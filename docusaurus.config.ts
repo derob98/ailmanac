@@ -49,9 +49,10 @@ const config: Config = {
     // for any page not yet translated. Translations are community-driven — see
     // docs/contribute/translation-playbook. Adding a language is one line here.
     defaultLocale: 'en',
+    // Top 12 world languages by reach (+ Italian). Adding/removing a language is
+    // a one-line change. Untranslated pages fall back to English.
     locales: [
-      'en', 'es', 'zh-Hans', 'hi', 'ar', 'pt-BR', 'ru', 'ja', 'de', 'fr', 'it',
-      'ko', 'id', 'tr', 'vi', 'pl', 'nl', 'uk', 'fa', 'th', 'bn', 'he', 'ur', 'sw',
+      'en', 'es', 'zh-Hans', 'hi', 'ar', 'pt-BR', 'ru', 'ja', 'de', 'fr', 'it', 'ko',
     ],
     localeConfigs: {
       en: {label: 'English'},
@@ -66,18 +67,6 @@ const config: Config = {
       fr: {label: 'Français'},
       it: {label: 'Italiano'},
       ko: {label: '한국어'},
-      id: {label: 'Bahasa Indonesia'},
-      tr: {label: 'Türkçe'},
-      vi: {label: 'Tiếng Việt'},
-      pl: {label: 'Polski'},
-      nl: {label: 'Nederlands'},
-      uk: {label: 'Українська'},
-      fa: {label: 'فارسی', direction: 'rtl'},
-      th: {label: 'ไทย'},
-      bn: {label: 'বাংলা'},
-      he: {label: 'עברית', direction: 'rtl'},
-      ur: {label: 'اردو', direction: 'rtl'},
-      sw: {label: 'Kiswahili'},
     },
   },
 
