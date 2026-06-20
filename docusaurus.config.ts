@@ -19,7 +19,7 @@ const config: Config = {
   title: 'AILmanac',
   tagline:
     'The always-current almanac for getting the most out of Claude — and every AI.',
-  favicon: 'img/favicon.ico',
+  favicon: 'img/logo.svg',
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
   future: {
