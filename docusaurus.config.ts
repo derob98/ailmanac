@@ -45,10 +45,40 @@ const config: Config = {
   },
 
   i18n: {
-    // English is the canonical source. Add locales only when an owner commits to
-    // maintaining them (see docs/contribute/translation-playbook).
+    // English is the canonical source; every other locale falls back to English
+    // for any page not yet translated. Translations are community-driven — see
+    // docs/contribute/translation-playbook. Adding a language is one line here.
     defaultLocale: 'en',
-    locales: ['en'],
+    locales: [
+      'en', 'es', 'zh-Hans', 'hi', 'ar', 'pt-BR', 'ru', 'ja', 'de', 'fr', 'it',
+      'ko', 'id', 'tr', 'vi', 'pl', 'nl', 'uk', 'fa', 'th', 'bn', 'he', 'ur', 'sw',
+    ],
+    localeConfigs: {
+      en: {label: 'English'},
+      es: {label: 'Español'},
+      'zh-Hans': {label: '简体中文'},
+      hi: {label: 'हिन्दी'},
+      ar: {label: 'العربية', direction: 'rtl'},
+      'pt-BR': {label: 'Português (Brasil)'},
+      ru: {label: 'Русский'},
+      ja: {label: '日本語'},
+      de: {label: 'Deutsch'},
+      fr: {label: 'Français'},
+      it: {label: 'Italiano'},
+      ko: {label: '한국어'},
+      id: {label: 'Bahasa Indonesia'},
+      tr: {label: 'Türkçe'},
+      vi: {label: 'Tiếng Việt'},
+      pl: {label: 'Polski'},
+      nl: {label: 'Nederlands'},
+      uk: {label: 'Українська'},
+      fa: {label: 'فارسی', direction: 'rtl'},
+      th: {label: 'ไทย'},
+      bn: {label: 'বাংলা'},
+      he: {label: 'עברית', direction: 'rtl'},
+      ur: {label: 'اردو', direction: 'rtl'},
+      sw: {label: 'Kiswahili'},
+    },
   },
 
   presets: [
@@ -142,6 +172,10 @@ const config: Config = {
           to: '/docs/whats-new/models-and-pricing',
           label: "What's New",
           position: 'left',
+        },
+        {
+          type: 'localeDropdown',
+          position: 'right',
         },
         {
           href: GITHUB_URL,
