@@ -44,6 +44,31 @@ const config: Config = {
     },
   },
 
+  // Structured data (JSON-LD) so search engines understand the site — helps
+  // rich results and discoverability.
+  headTags: [
+    {
+      tagName: 'script',
+      attributes: {type: 'application/ld+json'},
+      innerHTML: JSON.stringify({
+        '@context': 'https://schema.org',
+        '@type': 'WebSite',
+        name: 'AILmanac',
+        alternateName: 'AI Almanac',
+        url: 'https://derob98.github.io/ailmanac/',
+        description:
+          'The always-current, community-built almanac for getting the most out of Claude and any AI — for all levels.',
+        inLanguage: 'en',
+        potentialAction: {
+          '@type': 'SearchAction',
+          target:
+            'https://derob98.github.io/ailmanac/search?q={search_term_string}',
+          'query-input': 'required name=search_term_string',
+        },
+      }),
+    },
+  ],
+
   i18n: {
     // English is the canonical source; every other locale falls back to English
     // for any page not yet translated. Translations are community-driven — see
