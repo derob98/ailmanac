@@ -94,7 +94,15 @@ const config: Config = {
   ],
 
   themeConfig: {
-    image: 'img/docusaurus-social-card.jpg', // TODO: replace with branded og-default.png
+    image: 'img/og-default.png',
+    announcementBar: {
+      id: 'star-us',
+      content:
+        '⭐ If AILmanac helps you, <a target="_blank" rel="noopener" href="https://github.com/derob98/ailmanac">star it on GitHub</a> and share it — help it become the go-to AI field guide.',
+      backgroundColor: '#4f46e5',
+      textColor: '#ffffff',
+      isCloseable: true,
+    },
     metadata: [
       {
         name: 'keywords',
