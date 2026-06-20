@@ -2,6 +2,16 @@
 
 > **AI**·lmanac — the always-current, community-built almanac for getting the most out of **Claude** — and every AI. From your first prompt to production agents, for every level.
 
+<p>
+  <a href="https://derob98.github.io/ailmanac/"><img alt="Live site" src="https://img.shields.io/badge/live-derob98.github.io%2Failmanac-4f46e5"></a>
+  <a href="./CONTRIBUTING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen"></a>
+  <img alt="License: CC BY 4.0 & MIT" src="https://img.shields.io/badge/license-CC%20BY%204.0%20%26%20MIT-blue">
+  <img alt="Built with Docusaurus" src="https://img.shields.io/badge/built%20with-Docusaurus-3ECC5F">
+  <a href="https://github.com/derob98/ailmanac/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/derob98/ailmanac?style=social"></a>
+</p>
+
+👉 **Live:** https://derob98.github.io/ailmanac/
+
 AILmanac is a free documentation site (built with [Docusaurus](https://docusaurus.io/)) that teaches anyone — absolute beginner to power user — how to get great results from Claude (the chat apps, Claude Code, and the API) and from AI tools in general. Every page is tagged by level, written plainly, and kept honest about freshness.
 
 > ⚠️ **Independent project.** AILmanac is **not affiliated with, sponsored by, or endorsed by Anthropic.** "Claude" and "Anthropic" are trademarks of Anthropic. When AILmanac and the [official docs](https://docs.anthropic.com) disagree, the official docs win.
