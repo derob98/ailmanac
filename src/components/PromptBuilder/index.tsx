@@ -1,4 +1,5 @@
 import React, {useState, type ReactNode} from 'react';
+import Translate, {translate} from '@docusaurus/Translate';
 import styles from './styles.module.css';
 
 /**
@@ -53,20 +54,42 @@ export default function PromptBuilder(): ReactNode {
   return (
     <div className={styles.wrap}>
       <div className={styles.grid}>
-        {field('Role (optional)', role, setRole, 'a meticulous copy editor')}
-        {field('Goal', task, setTask, 'rewrite this paragraph to be clearer')}
-        {field('Context', context, setContext, 'audience: busy execs; product: …')}
-        {field('Format', format, setFormat, '3 bullets, under 80 words')}
-        {field('Tone', tone, setTone, 'professional, warm, concise')}
+        {field(
+          translate({id: 'pb.role', message: 'Role (optional)'}),
+          role, setRole,
+          translate({id: 'pb.role.ph', message: 'a meticulous copy editor'}),
+        )}
+        {field(
+          translate({id: 'pb.goal', message: 'Goal'}),
+          task, setTask,
+          translate({id: 'pb.goal.ph', message: 'rewrite this paragraph to be clearer'}),
+        )}
+        {field(
+          translate({id: 'pb.context', message: 'Context'}),
+          context, setContext,
+          translate({id: 'pb.context.ph', message: 'audience: busy execs; product: …'}),
+        )}
+        {field(
+          translate({id: 'pb.format', message: 'Format'}),
+          format, setFormat,
+          translate({id: 'pb.format.ph', message: '3 bullets, under 80 words'}),
+        )}
+        {field(
+          translate({id: 'pb.tone', message: 'Tone'}),
+          tone, setTone,
+          translate({id: 'pb.tone.ph', message: 'professional, warm, concise'}),
+        )}
       </div>
       <label className={styles.toggle}>
         <input type="checkbox" checked={idk} onChange={(e) => setIdk(e.target.checked)} />
-        Allow “I don't know” (reduces made-up answers)
+        <Translate id="pb.idk">Allow “I don't know” (reduces made-up answers)</Translate>
       </label>
       <div className={styles.outHead}>
-        <span>Your prompt</span>
+        <span><Translate id="pb.output">Your prompt</Translate></span>
         <button className={styles.copy} onClick={copy} type="button">
-          {copied ? '✓ Copied' : 'Copy'}
+          {copied
+            ? translate({id: 'pb.copied', message: '✓ Copied'})
+            : translate({id: 'pb.copy', message: 'Copy'})}
         </button>
       </div>
       <pre className={styles.out}>{prompt}</pre>

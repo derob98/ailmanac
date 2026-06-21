@@ -1,11 +1,11 @@
 import React, {type ReactNode} from 'react';
+import Translate from '@docusaurus/Translate';
 import styles from './styles.module.css';
 
 /**
  * Stamps a page (or a section) with a "last verified" date and a link to the
  * upstream source. Use it on VOLATILE content (anything quoting model names,
  * prices, limits, UI labels or features that change release-to-release).
- * Evergreen conceptual pages should NOT carry a date — see the freshness policy.
  */
 export default function VerifyNote({
   lastVerified,
@@ -22,14 +22,22 @@ export default function VerifyNote({
         ✅
       </span>
       <div className={styles.body}>
-        <strong>Last verified: {lastVerified}.</strong>{' '}
-        {children ??
-          'This page quotes facts that change over time — treat the date above as its freshness.'}{' '}
+        <strong>
+          <Translate id="verify.lastVerified" values={{date: lastVerified}}>
+            {'Last verified: {date}.'}
+          </Translate>
+        </strong>{' '}
+        {children ?? (
+          <Translate id="verify.default">
+            This page quotes facts that change over time — treat the date above as its
+            freshness.
+          </Translate>
+        )}{' '}
         {source && (
           <>
-            Confirm against the{' '}
+            <Translate id="verify.confirm">Confirm against the</Translate>{' '}
             <a href={source} target="_blank" rel="noreferrer">
-              official source
+              <Translate id="verify.source">official source</Translate>
             </a>
             .
           </>
