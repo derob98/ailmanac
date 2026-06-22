@@ -5,6 +5,9 @@ import ModelTable from '@site/src/components/ModelTable';
 import PromptBuilder from '@site/src/components/PromptBuilder';
 import ModelPicker from '@site/src/components/ModelPicker';
 import TokenEstimator from '@site/src/components/TokenEstimator';
+import ClaudeMdGenerator from '@site/src/components/ClaudeMdGenerator';
+import McpConfigBuilder from '@site/src/components/McpConfigBuilder';
+import CostCalculator from '@site/src/components/CostCalculator';
 
 // Register custom components globally so any .mdx page can use them WITHOUT an
 // import statement. Keeps the contributor experience friction-free.
@@ -16,4 +19,7 @@ export default {
   PromptBuilder,
   ModelPicker,
   TokenEstimator,
+  ClaudeMdGenerator,
+  McpConfigBuilder,
+  CostCalculator,
 };

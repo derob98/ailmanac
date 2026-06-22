@@ -183,6 +183,11 @@ const config: Config = {
           position: 'left',
         },
         {
+          to: '/docs/tools',
+          label: '🧰 Tools',
+          position: 'left',
+        },
+        {
           to: '/docs/whats-new/models-and-pricing',
           label: "What's New",
           position: 'left',
