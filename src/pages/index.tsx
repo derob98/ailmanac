@@ -6,6 +6,10 @@ import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
 
+import Hero3D from '@site/src/components/Hero3D';
+import {Reveal, CountUp} from '@site/src/components/Reveal';
+import {useSmoothScroll} from '@site/src/components/SmoothScroll';
+
 import styles from './index.module.css';
 
 type Card = {emoji: string; title: string; blurb: string; to: string; cta?: string};
@@ -114,10 +118,21 @@ function useChips(): string[] {
   ];
 }
 
+// Technical topic labels for the infinite marquee — mostly proper nouns that
+// read the same across locales, so they stay meaningful untranslated.
+const MARQUEE = [
+  'Prompting', 'Claude Code', 'MCP', 'Subagents', 'Skills', 'Tool use',
+  'Extended thinking', 'Prompt caching', 'Vision', 'Agents', 'CLAUDE.md',
+  'RAG', 'Evals', 'Streaming', 'Hooks', 'Output styles',
+];
+
 function Hero({lp}: {lp: string}) {
   return (
     <header className={styles.hero}>
       <div className={styles.mesh} aria-hidden="true" />
+      <div className={styles.canvasWrap} aria-hidden="true">
+        <Hero3D />
+      </div>
       <div className={clsx('container', styles.heroInner)}>
         <p className={styles.eyebrow}>
           <Translate id="home.hero.eyebrow">Open-source · for every level</Translate>
@@ -152,7 +167,64 @@ function Hero({lp}: {lp: string}) {
           ))}
         </ul>
       </div>
+      <div className={styles.scrollCue} aria-hidden="true">
+        <span className={styles.scrollDot} />
+      </div>
     </header>
+  );
+}
+
+function Marquee() {
+  const row = [...MARQUEE, ...MARQUEE];
+  return (
+    <div className={styles.marquee} aria-hidden="true">
+      <div className={styles.marqueeFade} />
+      <div className={styles.marqueeTrack}>
+        {row.map((t, i) => (
+          <span key={`a${i}`} className={styles.pill}>{t}</span>
+        ))}
+      </div>
+      <div className={clsx(styles.marqueeTrack, styles.marqueeReverse)}>
+        {row.map((t, i) => (
+          <span key={`b${i}`} className={styles.pill}>{t}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Stats() {
+  return (
+    <section className={styles.stats}>
+      <div className="container">
+        <div className={styles.statsGrid}>
+          <Reveal className={styles.stat} delay={0}>
+            <span className={styles.statNum}><CountUp to={12} /></span>
+            <span className={styles.statLabel}>
+              <Translate id="home.stats.languages">languages, fully translated</Translate>
+            </span>
+          </Reveal>
+          <Reveal className={styles.stat} delay={0.08}>
+            <span className={styles.statNum}><CountUp to={100} suffix="+" /></span>
+            <span className={styles.statLabel}>
+              <Translate id="home.stats.guides">guides & playbooks</Translate>
+            </span>
+          </Reveal>
+          <Reveal className={styles.stat} delay={0.16}>
+            <span className={styles.statNum}><CountUp to={7} /></span>
+            <span className={styles.statLabel}>
+              <Translate id="home.stats.skills">ready-to-use skill packs</Translate>
+            </span>
+          </Reveal>
+          <Reveal className={styles.stat} delay={0.24}>
+            <span className={styles.statNum}>∞</span>
+            <span className={styles.statLabel}>
+              <Translate id="home.stats.fresh">always current, never stale</Translate>
+            </span>
+          </Reveal>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -160,16 +232,21 @@ function CardGrid({title, lead, cards, big}: {title: string; lead?: string; card
   return (
     <section className={styles.section}>
       <div className="container">
-        <Heading as="h2" className={styles.sectionTitle}>{title}</Heading>
-        {lead && <p className={styles.sectionLead}>{lead}</p>}
+        <Reveal>
+          <Heading as="h2" className={styles.sectionTitle}>{title}</Heading>
+          {lead && <p className={styles.sectionLead}>{lead}</p>}
+        </Reveal>
         <div className={clsx(styles.grid, big && styles.gridBig)}>
-          {cards.map((c) => (
-            <Link key={c.title} to={c.to} className={styles.card}>
-              <span className={styles.cardEmoji} aria-hidden="true">{c.emoji}</span>
-              <Heading as="h3" className={styles.cardTitle}>{c.title}</Heading>
-              <p className={styles.cardBlurb}>{c.blurb}</p>
-              <span className={styles.cardCta}>{c.cta ?? 'Open'} →</span>
-            </Link>
+          {cards.map((c, i) => (
+            <Reveal key={c.title} delay={i * 0.07}>
+              <Link to={c.to} className={styles.card}>
+                <span className={styles.cardGlow} aria-hidden="true" />
+                <span className={styles.cardEmoji} aria-hidden="true">{c.emoji}</span>
+                <Heading as="h3" className={styles.cardTitle}>{c.title}</Heading>
+                <p className={styles.cardBlurb}>{c.blurb}</p>
+                <span className={styles.cardCta}>{c.cta ?? 'Open'} →</span>
+              </Link>
+            </Reveal>
           ))}
         </div>
       </div>
@@ -181,18 +258,20 @@ function Why() {
   return (
     <section className={clsx(styles.section, styles.whyBand)}>
       <div className="container">
-        <Heading as="h2" className={styles.sectionTitle}>
-          <Translate id="home.why.title">Why AILmanac</Translate>
-        </Heading>
+        <Reveal>
+          <Heading as="h2" className={styles.sectionTitle}>
+            <Translate id="home.why.title">Why AILmanac</Translate>
+          </Heading>
+        </Reveal>
         <div className={styles.whyGrid}>
-          {useWhy().map((w) => (
-            <div key={w.title} className={styles.why}>
+          {useWhy().map((w, i) => (
+            <Reveal key={w.title} delay={i * 0.07} className={styles.why}>
               <span className={styles.whyEmoji} aria-hidden="true">{w.emoji}</span>
               <div>
                 <strong>{w.title}</strong>
                 <p>{w.blurb}</p>
               </div>
-            </div>
+            </Reveal>
           ))}
         </div>
       </div>
@@ -229,12 +308,15 @@ function FinalCta({lp}: {lp: string}) {
 export default function Home(): ReactNode {
   const {siteConfig} = useDocusaurusContext();
   const lp = useLocalePrefix();
+  useSmoothScroll();
   return (
     <Layout
       title={`${siteConfig.title} — get the most out of Claude and any AI`}
       description="The always-current, community-built almanac for getting the most out of Claude — and every AI. For all levels, from your first prompt to production agents.">
       <Hero lp={lp} />
       <main>
+        <Marquee />
+        <Stats />
         <CardGrid
           title={translate({id: 'home.start.title', message: 'Where should you start?'})}
           lead={translate({id: 'home.start.lead', message: "Pick who you are — we'll send you to the right place."})}
