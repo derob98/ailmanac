@@ -1,20 +1,23 @@
 ---
 sidebar_position: 9
-title: "提示词缓存与成本优化"
-description: "复用稳定的提示词前缀以削减成本和延迟——以及会破坏它的那个坑。"
+title: "提示缓存与成本优化"
+description: "复用稳定的提示前缀以降低成本和延迟——以及那个会让它失效的陷阱。"
 ---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
 
 <LevelBadge level="advanced" />
 
-<VerifyNote lastVerified="2026-06-20" source="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching">
-缓存机制、适用条件，以及缓存 token 与新鲜 token 的定价会变化——请在官方提示词缓存文档中确认。
+<VerifyNote lastVerified="2026-06-21" source="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching">
+缓存机制、适用条件，以及缓存令牌与新令牌的定价都会变化——请在官方提示缓存文档中确认。
 </VerifyNote>
 
-如果你的许多请求共享一大块不变的内容——一段很长的系统提示词、一份大文档、一份工具目录——那么 **提示词缓存** 让 API 得以复用已处理过的前缀，而不必每次调用都重新读取。这会同时削减被缓存部分的 **成本** 和 **延迟**。
+如果你的许多请求共享一大块不变的内容——一段很长的系统提示、一份大文档、一份工具目录——那么**提示缓存**可以让 API 复用已处理过的前缀，而不必在每次调用时重新读取它。这会同时降低被缓存部分的**成本**和**延迟**。
 
-## 工作原理（心智模型）
+## 工作原理（思维模型）
 
-你在稳定前缀之后标记一个 **缓存断点**。首次调用时它会被处理并缓存；后续共享 **完全相同前缀** 的调用将命中缓存，并为该部分支付远低于原本的费用。
+你在稳定前缀之后标记一个**缓存断点**。首次调用时它会被处理并缓存；后续共享**完全相同前缀**的调用会命中缓存，并为此支付远低于原本的费用。
 
 ```mermaid
 flowchart LR
@@ -22,24 +25,91 @@ flowchart LR
   A2[Next request, same prefix] -->|cache hit| B2[New variable part]
 ```
 
+## 标记断点（可直接复制粘贴）
+
+在**最后一个稳定块**上添加 `cache_control`——这里是一段很长的系统提示。用户的回合排在它之后并可自由变化；直到（含）被标记块为止的所有内容都会被缓存。
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()
+
+message = client.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=1024,
+    system=[
+        {
+            "type": "text",
+            "text": LARGE_STABLE_PROMPT,  # long, unchanging — the cached prefix
+            "cache_control": {"type": "ephemeral"},
+        }
+    ],
+    messages=[{"role": "user", "content": "Summarize the key points."}],  # varies per call
+)
+
+print(message.usage.cache_read_input_tokens)  # > 0 means you got a hit
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic();
+
+const message = await client.messages.create({
+  model: "claude-sonnet-4-6",
+  max_tokens: 1024,
+  system: [
+    {
+      type: "text",
+      text: LARGE_STABLE_PROMPT, // long, unchanging — the cached prefix
+      cache_control: { type: "ephemeral" },
+    },
+  ],
+  messages: [{ role: "user", content: "Summarize the key points." }], // varies per call
+});
+
+console.log(message.usage.cache_read_input_tokens); // > 0 means you got a hit
+```
+
+</TabItem>
+</Tabs>
+
+第一次调用会支付少量的**写入**附加费来填充缓存；之后每一次使用相同前缀的调用都会以输入价格的一小部分把它读回。前缀必须足够长才符合条件——几千个令牌，具体取决于模型——否则它会悄无声息地不被缓存。
+
 ## 决定成败的那条不变量
 
 :::warning 缓存是前缀精确匹配的
-缓存命中要求被缓存的前缀 **逐字节完全一致**。最常见的 bug 是：提示词顶部附近有一个 *悄无声息的失效因子*——一个时间戳、一个会变的用户名、一份被重排过的工具列表——它改变了前缀，悄悄把你的命中率拉到了零。
+缓存命中要求被缓存的前缀**逐字节完全一致**。最常见的 bug 是：提示顶部附近有一个*悄无声息的失效因子*——一个时间戳、一个会变的用户名、一份被重排过的工具列表——它改变了前缀，悄悄把你的命中率拉到了零。
 :::
 
-**把所有稳定的内容放在最前，所有可变的内容放在最后，** 并让前缀保持真正恒定。
+**把所有稳定的内容放在最前，所有可变的内容放在最后，**并让前缀保持真正恒定。
+
+## 验证它是否真的生效
+
+不要想当然——从响应的 `usage` 中把它读回来：
+
+- **`cache_creation_input_tokens`** —— 本次调用写入缓存的令牌数（即第一次请求）。
+- **`cache_read_input_tokens`** —— 由缓存提供的令牌数（即节省下来的部分）。
+- **`input_tokens`** —— 未缓存的剩余部分，按全价计费。
+
+如果在多次本应共享前缀的重复请求中 `cache_read_input_tokens` 始终为**零**，那就是有悄无声息的失效因子在作祟——对两次调用渲染出的提示字节做 diff 即可找到它。
 
 ## 在哪里收益最大
 
-- 跨用户复用的长 **系统提示词**。
+- 跨用户复用的长**系统提示**。
 - **RAG / 文档问答**，对同一份原文反复查询。
-- 在多轮中拥有固定工具目录和指令的 **智能体**。
+- 在多轮中拥有固定工具目录和指令的**智能体**。
 
-将缓存与面向离线工作负载的 **批处理** 搭配使用，并与为模型选对规格（[选择模型](/docs/api/choosing-a-model)）相结合，可获得最大的综合节省——参见 [成本与延迟](/docs/foundations/cost-and-latency)。
+将缓存与面向离线工作负载的**批处理**搭配使用，并与为模型选对规格（[选择模型](/docs/api/choosing-a-model)）相结合，可获得最大的综合节省——参见[成本与延迟](/docs/foundations/cost-and-latency)。
 
 ## 下一步
 
-- [Token、上下文与定价](/docs/api/tokens-and-pricing)
+- [令牌、上下文与定价](/docs/api/tokens-and-pricing)
 - [流式输出与多轮对话](/docs/api/streaming)
 - [在 API 上构建智能体](/docs/api/building-agents)
