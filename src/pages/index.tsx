@@ -1,10 +1,18 @@
-import type {ReactNode} from 'react';
+import {type ReactNode, useEffect, useRef, useState} from 'react';
 import clsx from 'clsx';
 import Link from '@docusaurus/Link';
 import Translate, {translate} from '@docusaurus/Translate';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
+import {
+  motion,
+  useReducedMotion,
+  useScroll,
+  useSpring,
+  useTransform,
+  useVelocity,
+} from 'framer-motion';
 
 import Hero3D from '@site/src/components/Hero3D';
 import {Reveal, CountUp} from '@site/src/components/Reveal';
@@ -126,6 +134,13 @@ const MARQUEE = [
   'RAG', 'Evals', 'Streaming', 'Hooks', 'Output styles',
 ];
 
+/** Thin gradient bar tracking page scroll progress. */
+function ScrollProgress() {
+  const {scrollYProgress} = useScroll();
+  const scaleX = useSpring(scrollYProgress, {stiffness: 120, damping: 30, restDelta: 0.001});
+  return <motion.div className={styles.progress} style={{scaleX}} aria-hidden="true" />;
+}
+
 function Hero({lp}: {lp: string}) {
   return (
     <header className={styles.hero}>
@@ -174,10 +189,21 @@ function Hero({lp}: {lp: string}) {
   );
 }
 
+/** Infinite marquee that skews with scroll velocity — an awwwards staple. */
 function Marquee() {
+  const reduce = useReducedMotion();
+  const {scrollY} = useScroll();
+  const velocity = useVelocity(scrollY);
+  const skew = useSpring(
+    useTransform(velocity, [-2600, 2600], [-7, 7], {clamp: true}),
+    {stiffness: 220, damping: 40},
+  );
   const row = [...MARQUEE, ...MARQUEE];
   return (
-    <div className={styles.marquee} aria-hidden="true">
+    <motion.div
+      className={styles.marquee}
+      style={reduce ? undefined : {skewX: skew}}
+      aria-hidden="true">
       <div className={styles.marqueeFade} />
       <div className={styles.marqueeTrack}>
         {row.map((t, i) => (
@@ -189,7 +215,7 @@ function Marquee() {
           <span key={`b${i}`} className={styles.pill}>{t}</span>
         ))}
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -254,6 +280,57 @@ function CardGrid({title, lead, cards, big}: {title: string; lead?: string; card
   );
 }
 
+/**
+ * Pinned horizontal-scroll gallery: as you scroll down the tall section, the
+ * sticky inner row slides sideways. Falls back to a normal grid on small
+ * screens and under prefers-reduced-motion (where scroll-jacking hurts UX).
+ */
+function HorizontalGallery({title, lead, cards}: {title: string; lead?: string; cards: Card[]}) {
+  const reduce = useReducedMotion();
+  const ref = useRef<HTMLDivElement>(null);
+  const [enabled, setEnabled] = useState(false);
+
+  useEffect(() => {
+    const decide = () =>
+      setEnabled(!reduce && window.matchMedia('(min-width: 997px)').matches);
+    decide();
+    window.addEventListener('resize', decide);
+    return () => window.removeEventListener('resize', decide);
+  }, [reduce]);
+
+  const {scrollYProgress} = useScroll({
+    target: ref,
+    offset: ['start start', 'end end'],
+    layoutEffect: false,
+  });
+  const x = useTransform(scrollYProgress, [0, 1], ['2%', '-64%']);
+
+  if (!enabled) {
+    return <CardGrid title={title} lead={lead} cards={cards} big />;
+  }
+
+  return (
+    <section ref={ref} className={styles.hScroll} aria-label={title}>
+      <div className={styles.hSticky}>
+        <div className="container">
+          <Heading as="h2" className={clsx(styles.sectionTitle, styles.hTitle)}>{title}</Heading>
+        </div>
+        <motion.div className={styles.hTrack} style={{x}}>
+          {cards.map((c) => (
+            <Link key={c.title} to={c.to} className={clsx(styles.card, styles.hCard)}>
+              <span className={styles.cardGlow} aria-hidden="true" />
+              <span className={styles.cardEmoji} aria-hidden="true">{c.emoji}</span>
+              <Heading as="h3" className={styles.cardTitle}>{c.title}</Heading>
+              <p className={styles.cardBlurb}>{c.blurb}</p>
+              <span className={styles.cardCta}>{c.cta ?? 'Open'} →</span>
+            </Link>
+          ))}
+        </motion.div>
+      </div>
+    </section>
+  );
+}
+
 function Why() {
   return (
     <section className={clsx(styles.section, styles.whyBand)}>
@@ -313,6 +390,7 @@ export default function Home(): ReactNode {
     <Layout
       title={`${siteConfig.title} — get the most out of Claude and any AI`}
       description="The always-current, community-built almanac for getting the most out of Claude — and every AI. For all levels, from your first prompt to production agents.">
+      <ScrollProgress />
       <Hero lp={lp} />
       <main>
         <Marquee />
@@ -322,10 +400,9 @@ export default function Home(): ReactNode {
           lead={translate({id: 'home.start.lead', message: "Pick who you are — we'll send you to the right place."})}
           cards={useTracks(lp)}
         />
-        <CardGrid
+        <HorizontalGallery
           title={translate({id: 'home.outcomes.title', message: "What you'll be able to do"})}
           cards={useOutcomes(lp)}
-          big
         />
         <Why />
         <FinalCta lp={lp} />
