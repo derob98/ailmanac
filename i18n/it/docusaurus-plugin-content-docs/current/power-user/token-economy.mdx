@@ -1,0 +1,130 @@
+---
+sidebar_position: 1
+title: "Riduci il consumo di token (e i costi)"
+description: "Mosse collaudate per tagliare i token di Claude e la spesa: caching, prompting stringato, dimensionamento del modello, batching e misurazione."
+keywords: [token reduction, claude cost optimization, prompt caching, caveman prompt, token counting]
+---
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-06-24" source="https://docs.anthropic.com/en/docs/build-with-claude/token-counting">
+I prezzi dei token, gli sconti per il batch, l'idoneità alla cache e il comportamento del tokenizer cambiano tra le generazioni di modelli: verifica i numeri attuali sulla documentazione ufficiale di Anthropic prima di citare risparmi a chiunque.
+</VerifyNote>
+
+Paghi per ogni token in ingresso e per ogni token in uscita. La buona notizia: la maggior parte dei carichi di lavoro reali porta con sé **peso morto** — system prompt gonfi, contesto rinviato di continuo, risposte prolisse, il modello sbagliato per un compito facile. Eliminalo e il conto cala senza intaccare la qualità. Questa pagina è il toolkit per power user, ordinato grossomodo per leva.
+
+<Callout type="objectives" items={["Dove i token si disperdono davvero — input vs output vs contesto riutilizzato","Lo stile stringato / 'caveman': cosa risparmia davvero, e dove si ritorce contro","Prompt caching e batching per risparmi strutturali a parità di dollaro","Dimensionare correttamente il modello (Haiku per i compiti economici) e l'output strutturato al posto della prosa","Misurare prima di andare in produzione con l'endpoint di conteggio dei token"]} />
+
+## Prima di tutto, trova dove finiscono i token
+
+Prima di ottimizzare, suddividi la spesa in tre secchi — ognuno ha un rimedio diverso:
+
+<Flashcards title="I tre secchi dei token" cards={[{front:"Token di input",back:"Tutto ciò che invii: system prompt, tool, cronologia, documenti, il turno dell'utente. Spesso è il costo più grande e più ignorato nelle sessioni lunghe."},{front:"Token di output",back:"Tutto ciò che Claude genera. Prezzato più dell'input. È il bersaglio del prompting stringato."},{front:"Contesto riutilizzato",back:"Il blocco stabile che rinvii a ogni chiamata (system prompt, catalogo dei tool, documento grosso). Puro spreco a prezzo pieno se non lo metti in cache."}]} />
+
+I rimedi si allineano in modo pulito: **metti in cache** il contesto riutilizzato, **sfoltisci** l'input, **accorcia** l'output, **dimensiona correttamente** il modello e **raggruppa in batch** ciò che non è urgente.
+
+## Lo stile stringato / "caveman" (risparmi sull'output)
+
+La mossa virale è dire a Claude di eliminare il riempitivo e rispondere a frammenti — resa popolare dalla skill open-source per Claude Code [`caveman`](https://github.com/JuliusBrussee/caveman) (con licenza MIT, di Julius Brussee), il cui slogan è "why use many token when few token do trick". Impone frasi brevi, verbi all'infinito e zero convenevoli.
+
+<VerifyNote lastVerified="2026-06-24" source="https://github.com/JuliusBrussee/caveman">
+La skill `caveman` riporta una riduzione media dei token di output di circa il 65% sul suo benchmark di 10 task (intervallo 22–87%) e segnala che riduce solo i token di **output** — il thinking e l'input restano intatti. Benchmark indipendenti su task strutturati già concisi hanno rilevato guadagni molto più piccoli (grossomodo 9–21%). Tratta la percentuale di copertina come dipendente dal carico di lavoro, non come una garanzia.
+</VerifyNote>
+
+La conclusione onesta dai test indipendenti: lo stile **non costa nulla sul contenuto** (codice, termini tecnici, JSON restano esatti) ma i risparmi dipendono interamente dalla tua baseline. Se i tuoi prompt dicono già "sii conciso", gran parte del guadagno è già incassata. Le riduzioni grosse (40–65%) si vedono nelle risposte ricche di spiegazioni; l'estrazione strutturata si muove a malapena.
+
+<PromptCard title="Blocco di istruzioni snello — incollalo nel tuo system prompt">
+{`Answer terse. Cut filler, hedging, and pleasantries.
+Drop articles (a/an/the) and softeners (just, really, basically, actually).
+No preamble, no restating the question, no "happy to help."
+Fragments are fine. Keep technical terms and code blocks exact.
+Pattern per point: [thing] [action] [reason]. Next step if any.`}
+</PromptCard>
+
+<Callout type="tip" items={["Metti la regola stringata una sola volta nel system prompt, non in ogni turno dell'utente — ripeterla ti fa ripagare il costo dell'input a ogni chiamata.","Non comprimere mai codice, identificatori, JSON o numeri. Comprimi solo la prosa.","'Sii conciso. Restituisci solo JSON.' è di per sé circa il 60% del risparmio di output ottenibile — scrivilo prima di ricorrere a trucchi più sofisticati."]} />
+
+<Callout type="warning" items={["Lo stile stringato riduce solo l'OUTPUT. Non fa nulla per un system prompt da 20k token che rinvii a ogni chiamata — quello è un problema di input/caching.","Sui task con extended thinking, i token di ragionamento non sono toccati; riduci solo la risposta finale visibile."]} />
+
+## Metti in cache il prefisso riutilizzato (risparmi sull'input)
+
+Se molte chiamate condividono un grande blocco immutabile — un system prompt lungo, un catalogo di tool, un documento di riferimento — il **prompt caching** lo elabora una volta e lo riutilizza a una frazione del prezzo dell'input a ogni chiamata successiva. È il singolo cambiamento strutturale a più alta leva per i carichi di lavoro di chat e agent, perché ripaga a ogni turno.
+
+L'unica regola: il prefisso in cache deve essere **identico byte per byte** tra le chiamate. Un timestamp vagante o una lista di tool riordinata vicino all'inizio fa silenziosamente crollare a zero il tuo hit rate. La meccanica completa, lo snippet `cache_control` da copiaincollare e come verificare gli hit si trovano in [Prompt Caching e ottimizzazione dei costi](/docs/api/prompt-caching).
+
+<Steps items={[{title:"Ordina prima lo stabile, per ultimo il variabile",body:"Sposta il system prompt, i tool e i documenti in cima; tieni alla fine il turno mutevole dell'utente."},{title:"Segna il breakpoint",body:"Allega cache_control all'ultimo blocco stabile in modo che l'intero prefisso venga messo in cache. Vedi lo snippet nella nostra pagina sul prompt caching."},{title:"Verifica l'hit",body:"Leggi cache_read_input_tokens dal campo usage della risposta — maggiore di zero significa che stai risparmiando; zero su chiamate ripetute significa che c'è un invalidatore silenzioso."}]} />
+
+## Sfoltisci il contesto che invii
+
+La cache riutilizza il contesto a basso costo, ma il token più economico è quello che non invii mai. Verifica cosa c'è davvero nella finestra:
+
+- **Sfoltisci il system prompt.** I blocchi di istruzioni lunghi accumulano scorie. Taglia gli esempi che non si guadagnano più i loro token; tieni un esempio forte invece di cinque mediocri.
+- **Recupera, non scaricare.** Invece di incollare un intero documento, recupera solo i passaggi pertinenti ([RAG](/docs/foundations/rag)). Inviare un PDF di 50 pagine per rispondere a una sola domanda è lo spreco più comune.
+- **Compatta le sessioni lunghe.** Quando una conversazione cresce, sostituisci i turni vecchi con un breve riepilogo progressivo invece di trascinarti dietro ogni messaggio per sempre. La cronologia è fatta di token di input che ripaghi a ogni chiamata.
+- **Dimensiona correttamente il catalogo dei tool.** Ogni definizione di tool è fatta di token di input a ogni richiesta. Esponi solo i tool di cui il compito attuale ha bisogno.
+
+## Dimensiona correttamente il modello
+
+Non pagare le tariffe di Opus per un compito da Haiku. Classificazione, estrazione, formattazione semplice e routing di solito girano benissimo sul modello più piccolo a una frazione del prezzo per token. Riserva i modelli più grandi per i ragionamenti davvero difficili e valuta il routing: un modello economico gestisce la maggioranza facile, scalando solo i casi difficili. Vedi [Scegliere un modello](/docs/api/choosing-a-model) e [Token, contesto e prezzi](/docs/api/tokens-and-pricing) per i compromessi.
+
+## Preferisci l'output strutturato alla prosa
+
+Chiedere JSON (o un altro schema stretto) invece di un paragrafo esplicativo taglia i token di output *e* elimina le congetture di parsing a valle. Dire a Claude di restituire solo un oggetto compatto come `{"label": ..., "score": ...}` genera una frazione dei token di una risposta chiacchierona — e salti del tutto il preambolo "Ecco il risultato:". Dettagli in [Output strutturato](/docs/api/structured-output).
+
+## Raggruppa in batch ciò che non è urgente
+
+Per il lavoro offline in cui non ti serve una risposta in pochi secondi — eval, classificazione di massa, etichettatura di dataset, riassunto di un archivio — la **Message Batches API** di Anthropic esegue le richieste in modo asincrono con uno **sconto del 50% sia sui token di input che di output**, con risultati restituiti tipicamente entro 24 ore.
+
+<VerifyNote lastVerified="2026-06-24" source="https://www.anthropic.com/news/message-batches-api">
+La Message Batches API pubblicizza uno sconto fisso del 50% rispetto alla Messages API sincrona e tempi di consegna asincroni (fino a circa 24h). I limiti di richieste per batch e i prezzi cambiano — verifica le cifre attuali nella documentazione di Anthropic prima di farci affidamento.
+</VerifyNote>
+
+Combina questo con il caching e un modello dimensionato correttamente e lo sconto complessivo su un grande lavoro offline è drastico.
+
+## Misura — non tirare a indovinare
+
+Ottimizza contro i numeri, non contro le sensazioni. L'**endpoint di conteggio dei token** di Anthropic restituisce il conteggio esatto dei token di input per una richiesta *prima* di inviarla — stessa forma di una chiamata Messages, ed è gratuito (con rate limit). Usalo per confrontare un prompt gonfio con uno sfoltito, per prendere decisioni di routing del modello e per tenere i prompt entro la finestra di contesto.
+
+<PromptCard title="Conta i token prima di inviare (SDK Python)">
+{`import anthropic
+
+client = anthropic.Anthropic()
+
+resp = client.messages.count_tokens(
+    model="claude-opus-4-8",
+    system="You are a scientist",
+    messages=[{"role": "user", "content": "Hello, Claude"}],
+)
+print(resp.input_tokens)  # exact input count, no charge for counting`}
+</PromptCard>
+
+<Callout type="tip" items={["Non usare il tokenizer di un altro modello (es. tiktoken) — i conteggi differiscono per famiglia di modelli. Usa l'endpoint di Anthropic.","I tokenizer più recenti possono produrre circa il 30% di token in più per lo stesso testo rispetto ai modelli più vecchi — riconta quando migri, non riutilizzare vecchie stime.","Leggi input_tokens, cache_read_input_tokens e output_tokens dal campo usage della risposta per confermare che i risparmi siano arrivati in produzione."]} />
+
+Vedi [Token, contesto e prezzi](/docs/api/tokens-and-pricing) per le regole di conteggio e la formula di stima dei costi.
+
+## Un prima/dopo, dall'inizio alla fine
+
+Un assistente di triage del supporto esegue lo stesso system prompt da 4.000 token + catalogo di tool su ogni ticket e scrive una risposta chiacchierona da 600 token.
+
+<Steps items={[{title:"Prima",body:"~4.000 token di input rinviati a prezzo pieno a ogni chiamata + ~600 token di output prolisso, su un modello grande. Niente in cache, sincrono, risposte in prosa."},{title:"Metti in cache il prefisso",body:"Segna il blocco system+tools da 4.000 token con cache_control. Dopo la prima chiamata viene servito come cache read a una frazione del prezzo dell'input."},{title:"Dimensiona correttamente + struttura l'output",body:"Sposta il triage su un modello piccolo ed esigi solo JSON ({\"category\", \"priority\", \"reply\"}). L'output scende da ~600 token di prosa a ~120."},{title:"Raggruppa in batch l'arretrato",body:"I riempimenti notturni dei ticket passano per la Batches API allo sconto del 50% invece che per chiamate sincrone."}]} />
+
+Ogni leva è moltiplicativa: input in cache × modello più piccolo × output più stringato × sconto batch si compone in una riduzione totale ampia — mentre la qualità della risposta su questo compito facile resta invariata. Misura ogni passo con `count_tokens` così puoi dimostrare il guadagno invece di darlo per scontato.
+
+<Quiz title="Mettiti alla prova" questions={[{q:"Lo stile 'caveman' / stringato riduce principalmente quali token?",options:["I token di input (system prompt + contesto)","I token di output (la risposta generata)","I token di thinking / ragionamento"],answer:1,explain:"Il prompting stringato riduce l'OUTPUT — dice a Claude di rispondere a frammenti senza riempitivo. Non tocca l'input che invii né i token di extended thinking."},{q:"Rinvii lo stesso system prompt da 10k token a ogni chiamata. Il rimedio migliore?",options:["Dire a Claude di essere più conciso","Prompt caching — segna il prefisso stabile così viene riutilizzato a basso costo","Abbassare max_tokens"],answer:1,explain:"È un problema di input riutilizzato. Mettere in cache il prefisso stabile lo riutilizza a una frazione del prezzo dell'input a ogni chiamata successiva; la concisione riguarda solo l'output, e max_tokens limita la lunghezza della risposta."},{q:"Quale carico di lavoro è il più adatto allo sconto del 50% della Message Batches API?",options:["Una chat live dove gli utenti aspettano le risposte","Classificazione di massa notturna di un arretrato","Una funzione di autocomplete critica per la latenza"],answer:1,explain:"Il batching baratta l'immediatezza con uno sconto del 50% e risultati entro circa 24h — ideale per lavori offline come eval, etichettatura e riempimenti, non per qualcosa che un utente sta aspettando."},{q:"Come dovresti verificare che una modifica al prompt abbia davvero risparmiato token?",options:["Stimare con un tokenizer generico come tiktoken","Usare l'endpoint count_tokens di Anthropic e leggere i campi usage della risposta","Stimare a occhio il numero di caratteri"],answer:1,explain:"I conteggi dei token differiscono per famiglia di modelli, quindi i tokenizer generici ingannano. Il count_tokens di Anthropic dà il conteggio esatto dell'input prima di inviare, e i campi usage della risposta confermano i risparmi in produzione."}]} />
+
+<Callout type="takeaways" items={["Suddividi la spesa in input, output e contesto riutilizzato — ogni secchio ha un rimedio diverso.","Lo stile stringato/'caveman' taglia solo l'output; i guadagni sono grossi sulla prosa, piccoli sui task strutturati già concisi.","Metti in cache il prefisso stabile (identico byte per byte) per risparmi sull'input a parità di dollaro a ogni chiamata.","Sfoltisci il contesto, dimensiona correttamente il modello e preferisci JSON alla prosa — guadagni economici e cumulativi.","Raggruppa in batch il lavoro non urgente per uno sconto del 50%, e misura sempre con count_tokens invece di tirare a indovinare."]} />
+
+## Fonti e approfondimenti
+
+- [JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) — la skill open-source "caveman" per Claude Code (MIT, di Julius Brussee); dichiara una riduzione media dei token di output di circa il 65%.
+- ["I Benchmarked the Viral 'Caveman' Prompt…" — DEV Community](https://dev.to/jakguzik/i-benchmarked-the-viral-caveman-prompt-to-save-llm-tokens-then-my-6-line-version-beat-it-2o81) — benchmark indipendente che rileva circa il 9–21% sui task strutturati e un'alternativa più snella di 6 righe.
+- [Token counting — documentazione Anthropic](https://docs.anthropic.com/en/docs/build-with-claude/token-counting) — l'endpoint `count_tokens` e le note sul tokenizer per modello.
+- [Prompt caching — documentazione Anthropic](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) — meccanica della cache, idoneità e prezzi.
+- [Introducing the Message Batches API — Anthropic](https://www.anthropic.com/news/message-batches-api) — elaborazione asincrona con uno sconto del 50%.
+- [Pricing — documentazione Anthropic](https://docs.anthropic.com/en/docs/about-claude/pricing) — tariffe attuali per token per modello.
+
+## Avanti
+
+- [Prompt Caching e ottimizzazione dei costi](/docs/api/prompt-caching)
+- [Token, contesto e prezzi](/docs/api/tokens-and-pricing)
+- [Scegliere un modello Claude](/docs/api/choosing-a-model)
+- [Output strutturato](/docs/api/structured-output)
