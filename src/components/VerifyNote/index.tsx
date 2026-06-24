@@ -1,5 +1,5 @@
 import React, {type ReactNode} from 'react';
-import Translate from '@docusaurus/Translate';
+import Translate, {translate} from '@docusaurus/Translate';
 import styles from './styles.module.css';
 
 /**
@@ -23,9 +23,10 @@ export default function VerifyNote({
       </span>
       <div className={styles.body}>
         <strong>
-          <Translate id="verify.lastVerified" values={{date: lastVerified}}>
-            {'Last verified: {date}.'}
-          </Translate>
+          {translate(
+            {id: 'verify.lastVerified', message: 'Last verified: {date}.'},
+            {date: lastVerified},
+          )}
         </strong>{' '}
         {children ?? (
           <Translate id="verify.default">
