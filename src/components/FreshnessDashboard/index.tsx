@@ -1,5 +1,6 @@
 import React, {useMemo, useState, type ReactNode} from 'react';
 import Link from '@docusaurus/Link';
+import BrowserOnly from '@docusaurus/BrowserOnly';
 import data from '@site/data/freshness.json';
 import styles from './styles.module.css';
 
@@ -45,7 +46,7 @@ function statusOf(page: Page): Status {
   return 'stale';
 }
 
-export default function FreshnessDashboard(): ReactNode {
+function FreshnessDashboardInner(): ReactNode {
   const pages = data.pages as Page[];
   const sections = useMemo(
     () => ['all', ...Array.from(new Set(pages.map((p) => p.section))).sort()],
@@ -188,4 +189,11 @@ export default function FreshnessDashboard(): ReactNode {
       </div>
     </div>
   );
+}
+
+// Client-only: the dashboard computes freshness against the reader's live "today"
+// (Date.now()), which differs from the build-time SSR render. Rendering it only in
+// the browser avoids a React hydration mismatch (#418).
+export default function FreshnessDashboard(): ReactNode {
+  return <BrowserOnly>{() => <FreshnessDashboardInner />}</BrowserOnly>;
 }

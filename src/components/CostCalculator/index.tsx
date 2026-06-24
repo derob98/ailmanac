@@ -6,7 +6,7 @@ const n = (v: string) => {
   return isFinite(x) && x >= 0 ? x : 0;
 };
 const money = (x: number) =>
-  x.toLocaleString(undefined, {style: 'currency', currency: 'USD', maximumFractionDigits: x < 10 ? 4 : 2});
+  x.toLocaleString('en-US', {style: 'currency', currency: 'USD', maximumFractionDigits: x < 10 ? 4 : 2});
 
 export default function CostCalculator(): ReactNode {
   const [inTok, setInTok] = useState('1500');

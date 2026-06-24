@@ -31,16 +31,16 @@ export default function TokenEstimator(): ReactNode {
       />
       <div className={styles.stats}>
         <div className={styles.stat}>
-          <span className={styles.num}>{words.toLocaleString()}</span>
+          <span className={styles.num}>{words.toLocaleString('en-US')}</span>
           <span className={styles.cap}><Translate id="tokenest.words">words</Translate></span>
         </div>
         <div className={styles.stat}>
-          <span className={styles.num}>{chars.toLocaleString()}</span>
+          <span className={styles.num}>{chars.toLocaleString('en-US')}</span>
           <span className={styles.cap}><Translate id="tokenest.chars">characters</Translate></span>
         </div>
         <div className={`${styles.stat} ${styles.primary}`}>
           <span className={styles.num}>
-            ~{low.toLocaleString()}–{high.toLocaleString()}
+            ~{low.toLocaleString('en-US')}–{high.toLocaleString('en-US')}
           </span>
           <span className={styles.cap}><Translate id="tokenest.tokens">estimated tokens</Translate></span>
         </div>
