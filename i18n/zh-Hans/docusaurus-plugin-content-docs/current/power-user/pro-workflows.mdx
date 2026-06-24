@@ -1,0 +1,173 @@
+---
+sidebar_position: 4
+title: "专业工作流与高手操作"
+description: "把子代理、钩子、斜杠命令、MCP 和无头流水线堆叠成工作流，让你和 Claude 协作时效率大幅提升。"
+keywords: [claude code workflows, subagents, hooks, slash commands, headless agent sdk]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["编排并行子代理——并知道何时该升级为脚本驱动的动态工作流","把钩子当作确定性的粘合剂：保存时 lint、为停止设关卡、阻止被禁止的写入","把你反复使用的提示词变成自定义斜杠命令、技能和一种输出风格","构建一套 MCP 组合，以及可在 CI 中无人值守运行的无头流水线（claude -p）","有纪律地运行 探索 → 计划 → 执行 → 审查 循环，并保持上下文精简","把 CLAUDE.md 当作代码对待：简短、修剪过、信噪比高"]} />
+
+这是各种原语不再是孤立功能、而开始组成*工作流*的页面。如果你已经知道子代理或钩子是什么，那么杠杆就在于你如何**堆叠**它们：一个斜杠命令启动一轮计划模式，子代理把工作扇出，一个钩子在测试通过前不让本轮结束，再用一次无头调用把整件事在 CI 里跑起来。我们来把它们连起来。
+
+<VerifyNote lastVerified="2026-06-24" source="https://code.claude.com/docs/en/best-practices">
+Claude Code 迭代很快：各种标志、内置命令（`/deep-research`、`/code-review`）、`ultracode` 关键字、动态工作流的可用性以及努力等级都会在版本间变化。社区仓库的星标数每天都在变。在依赖任何与版本相关的内容之前，请对照官方文档确认。
+</VerifyNote>
+
+## 心智模型：谁掌握着计划？
+
+下面的每个高手操作，都是对同一个问题的不同回答——*谁掌握着计划和中间结果？* Anthropic 自己对全新的动态工作流功能的阐述把它讲得很清楚：
+
+| 工具 | 由谁决定接下来运行什么 | 结果存放在哪里 | 规模 |
+| --- | --- | --- | --- |
+| **[子代理](/docs/claude-code/subagents)** | Claude，逐轮决定 | Claude 的上下文窗口 | 每轮几个 |
+| **[技能](/docs/claude-code/skills)** | Claude，遵循提示词 | Claude 的上下文窗口 | 与子代理相同 |
+| **代理团队** | 一个主导代理，逐轮决定 | 一份共享的任务清单 | 少数几个长期协作者 |
+| **[动态工作流](/docs/claude-code/dynamic-workflows)** | 脚本 | 脚本变量 | 数十到数百 |
+
+这种递进本身就是全部要义：先从一个 Claude 开始，委派给子代理来保护上下文，只有当某个任务需要的代理数量超出一次对话所能协调的范围时，才把计划*搬进代码*。
+
+## 操作 1 — 并行子代理，然后升级为工作流
+
+一个[子代理](/docs/claude-code/subagents)是独立的 Claude，拥有自己的上下文窗口和受限的工具集；它返回的是结果，而非它的完整对话记录。高手的习惯是**把彼此独立的工作扇出**：
+
+<PromptCard title="把审查扇出到多个模块">{`Review the changes in auth/, billing/, and api/ — use the code-reviewer
+subagent on each, in parallel. Report only correctness bugs and missing tests.`}</PromptCard>
+
+三个审查者同时运行，每个都在差异上消耗自己的上下文，于是你的主会话看到的是三份整洁的报告，而不是三段原始差异。需要注意的是：并行只在子任务**彼此独立**时才有帮助。如果步骤 B 需要步骤 A 的输出，就按顺序运行；如果它们写入相同的文件，就用 [git worktree](/docs/claude-code/worktrees) 把它们隔离开。
+
+当任务超出一次对话的承载范围时——比如一次涉及 500 个文件的迁移、一次覆盖整个代码库的 bug 排查、需要跨多个来源交叉核对的研究——就升级为**[动态工作流](/docs/claude-code/dynamic-workflows)**。Claude 会写一段 JavaScript 编排脚本（扇出 → 归约 → 综合），由运行时在后台执行，最多并发 16 个代理，而进入你上下文的只有最终答案。用 `ultracode` 关键字触发它，或者干脆用大白话提出请求：
+
+<PromptCard title="启动一个动态工作流">{`ultracode: audit every API endpoint under src/routes/ for missing auth checks,
+then cross-check each finding with a second agent before reporting`}</PromptCard>
+
+真正的杀手锏不只是*更多代理*——而是脚本可以套用一种可复用的**质量模式**，比如让相互独立的代理在任何结论被汇报之前先对抗式地审查彼此的发现。试试内置的 `/deep-research <question>` 来现场看看这种模式：它会对每条主张投票，并过滤掉那些经不起交叉核对的。
+
+<Callout type="tip" items={["把一次好的工作流运行保存为命令：打开 /workflows，选中那次运行，按 s。它会在未来每个会话里变成 /你的名字。","先在一个切片上估算成本——一个目录，而不是整个仓库。一次运行可能比一次对话多出多得多的代理（以及 token）。"]} />
+
+## 操作 2 — 钩子：确定性的粘合剂
+
+CLAUDE.md 里的指令是*建议性的*——Claude 通常会照做。[钩子](/docs/claude-code/hooks)是*确定性的*——它们在循环中的固定节点运行一段脚本，每次都保证执行。当某件事**必须**毫无例外地发生时，就用钩子。
+
+三种杠杆最高的钩子模式：
+
+<Steps items={[{title: "PostToolUse —— 每次编辑时 lint/格式化", body: "在 Claude 编辑文件之后，自动运行你的格式化工具或 linter，让代码库永远不会跑偏。反馈也会回流给 Claude，于是它会自我纠正。"},{title: "Stop —— 用一次绿灯检查为本轮设关卡", body: "Stop 钩子运行你的测试/构建脚本，并在它通过之前阻止本轮结束。正是这一点让一次无人值守的运行能够正确收尾，而不是在工作仅仅“看起来完成了”时就停下。"},{title: "PreToolUse —— 阻止被禁止的操作", body: "在写入发生之前，拒绝对受保护路径（迁移文件、生成文件、密钥）的写入，无论 Claude 打算做什么。"}]} />
+
+你不必手写 JSON。让 Claude 替你撰写钩子：
+
+<PromptCard title="让 Claude 写一个钩子">{`Write a hook that runs eslint --fix after every file edit, and a second hook
+that blocks any Write or Edit to the db/migrations/ folder. Add them to
+.claude/settings.json and show me the config.`}</PromptCard>
+
+<Callout type="warning" items={["一个不停拦截的 Stop 钩子，在连续拦截若干次后会被覆盖，这样会话才不会死锁——你的关卡是一道安全护栏，而不是一个无限循环。","钩子以你 shell 的权限运行。在提交任何钩子脚本之前先审查它，就像你审查 CI 配置一样。"]} />
+
+## 操作 3 — 自定义斜杠命令、技能与输出风格
+
+任何你提示两次的东西都应该变成一个原语。决策很简单：**技能是知识，钩子是保证，MCP 是动作，斜杠命令是入口。**
+
+一个[斜杠命令](/docs/claude-code/slash-commands)（或者一个设了 `disable-model-invocation: true` 的技能）封装了一段你手动触发的可复用工作流。`$ARGUMENTS` 让它可以参数化：
+
+<PromptCard title=".claude/skills/fix-issue/SKILL.md">{`---
+name: fix-issue
+description: Triage and fix a GitHub issue end-to-end
+disable-model-invocation: true
+---
+Fix GitHub issue $ARGUMENTS:
+1. gh issue view to read the issue
+2. Search the codebase for the relevant files
+3. Write a failing test that reproduces the bug
+4. Implement the fix, then run tests and lint until green
+5. Commit with a descriptive message and open a PR`}</PromptCard>
+
+用 `/fix-issue 1234` 来运行它。对于任何带有副作用、你想刻意手动触发而不是让 Claude 自行调用的东西，使用 `disable-model-invocation: true`。
+
+[输出风格](/docs/claude-code/output-styles)改变 Claude 在整个会话中*如何*沟通——对专家可以简洁，用于教学时可以详尽并附带解释，或者采用一种你的工具链能解析的结构化格式。把一个自定义斜杠命令（*做什么*）与一种输出风格（*怎么做*）配对，你就同时塑造了这次交互的两端。
+
+官方文档里最被低估的高手操作：在做一个大功能之前，**让 Claude 来面试你**，然后开一个全新的会话、依据写好的规格去构建。
+
+<PromptCard title="用面试产出规格，再在干净的上下文里构建">{`I want to build [brief description]. Interview me in detail using the
+AskUserQuestion tool — technical implementation, UI/UX, edge cases, tradeoffs.
+Dig into the hard parts I might not have considered. When we've covered
+everything, write a complete, self-contained spec to SPEC.md.`}</PromptCard>
+
+## 操作 4 — 构建一套 MCP 组合
+
+[MCP 服务器](/docs/claude-code/mcp)是 Claude 通过 JSON-RPC 调用、用来真正*做事*的可执行进程——查询你的数据库、读取 Sentry、拉取一份 Figma 设计、提交一个 Linear issue。高手的“组合”是一小套经过深思熟虑的服务器，而不是你能找到的所有东西：
+
+<PromptCard title="往你的组合里添加服务器">{`claude mcp add --transport stdio sentry -- npx -y @sentry/mcp-server
+claude mcp add --transport http linear https://mcp.linear.app/sse`}</PromptCard>
+
+有两条原则能让一套 MCP 组合保持高效：
+
+- **有 CLI 时优先用 CLI。** `gh`、`aws`、`gcloud` 和 `sentry-cli` 是与一项服务对话*最*节省上下文的方式——Claude 已经熟悉它们，而且它们不会在每一轮都往上下文里加载一套工具 schema。把 MCP 留给那些没有好用 CLI 的服务，或者你想要结构化、带类型访问的场景。
+- **让服务器列表保持精简。** 每个已连接服务器的工具定义都会预先占用上下文。把你没在积极使用的服务器修剪掉；臃肿的工具列表会挤占你真正的指令。
+
+想了解更深层的原因，参见[上下文工程](/docs/frontiers/context-engineering)——治理 CLAUDE.md 的那套注意力预算逻辑，同样治理着你的工具列表。
+
+## 操作 5 — 无头与 Agent SDK 流水线
+
+`claude -p "prompt"` 以**非交互方式**运行 Claude——没有会话、输出可解析——这是通往 CI、预提交钩子和批处理作业的大门。这就是[无头 / Agent SDK](/docs/claude-code/headless-and-agent-sdk) 的表面。
+
+来自官方最佳实践指南的经典“跨文件扇出”模式：
+
+<PromptCard title="无头批量迁移">{`# 1. Have Claude generate the work list first, then loop:
+for file in $(cat files.txt); do
+  claude -p "Migrate $file from React to Vue. Return OK or FAIL." \\
+    --allowedTools "Edit,Bash(git commit *)"
+done`}</PromptCard>
+
+有两个标志承担了重活：`--output-format json`（或 `stream-json --verbose`）让结果可被机器读取，而 `--allowedTools` 在无人监督时精确限定 Claude 能碰什么。把它接到任何地方：
+
+<PromptCard title="把 Claude 当作流水线中的一环">{`cat error.log | claude -p "Cluster these errors by root cause, output JSON" \\
+  --output-format json | jq '.[] | select(.severity=="high")'`}</PromptCard>
+
+<Callout type="warning" items={["在把循环放到 2,000 个条目上跑之前，永远先在 2–3 个条目上测试提示词。先打磨，再放量。","无人值守的运行需要把验证内建进去——一个 Stop 钩子，或者提示词里的一个测试步骤——否则你只是把“大规模产出看似合理却错误的输出”这件事自动化了。"]} />
+
+## 操作 6 — 计划模式的纪律与上下文工程
+
+最可靠的单一质量杠杆，是**把研究与执行分开**。来自 Anthropic 最佳实践指南的四阶段循环：
+
+<Steps items={[{title: "探索（计划模式）", body: "进入计划模式。Claude 读取文件并回答问题，但不做任何更改。把它指向确切的目录：“读取 /src/auth 并解释会话是如何工作的。”"},{title: "计划", body: "请它给出一份详细的实施计划。在批准之前直接编辑它——一份你纠正过的计划，胜过一份你只是扫了一眼的计划。"},{title: "实施", body: "退出计划模式。Claude 依据计划编写代码，并运行你指定的验证。"},{title: "审查与提交", body: "让一个拥有全新上下文的子代理对照计划审查差异，补上缺口，然后提交并开一个 PR。"}]} />
+
+关于这套纪律参见[计划模式](/docs/claude-code/plan-mode)，并且当差异一句话就能说清时就跳过它——计划是有开销的。它之所以管用，原因在于**上下文经济**：随着窗口被填满，性能会下降，所以在一个 2,000 token 的上下文里，一条 50 token 的指令，远比同样一条指令埋在 50,000 token 里更有分量。一些实用习惯：
+
+- 在不相关的任务之间用 `/clear`；一个带着更好提示词的干净会话，胜过一段又长又被污染的会话。
+- 在两次纠正都失败之后，停止纠正——`/clear` 然后用你学到的东西重写提示词。
+- 把研究委派给子代理，让读文件这件事发生在*它们的*上下文里，而不是你的。
+
+## “升级你的配置”路线
+
+如果你别的都不做，那就按这个顺序做这些：
+
+<Steps items={[{title: "把 CLAUDE.md 修剪到只剩高信噪比内容", body: "运行 /init 得到一个起点，然后砍掉每一行通不过这个测试的内容：“删掉这行会导致 Claude 犯错吗？”一个臃肿的文件会让 Claude 忽略真正重要的规则。"},{title: "写下你的第一个钩子", body: "加一个 PostToolUse 的 lint/格式化钩子，再加一个对测试设关卡的 Stop 钩子。现在循环会自己闭合，而不是等着你。"},{title: "把一个反复使用的提示词变成斜杠命令", body: "挑一个你已经敲过两次的工作流——fix-issue、write-tests、ship-pr——把它放进 .claude/skills/ 或 .claude/commands/。"},{title: "精选一套 2–4 个服务器的 MCP 组合", body: "只添加你每周都用的服务器；在有 gh/aws CLI 的地方优先用它们而非 MCP。其余的修剪掉。"},{title: "采用 探索 → 计划 → 执行 → 审查 循环", body: "对任何多文件或不熟悉的更改使用计划模式，并以一个全新上下文的审查子代理收尾。"},{title: "去试一次无头", body: "在一个预提交钩子或一个带 --allowedTools 的小型批处理作业里运行 claude -p，让你切身体验到 Claude 是流水线中的一环，而不只是一个聊天框。"}]} />
+
+## 精通 CLAUDE.md
+
+[CLAUDE.md](/docs/claude-code/claude-md) 在每次对话开始时都会加载，所以它是你能控制的频率最高的上下文——也因此最容易因塞得过满而毁掉。
+
+| 放进 CLAUDE.md | 别放进去 |
+| --- | --- |
+| Claude 猜不到的 Bash 命令 | 任何 Claude 读代码就能找到的东西 |
+| 与默认值不同的代码风格规则 | Claude 已经知道的标准约定 |
+| 测试运行器 + 如何跑单个测试 | 完整的 API 文档（改成放链接） |
+| 仓库礼仪（分支/PR 命名） | 频繁变化的信息 |
+| 不显而易见的坑和环境怪癖 | “写干净的代码”这类空话 |
+
+把它当作代码对待：当行为出错时审查它，定期修剪，并使用 `@path/to/file` 导入加上每个目录各自的 CLAUDE.md 文件，让 monorepo 的每一部分都只拿到与自己相关的内容。把*有时才相关*的知识挪进[技能](/docs/claude-code/skills)，让它按需加载，而不是给每一轮都增加负担。
+
+<Quiz title="自我检测" questions={[{q: "你需要协调一次涉及 500 个文件、并带有对抗式交叉核对的迁移。哪个工具最合适？", options: ["在一次对话里用一小撮并行子代理", "一个动态工作流（ultracode / 一段保存好的脚本）", "一份更长的 CLAUDE.md"], answer: 1, explain: "当一个任务需要的代理数量超出一次对话所能协调的范围时，就把计划搬进代码。动态工作流把循环和中间结果保存在脚本里，可扩展到数百个代理，并且能套用对抗式审查这样的可复用质量模式。"}, {q: "钩子和 CLAUDE.md 指令之间的关键区别是什么？", options: ["钩子是建议性的；CLAUDE.md 是确定性的", "钩子是确定性的、保证会运行；CLAUDE.md 是建议性的", "它们可以互换"], answer: 1, explain: "钩子在循环中的固定节点每次都运行一段脚本——把它们用于必须发生的事。CLAUDE.md 是被当作指引来阅读的，Claude 通常会照做，但也可能偏离。"}, {q: "在无人值守的 `claude -p` 批处理运行中，哪个标志限定了 Claude 能做什么？", options: ["--output-format", "--allowedTools", "--verbose"], answer: 1, explain: "--allowedTools 限制 Claude 能使用哪些工具，这在无人监督时很重要。--output-format 让结果可解析；--verbose 用于调试。"}, {q: "为什么修剪 CLAUDE.md 能改善遵循度？", options: ["更短的文件从磁盘加载得更快", "随着上下文被填满性能会下降，所以埋在臃肿文件里的规则会被淹没", "它减少了子代理的数量"], answer: 1, explain: "随着上下文窗口被填满，LLM 的性能会下降。一份臃肿的 CLAUDE.md 会挤占真正重要的规则，于是 Claude 实际上会忽略其中一半。"}]} />
+
+<Flashcards title="高手操作回忆——翻转每张卡片" cards={[{front: "什么时候该从并行子代理升级到动态工作流？", back: "当任务需要的代理数量超出一次对话所能协调的范围时（大型迁移、代码库全面排查、多来源研究）——或者当你想把编排固化为一段可重复运行的脚本时。"}, {front: "杠杆最高的三个钩子事件？", back: "PostToolUse（编辑时 lint/格式化）、Stop（用绿灯的测试/构建为本轮设关卡）、PreToolUse（阻止被禁止的写入）。"}, {front: "技能 vs MCP vs 钩子 vs 斜杠命令？", back: "技能 = 知识；MCP = 动作；钩子 = 保证；斜杠命令 = 带参数的入口。"}, {front: "四阶段循环？", back: "探索（计划模式）→ 计划（编辑它）→ 实施 → 用一个全新上下文的子代理审查，然后提交。"}, {front: "访问外部服务最节省上下文的方式？", back: "在有 CLI 的地方用 CLI（gh、aws、gcloud）——它不会每轮都加载一套工具 schema。把 MCP 留给那些没有好用 CLI 的服务。"}]} />
+
+<Callout type="takeaways" items={["这种递进本身就是技能：一个 Claude → 并行子代理 → 脚本驱动的动态工作流，依据谁需要掌握计划来选择。","钩子是确定性的粘合剂——保存时 lint、为停止设关卡、阻止被禁止的写入——用于那些每次都必须发生的事。","把反复使用的提示词打包成斜杠命令/技能，用输出风格塑造交付方式，并让 MCP 组合保持精简（优先用 CLI）。","带 --allowedTools 的无头 claude -p 把 Claude 变成 CI/流水线中的一环；对无人值守的运行务必内建验证。","计划模式的纪律，加上激进的上下文经济（/clear、子代理研究、一份修剪过的 CLAUDE.md），是你拥有的最高可靠性的杠杆。"]} />
+
+## 来源与延伸阅读
+
+- [Claude Code 最佳实践](https://code.claude.com/docs/en/best-practices) —— Anthropic 的官方指南：探索→计划→执行循环、CLAUDE.md 规则、钩子、子代理、无头扇出，以及验证。
+- [用动态工作流大规模编排子代理](https://code.claude.com/docs/en/workflows) —— 关于动态工作流、`ultracode` 关键字、`/deep-research` 以及“谁掌握计划”对照表的官方文档。
+- [面向 AI 代理的有效上下文工程](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) —— Anthropic 工程团队谈把上下文视为有限预算以及即时检索。
+- [hesreallyhim/awesome-claude-code](https://github.com/hesreallyhim/awesome-claude-code) —— 一份由社区精选的大型清单，收录技能、钩子、斜杠命令、代理编排器和插件。
+- [qdhenry/Claude-Command-Suite](https://github.com/qdhenry/Claude-Command-Suite) —— 一个广为人知的专业斜杠命令与代理库（例如 `/dev:code-review`）。
+- [GWUDCAP/cc-sessions](https://github.com/GWUDCAP/cc-sessions) —— 一套有鲜明主张的扩展集，演示了用钩子做工作流约束，外加任务/git 管理。
+- [VoltAgent/awesome-claude-code-subagents](https://github.com/VoltAgent/awesome-claude-code-subagents) —— 一个收录专门化子代理定义的大型社区合集。

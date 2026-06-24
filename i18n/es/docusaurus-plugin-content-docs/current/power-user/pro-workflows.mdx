@@ -1,0 +1,173 @@
+---
+sidebar_position: 4
+title: "Flujos de trabajo pro y jugadas de poder"
+description: "Combina subagentes, hooks, slash-commands, MCP y pipelines headless en flujos de trabajo que te hacen drásticamente más rápido con Claude."
+keywords: [claude code workflows, subagents, hooks, slash commands, headless agent sdk]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Orquesta subagentes en paralelo — y sabe cuándo graduarte a un flujo de trabajo dinámico dirigido por script","Convierte los hooks en el pegamento determinista: lint al guardar, bloquea el cierre del turno, impide escrituras prohibidas","Transforma tus prompts repetidos en slash-commands personalizados, skills y un estilo de salida","Construye un stack de MCP y pipelines headless (claude -p) que se ejecuten sin supervisión en CI","Ejecuta el bucle explorar → planificar → ejecutar → revisar con disciplina, y mantén el contexto ligero","Trata CLAUDE.md como código: corto, podado y de alta señal"]} />
+
+Esta es la página donde las primitivas dejan de ser funciones individuales y empiezan a ser un *flujo de trabajo*. Si ya sabes qué es un subagente o un hook, la palanca está en cómo los **combinas**: un slash-command que lanza una pasada en modo plan, subagentes que reparten el trabajo, un hook que no deja terminar el turno hasta que pasan los tests, y una invocación headless que ejecuta todo en CI. Vamos a conectarlo todo.
+
+<VerifyNote lastVerified="2026-06-24" source="https://code.claude.com/docs/en/best-practices">
+Claude Code evoluciona rápido: los flags, los comandos incluidos (`/deep-research`, `/code-review`), la palabra clave `ultracode`, la disponibilidad de los flujos de trabajo dinámicos y los niveles de esfuerzo cambian entre versiones. El número de estrellas en los repos de la comunidad varía a diario. Confirma cualquier cosa específica de una versión contra la documentación oficial antes de confiar en ella.
+</VerifyNote>
+
+## El modelo mental: ¿quién sostiene el plan?
+
+Cada jugada de poder de abajo es una respuesta distinta a una única pregunta — *¿quién sostiene el plan y los resultados intermedios?* El propio enfoque de Anthropic para la nueva función de flujos de trabajo dinámicos lo expone con claridad:
+
+| Herramienta | Quién decide qué se ejecuta a continuación | Dónde viven los resultados | Escala |
+| --- | --- | --- | --- |
+| **[Subagentes](/docs/claude-code/subagents)** | Claude, turno a turno | La ventana de contexto de Claude | Unos pocos por turno |
+| **[Skills](/docs/claude-code/skills)** | Claude, siguiendo el prompt | La ventana de contexto de Claude | Igual que los subagentes |
+| **Equipos de agentes** | Un agente líder, turno a turno | Una lista de tareas compartida | Un puñado de pares de larga duración |
+| **[Flujos de trabajo dinámicos](/docs/claude-code/dynamic-workflows)** | El script | Variables del script | De decenas a cientos |
+
+La progresión es todo el juego: empieza con un solo Claude, delega en subagentes para proteger el contexto, y mueve el plan *al código* solo cuando una tarea necesita más agentes de los que una conversación puede coordinar.
+
+## Jugada 1 — Subagentes en paralelo, luego graduarse a un flujo de trabajo
+
+Un [subagente](/docs/claude-code/subagents) es un Claude separado con su propia ventana de contexto y un conjunto de herramientas acotado; devuelve un resultado, no su transcripción. El hábito del usuario avanzado es **repartir trabajo independiente**:
+
+<PromptCard title="Repartir una revisión entre módulos">{`Review the changes in auth/, billing/, and api/ — use the code-reviewer
+subagent on each, in parallel. Report only correctness bugs and missing tests.`}</PromptCard>
+
+Tres revisores se ejecutan a la vez, cada uno gastando su propio contexto en los diffs, y tu sesión principal ve tres informes ordenados en lugar de tres diffs en bruto. El truco: el paralelismo solo ayuda con subtareas **independientes**. Si el paso B necesita la salida del paso A, ejecútalos en secuencia; si escriben los mismos ficheros, aíslalos en [git worktrees](/docs/claude-code/worktrees).
+
+Cuando la tarea supera lo que cabe en una sola conversación — una migración de 500 ficheros, un barrido de bugs en toda la base de código, una investigación contrastada entre muchas fuentes — gradúate a un **[flujo de trabajo dinámico](/docs/claude-code/dynamic-workflows)**. Claude escribe un script de orquestación en JavaScript (repartir → reducir → sintetizar), un runtime lo ejecuta en segundo plano con hasta 16 agentes concurrentes, y solo la respuesta final llega a tu contexto. Lanza uno con la palabra clave `ultracode` o simplemente pídelo con palabras normales:
+
+<PromptCard title="Lanzar un flujo de trabajo dinámico">{`ultracode: audit every API endpoint under src/routes/ for missing auth checks,
+then cross-check each finding with a second agent before reporting`}</PromptCard>
+
+La función estrella no es solo *más agentes* — es que un script puede aplicar un **patrón de calidad** repetible, como hacer que agentes independientes revisen de forma adversaria los hallazgos de los demás antes de reportar ninguno. Prueba el comando incluido `/deep-research <pregunta>` para ver el patrón en vivo: vota cada afirmación y filtra las que no sobreviven al contraste cruzado.
+
+<Callout type="tip" items={["Guarda una buena ejecución de flujo de trabajo como comando: abre /workflows, selecciona la ejecución, pulsa s. Se convierte en /tu-nombre en cada sesión futura.","Mide el coste primero en una porción — un directorio, no todo el repo. Una ejecución puede generar muchos más agentes (y tokens) que una sola conversación."]} />
+
+## Jugada 2 — Hooks: el pegamento determinista
+
+Las instrucciones de CLAUDE.md son *orientativas* — Claude suele seguirlas. Los [hooks](/docs/claude-code/hooks) son *deterministas* — ejecutan un script en un punto fijo del bucle, garantizado, cada vez. Recurre a un hook cuando algo **debe** ocurrir sin ninguna excepción.
+
+Los tres patrones de hook de mayor palanca:
+
+<Steps items={[{title: "PostToolUse — lint/format en cada edición", body: "Después de que Claude edite un fichero, ejecuta tu formateador o linter automáticamente para que la base de código nunca derive. El feedback también vuelve a Claude, así que se autocorrige."},{title: "Stop — bloquea el turno hasta un check en verde", body: "Un hook Stop ejecuta tu script de test/build e impide que el turno termine hasta que pase. Esto es lo que permite que una ejecución sin supervisión termine correctamente en lugar de detenerse cuando el trabajo simplemente 'parece hecho'."},{title: "PreToolUse — bloquea acciones prohibidas", body: "Deniega escrituras a una ruta protegida (migraciones, ficheros generados, secretos) antes de que ocurran, sin importar lo que Claude pretenda."}]} />
+
+No tienes que escribir el JSON a mano. Pídele a Claude que escriba el hook por ti:
+
+<PromptCard title="Pedir a Claude que escriba un hook">{`Write a hook that runs eslint --fix after every file edit, and a second hook
+that blocks any Write or Edit to the db/migrations/ folder. Add them to
+.claude/settings.json and show me the config.`}</PromptCard>
+
+<Callout type="warning" items={["Un hook Stop que sigue bloqueando será anulado tras varios bloqueos consecutivos para que la sesión no se quede en deadlock — tu barrera es una protección, no un bucle infinito.","Los hooks se ejecutan con los permisos de tu shell. Revisa cualquier script de hook antes de hacer commit, exactamente como harías con la configuración de CI."]} />
+
+## Jugada 3 — Slash-commands personalizados, skills y estilos de salida
+
+Cualquier cosa que pidas dos veces debería convertirse en una primitiva. La decisión es simple: **las skills son conocimiento, los hooks son garantías, MCP es acción, los slash-commands son puntos de entrada.**
+
+Un [slash-command](/docs/claude-code/slash-commands) (o una skill con `disable-model-invocation: true`) empaqueta un flujo de trabajo repetible que disparas a mano. `$ARGUMENTS` lo hace parametrizable:
+
+<PromptCard title=".claude/skills/fix-issue/SKILL.md">{`---
+name: fix-issue
+description: Triage and fix a GitHub issue end-to-end
+disable-model-invocation: true
+---
+Fix GitHub issue $ARGUMENTS:
+1. gh issue view to read the issue
+2. Search the codebase for the relevant files
+3. Write a failing test that reproduces the bug
+4. Implement the fix, then run tests and lint until green
+5. Commit with a descriptive message and open a PR`}</PromptCard>
+
+Ejecútalo con `/fix-issue 1234`. Usa `disable-model-invocation: true` para cualquier cosa con efectos secundarios que quieras disparar deliberadamente en lugar de que Claude recurra a ella por su cuenta.
+
+Los [estilos de salida](/docs/claude-code/output-styles) cambian *cómo* se comunica Claude a lo largo de toda la sesión — escueto para un experto, extenso con explicaciones para enseñar, o un formato estructurado que tu tooling pueda parsear. Combina un slash-command personalizado (el *qué*) con un estilo de salida (el *cómo*) y habrás moldeado ambos extremos de la interacción.
+
+La jugada de poder más infrautilizada de la documentación oficial: **deja que Claude te entreviste** antes de una funcionalidad grande, y luego empieza una sesión nueva para construir a partir de la especificación escrita.
+
+<PromptCard title="Especificación por entrevista, luego construir en contexto limpio">{`I want to build [brief description]. Interview me in detail using the
+AskUserQuestion tool — technical implementation, UI/UX, edge cases, tradeoffs.
+Dig into the hard parts I might not have considered. When we've covered
+everything, write a complete, self-contained spec to SPEC.md.`}</PromptCard>
+
+## Jugada 4 — Construye un stack de MCP
+
+Los [servidores MCP](/docs/claude-code/mcp) son procesos ejecutables a los que Claude llama por JSON-RPC para *hacer* cosas de verdad — consultar tu base de datos, leer Sentry, traer un diseño de Figma, abrir un issue en Linear. Un "stack" de usuario avanzado es un conjunto pequeño y deliberado, no todo lo que encuentres:
+
+<PromptCard title="Añadir servidores a tu stack">{`claude mcp add --transport stdio sentry -- npx -y @sentry/mcp-server
+claude mcp add --transport http linear https://mcp.linear.app/sse`}</PromptCard>
+
+Dos principios mantienen rápido un stack de MCP:
+
+- **Prefiere una CLI cuando exista.** `gh`, `aws`, `gcloud` y `sentry-cli` son la forma *más* eficiente en contexto de hablar con un servicio — Claude ya las conoce, y no cargan un esquema de herramientas en cada turno. Reserva MCP para servicios sin una buena CLI, o donde quieras acceso estructurado y tipado.
+- **Mantén la lista de servidores ligera.** Las definiciones de herramientas de cada servidor conectado consumen contexto de entrada. Recorta los servidores que no estés usando activamente; las listas de herramientas hinchadas desplazan tus instrucciones reales.
+
+Para el porqué más profundo, consulta [Ingeniería de contexto](/docs/frontiers/context-engineering) — la misma lógica de presupuesto de atención que gobierna CLAUDE.md gobierna tu lista de herramientas.
+
+## Jugada 5 — Pipelines headless y Agent SDK
+
+`claude -p "prompt"` ejecuta Claude de forma **no interactiva** — sin sesión, con salida parseable — lo cual es la puerta a CI, hooks de pre-commit y trabajos por lotes. Esta es la superficie [headless / Agent SDK](/docs/claude-code/headless-and-agent-sdk).
+
+El clásico patrón de reparto entre ficheros de la guía oficial de mejores prácticas:
+
+<PromptCard title="Migración por lotes headless">{`# 1. Have Claude generate the work list first, then loop:
+for file in $(cat files.txt); do
+  claude -p "Migrate $file from React to Vue. Return OK or FAIL." \\
+    --allowedTools "Edit,Bash(git commit *)"
+done`}</PromptCard>
+
+Dos flags hacen el trabajo pesado: `--output-format json` (o `stream-json --verbose`) hace los resultados legibles por máquina, y `--allowedTools` acota exactamente lo que Claude puede tocar cuando no hay nadie mirando. Encadénalo donde sea:
+
+<PromptCard title="Claude como etapa de un pipeline">{`cat error.log | claude -p "Cluster these errors by root cause, output JSON" \\
+  --output-format json | jq '.[] | select(.severity=="high")'`}</PromptCard>
+
+<Callout type="warning" items={["Prueba siempre el prompt en 2–3 elementos antes de soltar el bucle sobre 2.000. Refina, luego escala.","Las ejecuciones sin supervisión necesitan verificación integrada — un hook Stop o un paso de test en el propio prompt — o simplemente habrás automatizado producir salida plausible-pero-incorrecta a escala."]} />
+
+## Jugada 6 — Disciplina de modo plan e ingeniería de contexto
+
+La palanca de calidad más fiable de todas es **separar la investigación de la ejecución**. El bucle de cuatro fases de la guía de mejores prácticas de Anthropic:
+
+<Steps items={[{title: "Explorar (modo plan)", body: "Entra en modo plan. Claude lee ficheros y responde preguntas pero no hace cambios. Apúntalo a los directorios exactos: 'lee /src/auth y explica cómo funcionan las sesiones.'"},{title: "Planificar", body: "Pide un plan de implementación detallado. Edítalo directamente antes de aprobarlo — un plan que has corregido le gana a un plan que ojeaste."},{title: "Implementar", body: "Sal del modo plan. Claude programa contra el plan y ejecuta la verificación que especificaste."},{title: "Revisar y hacer commit", body: "Haz que un subagente con contexto fresco revise el diff contra el plan, corrija huecos, y luego haz commit y abre un PR."}]} />
+
+Consulta [Modo plan](/docs/claude-code/plan-mode) para la disciplina, y sáltalo cuando el diff quepa en una frase — planificar tiene su sobrecoste. La razón por la que esto funciona es la **economía de contexto**: el rendimiento se degrada a medida que la ventana se llena, así que una instrucción de 50 tokens en un contexto de 2.000 tokens aterriza mucho mejor que la misma instrucción enterrada en 50.000 tokens. Hábitos prácticos:
+
+- `/clear` entre tareas no relacionadas; una sesión limpia con un prompt mejor le gana a una larga y contaminada.
+- Tras dos correcciones fallidas, deja de corregir — `/clear` y reescribe el prompt con lo que aprendiste.
+- Delega la investigación en subagentes para que la lectura de ficheros ocurra en *su* contexto, no en el tuyo.
+
+## El camino para "subir de nivel tu setup"
+
+Si no haces nada más, haz esto en orden:
+
+<Steps items={[{title: "Poda CLAUDE.md hasta dejar solo alta señal", body: "Ejecuta /init para arrancar, luego corta cada línea que no pase la prueba: '¿quitar esto haría que Claude cometiera un error?' Un fichero hinchado hace que Claude ignore las reglas que importan."},{title: "Escribe tu primer hook", body: "Añade un hook PostToolUse de lint/format y un hook Stop que bloquee según los tests. Ahora el bucle se cierra solo en lugar de esperarte."},{title: "Convierte un prompt repetido en un slash-command", body: "Elige un flujo de trabajo que hayas escrito dos veces — fix-issue, write-tests, ship-pr — y ponlo en .claude/skills/ o .claude/commands/."},{title: "Cura un stack de MCP de 2–4 servidores", body: "Añade solo los servidores que usas cada semana; prefiere las CLIs gh/aws sobre MCP donde existan. Recorta el resto."},{title: "Adopta el bucle explorar → planificar → ejecutar → revisar", body: "Usa modo plan para cualquier cambio multi-fichero o desconocido, y termina con un subagente de revisión de contexto fresco."},{title: "Ve headless una vez", body: "Ejecuta claude -p en un hook de pre-commit o en un pequeño trabajo por lotes con --allowedTools, para que experimentes Claude como etapa de un pipeline, no solo como un chat."}]} />
+
+## Maestría en CLAUDE.md
+
+[CLAUDE.md](/docs/claude-code/claude-md) se carga al inicio de cada conversación, así que es el contexto de mayor frecuencia que controlas — y por tanto el más fácil de arruinar atiborrándolo.
+
+| Pon en CLAUDE.md | Deja fuera |
+| --- | --- |
+| Comandos bash que Claude no puede adivinar | Cualquier cosa que Claude encuentre leyendo código |
+| Reglas de estilo de código que difieren de los valores por defecto | Convenciones estándar que Claude ya conoce |
+| El test runner + cómo ejecutar un solo test | Documentación completa de API (enlázala en su lugar) |
+| Etiqueta del repo (nombrado de ramas/PR) | Información que cambia con frecuencia |
+| Trampas no obvias y peculiaridades del entorno | Tópicos del estilo "escribe código limpio" |
+
+Trátalo como código: revísalo cuando el comportamiento falle, pódalo con regularidad, y usa imports `@path/to/file` más ficheros CLAUDE.md por directorio para que cada parte de un monorepo reciba solo lo relevante. Mueve el conocimiento *a veces relevante* a [skills](/docs/claude-code/skills) para que se cargue bajo demanda en lugar de gravar cada turno.
+
+<Quiz title="Ponte a prueba" questions={[{q: "Necesitas coordinar una migración de 500 ficheros con contraste cruzado adversario. ¿Qué herramienta encaja mejor?", options: ["Un puñado de subagentes en paralelo en una conversación", "Un flujo de trabajo dinámico (ultracode / un script guardado)", "Un CLAUDE.md más largo"], answer: 1, explain: "Cuando una tarea necesita más agentes de los que una conversación puede coordinar, mueve el plan al código. Un flujo de trabajo dinámico sostiene el bucle y los resultados intermedios en un script, escala a cientos de agentes, y puede aplicar patrones de calidad repetibles como la revisión adversaria."}, {q: "¿Cuál es la diferencia clave entre un hook y una instrucción de CLAUDE.md?", options: ["Los hooks son orientativos; CLAUDE.md es determinista", "Los hooks son deterministas y se garantiza su ejecución; CLAUDE.md es orientativo", "Son intercambiables"], answer: 1, explain: "Los hooks ejecutan un script en un punto fijo del bucle, cada vez — úsalos para lo que DEBE ocurrir. CLAUDE.md se lee como una guía que Claude suele seguir pero de la que puede desviarse."}, {q: "¿Qué flag acota lo que Claude puede hacer durante una ejecución por lotes `claude -p` sin supervisión?", options: ["--output-format", "--allowedTools", "--verbose"], answer: 1, explain: "--allowedTools restringe qué herramientas puede usar Claude, lo cual importa cuando no hay nadie mirando. --output-format hace los resultados parseables; --verbose es para depurar."}, {q: "¿Por qué podar CLAUDE.md mejora la adherencia?", options: ["Los ficheros más cortos se cargan más rápido desde disco", "El rendimiento se degrada a medida que el contexto se llena, así que una regla enterrada en un fichero hinchado se pierde", "Reduce el número de subagentes"], answer: 1, explain: "El rendimiento de los LLM se degrada a medida que la ventana de contexto se llena. Un CLAUDE.md hinchado desplaza las reglas que importan, así que Claude ignora de hecho la mitad."}]} />
+
+<Flashcards title="Repaso de jugadas de poder — voltea cada tarjeta" cards={[{front: "¿Cuándo te gradúas de los subagentes en paralelo a un flujo de trabajo dinámico?", back: "Cuando la tarea necesita más agentes de los que una conversación puede coordinar (migraciones grandes, barridos de la base de código, investigación multi-fuente) — o cuando quieres la orquestación codificada como un script reejecutable."}, {front: "¿Los tres eventos de hook de mayor palanca?", back: "PostToolUse (lint/format en la edición), Stop (bloquear el turno según tests/build en verde), PreToolUse (bloquear escrituras prohibidas)."}, {front: "¿skills vs MCP vs hooks vs slash-commands?", back: "Skills = conocimiento; MCP = acción; hooks = garantías; slash-commands = puntos de entrada parametrizados."}, {front: "¿El bucle de cuatro fases?", back: "Explorar (modo plan) → Planificar (editarlo) → Implementar → Revisar con un subagente de contexto fresco, luego hacer commit."}, {front: "¿La forma más eficiente en contexto de llegar a un servicio externo?", back: "Una CLI (gh, aws, gcloud) cuando exista — no carga un esquema de herramientas en cada turno. Reserva MCP para servicios sin una buena CLI."}]} />
+
+<Callout type="takeaways" items={["La progresión es la habilidad: un solo Claude → subagentes en paralelo → flujos de trabajo dinámicos dirigidos por script, elegidos según quién necesita sostener el plan.","Los hooks son el pegamento determinista — lint al guardar, bloquear el cierre, impedir escrituras prohibidas — para lo que debe ocurrir cada vez.","Empaqueta los prompts repetidos en slash-commands/skills, moldea la entrega con un estilo de salida, y mantén ligero un stack de MCP (prefiere las CLIs).","claude -p headless con --allowedTools convierte a Claude en una etapa de CI/pipeline; integra siempre verificación para las ejecuciones sin supervisión.","La disciplina de modo plan más una economía de contexto agresiva (/clear, investigación con subagentes, un CLAUDE.md podado) es la palanca de mayor fiabilidad que tienes."]} />
+
+## Fuentes y lecturas adicionales
+
+- [Best practices for Claude Code](https://code.claude.com/docs/en/best-practices) — la guía oficial de Anthropic: el bucle explorar→planificar→ejecutar, las reglas de CLAUDE.md, hooks, subagentes, reparto headless y verificación.
+- [Orchestrate subagents at scale with dynamic workflows](https://code.claude.com/docs/en/workflows) — documentación oficial sobre flujos de trabajo dinámicos, la palabra clave `ultracode`, `/deep-research` y la tabla comparativa de quién-sostiene-el-plan.
+- [Effective context engineering for AI agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) — Anthropic Engineering sobre el contexto como un presupuesto finito y la recuperación just-in-time.
+- [hesreallyhim/awesome-claude-code](https://github.com/hesreallyhim/awesome-claude-code) — una gran lista curada por la comunidad de skills, hooks, slash-commands, orquestadores de agentes y plugins.
+- [qdhenry/Claude-Command-Suite](https://github.com/qdhenry/Claude-Command-Suite) — una conocida biblioteca de slash-commands y agentes profesionales (p. ej. `/dev:code-review`).
+- [GWUDCAP/cc-sessions](https://github.com/GWUDCAP/cc-sessions) — un conjunto de extensiones con opiniones marcadas que demuestra hooks para hacer cumplir el flujo de trabajo más gestión de tareas/git.
+- [VoltAgent/awesome-claude-code-subagents](https://github.com/VoltAgent/awesome-claude-code-subagents) — una gran colección de la comunidad de definiciones de subagentes especializados.
