@@ -195,6 +195,7 @@ const config: Config = {
         {
           type: 'localeDropdown',
           position: 'right',
+          className: 'navbar-locale-dropdown',
         },
         {
           href: GITHUB_URL,
