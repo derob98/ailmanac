@@ -1,0 +1,153 @@
+---
+sidebar_position: 1
+title: "トークン使用量(とコスト)を削減する"
+description: "Claudeのトークンと費用を削減するための実証済みの手法 — キャッシュ、簡潔なプロンプト、モデルの適正化、バッチ処理、計測。"
+keywords: [token reduction, claude cost optimization, prompt caching, caveman prompt, token counting, rtk, tool output compression]
+---
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-06-24" source="https://platform.claude.com/docs/en/docs/build-with-claude/token-counting">
+トークン価格、バッチ割引、キャッシュ対象の条件、トークナイザの挙動はモデル世代ごとに変わります — 誰かに節約効果を伝える前に、Anthropicの公式ドキュメントで最新の数値を確認してください。
+</VerifyNote>
+
+入力トークンと出力トークンのすべてに料金が発生します。良い知らせは、ほとんどの実ワークロードは**無駄な重荷**を抱えているということです — 肥大化したシステムプロンプト、再送される文脈、冗長な返答、簡単な作業に対して間違ったモデルを使うこと。これらを削れば、品質を損なうことなく請求額が下がります。このページはパワーユーザー向けのツールキットで、おおむねレバレッジの大きい順に並んでいます。
+
+<Callout type="objectives" items={["トークンが実際にどこで漏れるのか — 入力 対 出力 対 再利用される文脈","簡潔な/「原始人」スタイル:実際に何を節約し、どこで裏目に出るのか","ドル対ドルで構造的に節約するためのプロンプトキャッシュとバッチ処理","モデルの適正化(安価な作業にはHaiku)と散文より構造化出力","出荷前にトークンカウントエンドポイントで計測する"]} />
+
+## まず、トークンがどこに行くのかを突き止める
+
+最適化の前に、支出を3つのバケツに分けましょう — それぞれに別々の対処法があります:
+
+<Flashcards title="3つのトークンバケツ" cards={[{front:"入力トークン",back:"送信するすべて:システムプロンプト、ツール、履歴、ドキュメント、ユーザーのターン。長いセッションでは最大かつ最も見過ごされがちなコストであることが多い。"},{front:"出力トークン",back:"Claudeが生成するすべて。入力より高く価格設定されている。簡潔スタイルのプロンプトの標的。"},{front:"再利用される文脈",back:"毎回の呼び出しで再送する安定した塊(システムプロンプト、ツールカタログ、大きなドキュメント)。キャッシュしない限り、フル価格で支払う純粋な無駄。"}]} />
+
+対処法はきれいに対応します:再利用される文脈は**キャッシュ**し、入力は**削減**し、出力は**短縮**し、モデルを**適正化**し、時間に敏感でないものは**バッチ処理**します。
+
+## 簡潔な/「原始人」スタイル(出力の節約)
+
+バズった手法は、Claudeに余計な言葉を捨てて断片で答えるよう指示することです — オープンソースの [`caveman`](https://github.com/JuliusBrussee/caveman) Claude Codeスキル(MITライセンス、Julius Brussee作)が広めたもので、そのキャッチフレーズは「why use many token when few token do trick(少ないトークンで事足りるのに、なぜ多くのトークンを使う)」です。これは短い文、不定詞の動詞、ゼロの社交辞令を強制します。
+
+<VerifyNote lastVerified="2026-06-24" source="https://github.com/JuliusBrussee/caveman">
+`caveman` スキルは、10タスクのベンチマーク全体で平均約65%の出力トークン削減(範囲22〜87%)を報告し、**出力**トークンのみを縮小すると述べています — 思考と入力は手つかずです。すでに簡潔な構造化タスクに対する独立したベンチマークでは、はるかに小さい効果(おおよそ9〜21%)しか見つかりませんでした。見出しの割合は保証ではなく、ワークロード依存のものとして扱ってください。
+</VerifyNote>
+
+独立したテストからの正直な結論:このスタイルは**内容には何のコストもかからない**(コード、専門用語、JSONは正確なまま)が、節約はベースラインに完全に依存します。プロンプトがすでに「簡潔に」と言っているなら、勝ち取れる分のほとんどはすでに得ています。大きな削減(40〜65%)は説明の多い回答で現れ、構造化された抽出はほとんど動きません。
+
+<PromptCard title="簡潔な指示ブロック — システムプロンプトに貼り付ける">
+{`Answer terse. Cut filler, hedging, and pleasantries.
+Drop articles (a/an/the) and softeners (just, really, basically, actually).
+No preamble, no restating the question, no "happy to help."
+Fragments are fine. Keep technical terms and code blocks exact.
+Pattern per point: [thing] [action] [reason]. Next step if any.`}
+</PromptCard>
+
+<Callout type="tip" items={["簡潔ルールはシステムプロンプトに一度だけ入れ、毎回のユーザーターンには入れないこと — 繰り返すと呼び出しごとに入力コストを再び支払うことになる。","コード、識別子、JSON、数値は決して圧縮しないこと。散文だけを圧縮する。","「Be concise. Return JSON only.(簡潔に。JSONのみ返す。)」だけで、達成可能な出力節約の約60%を占める — 凝ったテクニックに手を出す前にこれを書くこと。"]} />
+
+<Callout type="warning" items={["簡潔スタイルは出力だけを削る。毎回再送する2万トークンのシステムプロンプトには何の効果もない — それは入力/キャッシュの問題である。","拡張思考タスクでは、推論トークンは影響を受けない。縮小されるのは最終的に見える回答だけである。"]} />
+
+## ツール出力を文脈に再投入する前に圧縮する(RTK)
+
+Cavemanは Claudeが*書く*ものを縮小します。エージェント型セッションにおける鏡像の漏れは、Claudeが*読み返す*ものです:コーディングエージェントが実行するすべての `git status`、`npm test`、`ls -la`、ビルドログは、ヘッダー、プログレスバーなどすべてが、次のターンの入力トークンとしてそのままコンテキストウィンドウにパイプされます。長い [Claude Code](/docs/claude-code/what-is-claude-code) セッションでは、その観測ノイズがシステムプロンプトを上回ることがよくあります。
+
+[`rtk`](https://github.com/rtk-ai/rtk)(「Rust Token Killer」、Apache-2.0、homebrew-core収録)は、まさにこれを狙ったCLIプロキシです。`rtk init -g` は Claude Code の **Bashツールへの [PreToolUseフック](/docs/claude-code/hooks)**(`rtk hook claude`)をインストールし、各コマンドを透過的に `rtk <command>` に書き換えてその出力を圧縮します — ヘッダーや視覚的ノイズを取り除き、類似行をグループ化し、繰り返しをカウンタで重複排除し、冗長部分を切り詰めてから、モデルに届く前に処理します。
+
+<VerifyNote lastVerified="2026-06-24" source="https://github.com/rtk-ai/rtk">
+RTKのプロジェクトは、一般的な開発コマンドで60〜90%の出力削減を主張しています。その数字はツール自身のベンチマークであり、独立して検証されたものではなく、**Bash**ツールにしか作用しません — Claude Code のネイティブな Read、Grep、Glob はフックを迂回します(シェル相当の `cat`/`rg`/`find`、または `rtk read`/`rtk grep`/`rtk find` を通して経由させてください)。少なくとも報告された問題が1件(#582)あり、一部の設定でフックが総コストを約18%*上昇*させていることが判明したため、見出しを信じる前に自分のワークロードで計測してください。
+</VerifyNote>
+
+<PromptCard title="RTKをインストールしてグローバルフックを配線する(macOS)">
+{`brew install rtk          # see the repo for cargo / other installers
+rtk init -g --hook-only   # PreToolUse(Bash) hook only, no RTK.md file
+# undo anytime: rtk init -g --uninstall`}
+</PromptCard>
+
+`--hook-only` フラグはトークン予算にとって重要です:デフォルトの `rtk init` は、毎セッション読み込まれる `RTK.md` 指示ファイルも書き込みます — 節約と部分的に相殺する固定の*入力*コストです。Hook-only は出力圧縮を保ちつつ、プレフィックスには何も追加しません。フックを読み込ませるには、`rtk init -g` の後に Claude Code を再起動してください。
+
+<Callout type="tip" items={["RTKとcavemanは冗長ではなく補完的である:cavemanはモデルの出力を圧縮し、RTKはツール結果の入力(毎ターン送り返される観測)を圧縮する。両者を重ねれば両方向をカバーできる。","フックはBash呼び出しごとに発火し、透過的に書き換える — プロンプトの書き方を変える必要はない。","READMEではなく、実際の請求で計測すること。セッションでシェルコマンドが少なければ、RTKに圧縮できるものはほとんどない — その効果はツール出力がどれだけ騒がしいかに比例して大きくなる。"]} />
+
+## 再利用されるプレフィックスをキャッシュする(入力の節約)
+
+多くの呼び出しが大きな不変の塊 — 長いシステムプロンプト、ツールカタログ、参照ドキュメント — を共有している場合、**プロンプトキャッシュ**はそれを一度だけ処理し、それ以降の各呼び出しで入力価格のほんの一部で再利用します。これはチャットおよびエージェントのワークロードにとって、単一で最もレバレッジの大きい構造的変更です。毎ターン元が取れるからです。
+
+唯一のルール:キャッシュされるプレフィックスは、呼び出し間で**バイト単位で同一**でなければなりません。先頭付近のタイムスタンプの混入やツールリストの並べ替えがあると、ヒット率は静かにゼロまで落ちます。詳しい仕組み、コピペできる `cache_control` のスニペット、ヒットの検証方法は [プロンプトキャッシュとコスト最適化](/docs/api/prompt-caching) にあります。
+
+<Steps items={[{title:"安定を先に、可変を後に並べる",body:"システムプロンプト、ツール、ドキュメントを先頭に移動し、ユーザーの変化するターンを末尾に置く。"},{title:"ブレークポイントをマークする",body:"最後の安定ブロックに cache_control を付け、プレフィックス全体がキャッシュされるようにする。プロンプトキャッシュのページのスニペットを参照。"},{title:"ヒットを検証する",body:"レスポンスのusageから cache_read_input_tokens を読む — ゼロより大きければ節約できており、繰り返しの呼び出しで全部ゼロなら静かな無効化要因がある。"}]} />
+
+## 送信する文脈を削減する
+
+キャッシュは文脈を安価に再利用しますが、最も安いトークンは送らないトークンです。ウィンドウに実際に何が入っているかを監査しましょう:
+
+- **システムプロンプトを刈り込む。** 長い指示ブロックには無駄が溜まります。もはやトークンに見合わない例を削り、平凡な5つより強力な1つの例を残します。
+- **取り出す、投げ込まない。** ドキュメント全体を貼るのではなく、関連する箇所だけを取得します([RAG](/docs/foundations/rag))。1つの質問に答えるために50ページのPDFを送るのが、最もよくある無駄です。
+- **長いセッションをコンパクトにする。** 会話が長くなったら、古いターンを永遠に持ち続けるのではなく、短い実行中の要約に置き換えます。履歴は毎回の呼び出しで再び支払う入力トークンです。
+- **ツールカタログを適正化する。** 各ツール定義はリクエストごとの入力トークンです。現在のタスクに必要なツールだけを公開します。
+- **静的なメモリファイルを圧縮する。** [`CLAUDE.md`](/docs/claude-code/claude-md) とメモリノートは、毎セッション再び支払う再利用入力です。それらを簡潔な「原始人」散文に書き直すと(例えば [`caveman`](https://github.com/JuliusBrussee/caveman) プラグインの `caveman-compress` コマンド)一部を削れます — ただし、すでに無駄のないファイルでは一桁を見込んでください:無駄のない約350語の `CLAUDE.md` に対する実地のパスでは、削減はわずか約10%でした。レバーは本物ですが小さいです。これを追って、グローバル設定の指示の明快さを犠牲にしないでください。
+
+## モデルを適正化する
+
+Haiku相当のタスクにOpusの料金を払わないこと。分類、抽出、単純なフォーマット、ルーティングは、たいてい最小のモデルでトークンあたり価格のほんの一部で快適に動きます。より大きなモデルは本当に難しい推論のために取っておき、ルーティングを検討してください:安価なモデルが簡単な大多数を処理し、難しいケースだけをエスカレーションします。トレードオフについては [モデルの選択](/docs/api/choosing-a-model) と [トークン、コンテキスト、価格](/docs/api/tokens-and-pricing) を参照してください。
+
+## 散文より構造化出力を選ぶ
+
+説明的な段落の代わりにJSON(または別の引き締まったスキーマ)を求めると、出力トークンが減り、*かつ*下流での解析の当て推量がなくなります。Claudeに `{"label": ..., "score": ...}` のようなコンパクトなオブジェクトだけを返すよう指示すると、おしゃべりな回答のほんの一部のトークンしか生成されません — そして「Here's the result:(結果はこちらです:)」という前置きを完全に省けます。詳細は [構造化出力](/docs/api/structured-output) にあります。
+
+## 時間に敏感でないものをバッチ処理する
+
+数秒で答えが必要ないオフライン作業 — 評価、一括分類、データセットのラベル付け、アーカイブの要約 — では、Anthropicの **Message Batches API** がリクエストを非同期で実行し、**入力・出力トークンの両方で50%の割引**を提供し、結果は通常24時間以内に返ります。
+
+<VerifyNote lastVerified="2026-06-24" source="https://www.anthropic.com/news/message-batches-api">
+Message Batches API は、同期型のMessages APIに対する一律50%の割引と非同期(最大約24時間)のターンアラウンドを謳っています。バッチごとのリクエスト上限と価格は変わります — 頼る前に、Anthropicのドキュメントで最新の数値を確認してください。
+</VerifyNote>
+
+これをキャッシュと適正化されたモデルと組み合わせれば、大規模なオフラインジョブでの合計割引は劇的になります。
+
+## 計測する — 推測しない
+
+雰囲気ではなく数字に対して最適化しましょう。Anthropicの **トークンカウントエンドポイント** は、送信する*前に*リクエストの正確な入力トークン数を返します — Messages呼び出しと同じ形で、無料です(レート制限あり)。これを使って、肥大化したプロンプトと削減したプロンプトを比較したり、モデルルーティングの判断を下したり、プロンプトをコンテキストウィンドウ内に収めたりします。
+
+<PromptCard title="送信前にトークンをカウントする(Python SDK)">
+{`import anthropic
+
+client = anthropic.Anthropic()
+
+resp = client.messages.count_tokens(
+    model="claude-opus-4-8",
+    system="You are a scientist",
+    messages=[{"role": "user", "content": "Hello, Claude"}],
+)
+print(resp.input_tokens)  # exact input count, no charge for counting`}
+</PromptCard>
+
+<Callout type="tip" items={["別のモデルのトークナイザ(例:tiktoken)を使わないこと — カウントはモデルファミリーごとに異なる。Anthropicのエンドポイントを使う。","新しいトークナイザは、同じテキストに対して古いモデルより約30%多くのトークンを生成しうる — 移行時には再カウントし、古い見積もりを使い回さないこと。","本番で節約が実現したことを確認するため、レスポンスのusageから input_tokens、cache_read_input_tokens、output_tokens を読むこと。"]} />
+
+カウントのルールとコスト見積もりの公式については [トークン、コンテキスト、価格](/docs/api/tokens-and-pricing) を参照してください。
+
+## ビフォー/アフター、エンドツーエンド
+
+あるサポートトリアージアシスタントは、すべてのチケットに対して同じ4,000トークンのシステムプロンプト + ツールカタログを実行し、おしゃべりな600トークンの返信を書いています。
+
+<Steps items={[{title:"ビフォー",body:"毎回フル価格で再送される約4,000の入力トークン + 約600の冗長な出力トークン、大きなモデル上。キャッシュなし、同期、散文の返信。"},{title:"プレフィックスをキャッシュする",body:"4,000トークンのシステム+ツールのブロックを cache_control でマークする。最初の呼び出しの後は、入力価格のほんの一部でキャッシュ読み込みとして提供される。"},{title:"出力を適正化 + 構造化する",body:"トリアージを小さなモデルに移し、JSONのみ({\"category\", \"priority\", \"reply\"})を要求する。出力は約600の散文トークンから約120に下がる。"},{title:"バックログをバッチ処理する",body:"夜間のチケットの補填は、同期呼び出しではなく50%割引でBatches APIを通す。"}]} />
+
+各レバーは乗算的です:キャッシュされた入力 × より小さなモデル × より簡潔な出力 × バッチ割引 が複利で大きな総削減になります — その一方で、この簡単なタスクでの回答品質は変わりません。各ステップを `count_tokens` で計測し、勝利を仮定するのではなく証明できるようにしましょう。
+
+<Quiz title="自己チェック" questions={[{q:"「原始人」/簡潔スタイルは、主にどのトークンを削減しますか?",options:["入力トークン(システムプロンプト + 文脈)","出力トークン(生成される返信)","思考/推論トークン"],answer:1,explain:"簡潔スタイルのプロンプトは出力を縮小します — Claudeに余計な言葉なしで断片で答えるよう指示します。送信する入力や拡張思考トークンには触れません。"},{q:"毎回の呼び出しで同じ1万トークンのシステムプロンプトを再送しています。最良の対処法は?",options:["Claudeにもっと簡潔にするよう指示する","プロンプトキャッシュ — 安定したプレフィックスをマークして安価に再利用する","max_tokens を下げる"],answer:1,explain:"それは再利用入力の問題です。安定したプレフィックスをキャッシュすると、それ以降の各呼び出しで入力価格のほんの一部で再利用されます。簡潔さは出力にしか影響せず、max_tokens は返信の長さを制限するだけです。"},{q:"Message Batches API の50%割引に最も適したワークロードはどれですか?",options:["ユーザーが返信を待つライブチャット","バックログの夜間一括分類","レイテンシが重要なオートコンプリート機能"],answer:1,explain:"バッチ処理は即時性を50%割引と約24時間以内の結果と引き換えにします — 評価、ラベル付け、補填のようなオフラインジョブに理想的で、ユーザーが待っているものには向きません。"},{q:"プロンプトの変更が実際にトークンを節約したことをどう検証すべきですか?",options:["tiktoken のような汎用トークナイザで見積もる","Anthropicの count_tokens エンドポイントを使い、レスポンスのusageフィールドを読む","文字数を目分量で見る"],answer:1,explain:"トークン数はモデルファミリーごとに異なるため、汎用トークナイザは誤解を招きます。Anthropicの count_tokens は送信前に正確な入力数を返し、レスポンスのusageフィールドは本番での節約を確認します。"}]} />
+
+<Callout type="takeaways" items={["支出を入力、出力、再利用される文脈に分ける — 各バケツには別々の対処法がある。","簡潔/「原始人」スタイルは出力だけを削る。効果は散文では大きく、すでに簡潔な構造化タスクでは小さい。","安定したプレフィックス(バイト単位で同一)をキャッシュし、毎回の呼び出しでドル対ドルの入力節約を得る。","文脈を削減し、モデルを適正化し、散文よりJSONを選ぶ — 安価で複利的な勝利。","緊急でない作業をバッチ処理して50%割引を得て、推測する代わりに常に count_tokens で計測する。"]} />
+
+## 出典とさらに読む
+
+- [JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) — オープンソースの「caveman」 Claude Codeスキル(MIT、Julius Brussee作);平均約65%の出力トークン削減を主張。
+- [「I Benchmarked the Viral 'Caveman' Prompt…」 — DEV Community](https://dev.to/jakguzik/i-benchmarked-the-viral-caveman-prompt-to-save-llm-tokens-then-my-6-line-version-beat-it-2o81) — 構造化タスクで約9〜21%という結果を見出し、より無駄のない6行の代替案を示した独立ベンチマーク。
+- [rtk-ai/rtk](https://github.com/rtk-ai/rtk) — 「Rust Token Killer」 CLIプロキシ(Apache-2.0、homebrew-core収録);PreToolUse Bashフックを介して開発コマンドの出力を圧縮;一般的なコマンドで60〜90%を主張。
+- [RTK Hook Increases Claude Code Costs by 18% — rtk-ai/rtk #582](https://github.com/rtk-ai/rtk/issues/582) — 一部の設定でフックが総コストを上げうるという反証;見出しの数字を信じる前に計測すること。
+- [Token counting — Anthropic docs](https://platform.claude.com/docs/en/docs/build-with-claude/token-counting) — `count_tokens` エンドポイントとモデルごとのトークナイザに関する注記。
+- [Prompt caching — Anthropic docs](https://platform.claude.com/docs/en/docs/build-with-claude/prompt-caching) — キャッシュの仕組み、対象条件、価格。
+- [Introducing the Message Batches API — Anthropic](https://www.anthropic.com/news/message-batches-api) — 50%割引での非同期処理。
+- [Pricing — Anthropic docs](https://platform.claude.com/docs/en/docs/about-claude/pricing) — モデルごとの現在のトークンあたり料金。
+
+## 次へ
+
+- [プロンプトキャッシュとコスト最適化](/docs/api/prompt-caching)
+- [トークン、コンテキスト、価格](/docs/api/tokens-and-pricing)
+- [Claudeモデルの選択](/docs/api/choosing-a-model)
+- [構造化出力](/docs/api/structured-output)
