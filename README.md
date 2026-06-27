@@ -28,7 +28,7 @@ AILmanac is a free, open documentation site that teaches anyone — absolute beg
 
 > ⚠️ **Independent project.** AILmanac is **not affiliated with, sponsored by, or endorsed by Anthropic.** "Claude" and "Anthropic" are trademarks of Anthropic. When AILmanac and the [official docs](https://docs.anthropic.com) disagree, **the official docs win** — and we link to them throughout.
 
-> ⭐ **If a page here saves you time, please [star the repo](https://github.com/derob98/ailmanac).** Stars are how more people find it — and they fund nothing but motivation.
+> ⭐ **If a page here saves you time, please [star the repo](https://github.com/derob98/ailmanac).** Stars are how more people find it — and they fund nothing but motivation. &nbsp;**[Share it on X →](https://x.com/intent/post?text=AILmanac%20%E2%80%94%20a%20free%2C%20interactive%20field%20guide%20to%20getting%20the%20most%20out%20of%20Claude%20%26%20AI.%20Open-source%2C%2012%20languages%2C%20no%20sign-up.&url=https%3A%2F%2Fderob98.github.io%2Failmanac%2F&hashtags=ClaudeAI%2CAI)**
 
 ## Why AILmanac (and not just the official docs)?
 
@@ -91,6 +91,14 @@ Using a custom domain? Set `url` to it, `baseUrl` to `/`, and add `static/CNAME`
 ## Cite AILmanac
 
 Referencing AILmanac in a post, course, or paper? A citation file is included — see [`CITATION.cff`](./CITATION.cff). GitHub's **"Cite this repository"** button (top-right of the repo) generates APA/BibTeX for you.
+
+## Star history
+
+<a href="https://star-history.com/#derob98/ailmanac&Date">
+  <img alt="AILmanac star history" src="https://api.star-history.com/svg?repos=derob98/ailmanac&type=Date" width="600">
+</a>
+
+A ⭐ is the single biggest thing that helps others discover AILmanac. If it's useful to you, it'd mean a lot.
 
 ## Author & maintainer
 
