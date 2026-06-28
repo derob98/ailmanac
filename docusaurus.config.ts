@@ -36,9 +36,6 @@ const config: Config = {
   onBrokenLinks: 'throw',
   onBrokenAnchors: 'throw',
 
-  // Tap-to-open the mobile locale dropdown (iOS gives a tapped <a> no hover/focus).
-  clientModules: ['./src/js/mobile-locale-toggle.js'],
-
   // Mermaid diagrams (themeable, translatable, more accessible than image diagrams).
   markdown: {
     mermaid: true,
