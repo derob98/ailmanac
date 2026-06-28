@@ -172,10 +172,27 @@ const config: Config = {
       },
       items: [
         {
-          type: 'docSidebar',
-          sidebarId: 'docs',
-          position: 'left',
+          // A dropdown (NOT a docSidebar link): on mobile the drawer EXPANDS this
+          // in place on first tap to show the doc index, instead of navigating
+          // away and closing. On desktop it's a hover menu of the sections.
+          type: 'dropdown',
           label: 'Guide',
+          position: 'left',
+          items: [
+            {label: 'Start Here', to: '/docs/start-here'},
+            {label: 'AI Foundations', to: '/docs/foundations'},
+            {label: 'Prompting', to: '/docs/prompting'},
+            {label: 'Claude.ai & Apps', to: '/docs/claude-app'},
+            {label: 'Claude Code', to: '/docs/claude-code'},
+            {label: 'Claude API & Building', to: '/docs/api'},
+            {label: 'Playbooks', to: '/docs/playbooks'},
+            {label: 'Walkthroughs', to: '/docs/walkthroughs'},
+            {label: 'Templates & Recipes', to: '/docs/templates'},
+            {label: 'Security & Responsible Use', to: '/docs/security'},
+            {label: 'Power User', to: '/docs/power-user'},
+            {label: 'Frontiers', to: '/docs/frontiers'},
+            {label: 'Contribute', to: '/docs/contribute'},
+          ],
         },
         {
           to: '/docs/start-here/welcome',
