@@ -197,6 +197,9 @@ function Hero({lp}: {lp: string}) {
   return (
     <header className={styles.hero}>
       <div className={styles.mesh} aria-hidden="true" />
+      {/* Slow conic "aurora" depth layer behind the WebGL scene (CSS-only,
+          reduced-motion gated). Purely decorative. */}
+      <div className={styles.aurora} aria-hidden="true" />
       <div className={styles.canvasWrap} aria-hidden="true">
         {/* The lighter v3 WebGL accent: ink word + self-drawing constellation. */}
         <HeroInk />
