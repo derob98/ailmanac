@@ -185,6 +185,7 @@ const config: Config = {
             {label: 'Claude.ai & Apps', to: '/docs/claude-app'},
             {label: 'Claude Code', to: '/docs/claude-code'},
             {label: 'Claude API & Building', to: '/docs/api'},
+            {label: 'AI Models & Assistants', to: '/docs/models'},
             {label: 'Playbooks', to: '/docs/playbooks'},
             {label: 'Walkthroughs', to: '/docs/walkthroughs'},
             {label: 'Templates & Recipes', to: '/docs/templates'},
