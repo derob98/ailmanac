@@ -1,0 +1,238 @@
+---
+sidebar_position: 11
+title: "Lokale KI-Agenten bauen"
+description: "Autonome Agenten, die vollständig auf Ihrem eigenen Rechner mit einem lokalen Open-Weight-Modell laufen — privat, offline, kostenlos im Betrieb. Die Architektur, die Kompromisse und wie Sie anfangen."
+keywords: [local AI agent, offline agent, Ollama agent, private AI agent, local LLM tool use, self-hosted agent]
+---
+
+<LevelBadge level="advanced" />
+
+Ein **lokaler KI-Agent** ist eine autonome Schleife, die vollständig auf Ihrer eigenen Hardware läuft: Ein Open-Weight-Modell (bereitgestellt von [Ollama](/docs/models/run-models-locally-ollama) oder LM Studio) entscheidet, was zu tun ist, ruft die **Tools** auf, die Sie ihm geben, liest die Ergebnisse und macht weiter, bis die Aufgabe erledigt ist — wobei **nichts Ihren Rechner verlässt**. Keine Cloud-API, keine Kosten pro Aufruf, kein Internet erforderlich. Der Haken: Ein Modell, das klein genug ist, um auf einem Laptop zu laufen, ist bei schwierigem Reasoning und langfristiger Planung schwächer als ein Frontier-Modell, und *Sie* sind für seine Zuverlässigkeit und Sicherheit verantwortlich. Diese Seite behandelt die ehrliche Begründung für lokale Agenten, die minimale Architektur, was tatsächlich lokal läuft und einen realistischen Weg zu Ihrem ersten Agenten.
+
+<Callout type="objectives" items={[
+  "Wissen, WARUM Sie einen Agenten bauen würden, der lokal läuft — und die ehrlichen Kompromisse gegenüber einem Cloud-API-Agenten",
+  "Die minimale Architektur verstehen: lokales Modell + Tool-Calling-Schleife + Tools + ein Schutzmechanismus/eine Abbruchbedingung",
+  "Ein lokales Modell wählen, das tatsächlich Tool-Nutzung / agentische Arbeit leisten kann",
+  "Wissen, welche Agenten-Frameworks lokal laufen, indem man sie auf einen lokalen Endpunkt zeigen lässt (LangGraph, CrewAI, OpenAI Agents SDK)",
+  "Einem 'simpel anfangen'-Pfad von einem einmaligen Tool-Aufruf bis zu einer abgesicherten Schleife folgen",
+  "Den Agenten in eine Sandbox stecken und mit einem Budget-Limit versehen, damit eine autonome Schleife keinen echten Schaden anrichten kann",
+]} />
+
+## Warum einen *lokalen* Agenten bauen (und wann nicht)
+
+Ein gewöhnlicher [Tool-Use-Agent](/docs/api/tool-use) ruft ein Cloud-Modell auf. Ein *lokaler* Agent tauscht diesen Cloud-Aufruf gegen ein Modell aus, das auf Ihrem eigenen Rechner läuft. Sie geben etwas Leistungsfähigkeit auf und übernehmen einen gewissen Betriebsaufwand; im Gegenzug erhalten Sie vier Dinge, die auf anderem Wege schwer zu bekommen sind:
+
+- **Privatsphäre** — Prompts, Tool-Eingaben und Tool-Ausgaben verlassen niemals den Rechner. Das ist der einzige Grund, warum Teams in regulierten, sensiblen oder vom Netz getrennten (air-gapped) Umgebungen lokale Agenten bauen: Die Daten können physisch nicht zu einem Dritten gelangen.
+- **Offline** — kein Internet, keine API-Abhängigkeit, kein Ausfall des Anbieters. Der Agent besteht aus Dateien auf Ihrer Festplatte; er läuft im Flugzeug oder hinter einer Firewall.
+- **Keine Kosten pro Aufruf** — eine Agenten-Schleife kann pro Aufgabe Dutzende Modellaufrufe auslösen. Lokal sind diese Aufrufe „kostenlos“ (Sie zahlen mit Strom und Hardware, nicht mit Tokens), sodass Sie ihn iterieren lassen können, ohne auf einen Zähler zu schauen.
+- **Volle Kontrolle** — eine exakte Modellversion festnageln, das Verhalten anpassen und ohne Ratenbegrenzungen oder Überraschungen in den Nutzungsbedingungen laufen lassen.
+
+Die ehrlichen Kompromisse — seien Sie sich darüber im Klaren, bevor Sie sich festlegen:
+
+- **Leistungslücke.** Der schwierigste Teil eines Agenten ist das *Reasoning*: mehrstufige Arbeit planen, sich von einem fehlgeschlagenen Tool-Aufruf erholen, wissen, wann man aufhören soll. Ein Modell, das Sie auf einem Laptop laufen lassen können (etwa 1B–14B Parameter), ist hier deutlich schwächer als ein Frontier-Modell. Einfache, gut abgegrenzte Schleifen funktionieren lokal gut; langfristige, offene Aufgaben sind der Punkt, an dem lokale Agenten am häufigsten entgleisen.
+- **Sie sind für Zuverlässigkeit und Sicherheit verantwortlich.** Kein Anbieter filtert, überwacht oder sichert für Sie ab. Wenn der Agent endlos in einer Schleife hängt, das falsche Tool aufruft oder eine destruktive Aktion ausführt, liegt das an Ihrem Design. (Siehe die Warnung unten — diesen Teil unterschätzen die Leute.)
+- **Hardware-Grenzen.** Größere, intelligentere Modelle benötigen mehr RAM/VRAM, als die meisten Rechner haben. Sie wählen normalerweise *das größte leistungsfähige Modell, das Ihre Hardware betreiben kann*, nicht das beste existierende Modell.
+
+Eine dauerhafte Faustregel: **lokal anfangen, eskalieren, wenn die Aufgabe es erfordert.** Verwenden Sie einen lokalen Agenten für private/offline/im großen Maßstab günstige Arbeit und gut abgegrenzte Schleifen; greifen Sie zu einem Frontier-API-Agenten, wenn die Aufgabe wirklich das zusätzliche Reasoning benötigt. Die Architektur unten ist in beiden Fällen identisch — nur der Endpunkt ändert sich — sodass Sie lokal prototypisieren und Modelle später austauschen können.
+
+## Die minimale Architektur
+
+Reduziert man einen Agenten auf seinen Kern, gibt es vier Teile. Alles andere ist Komfort obendrauf.
+
+```
+        ┌─────────────────────────────────────────────┐
+        │                                             │
+        │   1. LOCAL MODEL  ──►  decides next action  │
+        │      (Ollama / LM Studio, tool-capable)     │
+        │                  │                          │
+        │                  ▼                          │
+        │   2. TOOL-CALLING LOOP                       │
+        │      parse the model's tool request,         │
+        │      run it, feed the result back            │
+        │                  │                          │
+        │                  ▼                          │
+        │   3. TOOLS  ──►  search / read file /        │
+        │      run code / call an API (your code)      │
+        │                  │                          │
+        │                  ▼                          │
+        │   4. GUARDRAIL / STOP CONDITION              │
+        │      max steps, budget, approval gate,       │
+        │      "done" check ──► exit the loop          │
+        │                                             │
+        └─────────────────────────────────────────────┘
+```
+
+1. **Ein lokales Modell, das Tool-Calling unterstützt.** Das Modell muss in der Lage sein, eine strukturierte Anfrage zum Aufruf eines Tools auszugeben (auch *Function Calling* genannt), nicht nur zu chatten. Ollama stellt dies über seine API und über einen **OpenAI-kompatiblen Endpunkt** unter `http://localhost:11434/v1` bereit, sodass jedes Framework, das das OpenAI-Format spricht, ein lokales Modell steuern kann. <VerifyNote lastVerified="2026-06-28" source="https://ollama.com/blog/tool-support">Ollama unterstützt Tool-Calling und listet Tool-fähige Modelle unter seiner Kategorie Tools auf; der OpenAI-kompatible Endpunkt (`/v1`) unterstützt ebenfalls Tools. Welche genauen Modelle Tools unterstützen, ändert sich mit dem Erscheinen neuer Releases — prüfen Sie die aktuelle Tools-Liste unter <a href="https://ollama.com/search?c=tools">ollama.com/search?c=tools</a>.</VerifyNote>
+2. **Die Tool-Calling-Schleife.** Das Herzstück des Agenten: Senden Sie die Konversation an das Modell, prüfen Sie, ob es den Aufruf eines Tools angefordert hat, führen Sie dieses Tool aus, hängen Sie das Ergebnis an und wiederholen Sie. Wenn das Modell antwortet, ohne ein Tool anzufordern, endet die Schleife.
+3. **Tools.** Einfache Funktionen, die Sie dem Modell zur Verfügung stellen — das Web durchsuchen, eine Datei lesen, einen Shell-Befehl ausführen, eine Datenbank abfragen, eine API aufrufen. Jedes Tool hat einen Namen, eine Beschreibung und ein typisiertes Eingabeschema, damit das Modell weiß, wann und wie es es verwenden soll.
+4. **Ein Schutzmechanismus / eine Abbruchbedingung.** Unverhandelbar für Autonomie. Mindestens ein **Maximalschritt-Limit**, damit die Schleife nicht ewig laufen kann, plus — für alles, was schreibt, löscht, ausgibt oder versendet — ein **Genehmigungs-Gate** oder eine Sandbox. Ohne dies haben Sie keinen Agenten, sondern eine Endlosschleife mit Dateizugriff.
+
+Die Schleife in Schritt 2 ist wirklich klein. Hier ist sie in Python-Pseudocode gegen einen lokalen Ollama-Endpunkt:
+
+<PromptCard title="Eine minimale lokale Agenten-Schleife (Python-Pseudocode, zeigt auf lokales Ollama)">{`from openai import OpenAI
+
+# Point the OpenAI client at your LOCAL Ollama endpoint — nothing leaves the machine
+client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "read_file",
+        "description": "Read a UTF-8 text file and return its contents",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+}]
+
+def run_tool(name, args):
+    if name == "read_file":
+        # GUARDRAIL: only allow reads inside a sandboxed directory
+        return safe_read(args["path"])
+    raise ValueError(f"unknown tool: {name}")
+
+messages = [{"role": "user", "content": "Summarize ./notes/today.md"}]
+
+for step in range(8):                       # GUARDRAIL: hard step cap
+    resp = client.chat.completions.create(
+        model="llama3.1", messages=messages, tools=tools,
+    )
+    msg = resp.choices[0].message
+    messages.append(msg)
+
+    if not msg.tool_calls:                  # STOP: model answered, we're done
+        print(msg.content)
+        break
+
+    for call in msg.tool_calls:
+        result = run_tool(call.function.name, json.loads(call.function.arguments))
+        messages.append({
+            "role": "tool", "tool_call_id": call.id, "content": str(result),
+        })
+else:
+    print("Stopped: hit the step cap without finishing.")`}</PromptCard>
+
+Das ist das gesamte Muster. Frameworks fügen Speicher, Wiederholungsversuche, Multi-Agenten-Orchestrierung, Tracing und strukturierten Zustand obendrauf — aber jedes von ihnen ist eine robustere Version dieser Schleife.
+
+## Welche lokalen Modelle für agentische / Tool-Use-Arbeit geeignet sind
+
+Nicht jedes Open-Weight-Modell kann einen Agenten steuern. Die Messlatte ist **zuverlässiges Tool-Calling**: Das Modell muss konsistent wohlgeformte Tool-Anfragen ausgeben, das richtige Tool auswählen und keine Argumente halluzinieren. Zwei Filter bei der Auswahl:
+
+- **Es muss ein Tool-fähiges Modell sein.** Ollama kennzeichnet diese — durchsuchen Sie die [Tools-Kategorie](https://ollama.com/search?c=tools) für die aktuelle Liste, anstatt etwas anzunehmen. Zu den häufig für solides lokales Tool-Use genannten Modellen gehören die instruction-getunten Familien Qwen und Llama; die genaue beste Wahl verschiebt sich von Quartal zu Quartal.
+- **Es muss mit Spielraum für Kontext auf Ihre Hardware passen.** Agenten-Schleifen sammeln lange Nachrichtenverläufe an (jedes Tool-Ergebnis wird angehängt), sodass Sie sowohl die Gewichte *als auch* ein großzügiges Kontextfenster im Speicher benötigen. Ein kleineres Modell, das bequem passt und schnell läuft, schlägt oft ein größeres, das auf die Festplatte auslagert und mitten in der Schleife stehen bleibt.
+
+<VerifyNote lastVerified="2026-06-28" source="https://ollama.com/search?c=tools">
+Konkrete Modellnamen und ihre Zuverlässigkeit beim Tool-Calling ändern sich schnell, wenn neue Open-Weight-Releases erscheinen. Behandeln Sie jedes genannte Modell (Llama, Qwen, Mistral usw.) als verderblich — prüfen Sie gegen Ollamas aktuelle Tools-Kategorie und eine schnelle eigene Eval, bevor Sie sich festlegen. Für einen umfassenderen Blick auf die Open-Model-Landschaft siehe <a href="/docs/models/deepseek-qwen-open-models">DeepSeek &amp; Qwen Open Models</a>.
+</VerifyNote>
+
+Der entscheidende Schritt ist nicht das Lesen von Benchmarks — es ist das Durchführen einer kleinen [Eval](/docs/power-user/evals) *Ihrer* Aufgabe gegen zwei oder drei Kandidatenmodelle. Ein Modell, das eine Bestenliste anführt, kann bei den spezifischen Tools, die Ihr Agent benötigt, dennoch unzuverlässig sein. Messen Sie auf Ihrer eigenen Schleife.
+
+## Frameworks, die lokal laufen
+
+Sie können die obige Schleife von Hand bauen, und für einen ersten Agenten ist das eine großartige Art zu lernen. Für alles Echte gibt Ihnen ein Framework Wiederholungsversuche, Speicher, Multi-Agenten-Koordination und Tracing. Die zentrale Tatsache: Die beliebten Agenten-Frameworks sind **modellagnostisch** — es ist ihnen egal, ob das Modell in der Cloud oder auf `localhost` ist, solange Sie sie auf den richtigen Endpunkt zeigen lassen.
+
+- **[LangGraph](https://github.com/langchain-ai/langgraph)** — ein Low-Level-Orchestrierungs-Framework für zustandsbehaftete Agenten (dauerhafte Ausführung, Persistenz, Human-in-the-Loop). Modellagnostisch; verdrahten Sie es ohne Umwege über die LangChain-Ollama-Integration mit einem lokalen Modell. Gut, wenn Sie explizite Kontrolle über den Zustandsgraphen des Agenten benötigen.
+- **[CrewAI](https://docs.crewai.com/en/learn/llm-connections)** — ein höher angesiedeltes Framework zur Orchestrierung eines oder mehrerer rollenbasierter Agenten („Crews“). Modellagnostisch über LiteLLM; zeigen Sie einen Agenten mit `LLM(model="ollama/llama3.1", base_url="http://localhost:11434")` auf ein lokales Modell. Gut, wenn Sie schnell mehrere kooperierende Agenten zusammenstellen wollen.
+- **[OpenAI Agents SDK](https://openai.github.io/openai-agents-python/)** — ein leichtgewichtiges Multi-Agenten-Framework. Trotz des Namens ist es **anbieteragnostisch**: über seine [LiteLLM-Integration](https://openai.github.io/openai-agents-python/models/litellm/) können Sie es auf ein lokales Ollama-Modell statt auf ein OpenAI-Modell zeigen lassen. Gut, wenn Sie OpenAIs Agenten-Ergonomie auf einem lokalen Backend wollen.
+
+<VerifyNote lastVerified="2026-06-28" source="https://openai.github.io/openai-agents-python/models/litellm/">
+Alle drei Frameworks haben zum Verifizierungsdatum lokale Open-Weight-Modelle betrieben — LangGraph und CrewAI nativ, das OpenAI Agents SDK über seinen LiteLLM-Adapter. Adapter-Status, Installations-Extras und die genaue Konfiguration (Modellnamen-Präfixe, Basis-URLs) ändern sich zwischen Releases. Prüfen Sie gegen die aktuelle Dokumentation jedes Projekts, bevor Sie bauen. Für einen breiteren Vergleich dieser und anderer Frameworks siehe <a href="/docs/models/open-source-agent-frameworks">Open-Source-Agenten-Frameworks</a>.
+</VerifyNote>
+
+Wählen Sie ein Framework und lernen Sie es gut, anstatt alle drei anzutesten. Die Konzepte (Agenten, Tools, Schleifen, Zustand) übertragen sich; die APIs sind Details.
+
+## Bauen Sie Ihren ersten lokalen Agenten
+
+Ein realistischer Weg geht in bewussten Schritten von „gar keine Schleife“ zu „abgesicherte autonome Schleife“. Überspringen Sie nicht zu Schritt 4 — die meisten Fehler, auf die Leute bei lokalen Agenten stoßen, kommen daher, dass sie einem schwachen Modell zu früh zu viel Spielraum geben.
+
+<Steps items={[
+  {title: "Ein Tool-fähiges Modell lokal zum Laufen bringen", body: "Installieren Sie Ollama (siehe Modelle lokal ausführen), ziehen Sie dann ein für Tools gekennzeichnetes Modell, z. B. ollama pull llama3.1. Bestätigen Sie, dass es auf http://localhost:11434 bereitsteht und dass ollama list es anzeigt. Noch kein Agent — nur ein Modell, das Sie aufrufen können."},
+  {title: "EINEN Tool-Aufruf zum Funktionieren bringen (keine Schleife)", body: "Senden Sie eine einzelne Anfrage mit einem definierten Tool (z. B. eine get_time- oder read_file-Funktion) und prüfen Sie, ob das Modell tatsächlich einen wohlgeformten Tool-Aufruf mit gültigen Argumenten zurückgibt. Wenn ein Modell nicht zuverlässig einen sauberen Tool-Aufruf hinbekommt, überlebt es keine Schleife — wechseln Sie das Modell jetzt, nicht später."},
+  {title: "In eine begrenzte Schleife einpacken", body: "Fügen Sie die run-execute-feed-back-Schleife aus dem PromptCard oben hinzu, mit einem harten Maximalschritt-Limit (beginnen Sie bei 6–8). Geben Sie ihr eine kleine, gut abgegrenzte Aufgabe mit nur-lesenden Tools. Beobachten Sie jeden Schritt im Ausdruck, damit Sie das Reasoning des Modells sehen und es dabei erwischen, wenn es in einer Schleife hängt oder ein Tool missbraucht."},
+  {title: "Schutzmechanismen vor jedem schreibenden/destruktiven Tool hinzufügen", body: "Führen Sie erst jetzt Tools ein, die den Zustand verändern (eine Datei schreiben, einen Befehl ausführen, eine API aufrufen, die Geld kostet). Sichern Sie jedes hinter einer Genehmigungsabfrage ab oder lassen Sie sie in einer Sandbox/einem Container laufen, und fügen Sie ein Budget- oder Echtzeit-Limit hinzu. Testen Sie die Fehlermodi bewusst: Geben Sie ihm eine Aufgabe, die er nicht erledigen kann, und bestätigen Sie, dass er sauber stoppt."},
+  {title: "Zu einem Framework aufsteigen (optional)", body: "Sobald die handgebaute Schleife funktioniert, portieren Sie sie zu LangGraph, CrewAI oder dem OpenAI Agents SDK, das auf Ihren lokalen Endpunkt zeigt. Sie bekommen Wiederholungsversuche, Speicher und Multi-Agenten-Orchestrierung gratis — und das Modell bleibt genau dort, wo es ist, auf Ihrem Rechner."},
+]} />
+
+<Callout type="warning" items={["Ein lokaler Agent mit Tools kann trotzdem echte Aktionen ausführen — stecken Sie ihn in eine Sandbox, verlangen Sie Genehmigung für destruktive Schritte und begrenzen Sie seine Schleifen/sein Budget."]} />
+
+## Überprüfen Sie sich selbst
+
+<Quiz title="Überprüfen Sie sich selbst" questions={[
+  {
+    q: "Was ist der einzelne wichtigste Grund, warum Teams Agenten bauen, die lokal statt gegen eine Cloud-API laufen?",
+    options: [
+      "Lokale Modelle sind beim langfristigen Reasoning intelligenter als Frontier-Modelle",
+      "Privatsphäre/Kontrolle — Prompts, Tool-Eingaben und -Ausgaben verlassen niemals den Rechner",
+      "Lokale Agenten brauchen keine Abbruchbedingung oder Schutzmechanismen",
+      "Frameworks wie LangGraph laufen nur lokal"
+    ],
+    answer: 1,
+    explain: "Privatsphäre ist der entscheidende Vorteil: Daten können physisch keinen Dritten erreichen. Lokale Modelle sind beim schwierigen Reasoning generell schwächer, brauchen weiterhin Schutzmechanismen, und die Frameworks sind modellagnostisch (sie laufen in der Cloud oder lokal)."
+  },
+  {
+    q: "Welche vier Teile bilden die minimale Architektur eines lokalen Agenten?",
+    options: [
+      "Eine GPU, eine Datenbank, ein Webserver und ein Frontend",
+      "Ein lokales Tool-fähiges Modell, eine Tool-Calling-Schleife, Tools und ein Schutzmechanismus/eine Abbruchbedingung",
+      "Ein Cloud-API-Schlüssel, ein Vektorspeicher, ein Prompt-Template und ein Cronjob",
+      "Drei kooperierende Agenten und ein Supervisor"
+    ],
+    answer: 1,
+    explain: "Reduziert ist ein Agent: ein Modell, das Tools anfordern kann, eine Schleife, die diese Anfragen ausführt und Ergebnisse zurückspeist, die Tools selbst und ein Schutzmechanismus (Schritt-/Budget-Limit, Genehmigungs-Gate), der die Schleife begrenzt."
+  },
+  {
+    q: "Was bedeutet es, dass LangGraph, CrewAI und das OpenAI Agents SDK für den lokalen Einsatz 'modellagnostisch' sind?",
+    options: [
+      "Sie enthalten ihr eigenes integriertes lokales Modell",
+      "Sie können auf einen lokalen Endpunkt gezeigt werden (z. B. Ollamas OpenAI-kompatibles /v1) statt auf ein Cloud-Modell",
+      "Sie funktionieren nur mit OpenAI-Modellen",
+      "Sie erfordern, dass Sie Ihren Agenten für jedes Modell neu schreiben"
+    ],
+    answer: 1,
+    explain: "Modellagnostisch bedeutet, dass es dem Framework egal ist, wo das Modell lebt — Sie zeigen es auf einen lokalen Endpunkt. Das OpenAI Agents SDK erreicht lokale Modelle über seinen LiteLLM-Adapter; LangGraph und CrewAI tun dies nativ."
+  },
+  {
+    q: "Sie bauen Ihren ersten lokalen Agenten. Was sollten Sie tun, BEVOR Sie ein Tool hinzufügen, das Dateien schreibt oder Befehle ausführt?",
+    options: [
+      "Das Schritt-Limit entfernen, damit er komplexe Aufgaben abschließen kann",
+      "Bestätigen, dass ein sauberer nur-lesender Tool-Aufruf funktioniert, eine begrenzte Schleife laufen lassen, dann destruktive Tools hinter Genehmigung/Sandbox + einem Budget-Limit absichern",
+      "Zum größten verfügbaren Modell wechseln, unabhängig von der Hardware",
+      "Ihm Internetzugang geben und ihn frei iterieren lassen"
+    ],
+    answer: 1,
+    explain: "Bauen Sie auf: einen Tool-Aufruf beweisen, dann eine begrenzte nur-lesende Schleife, und erst dann zustandsverändernde Tools einführen — hinter Genehmigungs-Gates oder einer Sandbox, mit Schritt- und Budget-Limits. Limits zu entfernen oder früh breit zu gehen, ist genau die Art, wie lokale Agenten echten Schaden anrichten."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Was ist ein 'lokaler KI-Agent'?", back: "Eine autonome Schleife, die vollständig auf Ihrer eigenen Hardware läuft: Ein Open-Weight-Modell (über Ollama/LM Studio) entscheidet Aktionen, ruft Tools auf, liest Ergebnisse und wiederholt dies, bis es fertig ist — wobei keine Daten den Rechner verlassen und keine Kosten pro Aufruf anfallen." },
+  { front: "Die vier Teile der minimalen Agenten-Architektur", back: "1) Ein lokales Tool-fähiges Modell, 2) eine Tool-Calling-Schleife (Anfrage ausführen → Ergebnis zurückspeisen), 3) Tools (Ihre Funktionen), 4) ein Schutzmechanismus/eine Abbruchbedingung (Schritt-Limit, Budget, Genehmigungs-Gate)." },
+  { front: "Was ermöglicht jedem Framework im OpenAI-Format, ein lokales Modell zu steuern?", back: "Ollama stellt unter http://localhost:11434/v1 einen OpenAI-kompatiblen Endpunkt bereit, der Tool-Calling unterstützt, sodass Frameworks ihren OpenAI-Client dorthin statt auf die Cloud zeigen lassen." },
+  { front: "Größter ehrlicher Kompromiss lokaler Agenten", back: "Die Leistungslücke beim Reasoning/bei der langfristigen Planung: Ein laptop-großes Modell (~1B–14B) ist deutlich schwächer als ein Frontier-Modell, und Sie sind selbst für die gesamte Zuverlässigkeit und Sicherheit verantwortlich." },
+  { front: "Wie man ein lokales Modell für agentische Arbeit auswählt", back: "Verlangen Sie zuverlässiges Tool-Calling (nutzen Sie Ollamas Tools-Kategorie), stellen Sie sicher, dass es mit Spielraum für einen wachsenden Kontext auf Ihre Hardware passt, und führen Sie dann eine kleine Eval IHRER Aufgabe über 2–3 Kandidaten durch, statt Bestenlisten zu vertrauen." },
+  { front: "Drei Frameworks, die Agenten auf einem lokalen Modell betreiben", back: "LangGraph und CrewAI (modellagnostisch, native Ollama-Unterstützung) und das OpenAI Agents SDK (anbieteragnostisch über seinen LiteLLM-Adapter) — alle können auf einen lokalen Endpunkt zeigen." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Ein lokaler Agent ist die übliche Tool-Use-Schleife, bei der das Cloud-Modell gegen ein Open-Weight-Modell auf Ihrem Rechner getauscht wird — privat, offline und kostenlos zu iterieren.",
+  "Minimale Architektur = lokales Tool-fähiges Modell + Tool-Calling-Schleife + Tools + ein Schutzmechanismus/eine Abbruchbedingung. Die Schleife selbst ist winzig.",
+  "Ollamas OpenAI-kompatibler Endpunkt (/v1) unterstützt Tool-Calling, sodass jedes Framework im OpenAI-Format ein lokales Modell steuern kann.",
+  "LangGraph, CrewAI und das OpenAI Agents SDK sind modellagnostisch — zeigen Sie sie auf einen lokalen Endpunkt statt auf die Cloud.",
+  "Wählen Sie ein Tool-fähiges Modell, das auf Ihre Hardware passt, und entscheiden Sie dann mit einer kleinen Eval Ihrer eigenen Aufgabe — nicht mit einer Bestenliste.",
+  "Seien Sie ehrlich über die Leistungslücke und übernehmen Sie die Verantwortung für die Sicherheit: Begrenzen Sie Schleifen und Budget, stecken Sie Tools in eine Sandbox und verlangen Sie Genehmigung für alles Destruktive.",
+  "Simpel anfangen: ein sauberer Tool-Aufruf → begrenzte nur-lesende Schleife → abgesicherte destruktive Tools → (optional) ein Framework."
+]} />
+
+## Quellen & weiterführende Literatur
+
+- [Ollama — Tool support (Blog)](https://ollama.com/blog/tool-support)
+- [Ollama — Dokumentation zum Tool-Calling](https://docs.ollama.com/capabilities/tool-calling)
+- [Ollama — Tool-fähige Modelle (Tools-Kategorie)](https://ollama.com/search?c=tools)
+- [Ollama-Bibliothek](https://ollama.com/library)
+- [LangGraph (GitHub — langchain-ai/langgraph)](https://github.com/langchain-ai/langgraph)
+- [LangGraph-Überblick — LangChain-Dokumentation](https://docs.langchain.com/oss/python/langgraph/overview)
+- [CrewAI — Mit jedem LLM verbinden (inkl. Ollama)](https://docs.crewai.com/en/learn/llm-connections)
+- [OpenAI Agents SDK — Dokumentation](https://openai.github.io/openai-agents-python/)
+- [OpenAI Agents SDK — LiteLLM-Integration (Nicht-OpenAI / lokale Modelle)](https://openai.github.io/openai-agents-python/models/litellm/)
