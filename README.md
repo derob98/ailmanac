@@ -20,6 +20,10 @@ From your first prompt to production agents. Level-tagged, plain-spoken, and kep
 
 **[Read the site →](https://derob98.github.io/ailmanac/)** &nbsp;·&nbsp; **[Start Here in 5 min →](https://derob98.github.io/ailmanac/docs/start-here/your-first-5-minutes)** &nbsp;·&nbsp; **[Contribute in 10 min →](https://derob98.github.io/ailmanac/docs/contribute/contribute-in-10-minutes)**
 
+<a href="https://derob98.github.io/ailmanac/">
+  <img alt="AILmanac homepage — get genuinely great results from Claude and any AI" src="static/img/screenshot-home.jpeg" width="840">
+</a>
+
 </div>
 
 ---
@@ -45,6 +49,11 @@ The official docs, cookbooks, and "awesome" lists are excellent — AILmanac doe
 ## What's inside
 
 A full funnel from "what's a token?" to "harden an autonomous agent." Browse on the **[live site](https://derob98.github.io/ailmanac/)**:
+
+<a href="https://derob98.github.io/ailmanac/docs/models/">
+  <img alt="AILmanac — structured, interactive docs with level tags and a card-based browse" src="static/img/screenshot-models.jpeg" width="840">
+</a>
+
 
 - **[Start Here](https://derob98.github.io/ailmanac/docs/start-here/welcome)** — pick a track by level/role and get a guaranteed first win.
 - **[AI Foundations](https://derob98.github.io/ailmanac/docs/foundations/what-is-an-llm)** — provider-agnostic mental models: tokens, roles, sampling, RAG, embeddings, evals, hallucinations.
