@@ -1,0 +1,238 @@
+---
+sidebar_position: 11
+title: "Construire des agents IA locaux"
+description: "Des agents autonomes qui s'exécutent entièrement sur votre machine avec un modèle local à poids ouverts — privés, hors ligne, gratuits à exécuter. L'architecture, les compromis et comment démarrer."
+keywords: [local AI agent, offline agent, Ollama agent, private AI agent, local LLM tool use, self-hosted agent]
+---
+
+<LevelBadge level="advanced" />
+
+Un **agent IA local** est une boucle autonome qui s'exécute entièrement sur votre propre matériel : un modèle à poids ouverts (servi par [Ollama](/docs/models/run-models-locally-ollama) ou LM Studio) décide quoi faire, appelle les **outils** que vous lui donnez, lit les résultats et continue jusqu'à ce que la tâche soit terminée — sans que **rien ne quitte votre machine**. Pas d'API cloud, pas de facturation à l'appel, pas d'internet requis. Le revers : un modèle assez petit pour tourner sur un ordinateur portable est plus faible en raisonnement difficile et en planification à long horizon qu'un modèle de pointe, et c'est *vous* qui êtes responsable de sa fiabilité et de sa sécurité. Cette page couvre les arguments honnêtes en faveur des agents locaux, l'architecture minimale, ce qui s'exécute réellement en local, et un chemin réaliste vers votre premier agent.
+
+<Callout type="objectives" items={[
+  "Savoir POURQUOI vous construiriez un agent qui s'exécute en local — et les compromis honnêtes par rapport à un agent basé sur une API cloud",
+  "Comprendre l'architecture minimale : modèle local + boucle d'appel d'outils + outils + un garde-fou/condition d'arrêt",
+  "Choisir un modèle local qui peut réellement faire de l'appel d'outils / du travail agentique",
+  "Savoir quels frameworks d'agents s'exécutent en local en pointant vers un endpoint local (LangGraph, CrewAI, OpenAI Agents SDK)",
+  "Suivre un chemin « commencer simple » d'un appel d'outil unique à une boucle encadrée",
+  "Mettre l'agent en bac à sable et plafonner son budget pour qu'une boucle autonome ne puisse pas causer de réels dégâts",
+]} />
+
+## Pourquoi construire un agent *local* (et quand ne pas le faire)
+
+Un [agent à usage d'outils](/docs/api/tool-use) ordinaire appelle un modèle cloud. Un agent *local* remplace cet appel cloud par un modèle qui tourne sur votre propre machine. Vous cédez une part de capacité et héritez d'une certaine charge opérationnelle ; en échange, vous obtenez quatre choses difficiles à obtenir autrement :
+
+- **Confidentialité** — les prompts, les entrées d'outils et les sorties d'outils ne quittent jamais la machine. C'est toute la raison pour laquelle les équipes en environnement réglementé, sensible ou isolé (air-gapped) construisent des agents locaux : les données ne peuvent physiquement pas aller vers un tiers.
+- **Hors ligne** — pas d'internet, pas de dépendance à une API, pas de panne de fournisseur. L'agent est un ensemble de fichiers sur votre disque ; il s'exécute dans un avion ou derrière un pare-feu.
+- **Aucun coût à l'appel** — une boucle d'agent peut déclencher des dizaines d'appels de modèle par tâche. En local, ces appels sont « gratuits » (vous payez en électricité et en matériel, pas en tokens), donc vous pouvez le laisser itérer sans surveiller un compteur.
+- **Contrôle total** — figer une version exacte du modèle, personnaliser le comportement et l'exécuter sans limites de débit ni surprises liées aux conditions d'utilisation.
+
+Les compromis honnêtes — soyez lucide à leur sujet avant de vous engager :
+
+- **Écart de capacité.** La partie la plus difficile d'un agent est le *raisonnement* : planifier un travail en plusieurs étapes, récupérer d'un appel d'outil échoué, savoir quand s'arrêter. Un modèle que vous pouvez exécuter sur un ordinateur portable (environ 1 à 14 milliards de paramètres) est nettement plus faible ici qu'un modèle de pointe. Les boucles simples et bien délimitées fonctionnent bien en local ; les tâches à long horizon et ouvertes sont là où les agents locaux déraillent le plus souvent.
+- **Vous êtes responsable de la fiabilité et de la sécurité.** Aucun fournisseur ne filtre, ne surveille ni ne pose de garde-fous à votre place. Si l'agent boucle à l'infini, appelle le mauvais outil ou entreprend une action destructrice, c'est votre conception qui est en cause. (Voir l'avertissement ci-dessous — c'est la partie que les gens sous-estiment.)
+- **Limites matérielles.** Des modèles plus gros et plus intelligents ont besoin de plus de RAM/VRAM que la plupart des machines n'en ont. Vous choisissez généralement *le plus grand modèle capable que votre matériel peut exécuter*, et non le meilleur modèle qui existe.
+
+Une règle empirique durable : **commencer en local, escalader quand la tâche l'exige.** Utilisez un agent local pour le travail privé/hors ligne/économique à grande échelle et les boucles bien délimitées ; tournez-vous vers un agent basé sur une API de pointe quand la tâche a réellement besoin du surcroît de raisonnement. L'architecture ci-dessous est identique dans les deux cas — seul l'endpoint change — de sorte que vous pouvez prototyper en local et changer de modèle plus tard.
+
+## L'architecture minimale
+
+Réduisez un agent à son cœur et il ne reste que quatre parties. Tout le reste n'est que confort par-dessus.
+
+```
+        ┌─────────────────────────────────────────────┐
+        │                                             │
+        │   1. LOCAL MODEL  ──►  decides next action  │
+        │      (Ollama / LM Studio, tool-capable)     │
+        │                  │                          │
+        │                  ▼                          │
+        │   2. TOOL-CALLING LOOP                       │
+        │      parse the model's tool request,         │
+        │      run it, feed the result back            │
+        │                  │                          │
+        │                  ▼                          │
+        │   3. TOOLS  ──►  search / read file /        │
+        │      run code / call an API (your code)      │
+        │                  │                          │
+        │                  ▼                          │
+        │   4. GUARDRAIL / STOP CONDITION              │
+        │      max steps, budget, approval gate,       │
+        │      "done" check ──► exit the loop          │
+        │                                             │
+        └─────────────────────────────────────────────┘
+```
+
+1. **Un modèle local qui prend en charge l'appel d'outils.** Le modèle doit être capable d'émettre une requête structurée pour appeler un outil (aussi appelé *function calling*), et pas seulement de discuter. Ollama expose cela via son API et via un **endpoint compatible OpenAI** à l'adresse `http://localhost:11434/v1`, de sorte que n'importe quel framework qui parle le format OpenAI peut piloter un modèle local. <VerifyNote lastVerified="2026-06-28" source="https://ollama.com/blog/tool-support">Ollama prend en charge l'appel d'outils et liste les modèles compatibles avec les outils dans sa catégorie Tools ; l'endpoint compatible OpenAI (`/v1`) prend également en charge les outils. Les modèles exacts qui prennent en charge les outils évoluent au fil des nouvelles versions — consultez la liste Tools actuelle sur <a href="https://ollama.com/search?c=tools">ollama.com/search?c=tools</a>.</VerifyNote>
+2. **La boucle d'appel d'outils.** Le cœur de l'agent : envoyer la conversation au modèle, voir s'il a demandé d'appeler un outil, exécuter cet outil, ajouter le résultat, et recommencer. Quand le modèle répond sans demander d'outil, la boucle se termine.
+3. **Les outils.** De simples fonctions que vous exposez au modèle — chercher sur le web, lire un fichier, exécuter une commande shell, interroger une base de données, appeler une API. Chaque outil a un nom, une description et un schéma d'entrée typé afin que le modèle sache quand et comment l'utiliser.
+4. **Un garde-fou / une condition d'arrêt.** Non négociable pour l'autonomie. Au minimum un **plafond du nombre d'étapes** pour que la boucle ne puisse pas tourner indéfiniment, plus — pour tout ce qui écrit, supprime, dépense ou envoie — une **barrière d'approbation** ou un bac à sable. Sans cela, vous n'avez pas un agent, vous avez une boucle infinie avec accès aux fichiers.
+
+La boucle de l'étape 2 est réellement petite. La voici en pseudo-code Python, ciblant un endpoint Ollama local :
+
+<PromptCard title="Une boucle d'agent local minimale (pseudo-code Python, pointe vers un Ollama local)">{`from openai import OpenAI
+
+# Point the OpenAI client at your LOCAL Ollama endpoint — nothing leaves the machine
+client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "read_file",
+        "description": "Read a UTF-8 text file and return its contents",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+}]
+
+def run_tool(name, args):
+    if name == "read_file":
+        # GUARDRAIL: only allow reads inside a sandboxed directory
+        return safe_read(args["path"])
+    raise ValueError(f"unknown tool: {name}")
+
+messages = [{"role": "user", "content": "Summarize ./notes/today.md"}]
+
+for step in range(8):                       # GUARDRAIL: hard step cap
+    resp = client.chat.completions.create(
+        model="llama3.1", messages=messages, tools=tools,
+    )
+    msg = resp.choices[0].message
+    messages.append(msg)
+
+    if not msg.tool_calls:                  # STOP: model answered, we're done
+        print(msg.content)
+        break
+
+    for call in msg.tool_calls:
+        result = run_tool(call.function.name, json.loads(call.function.arguments))
+        messages.append({
+            "role": "tool", "tool_call_id": call.id, "content": str(result),
+        })
+else:
+    print("Stopped: hit the step cap without finishing.")`}</PromptCard>
+
+C'est tout le motif. Les frameworks ajoutent par-dessus la mémoire, les nouvelles tentatives, l'orchestration multi-agents, le traçage et l'état structuré — mais chacun d'eux n'est qu'une version plus robuste de cette boucle.
+
+## Quels modèles locaux conviennent au travail agentique / à l'appel d'outils
+
+Tous les modèles à poids ouverts ne peuvent pas piloter un agent. Le critère est un **appel d'outils fiable** : le modèle doit émettre des requêtes d'outils bien formées de façon constante, choisir le bon outil et ne pas halluciner d'arguments. Deux filtres au moment de choisir :
+
+- **Ce doit être un modèle compatible avec les outils.** Ollama les étiquette — parcourez la [catégorie Tools](https://ollama.com/search?c=tools) pour la liste actuelle plutôt que de faire des suppositions. Les modèles fréquemment cités pour un bon usage local des outils incluent les familles Qwen et Llama ajustées par instruction ; le meilleur choix exact évolue de trimestre en trimestre.
+- **Il doit tenir sur votre matériel avec de la marge pour le contexte.** Les boucles d'agent accumulent de longs historiques de messages (chaque résultat d'outil est ajouté), donc vous avez besoin à la fois des poids *et* d'une fenêtre de contexte généreuse en mémoire. Un modèle plus petit qui tient confortablement et tourne vite bat souvent un plus grand qui déborde sur le disque et cale au milieu de la boucle.
+
+<VerifyNote lastVerified="2026-06-28" source="https://ollama.com/search?c=tools">
+Les noms de modèles spécifiques et leur fiabilité en appel d'outils évoluent vite au fil des nouvelles versions à poids ouverts. Considérez tout modèle nommé (Llama, Qwen, Mistral, etc.) comme périssable — vérifiez par rapport à la catégorie Tools actuelle d'Ollama et à une évaluation rapide de la vôtre avant de vous engager. Pour un aperçu plus complet du paysage des modèles ouverts, voir <a href="/docs/models/deepseek-qwen-open-models">Modèles ouverts DeepSeek &amp; Qwen</a>.
+</VerifyNote>
+
+Le geste décisif n'est pas de lire les benchmarks — c'est d'exécuter une petite [évaluation](/docs/power-user/evals) de *votre* tâche face à deux ou trois modèles candidats. Un modèle qui domine un classement peut tout de même être peu fiable sur les outils spécifiques dont votre agent a besoin. Mesurez sur votre propre boucle.
+
+## Frameworks qui s'exécutent en local
+
+Vous pouvez coder la boucle ci-dessus à la main, et pour un premier agent c'est une excellente façon d'apprendre. Pour tout ce qui est sérieux, un framework vous apporte les nouvelles tentatives, la mémoire, la coordination multi-agents et le traçage. Le fait clé : les frameworks d'agents populaires sont **agnostiques quant au modèle** — ils se moquent que le modèle soit dans le cloud ou sur `localhost`, tant que vous les pointez vers le bon endpoint.
+
+- **[LangGraph](https://github.com/langchain-ai/langgraph)** — un framework d'orchestration de bas niveau pour agents à état (exécution durable, persistance, humain-dans-la-boucle). Agnostique quant au modèle ; reliez-le à un modèle local via l'intégration LangChain Ollama sans contournement. Bon quand vous avez besoin d'un contrôle explicite sur le graphe d'état de l'agent.
+- **[CrewAI](https://docs.crewai.com/en/learn/llm-connections)** — un framework de plus haut niveau pour orchestrer un ou plusieurs agents à rôles (« crews »). Agnostique quant au modèle via LiteLLM ; pointez un agent vers un modèle local avec `LLM(model="ollama/llama3.1", base_url="http://localhost:11434")`. Bon quand vous voulez composer rapidement plusieurs agents coopérants.
+- **[OpenAI Agents SDK](https://openai.github.io/openai-agents-python/)** — un framework multi-agents léger. Malgré son nom, il est **agnostique quant au fournisseur** : via son [intégration LiteLLM](https://openai.github.io/openai-agents-python/models/litellm/) vous pouvez le pointer vers un modèle Ollama local plutôt que vers un modèle OpenAI. Bon quand vous voulez l'ergonomie d'agent d'OpenAI sur un backend local.
+
+<VerifyNote lastVerified="2026-06-28" source="https://openai.github.io/openai-agents-python/models/litellm/">
+Les trois frameworks exécutaient des modèles à poids ouverts en local à la date de vérification — LangGraph et CrewAI nativement, l'OpenAI Agents SDK via son adaptateur LiteLLM. Le statut des adaptateurs, les extras d'installation et la configuration exacte (préfixes de noms de modèles, URL de base) changent d'une version à l'autre. Vérifiez par rapport à la documentation actuelle de chaque projet avant de construire. Pour une comparaison plus large de ces frameworks et d'autres, voir <a href="/docs/models/open-source-agent-frameworks">Frameworks d'agents open source</a>.
+</VerifyNote>
+
+Choisissez un framework et apprenez-le bien plutôt que de goûter aux trois. Les concepts (agents, outils, boucles, état) se transfèrent ; les API ne sont que des détails.
+
+## Construisez votre premier agent local
+
+Un chemin réaliste va de « pas de boucle du tout » à « boucle autonome encadrée » par étapes délibérées. Ne sautez pas à l'étape 4 — la plupart des échecs que les gens rencontrent avec les agents locaux viennent du fait de donner trop de latitude, trop tôt, à un modèle faible.
+
+<Steps items={[
+  {title: "Faire tourner un modèle compatible avec les outils en local", body: "Installez Ollama (voir Exécuter des modèles en local), puis récupérez un modèle étiqueté pour les outils, par exemple ollama pull llama3.1. Confirmez qu'il est servi sur http://localhost:11434 et que ollama list l'affiche. Pas encore d'agent — juste un modèle que vous pouvez appeler."},
+  {title: "Faire fonctionner UN appel d'outil (sans boucle)", body: "Envoyez une requête unique avec un seul outil défini (par exemple une fonction get_time ou read_file) et vérifiez que le modèle retourne bien un appel d'outil correctement formé avec des arguments valides. Si un modèle ne peut pas faire de façon fiable un appel d'outil propre, il ne survivra pas à une boucle — changez de modèle maintenant, pas plus tard."},
+  {title: "L'envelopper dans une boucle bornée", body: "Ajoutez la boucle exécuter-lancer-renvoyer de la PromptCard ci-dessus, avec un plafond strict du nombre d'étapes (commencez à 6–8). Donnez-lui une tâche petite et bien délimitée avec des outils en lecture seule. Regardez chaque étape s'afficher pour pouvoir voir le raisonnement du modèle et le surprendre en train de boucler ou de mal utiliser un outil."},
+  {title: "Ajouter des garde-fous avant tout outil d'écriture/destructeur", body: "Seulement maintenant, introduisez des outils qui modifient l'état (écrire un fichier, exécuter une commande, appeler une API payante). Placez chacun derrière une invite d'approbation ou exécutez-les dans un bac à sable/conteneur, et ajoutez un plafond de budget ou de temps horloge. Testez délibérément les modes d'échec : donnez-lui une tâche qu'il ne peut pas terminer et confirmez qu'il s'arrête proprement."},
+  {title: "Passer à un framework (facultatif)", body: "Une fois que la boucle codée à la main fonctionne, portez-la vers LangGraph, CrewAI ou l'OpenAI Agents SDK pointé vers votre endpoint local. Vous obtenez gratuitement les nouvelles tentatives, la mémoire et l'orchestration multi-agents — et le modèle reste exactement là où il est, sur votre machine."},
+]} />
+
+<Callout type="warning" items={["Un agent local doté d'outils peut tout de même entreprendre de vraies actions — mettez-le en bac à sable, exigez une approbation pour les étapes destructrices, et plafonnez ses boucles/son budget."]} />
+
+## Vérifiez vos connaissances
+
+<Quiz title="Vérifiez vos connaissances" questions={[
+  {
+    q: "Quelle est la seule raison la plus importante pour laquelle les équipes construisent des agents qui s'exécutent en local plutôt que contre une API cloud ?",
+    options: [
+      "Les modèles locaux sont plus intelligents en raisonnement à long horizon que les modèles de pointe",
+      "Confidentialité/contrôle — les prompts, les entrées d'outils et les sorties ne quittent jamais la machine",
+      "Les agents locaux n'ont pas besoin de condition d'arrêt ni de garde-fous",
+      "Des frameworks comme LangGraph ne s'exécutent qu'en local"
+    ],
+    answer: 1,
+    explain: "La confidentialité est l'avantage déterminant : les données ne peuvent physiquement pas atteindre un tiers. Les modèles locaux sont généralement plus faibles en raisonnement difficile, ont toujours besoin de garde-fous, et les frameworks sont agnostiques quant au modèle (ils s'exécutent en cloud ou en local)."
+  },
+  {
+    q: "Quelles sont les quatre parties qui composent l'architecture minimale d'un agent local ?",
+    options: [
+      "Un GPU, une base de données, un serveur web et un frontend",
+      "Un modèle local compatible avec les outils, une boucle d'appel d'outils, des outils et un garde-fou/condition d'arrêt",
+      "Une clé d'API cloud, un magasin de vecteurs, un modèle de prompt et une tâche cron",
+      "Trois agents coopérants et un superviseur"
+    ],
+    answer: 1,
+    explain: "Réduit à l'essentiel, un agent c'est : un modèle qui peut demander des outils, une boucle qui exécute ces requêtes et renvoie les résultats, les outils eux-mêmes, et un garde-fou (plafond d'étapes/de budget, barrière d'approbation) qui borne la boucle."
+  },
+  {
+    q: "Que signifie le fait que LangGraph, CrewAI et l'OpenAI Agents SDK soient « agnostiques quant au modèle » pour un usage local ?",
+    options: [
+      "Ils incluent leur propre modèle local intégré",
+      "On peut les pointer vers un endpoint local (par exemple le /v1 compatible OpenAI d'Ollama) au lieu d'un modèle cloud",
+      "Ils ne fonctionnent qu'avec les modèles OpenAI",
+      "Ils exigent de réécrire votre agent pour chaque modèle"
+    ],
+    answer: 1,
+    explain: "Agnostique quant au modèle signifie que le framework se moque de l'endroit où vit le modèle — vous le pointez vers un endpoint local. L'OpenAI Agents SDK atteint les modèles locaux via son adaptateur LiteLLM ; LangGraph et CrewAI le font nativement."
+  },
+  {
+    q: "Vous construisez votre premier agent local. Que devriez-vous faire AVANT d'ajouter tout outil qui écrit des fichiers ou exécute des commandes ?",
+    options: [
+      "Retirer le plafond d'étapes pour qu'il puisse terminer des tâches complexes",
+      "Confirmer qu'un appel d'outil propre en lecture seule fonctionne, exécuter une boucle bornée, puis placer les outils destructeurs derrière une approbation/un bac à sable + un plafond de budget",
+      "Passer au plus grand modèle disponible sans tenir compte du matériel",
+      "Lui donner accès à internet et le laisser itérer librement"
+    ],
+    answer: 1,
+    explain: "Construisez par étapes : prouvez un appel d'outil, puis une boucle bornée en lecture seule, et seulement ensuite introduisez des outils qui modifient l'état — derrière des barrières d'approbation ou un bac à sable, avec des plafonds d'étapes et de budget. Retirer les limites ou élargir trop tôt est exactement la façon dont les agents locaux causent de réels dégâts."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Qu'est-ce qu'un « agent IA local » ?", back: "Une boucle autonome s'exécutant entièrement sur votre propre matériel : un modèle à poids ouverts (via Ollama/LM Studio) décide des actions, appelle des outils, lit les résultats et recommence jusqu'à ce que ce soit terminé — sans qu'aucune donnée ne quitte la machine ni aucun coût à l'appel." },
+  { front: "Les quatre parties de l'architecture minimale d'un agent", back: "1) Un modèle local compatible avec les outils, 2) une boucle d'appel d'outils (exécuter la requête → renvoyer le résultat), 3) des outils (vos fonctions), 4) un garde-fou/condition d'arrêt (plafond d'étapes, budget, barrière d'approbation)." },
+  { front: "Qu'est-ce qui permet à n'importe quel framework au format OpenAI de piloter un modèle local ?", back: "Ollama expose un endpoint compatible OpenAI à l'adresse http://localhost:11434/v1 qui prend en charge l'appel d'outils, de sorte que les frameworks pointent leur client OpenAI là plutôt que vers le cloud." },
+  { front: "Le plus grand compromis honnête des agents locaux", back: "L'écart de capacité en raisonnement/planification à long horizon : un modèle de la taille d'un ordinateur portable (~1 à 14 milliards) est nettement plus faible qu'un modèle de pointe, et vous êtes vous-même responsable de toute la fiabilité et de la sécurité." },
+  { front: "Comment choisir un modèle local pour le travail agentique", back: "Exigez un appel d'outils fiable (utilisez la catégorie Tools d'Ollama), assurez-vous qu'il tient sur votre matériel avec de la marge pour un contexte croissant, puis exécutez une petite évaluation de VOTRE tâche sur 2 à 3 candidats plutôt que de faire confiance aux classements." },
+  { front: "Trois frameworks qui exécutent des agents sur un modèle local", back: "LangGraph et CrewAI (agnostiques quant au modèle, prise en charge native d'Ollama) et l'OpenAI Agents SDK (agnostique quant au fournisseur via son adaptateur LiteLLM) — tous peuvent pointer vers un endpoint local." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Un agent local est la boucle standard d'usage d'outils avec le modèle cloud remplacé par un modèle à poids ouverts sur votre machine — privé, hors ligne et gratuit à itérer.",
+  "Architecture minimale = modèle local compatible avec les outils + boucle d'appel d'outils + outils + un garde-fou/condition d'arrêt. La boucle elle-même est minuscule.",
+  "L'endpoint compatible OpenAI d'Ollama (/v1) prend en charge l'appel d'outils, de sorte que n'importe quel framework au format OpenAI peut piloter un modèle local.",
+  "LangGraph, CrewAI et l'OpenAI Agents SDK sont agnostiques quant au modèle — pointez-les vers un endpoint local plutôt que vers le cloud.",
+  "Choisissez un modèle compatible avec les outils qui tient sur votre matériel, puis décidez avec une petite évaluation de votre propre tâche — pas un classement.",
+  "Soyez honnête sur l'écart de capacité et assumez la sécurité : plafonnez les boucles et le budget, mettez les outils en bac à sable, et exigez une approbation pour tout ce qui est destructeur.",
+  "Commencez simple : un appel d'outil propre → boucle bornée en lecture seule → outils destructeurs encadrés → (facultativement) un framework."
+]} />
+
+## Sources et lectures complémentaires
+
+- [Ollama — Prise en charge des outils (blog)](https://ollama.com/blog/tool-support)
+- [Ollama — Documentation de l'appel d'outils](https://docs.ollama.com/capabilities/tool-calling)
+- [Ollama — Modèles compatibles avec les outils (catégorie Tools)](https://ollama.com/search?c=tools)
+- [Bibliothèque Ollama](https://ollama.com/library)
+- [LangGraph (GitHub — langchain-ai/langgraph)](https://github.com/langchain-ai/langgraph)
+- [Aperçu de LangGraph — documentation LangChain](https://docs.langchain.com/oss/python/langgraph/overview)
+- [CrewAI — Se connecter à n'importe quel LLM (y compris Ollama)](https://docs.crewai.com/en/learn/llm-connections)
+- [OpenAI Agents SDK — documentation](https://openai.github.io/openai-agents-python/)
+- [OpenAI Agents SDK — intégration LiteLLM (modèles non-OpenAI / locaux)](https://openai.github.io/openai-agents-python/models/litellm/)
