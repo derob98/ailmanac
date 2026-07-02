@@ -20,6 +20,12 @@ export default function TokenEstimator(): ReactNode {
   const low = Math.min(byChars, byWords);
   const high = Math.max(byChars, byWords);
 
+  // Put the estimate in perspective: what fraction of a 200K-token context
+  // window would this text occupy? Turns an abstract number into scale.
+  const CTX = 200_000;
+  const fill = Math.min(1, high / CTX);
+  const pct = high / CTX < 0.01 ? '<1' : Math.round((high / CTX) * 100).toString();
+
   return (
     <div className={styles.wrap}>
       <textarea
@@ -44,6 +50,27 @@ export default function TokenEstimator(): ReactNode {
           </span>
           <span className={styles.cap}><Translate id="tokenest.tokens">estimated tokens</Translate></span>
         </div>
+      </div>
+      <div
+        className={styles.meter}
+        style={{'--fill': fill} as React.CSSProperties}
+        role="img"
+        aria-label={translate(
+          {
+            id: 'tokenest.meterAria',
+            message: 'Estimated {pct}% of a 200,000-token context window',
+          },
+          {pct},
+        )}
+      >
+        <div className={styles.meterTrack}>
+          <div className={styles.meterFill} />
+        </div>
+        <span className={styles.meterCap}>
+          <Translate id="tokenest.meterCap" values={{pct}}>
+            {'≈ {pct}% of a 200K-token context window'}
+          </Translate>
+        </span>
       </div>
       <p className={styles.note}>
         <Translate id="tokenest.note">
