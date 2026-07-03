@@ -1,0 +1,153 @@
+---
+sidebar_position: 1
+title: "Réduisez votre consommation de tokens (et son coût)"
+description: "Des techniques éprouvées pour réduire les tokens et les dépenses Claude — cache, prompting laconique, dimensionnement du modèle, traitement par lots et mesure."
+keywords: [token reduction, claude cost optimization, prompt caching, caveman prompt, token counting, rtk, tool output compression]
+---
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-06-24" source="https://platform.claude.com/docs/en/docs/build-with-claude/token-counting">
+Les prix des tokens, les remises par lots, l'éligibilité au cache et le comportement du tokenizer changent d'une génération de modèle à l'autre — vérifiez les chiffres actuels dans la documentation officielle d'Anthropic avant d'annoncer des économies à qui que ce soit.
+</VerifyNote>
+
+Vous payez chaque token en entrée et chaque token en sortie. La bonne nouvelle : la plupart des charges de travail réelles traînent du **poids mort** — prompts système gonflés, contexte renvoyé, réponses verbeuses, le mauvais modèle pour une tâche facile. Éliminez tout ça et la facture baisse sans toucher à la qualité. Cette page est la boîte à outils du power-user, classée grosso modo par effet de levier.
+
+<Callout type="objectives" items={["Où les tokens fuient réellement — entrée vs sortie vs contexte réutilisé","Le style laconique / « caveman » : ce qu'il économise vraiment, et où il se retourne contre vous","Le cache de prompt et le traitement par lots pour des économies structurelles à chaque euro dépensé","Dimensionner le modèle au besoin (Haiku pour les tâches faciles) et préférer la sortie structurée à la prose","Mesurer avant de livrer avec l'endpoint de comptage de tokens"]} />
+
+## D'abord, trouvez où partent les tokens
+
+Avant d'optimiser, répartissez vos dépenses en trois catégories — chacune a un remède différent :
+
+<Flashcards title="Les trois catégories de tokens" cards={[{front:"Tokens d'entrée",back:"Tout ce que vous envoyez : prompt système, outils, historique, documents, le tour utilisateur. Souvent le coût le plus élevé et le plus ignoré dans les longues sessions."},{front:"Tokens de sortie",back:"Tout ce que Claude génère. Facturé plus cher que l'entrée. La cible du prompting laconique."},{front:"Contexte réutilisé",back:"Le bloc stable que vous renvoyez à chaque appel (prompt système, catalogue d'outils, gros document). Pur gaspillage au prix fort, à moins de le mettre en cache."}]} />
+
+Les remèdes s'alignent proprement : **mettez en cache** le contexte réutilisé, **élaguez** l'entrée, **raccourcissez** la sortie, **dimensionnez** le modèle et **regroupez** ce qui n'est pas urgent.
+
+## Le style laconique / « caveman » (économies en sortie)
+
+Le geste viral consiste à dire à Claude de supprimer le remplissage et de répondre par fragments — popularisé par la skill Claude Code open-source [`caveman`](https://github.com/JuliusBrussee/caveman) (sous licence MIT, par Julius Brussee), dont le slogan est « why use many token when few token do trick ». Elle force des phrases courtes, des verbes à l'infinitif et zéro politesse.
+
+<VerifyNote lastVerified="2026-06-24" source="https://github.com/JuliusBrussee/caveman">
+La skill `caveman` rapporte une réduction moyenne d'environ 65 % des tokens de sortie sur son benchmark de 10 tâches (fourchette 22–87 %) et note qu'elle ne réduit que les tokens de **sortie** — la réflexion et l'entrée restent intactes. Des benchmarks indépendants sur des tâches structurées déjà concises ont trouvé des gains bien plus faibles (environ 9–21 %). Considérez le pourcentage annoncé comme dépendant de la charge de travail, pas comme une garantie.
+</VerifyNote>
+
+Le constat honnête des tests indépendants : le style **ne coûte rien sur le contenu** (le code, les termes techniques, le JSON restent exacts) mais les économies dépendent entièrement de votre référence de base. Si vos prompts disent déjà « sois concis », l'essentiel du gain est déjà acquis. Les grosses réductions (40–65 %) apparaissent sur les réponses riches en explications ; l'extraction structurée bouge à peine.
+
+<PromptCard title="Bloc d'instruction sobre — à coller dans votre prompt système">
+{`Answer terse. Cut filler, hedging, and pleasantries.
+Drop articles (a/an/the) and softeners (just, really, basically, actually).
+No preamble, no restating the question, no "happy to help."
+Fragments are fine. Keep technical terms and code blocks exact.
+Pattern per point: [thing] [action] [reason]. Next step if any.`}
+</PromptCard>
+
+<Callout type="tip" items={["Mettez la règle laconique une seule fois dans le prompt système, pas à chaque tour utilisateur — la répéter re-paie le coût d'entrée à chaque appel.","Ne compressez jamais le code, les identifiants, le JSON ou les nombres. Compressez uniquement la prose.","« Be concise. Return JSON only. » représente à lui seul ~60 % des économies de sortie atteignables — écrivez-le avant de vous tourner vers des astuces plus sophistiquées."]} />
+
+<Callout type="warning" items={["Le style laconique réduit UNIQUEMENT la sortie. Il ne fait rien pour un prompt système de 20k tokens que vous renvoyez à chaque appel — ça, c'est un problème d'entrée/cache.","Sur les tâches à réflexion étendue, les tokens de raisonnement ne sont pas affectés ; vous ne réduisez que la réponse finale visible."]} />
+
+## Compressez la sortie des outils avant qu'elle ne revienne dans le contexte (RTK)
+
+Caveman réduit ce que Claude *écrit*. La fuite en miroir dans les sessions agentiques, c'est ce que Claude *relit* : chaque `git status`, `npm test`, `ls -la` ou log de build qu'un agent de code exécute est renvoyé — en-têtes, barres de progression et tout le reste — directement dans la fenêtre de contexte sous forme de tokens d'entrée au tour suivant. Sur une longue session [Claude Code](/docs/claude-code/what-is-claude-code), ce bruit d'observation dépasse souvent le prompt système.
+
+[`rtk`](https://github.com/rtk-ai/rtk) (« Rust Token Killer », Apache-2.0, dans homebrew-core) est un proxy CLI visant exactement ça. `rtk init -g` installe un **[hook PreToolUse](/docs/claude-code/hooks) sur l'outil Bash de Claude Code** (`rtk hook claude`) qui réécrit de façon transparente chaque commande en `rtk <command>` et compresse sa sortie — en supprimant les en-têtes et le bruit visuel, en groupant les lignes similaires, en dédupliquant les répétitions avec des compteurs et en tronquant la redondance — avant qu'elle n'atteigne le modèle.
+
+<VerifyNote lastVerified="2026-06-24" source="https://github.com/rtk-ai/rtk">
+Le projet RTK revendique 60–90 % de réduction de sortie sur les commandes de dev courantes. Ce chiffre est le benchmark de l'outil lui-même, non vérifié indépendamment, et il ne touche que l'outil **Bash** — les Read, Grep et Glob natifs de Claude Code contournent le hook (faites-les passer par lui avec les équivalents shell `cat`/`rg`/`find`, ou `rtk read`/`rtk grep`/`rtk find`). Au moins un problème signalé (#582) a constaté que le hook *augmentait* le coût total d'environ 18 % dans certaines configurations, alors mesurez sur votre propre charge de travail avant de faire confiance au chiffre annoncé.
+</VerifyNote>
+
+<PromptCard title="Installer RTK et brancher le hook global (macOS)">
+{`brew install rtk          # see the repo for cargo / other installers
+rtk init -g --hook-only   # PreToolUse(Bash) hook only, no RTK.md file
+# undo anytime: rtk init -g --uninstall`}
+</PromptCard>
+
+Le drapeau `--hook-only` compte pour le budget de tokens : le `rtk init` par défaut écrit aussi un fichier d'instructions `RTK.md` qui se charge à chaque session — un coût d'*entrée* fixe qui combat en partie les économies. Le mode hook-only garde la compression de sortie et n'ajoute rien au préfixe. Redémarrez Claude Code après `rtk init -g` pour que le hook se charge.
+
+<Callout type="tip" items={["RTK et caveman sont complémentaires, pas redondants : caveman compresse la SORTIE du modèle, RTK compresse l'ENTRÉE des résultats d'outils (les observations renvoyées à chaque tour). Les empiler couvre les deux directions.","Le hook se déclenche à chaque appel Bash et réécrit de façon transparente — vous ne changez pas votre façon de prompter.","Mesurez avec la vraie facture, pas le README. Si vos sessions sont pauvres en commandes shell, RTK a peu à compresser — son gain croît avec le bruit de votre sortie d'outils."]} />
+
+## Mettez en cache le préfixe réutilisé (économies en entrée)
+
+Si de nombreux appels partagent un grand bloc inchangé — un long prompt système, un catalogue d'outils, un document de référence — le **cache de prompt** le traite une fois et le réutilise à une fraction du prix d'entrée à chaque appel ultérieur. C'est le changement structurel à plus fort effet de levier pour les charges de travail de chat et d'agent, car il rapporte à chaque tour.
+
+La seule règle : le préfixe mis en cache doit être **identique octet pour octet** entre les appels. Un timestamp égaré ou une liste d'outils réordonnée près du début fait silencieusement chuter votre taux de succès à zéro. La mécanique complète, le snippet `cache_control` à copier-coller et la façon de vérifier les succès sont dans [Cache de prompt et optimisation des coûts](/docs/api/prompt-caching).
+
+<Steps items={[{title:"Triez stable d'abord, variable en dernier",body:"Déplacez le prompt système, les outils et les documents au début ; gardez le tour changeant de l'utilisateur à la fin."},{title:"Marquez le point de rupture",body:"Attachez cache_control au dernier bloc stable pour que tout le préfixe soit mis en cache. Voir le snippet dans notre page sur le cache de prompt."},{title:"Vérifiez le succès",body:"Lisez cache_read_input_tokens dans l'usage de la réponse — supérieur à zéro signifie que vous économisez ; zéro sur des appels répétés signale un invalidateur silencieux."}]} />
+
+## Élaguez le contexte que vous envoyez
+
+Le cache réutilise le contexte à bas prix, mais le token le moins cher est celui que vous n'envoyez jamais. Auditez ce qu'il y a réellement dans la fenêtre :
+
+- **Élaguez le prompt système.** Les longs blocs d'instructions accumulent des scories. Coupez les exemples qui ne justifient plus leurs tokens ; gardez un exemple fort plutôt que cinq médiocres.
+- **Récupérez, ne déversez pas.** Au lieu de coller un document entier, ne cherchez que les passages pertinents ([RAG](/docs/foundations/rag)). Envoyer un PDF de 50 pages pour répondre à une seule question est le gaspillage le plus courant.
+- **Compactez les longues sessions.** Quand une conversation grandit, remplacez les vieux tours par un court résumé glissant au lieu de transporter chaque message pour toujours. L'historique, ce sont des tokens d'entrée que vous re-payez à chaque appel.
+- **Dimensionnez le catalogue d'outils.** Chaque définition d'outil, ce sont des tokens d'entrée à chaque requête. N'exposez que les outils dont la tâche courante a besoin.
+- **Compressez les fichiers de mémoire statiques.** [`CLAUDE.md`](/docs/claude-code/claude-md) et les notes de mémoire sont de l'entrée réutilisée que vous re-payez à chaque session. Les réécrire en prose laconique « caveman » (par ex. la commande `caveman-compress` du plugin [`caveman`](https://github.com/JuliusBrussee/caveman)) en grignote une part — mais attendez-vous à des chiffres à un seul chiffre sur des fichiers déjà sobres : une passe pratique sur un `CLAUDE.md` serré d'environ 350 mots n'a coupé qu'environ 10 %. Le levier est réel mais petit ; ne sacrifiez pas la clarté des instructions de votre config globale pour le poursuivre.
+
+## Dimensionnez le modèle au besoin
+
+Ne payez pas le tarif Opus pour une tâche de niveau Haiku. Classification, extraction, formatage simple et routage tournent généralement très bien sur le plus petit modèle à une fraction du prix par token. Réservez les modèles plus grands au raisonnement vraiment difficile, et envisagez le routage : un modèle bon marché gère la majorité facile, en n'escaladant que les cas difficiles. Voir [Choisir un modèle](/docs/api/choosing-a-model) et [Tokens, contexte et tarification](/docs/api/tokens-and-pricing) pour les compromis.
+
+## Préférez la sortie structurée à la prose
+
+Demander du JSON (ou un autre schéma serré) au lieu d'un paragraphe explicatif réduit les tokens de sortie *et* supprime les devinettes de parsing en aval. Dire à Claude de ne renvoyer qu'un objet compact comme `{"label": ..., "score": ...}` génère une fraction des tokens d'une réponse bavarde — et vous évitez complètement le préambule « Voici le résultat : ». Détails dans [Sortie structurée](/docs/api/structured-output).
+
+## Regroupez ce qui n'est pas urgent
+
+Pour le travail hors ligne où vous n'avez pas besoin d'une réponse en quelques secondes — évals, classification en masse, étiquetage de jeux de données, résumé d'une archive — l'**API Message Batches** d'Anthropic exécute les requêtes de façon asynchrone avec une **remise de 50 % sur les tokens d'entrée et de sortie**, les résultats étant généralement renvoyés sous 24 heures.
+
+<VerifyNote lastVerified="2026-06-24" source="https://www.anthropic.com/news/message-batches-api">
+L'API Message Batches annonce une remise forfaitaire de 50 % par rapport à l'API Messages synchrone et un délai asynchrone (jusqu'à ~24 h). Les limites de requêtes par lot et les tarifs changent — confirmez les chiffres actuels dans la documentation d'Anthropic avant de vous y fier.
+</VerifyNote>
+
+Empilez ça avec le cache et un modèle bien dimensionné, et la remise combinée sur un gros travail hors ligne est spectaculaire.
+
+## Mesurez — ne devinez pas
+
+Optimisez contre des chiffres, pas des impressions. L'**endpoint de comptage de tokens** d'Anthropic renvoie le nombre exact de tokens d'entrée d'une requête *avant* de l'envoyer — même forme qu'un appel Messages, et c'est gratuit (avec limite de débit). Utilisez-le pour comparer un prompt gonflé à un prompt élagué, pour décider du routage des modèles et pour garder les prompts dans la fenêtre de contexte.
+
+<PromptCard title="Compter les tokens avant l'envoi (SDK Python)">
+{`import anthropic
+
+client = anthropic.Anthropic()
+
+resp = client.messages.count_tokens(
+    model="claude-opus-4-8",
+    system="You are a scientist",
+    messages=[{"role": "user", "content": "Hello, Claude"}],
+)
+print(resp.input_tokens)  # exact input count, no charge for counting`}
+</PromptCard>
+
+<Callout type="tip" items={["N'utilisez pas le tokenizer d'un autre modèle (par ex. tiktoken) — les comptes diffèrent selon la famille de modèles. Utilisez l'endpoint d'Anthropic.","Les tokenizers plus récents peuvent produire ~30 % de tokens en plus pour le même texte que les modèles plus anciens — recomptez lors d'une migration, ne réutilisez pas d'anciennes estimations.","Lisez input_tokens, cache_read_input_tokens et output_tokens dans l'usage de la réponse pour confirmer que les économies sont bien réalisées en production."]} />
+
+Voir [Tokens, contexte et tarification](/docs/api/tokens-and-pricing) pour les règles de comptage et la formule d'estimation des coûts.
+
+## Un avant/après, de bout en bout
+
+Un assistant de tri du support exécute le même prompt système de 4 000 tokens + catalogue d'outils sur chaque ticket et écrit une réponse bavarde de 600 tokens.
+
+<Steps items={[{title:"Avant",body:"~4 000 tokens d'entrée renvoyés au prix fort à chaque appel + ~600 tokens de sortie verbeux, sur un grand modèle. Rien en cache, synchrone, réponses en prose."},{title:"Mettre le préfixe en cache",body:"Marquez le bloc système+outils de 4 000 tokens avec cache_control. Après le premier appel, il est servi en lectures de cache à une fraction du prix d'entrée."},{title:"Dimensionner + structurer la sortie",body:"Déplacez le tri vers un petit modèle et exigez du JSON uniquement ({\"category\", \"priority\", \"reply\"}). La sortie passe de ~600 tokens de prose à ~120."},{title:"Regrouper l'arriéré",body:"Les rattrapages de tickets nocturnes passent par l'API Batches à la remise de 50 % au lieu d'appels synchrones."}]} />
+
+Chaque levier est multiplicatif : entrée en cache × modèle plus petit × sortie plus laconique × remise par lots se composent en une grande réduction totale — tandis que la qualité de la réponse sur cette tâche facile reste inchangée. Mesurez chaque étape avec `count_tokens` pour prouver le gain plutôt que de le supposer.
+
+<Quiz title="Testez-vous" questions={[{q:"Le style « caveman » / laconique réduit principalement quels tokens ?",options:["Les tokens d'entrée (prompt système + contexte)","Les tokens de sortie (la réponse générée)","Les tokens de réflexion / raisonnement"],answer:1,explain:"Le prompting laconique réduit la SORTIE — il dit à Claude de répondre par fragments sans remplissage. Il ne touche ni l'entrée que vous envoyez ni les tokens de réflexion étendue."},{q:"Vous renvoyez le même prompt système de 10k tokens à chaque appel. Meilleur remède ?",options:["Dire à Claude d'être plus concis","Cache de prompt — marquer le préfixe stable pour qu'il soit réutilisé à bas prix","Baisser max_tokens"],answer:1,explain:"C'est un problème d'entrée réutilisée. Mettre en cache le préfixe stable le réutilise à une fraction du prix d'entrée à chaque appel ultérieur ; la concision n'affecte que la sortie, et max_tokens ne fait que plafonner la longueur de la réponse."},{q:"Quelle charge de travail convient le mieux à la remise de 50 % de l'API Message Batches ?",options:["Un chat en direct où les utilisateurs attendent les réponses","La classification nocturne en masse d'un arriéré","Une fonctionnalité d'autocomplétion critique en latence"],answer:1,explain:"Le traitement par lots échange l'immédiateté contre une remise de 50 % avec des résultats sous ~24 h — idéal pour les travaux hors ligne comme les évals, l'étiquetage et les rattrapages, pas pour ce qu'un utilisateur attend."},{q:"Comment vérifier qu'un changement de prompt a réellement économisé des tokens ?",options:["Estimer avec un tokenizer générique comme tiktoken","Utiliser l'endpoint count_tokens d'Anthropic et lire les champs d'usage de la réponse","Estimer à l'œil le nombre de caractères"],answer:1,explain:"Les comptes de tokens diffèrent selon la famille de modèles, donc les tokenizers génériques induisent en erreur. count_tokens d'Anthropic donne le compte d'entrée exact avant l'envoi, et les champs d'usage de la réponse confirment les économies en production."}]} />
+
+<Callout type="takeaways" items={["Répartissez les dépenses en entrée, sortie et contexte réutilisé — chaque catégorie a un remède différent.","Le style laconique / « caveman » ne réduit que la sortie ; les gains sont grands sur la prose, petits sur les tâches structurées déjà concises.","Mettez en cache le préfixe stable (identique octet pour octet) pour des économies d'entrée à chaque euro dépensé sur chaque appel.","Élaguez le contexte, dimensionnez le modèle et préférez le JSON à la prose — des gains bon marché et cumulatifs.","Regroupez le travail non urgent pour une remise de 50 %, et mesurez toujours avec count_tokens au lieu de deviner."]} />
+
+## Sources et lectures complémentaires
+
+- [JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) — la skill Claude Code open-source « caveman » (MIT, par Julius Brussee) ; revendique ~65 % de réduction moyenne des tokens de sortie.
+- [« I Benchmarked the Viral 'Caveman' Prompt… » — DEV Community](https://dev.to/jakguzik/i-benchmarked-the-viral-caveman-prompt-to-save-llm-tokens-then-my-6-line-version-beat-it-2o81) — benchmark indépendant trouvant ~9–21 % sur les tâches structurées et une alternative plus sobre en 6 lignes.
+- [rtk-ai/rtk](https://github.com/rtk-ai/rtk) — proxy CLI « Rust Token Killer » (Apache-2.0, dans homebrew-core) ; compresse la sortie des commandes de dev via un hook Bash PreToolUse ; revendique 60–90 % sur les commandes courantes.
+- [RTK Hook Increases Claude Code Costs by 18% — rtk-ai/rtk #582](https://github.com/rtk-ai/rtk/issues/582) — contre-preuve que le hook peut augmenter le coût total dans certaines configurations ; mesurez avant de faire confiance au chiffre annoncé.
+- [Token counting — Documentation Anthropic](https://platform.claude.com/docs/en/docs/build-with-claude/token-counting) — l'endpoint `count_tokens` et les notes sur le tokenizer par modèle.
+- [Prompt caching — Documentation Anthropic](https://platform.claude.com/docs/en/docs/build-with-claude/prompt-caching) — mécanique du cache, éligibilité et tarification.
+- [Introducing the Message Batches API — Anthropic](https://www.anthropic.com/news/message-batches-api) — traitement asynchrone à une remise de 50 %.
+- [Pricing — Documentation Anthropic](https://platform.claude.com/docs/en/docs/about-claude/pricing) — tarifs par token actuels par modèle.
+
+## Suite
+
+- [Cache de prompt et optimisation des coûts](/docs/api/prompt-caching)
+- [Tokens, contexte et tarification](/docs/api/tokens-and-pricing)
+- [Choisir un modèle Claude](/docs/api/choosing-a-model)
+- [Sortie structurée](/docs/api/structured-output)
