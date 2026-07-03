@@ -77,6 +77,7 @@ export default function ModelPicker(): ReactNode {
           <button
             key={val}
             type="button"
+            aria-pressed={value === val}
             className={`${styles.choice} ${value === val ? styles.active : ''}`}
             onClick={() => set(val)}>
             {label}
@@ -91,19 +92,24 @@ export default function ModelPicker(): ReactNode {
       {row(translate({id: 'mp.row.difficulty', message: 'Task difficulty'}), d, OPTIONS.d, setD)}
       {row(translate({id: 'mp.row.priority', message: 'What matters most'}), p, OPTIONS.p, setP)}
       {row(translate({id: 'mp.row.volume', message: 'Request volume'}), v, OPTIONS.v, setV)}
-      <div className={styles.result}>
-        <div className={styles.model}>{rec.model}</div>
-        <p className={styles.why}>{rec.why}</p>
-        <p className={styles.note}>
-          <Translate id="mp.note.pre">Look up the exact model ID on the</Translate>{' '}
-          <Link to={`${lp}/docs/whats-new/models-and-pricing`}>
-            <Translate id="mp.note.link">models table</Translate>
-          </Link>
-          .{' '}
-          <Translate id="mp.note.post">
-            Rule of thumb only — run a quick eval on your own inputs to be sure.
-          </Translate>
-        </p>
+      <div className={styles.resultLive} aria-live="polite">
+        <div className={styles.result} key={rec.model}>
+          <span className={styles.eyebrow}>
+            <Translate id="mp.result.eyebrow">Recommended</Translate>
+          </span>
+          <div className={styles.model}>{rec.model}</div>
+          <p className={styles.why}>{rec.why}</p>
+          <p className={styles.note}>
+            <Translate id="mp.note.pre">Look up the exact model ID on the</Translate>{' '}
+            <Link to={`${lp}/docs/whats-new/models-and-pricing`}>
+              <Translate id="mp.note.link">models table</Translate>
+            </Link>
+            .{' '}
+            <Translate id="mp.note.post">
+              Rule of thumb only — run a quick eval on your own inputs to be sure.
+            </Translate>
+          </p>
+        </div>
       </div>
     </div>
   );
