@@ -1,0 +1,202 @@
+---
+sidebar_position: 7
+title: "Agent 记忆的真实工作原理"
+description: "上下文窗口不是记忆。这是一份 2026 年 Agent 记忆的实地指南——工作记忆、情景记忆、语义记忆与程序记忆；各种存储模式（全上下文、vector、knowledge-graph、压缩）；以及 Claude、ChatGPT 和 Gemini 各自的实现方式。"
+keywords: [agent memory, ai agent memory, episodic memory, semantic memory, procedural memory, working memory, vector memory, knowledge graph memory, mem0, letta, zep, locomo, claude memory, chatgpt memory, gemini memory, long-term memory, context engineering]
+---
+
+<LevelBadge level="intermediate" />
+
+# Agent 记忆的真实工作原理
+
+在两个不同的会话中问同一个聊天机器人同一个问题，它两次都会像陌生人一样回答。这不是 bug——这是默认行为。原始语言模型在两次调用之间没有任何记忆。它在一次对话中"记住"的一切都存在于上下文窗口里，而当那次对话结束时，一切就消失了。
+
+**记忆**就是你为解决这个问题而加装的机制：这些系统决定一个 agent 应该把什么带到后续、存到哪里，以及如何在恰当的时刻取回恰当的那一块。到了 2026 年，这不再是一个支线任务，而成为 agent 设计中的一等公民，拥有自己的 benchmark、框架和一套真正的研究文献。本页就是这张地图。
+
+<Callout
+  type="objectives"
+  items={[
+    "理解为什么上下文窗口不是记忆——以及边界究竟在哪里",
+    "分清 agent 使用的四种记忆类型：工作、情景、语义、程序",
+    "比较四种存储模式：全上下文、vector/RAG、knowledge-graph 和压缩/摘要",
+    "了解 Claude、ChatGPT 和 Gemini 今天各自如何实现记忆",
+    "在不过度工程化的前提下为你自己的 agent 选择一种记忆方案"
+  ]}
+/>
+
+<VerifyNote lastVerified="2026-07-03" source="https://arxiv.org/abs/2402.17753">
+下面的分类法和存储模式是稳定的，但框架格局（Mem0、Letta、Zep、LangMem、Cognee）和 benchmark 排行榜每月都在变动。把具体的分数和产品功能当作快照——在引用某个数字前请重新核对所链接的来源。
+</VerifyNote>
+
+## 唯一需要牢记的一点：上下文 ≠ 记忆
+
+最常见的混淆是把一个巨大的上下文窗口当成"记忆"。它不是。上下文窗口是**一个回合的工作空间**——它在每次调用时都从零重新填充，它是有限的，而且它很昂贵。注意力也会在窗口内衰减（[Context Engineering](/docs/frontiers/context-engineering) 中讨论的"lost in the middle"效应）。
+
+记忆在三个方面与之不同：
+
+| | 上下文窗口 | 记忆 |
+| --- | --- | --- |
+| **生命周期** | 一次请求 | 跨会话、跨天、永久 |
+| **大小** | 固定的 token 上限 | 实际上无界（外部存储） |
+| **成本** | 每一个回合都要付费 | 写入时付一次；引用很便宜 |
+| **访问** | 一切内容始终在视野中 | 有选择性——只取回相关的部分 |
+
+Agent 记忆的整场博弈就是**在这两者之间移动正确的信息**：把持久的事实写*出*窗口，这样你就不必每个回合都为它们付费；只在这个具体步骤需要它们时才把它们拉*回*来。把这个流程做对，一个 agent 就能在一个始终只保留几千个相关 token 的上下文窗口上运行数周。
+
+## 四种记忆
+
+（宽松地）借鉴认知科学，2026 年的 agent 生态已经收敛到四个类别。你很少四种都需要——但给它们命名能让你不再构建一个什么都做得很糟糕的大杂烩。
+
+<Steps
+  items={[
+    {title: "工作记忆", body: "此刻在上下文窗口里的东西——当前任务、最近几个回合、这一步的工具结果。天生易失。这是草稿纸，不是档案库。把它管理好属于 context engineering；它不是持久化。"},
+    {title: "情景记忆", body: "发生过的具体事情，带有时间戳。'周二用户说结账坏了；周三支持团队标记为已解决。'情景记忆本质上是时间性的——顺序和时间点都很重要。正是它让 agent 能对一段历史而非一个快照进行推理。"},
+    {title: "语义记忆", body: "持久的事实和偏好，剥离了你是何时学到它们的。'用户偏好公制单位。''这位客户使用的是企业版套餐。'语义记忆基本上是无时间性的——它表示 agent 认为当前为真的东西，而不是它得知这一点的那个事件。"},
+    {title: "程序记忆", body: "如何做某件事——可复用的技能、工作流和习得的例程。在实践中是四者中最不成熟的。在像 Claude Code 这样的工具里，它常常以指令文件（CLAUDE.md）和可复用技能的形式存在，而不是一个自动存储。"}
+  ]}
+/>
+
+一个有用的判别法：如果你会用*"那是什么时候发生的？"*来回答，它就是**情景**记忆；如果你会用*"什么是真的？"*来回答，它就是**语义**记忆；如果你会用*"方法如下"*来回答，它就是**程序**记忆；如果它只在接下来几秒钟有意义，它就是**工作**记忆，根本不需要持久化。
+
+## 四种存储模式
+
+一旦你知道要记住*什么*，你就要选择*如何*存储和取回它。有四种主导模式，大致按复杂度排序。大多数真实系统会组合其中两三种。
+
+### 1. 全上下文（把它全塞进去）
+
+保留整段历史，每个回合都重新发送。零基础设施、完美召回——直到你撞上 token 上限、成本曲线或"lost in the middle"。对短助手来说没问题；对任何长期运行的东西来说是死路。这是其他每一种模式都在其之上改进的基线。
+
+### 2. Vector / RAG 记忆
+
+把每一条记忆作为一个 embedding 写入 vector 数据库；在查询时，把当前回合 embed 之后取回最相似的 top-k 条记忆。这就是把[检索增强生成](/docs/foundations/rag)对准对话历史而非文档。便宜、可扩展，是对事实和偏好进行语义召回的默认选择。
+
+它的弱点：对于**时间性**或**多跳**问题，相似 ≠ 相关。"在预算被削减*之后*我们决定了什么？"是一个排序问题，而余弦相似度对时间或对把两个事实串联起来毫无感知。
+
+### 3. Knowledge-graph 记忆
+
+把记忆存储为**实体和关系**——节点和边，通常在边上带时间戳。要回答一个问题，你遍历图而不是模糊匹配 vector。这就是让多跳和时间性推理变得可行的东西（"谁替换了那个拥有用户投诉的那个账户的人？"）。像 Zep/Graphiti 这样的框架把它们的整个卖点都建立在时间性 knowledge graph 上。代价是实打实的工程：抽取、实体消解，以及防止图腐坏。
+
+### 4. 压缩与摘要
+
+周期性地把运行中的历史压缩成一份提炼过的摘要，然后从那里继续——用逐字召回换取一个更小、更便宜的窗口。这就是 Claude Code 里 `/compact` 所做的事，也是许多聊天产品里"自动摘要"所做的事。它是最便宜的长期记忆形式，也常常是你实际上最先需要的那一种。它的风险：摘要悄悄地丢掉了你恰好需要的那一个细节。关于这一点在长达数小时的运行中如何展开，参见 [Long-Running Agent Harnesses](/docs/frontiers/long-running-agent-harnesses)。
+
+<Callout type="tip">
+真实系统会把这些分层叠加。一个常见的 2026 技术栈：对运行中的对话用<strong>压缩</strong>，对语义事实用 <strong>vector</strong>，只有当时间性/多跳查询真正出现在你的流量中时才在其上叠加一个<strong>图</strong>。在你感到图所解决的那种痛之前，别去构建图。
+</Callout>
+
+## 三巨头各自怎么做
+
+如今每个主要助手都搭载了某种记忆。它们不是同一回事，而且这些差异很重要。
+
+| 产品 | 它记住什么 | 大致如何工作 |
+| --- | --- | --- |
+| **Claude** | 两层：一层应用级的、关于你偏好的记忆，以及一个面向开发者的、供 agent 使用的**memory tool**。 | [Claude app memory](/docs/claude-app/memory) 跨聊天存储事实；API 的 [memory tool 加上下文编辑](/docs/api/memory-and-context-editing)让 agent 把笔记写入客户端存储，并自动修剪陈旧的工具结果以熬过长期运行。 |
+| **ChatGPT** | "已保存的记忆"（显式事实）加上对你过往聊天的引用。 | 用户陈述的事实与自动抽取的偏好的混合，在后续回合注入系统上下文。用户可编辑、可开关。 |
+| **Gemini** | 从你的聊天中提取的个人上下文，以及可选地更广的 Google 账户面。 | 回忆先前对话中的细节，并可利用账户上下文进行个性化，受你的隐私控制约束。 |
+
+两个要点。第一，**消费级记忆大多是语义的**——偏好和事实——而不是完整的情景重放。第二，如果你是在*构建*一个 agent，产品自带的记忆不是你的记忆系统；那一层由你自己拥有，使用像 Claude 的 memory tool 或一个外部框架这样的原语。
+
+<PromptCard title="把一个原始模型变成一个会记笔记的 agent（最便宜的真实记忆）">
+{`You have a file called MEMORY.md that persists between our sessions.
+
+At the END of each session, append any durable facts worth keeping:
+- my stable preferences (tools, formats, style)
+- decisions we made and WHY
+- open threads to resume next time
+
+At the START of each session, read MEMORY.md first and use it.
+Keep it under 30 lines — when it grows past that, consolidate and
+delete anything stale. Never store secrets or credentials.`}
+</PromptCard>
+
+那一个模式——把持久的笔记写入一个外部文件，下次再读回来——就是 agent 记忆的 80/20。下面大部分框架机制不过是这件完全相同的事情的一个更自动、更可扩展的版本。
+
+## 衡量记忆：LoCoMo benchmark
+
+你无法改进你无法衡量的东西，而在 benchmark 出现之前，记忆很难衡量。被引用最多的是 **LoCoMo**（"Evaluating Very Long-Term Conversational Memory of LLM Agents"）：非常长的多会话对话——跨数十个会话、数百个回合——配有五种口味的问答对：单跳、多跳（跨会话）、时间性推理、开放域和对抗性。
+
+LoCoMo 揭示的是你应当围绕其设计的那个模式：系统在单跳事实召回上表现良好，而在**时间性和多跳**问题上崩溃。那个失败模式恰恰是 knowledge-graph 记忆存在的原因——它是把那两个类别提升最多的模式。当你评估你自己 agent 的记忆时，给多跳和时间性用例赋予高权重；单跳召回几乎会给一切都镀上一层美化。
+
+<VerifyNote lastVerified="2026-07-03" source="https://snap-research.github.io/locomo/">
+LoCoMo 是标准的学术参考（arXiv 2402.17753）。声称具体 LoCoMo 分数的厂商排行榜变化很快，且常常是自我报告的——在把一个头条数字当作事实之前，请对照论文的方法论核实。
+</VerifyNote>
+
+## 在不过度构建的前提下选择方案
+
+<Steps
+  items={[
+    {title: "短助手、单个会话？", body: "什么都不做。工作记忆（上下文窗口）就够了。在这里加一个记忆存储纯属额外开销。"},
+    {title: "需要它跨会话记住我？", body: "从把笔记写入一个外部文件，或者产品自带的记忆开始。这以近乎为零的成本覆盖了大多数'记住我的偏好'需求。"},
+    {title: "不断增长的历史撑爆了窗口？", body: "加上压缩/摘要。保留承重的事实，丢掉逐帧回放。这就是长期运行的 agent 所在之处。"},
+    {title: "要从一段庞大的历史中召回事实？", body: "加上 vector/RAG 记忆。每个回合取回 top-k 条相关记忆，而不是重新发送一切。"},
+    {title: "时间性或多跳问题失败了？", body: "只有到现在才去动用 knowledge graph——或者一个托管框架（Mem0、Letta、Zep、LangMem），它在你不必手工搓抽取和实体消解的前提下给你一个。"}
+  ]}
+/>
+
+陷阱在于从第五步开始。图记忆在演示里令人印象深刻，在生产里则昂贵。爬这个阶梯；在解决你实际问题的第一级就停下。
+
+<Quiz
+  questions={[
+    {
+      q: "为什么一个大的上下文窗口和 agent 记忆不是一回事？",
+      options: [
+        "上下文窗口读取起来比记忆慢",
+        "上下文窗口每个回合都从零重新填充、是有限的，而且每次调用都要付费——记忆则在窗口之外廉价地持久存在",
+        "记忆只能存储文本，而上下文窗口也能存储图像",
+        "并没有真正的区别；'记忆'只是对一个更大窗口的营销说法"
+      ],
+      answer: 1,
+      explain: "窗口是一个回合的工作空间——易失、大小受限、每次请求都要重新付费。记忆是一个外部存储：写入一次、廉价引用、跨会话持久。核心技能是在两者之间移动正确的事实。"
+    },
+    {
+      q: "一位用户问：'在预算被削减之后我们紧接着决定了什么？'哪种记忆方案最有可能正确回答？",
+      options: [
+        "纯 vector/RAG 相似度搜索",
+        "在其上叠加一份摘要的全上下文塞入",
+        "在关系上带时间戳的 knowledge-graph 记忆",
+        "程序记忆"
+      ],
+      answer: 2,
+      explain: "这是一个时间性的、多跳的问题——'在 X 之后'并串联两个事件。余弦相似度对排序毫无感知。带时间戳的图遍历正是为这种情况打造的模式，这也是为什么图记忆把 LoCoMo 的时间性和多跳类别提升最多。"
+    },
+    {
+      q: "对于'用户偏好公制单位'，哪种分类是正确的？",
+      options: [
+        "情景记忆——它发生在某个时间点",
+        "工作记忆——它只在这个回合需要",
+        "语义记忆——一个关于当前什么为真的无时间性事实",
+        "程序记忆——它是一项技能"
+      ],
+      answer: 2,
+      explain: "这是一个剥离了你何时学到它的持久事实——正是语义记忆的定义。如果问题是'用户是什么时候告诉我他们偏好公制的？'，那才是情景记忆。"
+    },
+    {
+      q: "你在构建一个短的、单会话的辅助机器人。正确的记忆设计是什么？",
+      options: [
+        "从第一天起就用一个带时间戳的 knowledge graph，为将来做准备",
+        "除了上下文窗口什么都不要——加一个存储是不必要的开销",
+        "一个用所有可能事实预填的 vector 数据库",
+        "并行的完整情景 + 语义 + 程序存储"
+      ],
+      answer: 1,
+      explain: "只按你的问题所要求的高度爬这个阶梯。一个单会话机器人的工作记忆就是上下文窗口本身。在这里构建持久化只会增加成本和失败模式，却没有回报。"
+    }
+  ]}
+/>
+
+<Flashcards title="Agent 记忆词汇" cards={[{front: "工作记忆", back: "此刻在上下文窗口里的东西——当前回合的草稿纸。易失、每次调用都重新付费、不是持久化。"}, {front: "情景记忆", back: "带时间戳的具体事件。'周二用户说了 X。'时间性——顺序和时间点都很重要。"}, {front: "语义记忆", back: "持久的、无时间性的事实和偏好。'用户偏好公制。'agent 认为当前为真的东西。"}, {front: "程序记忆", back: "如何做某件事——可复用的技能和工作流。最不成熟；常以指令文件 / 技能的形式存在。"}, {front: "Vector / RAG 记忆", back: "把记忆存为 embedding，按相似度取回 top-k。对事实很棒；在时间性和多跳上很弱。"}, {front: "Knowledge-graph 记忆", back: "你遍历的实体 + 带时间戳的关系。解决多跳和时间性问题；需要实打实的工程。"}, {front: "压缩", back: "周期性地把历史摘要化，并从提炼版本继续。最便宜的长期记忆；有丢掉一个需要的细节的风险。"}, {front: "LoCoMo", back: "标准的长期对话记忆 benchmark。系统通过单跳召回而在时间性/多跳上失败——围绕这一点来设计。"}]} />
+
+## 底线
+
+记忆不是你打开的一个功能——它是**一个你设计的流程**：什么离开窗口、它存在哪里，以及它如何回来。给四种记忆类型命名，这样你就不会为它们全部构建一个大杂烩。从解决你问题的最便宜的存储模式开始，只有当你感到下一种的痛时才往上爬。并且用时间性和多跳用例来衡量，因为单跳召回会让一切看起来比实际更聪明。
+
+记忆是 [Context Engineering](/docs/frontiers/context-engineering) 的另一半：context engineering 决定*这个回合*什么填满窗口；记忆决定什么在回合*之间*存活下来。二者合起来，就是把一个聊天机器人和一个越用越好的 agent 区分开来的东西。
+
+## 来源与延伸阅读
+
+- [Evaluating Very Long-Term Conversational Memory of LLM Agents (LoCoMo)](https://arxiv.org/abs/2402.17753) — 那个经典的 benchmark；[项目页面](https://snap-research.github.io/locomo/)。
+- [Effective context engineering for AI agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) — Anthropic 谈压缩、记笔记和即时检索。
+- [Claude memory tool & context editing docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool) — 面向开发者的原语。
+- [Agent Memory Techniques](https://github.com/NirDiamant/Agent_Memory_Techniques) — 30 个可运行的 notebook，涵盖对话缓冲区、vector 存储、knowledge graph、情景/语义记忆、Mem0、Letta、Zep、Graphiti 和 LoCoMo。
+- [The State of AI Agent Memory 2026](https://mem0.ai/blog/state-of-ai-agent-memory-2026) — 关于记忆架构和 benchmark 的厂商报告（带着惯常的对自我报告数字的谨慎来阅读）。
+- AILmanac 上的相关内容：[Context Engineering](/docs/frontiers/context-engineering) · [Long-Running Agent Harnesses](/docs/frontiers/long-running-agent-harnesses) · [RAG](/docs/foundations/rag) · [Claude app memory](/docs/claude-app/memory) · [Memory & Context Editing (API)](/docs/api/memory-and-context-editing)。
