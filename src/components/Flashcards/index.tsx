@@ -52,6 +52,7 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
   const isLast = current === total - 1;
   const progress = ((current + 1) / total) * 100;
   const cardId = `${baseId}-card`;
+  const instrId = `${baseId}-instr`;
 
   const go = (next: number) => {
     setFlipped(false); // always land on the term side after navigating
@@ -63,6 +64,12 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
     if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
       e.preventDefault();
       flip();
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      go(current + 1); // next card (no-op past the end via clamp)
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      go(current - 1); // previous card
     }
   };
 
@@ -94,11 +101,12 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
         type="button"
         className={styles.card}
         data-flipped={flipped ? 'true' : 'false'}
+        data-has-more={isLast ? 'false' : 'true'}
         onClick={flip}
         onKeyDown={onCardKeyDown}
         aria-pressed={flipped}
         aria-label={flipLabel}
-        aria-describedby={cardId}>
+        aria-describedby={`${cardId} ${instrId}`}>
         <span className={styles.flipHint} aria-hidden="true">
           {flipped ? '↩ term' : 'tap to flip ✨'}
         </span>
@@ -122,6 +130,15 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
           </span>
         </span>
       </button>
+
+      {/* Static keyboard instructions, referenced by the card via aria-describedby. */}
+      <span id={instrId} className={styles.srOnly}>
+        {translate({
+          id: 'flashcards.kbdHint',
+          message:
+            'Press Enter or Space to flip the card. Use the left and right arrow keys to move between cards.',
+        })}
+      </span>
 
       {/* Polite live region announces which face is shown after a flip. */}
       <span className={styles.srOnly} aria-live="polite">
