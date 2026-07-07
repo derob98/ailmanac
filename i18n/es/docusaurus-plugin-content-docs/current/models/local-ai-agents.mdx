@@ -1,0 +1,238 @@
+---
+sidebar_position: 11
+title: "Crear agentes de IA locales"
+description: "Agentes autónomos que se ejecutan por completo en tu máquina con un modelo local de pesos abiertos: privados, sin conexión y gratis de ejecutar. La arquitectura, las concesiones y cómo empezar."
+keywords: [local AI agent, offline agent, Ollama agent, private AI agent, local LLM tool use, self-hosted agent]
+---
+
+<LevelBadge level="advanced" />
+
+Un **agente de IA local** es un bucle autónomo que se ejecuta por completo en tu propio hardware: un modelo de pesos abiertos (servido por [Ollama](/docs/models/run-models-locally-ollama) o LM Studio) decide qué hacer, llama a las **herramientas** que le das, lee los resultados y sigue adelante hasta terminar la tarea, **sin que nada salga de tu máquina**. Sin API en la nube, sin factura por llamada, sin necesidad de internet. La pega: un modelo lo bastante pequeño para correr en un portátil es más débil en razonamiento difícil y planificación a largo plazo que un modelo de frontera, y *tú* eres el responsable de su fiabilidad y seguridad. Esta página cubre el argumento honesto a favor de los agentes locales, la arquitectura mínima, qué se ejecuta realmente en local y un camino realista hacia el primero.
+
+<Callout type="objectives" items={[
+  "Saber POR QUÉ construirías un agente que se ejecuta en local, y las concesiones honestas frente a un agente con API en la nube",
+  "Entender la arquitectura mínima: modelo local + bucle de llamada a herramientas + herramientas + una barrera/condición de parada",
+  "Elegir un modelo local que realmente pueda hacer uso de herramientas / trabajo agéntico",
+  "Saber qué frameworks de agentes se ejecutan en local apuntando a un endpoint local (LangGraph, CrewAI, OpenAI Agents SDK)",
+  "Seguir un camino de 'empezar sencillo' desde una única llamada a herramienta hasta un bucle con barreras",
+  "Aislar (sandbox) y limitar el presupuesto del agente para que un bucle autónomo no pueda causar daños reales",
+]} />
+
+## Por qué construir un agente *local* (y cuándo no)
+
+Un [agente de uso de herramientas](/docs/api/tool-use) ordinario llama a un modelo en la nube. Un agente *local* cambia esa llamada en la nube por un modelo que corre en tu propia máquina. Renuncias a algo de capacidad y heredas cierta carga operativa; a cambio obtienes cuatro cosas difíciles de conseguir de otro modo:
+
+- **Privacidad** — los prompts, las entradas a las herramientas y las salidas de las herramientas nunca salen de la máquina. Esta es la razón principal por la que los equipos en entornos regulados, sensibles o aislados (air-gapped) construyen agentes locales: los datos físicamente no pueden ir a un tercero.
+- **Sin conexión** — sin internet, sin dependencia de API, sin caídas del proveedor. El agente son archivos en tu disco; se ejecuta en un avión o detrás de un cortafuegos.
+- **Sin coste por llamada** — un bucle de agente puede disparar decenas de llamadas al modelo por tarea. En local esas llamadas son "gratis" (pagas en electricidad y hardware, no en tokens), así que puedes dejar que itere sin vigilar un contador.
+- **Control total** — fija una versión exacta del modelo, personaliza el comportamiento y ejecuta sin límites de tasa ni sorpresas en los términos de servicio.
+
+Las concesiones honestas — ten claridad sobre estas antes de comprometerte:
+
+- **Brecha de capacidad.** La parte más difícil de un agente es el *razonamiento*: planificar trabajo de varios pasos, recuperarse de una llamada a herramienta fallida, saber cuándo parar. Un modelo que puedes ejecutar en un portátil (aproximadamente entre 1B y 14B de parámetros) es notablemente más débil aquí que un modelo de frontera. Los bucles simples y bien acotados funcionan bien en local; las tareas de largo horizonte y abiertas son donde los agentes locales se descarrilan con más frecuencia.
+- **Tú eres el responsable de la fiabilidad y la seguridad.** Ningún proveedor filtra, monitoriza ni pone barreras por ti. Si el agente entra en bucle infinito, llama a la herramienta equivocada o realiza una acción destructiva, eso recae en tu diseño. (Mira la advertencia de más abajo: esta es la parte que la gente subestima.)
+- **Límites de hardware.** Los modelos más grandes e inteligentes necesitan más RAM/VRAM de la que tienen la mayoría de las máquinas. Normalmente eliges *el modelo más grande y capaz que tu hardware puede ejecutar*, no el mejor modelo que existe.
+
+Una regla práctica duradera: **empieza en local, escala cuando la tarea lo exija.** Usa un agente local para trabajo privado/sin conexión/barato a escala y para bucles bien acotados; recurre a un agente con API de frontera cuando la tarea necesite realmente el razonamiento extra. La arquitectura de abajo es idéntica en ambos casos —solo cambia el endpoint— así que puedes prototipar en local y cambiar de modelo más adelante.
+
+## La arquitectura mínima
+
+Reduce un agente a su núcleo y quedan cuatro partes. Todo lo demás es comodidad encima de estas.
+
+```
+        ┌─────────────────────────────────────────────┐
+        │                                             │
+        │   1. LOCAL MODEL  ──►  decides next action  │
+        │      (Ollama / LM Studio, tool-capable)     │
+        │                  │                          │
+        │                  ▼                          │
+        │   2. TOOL-CALLING LOOP                       │
+        │      parse the model's tool request,         │
+        │      run it, feed the result back            │
+        │                  │                          │
+        │                  ▼                          │
+        │   3. TOOLS  ──►  search / read file /        │
+        │      run code / call an API (your code)      │
+        │                  │                          │
+        │                  ▼                          │
+        │   4. GUARDRAIL / STOP CONDITION              │
+        │      max steps, budget, approval gate,       │
+        │      "done" check ──► exit the loop          │
+        │                                             │
+        └─────────────────────────────────────────────┘
+```
+
+1. **Un modelo local que admita llamada a herramientas.** El modelo debe ser capaz de emitir una petición estructurada para llamar a una herramienta (también conocida como *function calling*), no solo chatear. Ollama expone esto a través de su API y de un **endpoint compatible con OpenAI** en `http://localhost:11434/v1`, así que cualquier framework que hable el formato de OpenAI puede manejar un modelo local. <VerifyNote lastVerified="2026-06-28" source="https://ollama.com/blog/tool-support">Ollama admite la llamada a herramientas y lista los modelos con capacidad para herramientas bajo su categoría Tools; el endpoint compatible con OpenAI (`/v1`) también admite herramientas. Qué modelos exactos admiten herramientas cambia a medida que llegan nuevas versiones: consulta la lista actual de Tools en <a href="https://ollama.com/search?c=tools">ollama.com/search?c=tools</a>.</VerifyNote>
+2. **El bucle de llamada a herramientas.** El corazón del agente: envía la conversación al modelo, comprueba si pidió llamar a una herramienta, ejecuta esa herramienta, añade el resultado y repite. Cuando el modelo responde sin solicitar una herramienta, el bucle termina.
+3. **Herramientas.** Funciones sencillas que expones al modelo: buscar en la web, leer un archivo, ejecutar un comando de shell, consultar una base de datos, llamar a una API. Cada herramienta tiene un nombre, una descripción y un esquema de entrada tipado para que el modelo sepa cuándo y cómo usarla.
+4. **Una barrera / condición de parada.** Innegociable para la autonomía. Como mínimo un **límite máximo de pasos** para que el bucle no pueda correr para siempre, más —para cualquier cosa que escriba, borre, gaste o envíe— una **puerta de aprobación** o un sandbox. Sin esto no tienes un agente, tienes un bucle infinito con acceso a archivos.
+
+El bucle del paso 2 es realmente pequeño. Aquí está en pseudocódigo Python contra un endpoint local de Ollama:
+
+<PromptCard title="Un bucle mínimo de agente local (pseudocódigo Python, apunta a Ollama local)">{`from openai import OpenAI
+
+# Point the OpenAI client at your LOCAL Ollama endpoint — nothing leaves the machine
+client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "read_file",
+        "description": "Read a UTF-8 text file and return its contents",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+}]
+
+def run_tool(name, args):
+    if name == "read_file":
+        # GUARDRAIL: only allow reads inside a sandboxed directory
+        return safe_read(args["path"])
+    raise ValueError(f"unknown tool: {name}")
+
+messages = [{"role": "user", "content": "Summarize ./notes/today.md"}]
+
+for step in range(8):                       # GUARDRAIL: hard step cap
+    resp = client.chat.completions.create(
+        model="llama3.1", messages=messages, tools=tools,
+    )
+    msg = resp.choices[0].message
+    messages.append(msg)
+
+    if not msg.tool_calls:                  # STOP: model answered, we're done
+        print(msg.content)
+        break
+
+    for call in msg.tool_calls:
+        result = run_tool(call.function.name, json.loads(call.function.arguments))
+        messages.append({
+            "role": "tool", "tool_call_id": call.id, "content": str(result),
+        })
+else:
+    print("Stopped: hit the step cap without finishing.")`}</PromptCard>
+
+Ese es todo el patrón. Los frameworks añaden memoria, reintentos, orquestación multiagente, trazabilidad y estado estructurado encima, pero cada uno de ellos es una versión más robusta de este bucle.
+
+## Qué modelos locales sirven para trabajo agéntico / de uso de herramientas
+
+No todos los modelos de pesos abiertos pueden manejar un agente. El listón es la **llamada fiable a herramientas**: el modelo tiene que emitir peticiones de herramientas bien formadas de forma consistente, elegir la herramienta correcta y no alucinar argumentos. Dos filtros al elegir:
+
+- **Debe ser un modelo con capacidad para herramientas.** Ollama los etiqueta: navega por la [categoría Tools](https://ollama.com/search?c=tools) para ver la lista actual en lugar de dar por hecho. Entre los modelos citados habitualmente por un buen uso local de herramientas están las familias afinadas por instrucciones Qwen y Llama; la mejor elección exacta cambia trimestre a trimestre.
+- **Debe caber en tu hardware con espacio para el contexto.** Los bucles de agente acumulan historiales de mensajes largos (cada resultado de herramienta se añade), así que necesitas en memoria tanto los pesos *como* una ventana de contexto generosa. Un modelo más pequeño que cabe cómodamente y corre rápido a menudo supera a uno más grande que hace swap a disco y se atasca a mitad del bucle.
+
+<VerifyNote lastVerified="2026-06-28" source="https://ollama.com/search?c=tools">
+Los nombres concretos de modelos y su fiabilidad en la llamada a herramientas cambian rápido a medida que llegan nuevos lanzamientos de pesos abiertos. Trata cualquier modelo nombrado (Llama, Qwen, Mistral, etc.) como perecedero: verifícalo contra la categoría Tools actual de Ollama y con una evaluación rápida tuya antes de comprometerte. Para una visión más amplia del panorama de modelos abiertos consulta <a href="/docs/models/deepseek-qwen-open-models">Modelos abiertos DeepSeek &amp; Qwen</a>.
+</VerifyNote>
+
+El movimiento decisivo no es leer benchmarks, es ejecutar una pequeña [eval](/docs/power-user/evals) de *tu* tarea contra dos o tres modelos candidatos. Un modelo que encabeza un ranking puede seguir siendo poco fiable con las herramientas específicas que tu agente necesita. Mide sobre tu propio bucle.
+
+## Frameworks que se ejecutan en local
+
+Puedes montar el bucle de arriba a mano, y para un primer agente esa es una gran forma de aprender. Para cualquier cosa real, un framework te da reintentos, memoria, coordinación multiagente y trazabilidad. El dato clave: los frameworks de agentes populares son **agnósticos respecto al modelo**, no les importa si el modelo está en la nube o en `localhost`, siempre que los apuntes al endpoint correcto.
+
+- **[LangGraph](https://github.com/langchain-ai/langgraph)** — un framework de orquestación de bajo nivel para agentes con estado (ejecución duradera, persistencia, humano en el bucle). Agnóstico respecto al modelo; conéctalo a un modelo local mediante la integración Ollama de LangChain sin soluciones alternativas. Bueno cuando necesitas control explícito sobre el grafo de estado del agente.
+- **[CrewAI](https://docs.crewai.com/en/learn/llm-connections)** — un framework de más alto nivel para orquestar uno o más agentes basados en roles ("crews"). Agnóstico respecto al modelo mediante LiteLLM; apunta un agente a un modelo local con `LLM(model="ollama/llama3.1", base_url="http://localhost:11434")`. Bueno cuando quieres componer rápidamente varios agentes que cooperan.
+- **[OpenAI Agents SDK](https://openai.github.io/openai-agents-python/)** — un framework multiagente ligero. A pesar del nombre es **agnóstico respecto al proveedor**: mediante su [integración con LiteLLM](https://openai.github.io/openai-agents-python/models/litellm/) puedes apuntarlo a un modelo local de Ollama en lugar de a uno de OpenAI. Bueno cuando quieres la ergonomía de agentes de OpenAI sobre un backend local.
+
+<VerifyNote lastVerified="2026-06-28" source="https://openai.github.io/openai-agents-python/models/litellm/">
+Los tres frameworks ejecutaban modelos locales de pesos abiertos en la fecha de verificación: LangGraph y CrewAI de forma nativa, y el OpenAI Agents SDK mediante su adaptador LiteLLM. El estado de los adaptadores, los extras de instalación y la configuración exacta (prefijos de nombre de modelo, URLs base) cambian entre versiones. Confírmalo contra la documentación actual de cada proyecto antes de construir. Para una comparación más amplia de estos y otros frameworks consulta <a href="/docs/models/open-source-agent-frameworks">Frameworks de agentes de código abierto</a>.
+</VerifyNote>
+
+Elige un framework y apréndelo bien en lugar de probar los tres. Los conceptos (agentes, herramientas, bucles, estado) se transfieren; las APIs son detalles.
+
+## Construye tu primer agente local
+
+Un camino realista va de "sin bucle en absoluto" a "bucle autónomo con barreras" en pasos deliberados. No te saltes al paso 4: la mayoría de los fallos que la gente encuentra con los agentes locales vienen de dar demasiada cuerda a un modelo débil demasiado pronto.
+
+<Steps items={[
+  {title: "Pon en marcha un modelo con capacidad para herramientas en local", body: "Instala Ollama (ver Ejecutar modelos en local), luego descarga un modelo etiquetado para herramientas, p. ej. ollama pull llama3.1. Confirma que sirve en http://localhost:11434 y que ollama list lo muestra. Todavía no hay agente: solo un modelo al que puedes llamar."},
+  {title: "Haz que funcione UNA llamada a herramienta (sin bucle)", body: "Envía una única petición con una herramienta definida (p. ej. una función get_time o read_file) y comprueba que el modelo devuelve realmente una llamada a herramienta bien formada con argumentos válidos. Si un modelo no puede hacer de forma fiable una llamada limpia a herramienta, no sobrevivirá a un bucle: cambia de modelo ahora, no más tarde."},
+  {title: "Envuélvelo en un bucle acotado", body: "Añade el bucle ejecutar-ejecutar-realimentar del PromptCard de arriba, con un límite máximo de pasos estricto (empieza en 6–8). Dale una tarea pequeña y bien acotada con herramientas de solo lectura. Observa cómo se imprime cada paso para poder ver el razonamiento del modelo y pillarlo si entra en bucle o usa mal una herramienta."},
+  {title: "Añade barreras antes de cualquier herramienta de escritura/destructiva", body: "Solo ahora introduce herramientas que cambian el estado (escribir un archivo, ejecutar un comando, llamar a una API que cuesta dinero). Pon una puerta de aprobación delante de cada una o ejecútalas en un sandbox/contenedor, y añade un límite de presupuesto o de tiempo real. Prueba los modos de fallo deliberadamente: dale una tarea que no pueda terminar y confirma que se detiene limpiamente."},
+  {title: "Gradúate a un framework (opcional)", body: "Una vez que el bucle hecho a mano funciona, pórtalo a LangGraph, CrewAI o el OpenAI Agents SDK apuntando a tu endpoint local. Obtienes reintentos, memoria y orquestación multiagente gratis, y el modelo se queda exactamente donde está, en tu máquina."},
+]} />
+
+<Callout type="warning" items={["Un agente local con herramientas todavía puede realizar acciones reales: aíslalo en un sandbox, exige aprobación para los pasos destructivos y limita sus bucles/presupuesto."]} />
+
+## Compruébate
+
+<Quiz title="Compruébate" questions={[
+  {
+    q: "¿Cuál es la razón más importante por la que los equipos construyen agentes que se ejecutan en local en lugar de contra una API en la nube?",
+    options: [
+      "Los modelos locales son más inteligentes en razonamiento de largo horizonte que los modelos de frontera",
+      "Privacidad/control: los prompts, las entradas a las herramientas y las salidas nunca salen de la máquina",
+      "Los agentes locales no necesitan una condición de parada ni barreras",
+      "Frameworks como LangGraph solo se ejecutan en local"
+    ],
+    answer: 1,
+    explain: "La privacidad es la ventaja definitoria: los datos físicamente no pueden llegar a un tercero. Los modelos locales suelen ser más débiles en razonamiento difícil, siguen necesitando barreras, y los frameworks son agnósticos respecto al modelo (se ejecutan en la nube o en local)."
+  },
+  {
+    q: "¿Qué cuatro partes componen la arquitectura mínima de un agente local?",
+    options: [
+      "Una GPU, una base de datos, un servidor web y un frontend",
+      "Un modelo local con capacidad para herramientas, un bucle de llamada a herramientas, las herramientas y una barrera/condición de parada",
+      "Una clave de API en la nube, un almacén de vectores, una plantilla de prompt y un cron job",
+      "Tres agentes que cooperan y un supervisor"
+    ],
+    answer: 1,
+    explain: "Reducido al mínimo, un agente es: un modelo que puede solicitar herramientas, un bucle que ejecuta esas peticiones y realimenta los resultados, las herramientas en sí, y una barrera (límite de pasos/presupuesto, puerta de aprobación) que acota el bucle."
+  },
+  {
+    q: "¿Qué significa que LangGraph, CrewAI y el OpenAI Agents SDK sean 'agnósticos respecto al modelo' para uso local?",
+    options: [
+      "Incluyen su propio modelo local integrado",
+      "Se pueden apuntar a un endpoint local (p. ej. el /v1 compatible con OpenAI de Ollama) en lugar de a un modelo en la nube",
+      "Solo funcionan con modelos de OpenAI",
+      "Requieren reescribir tu agente para cada modelo"
+    ],
+    answer: 1,
+    explain: "Agnóstico respecto al modelo significa que al framework no le importa dónde vive el modelo: lo apuntas a un endpoint local. El OpenAI Agents SDK llega a los modelos locales mediante su adaptador LiteLLM; LangGraph y CrewAI lo hacen de forma nativa."
+  },
+  {
+    q: "Estás construyendo tu primer agente local. ¿Qué deberías hacer ANTES de añadir cualquier herramienta que escriba archivos o ejecute comandos?",
+    options: [
+      "Quitar el límite de pasos para que pueda terminar tareas complejas",
+      "Confirmar que funciona una llamada limpia a herramienta de solo lectura, ejecutar un bucle acotado, y luego poner las herramientas destructivas detrás de aprobación/sandbox + un límite de presupuesto",
+      "Cambiar al modelo más grande disponible sin importar el hardware",
+      "Darle acceso a internet y dejarlo iterar libremente"
+    ],
+    answer: 1,
+    explain: "Construye de forma incremental: prueba una llamada a herramienta, luego un bucle acotado de solo lectura, y solo entonces introduce herramientas que cambian el estado, detrás de puertas de aprobación o un sandbox, con límites de pasos y de presupuesto. Quitar límites o ir a lo grande demasiado pronto es exactamente como los agentes locales causan daños reales."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "¿Qué es un 'agente de IA local'?", back: "Un bucle autónomo que se ejecuta por completo en tu propio hardware: un modelo de pesos abiertos (vía Ollama/LM Studio) decide acciones, llama a herramientas, lee resultados y repite hasta terminar, sin que ningún dato salga de la máquina y sin coste por llamada." },
+  { front: "Las cuatro partes de la arquitectura mínima del agente", back: "1) Un modelo local con capacidad para herramientas, 2) un bucle de llamada a herramientas (ejecutar petición → realimentar resultado), 3) herramientas (tus funciones), 4) una barrera/condición de parada (límite de pasos, presupuesto, puerta de aprobación)." },
+  { front: "¿Qué permite que cualquier framework en formato OpenAI maneje un modelo local?", back: "Ollama expone un endpoint compatible con OpenAI en http://localhost:11434/v1 que admite la llamada a herramientas, así que los frameworks apuntan ahí su cliente de OpenAI en lugar de a la nube." },
+  { front: "La mayor concesión honesta de los agentes locales", back: "La brecha de capacidad en razonamiento/planificación de largo horizonte: un modelo del tamaño de un portátil (~1B–14B) es notablemente más débil que un modelo de frontera, y tú eres el responsable de toda la fiabilidad y la seguridad." },
+  { front: "Cómo elegir un modelo local para trabajo agéntico", back: "Exige llamada fiable a herramientas (usa la categoría Tools de Ollama), asegúrate de que cabe en tu hardware con espacio para un contexto creciente, y luego ejecuta una pequeña eval de TU tarea entre 2–3 candidatos en lugar de confiar en los rankings." },
+  { front: "Tres frameworks que ejecutan agentes sobre un modelo local", back: "LangGraph y CrewAI (agnósticos respecto al modelo, con soporte nativo para Ollama) y el OpenAI Agents SDK (agnóstico respecto al proveedor mediante su adaptador LiteLLM): todos pueden apuntar a un endpoint local." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Un agente local es el bucle estándar de uso de herramientas con el modelo en la nube cambiado por un modelo de pesos abiertos en tu máquina: privado, sin conexión y gratis de iterar.",
+  "Arquitectura mínima = modelo local con capacidad para herramientas + bucle de llamada a herramientas + herramientas + una barrera/condición de parada. El bucle en sí es diminuto.",
+  "El endpoint compatible con OpenAI de Ollama (/v1) admite la llamada a herramientas, así que cualquier framework en formato OpenAI puede manejar un modelo local.",
+  "LangGraph, CrewAI y el OpenAI Agents SDK son agnósticos respecto al modelo: apúntalos a un endpoint local en lugar de a la nube.",
+  "Elige un modelo con capacidad para herramientas que quepa en tu hardware, y luego decide con una pequeña eval de tu propia tarea, no con un ranking.",
+  "Sé honesto sobre la brecha de capacidad y hazte responsable de la seguridad: limita los bucles y el presupuesto, aísla las herramientas en un sandbox y exige aprobación para cualquier cosa destructiva.",
+  "Empieza sencillo: una llamada limpia a herramienta → bucle acotado de solo lectura → herramientas destructivas con barreras → (opcionalmente) un framework."
+]} />
+
+## Fuentes y lecturas adicionales
+
+- [Ollama — Soporte de herramientas (blog)](https://ollama.com/blog/tool-support)
+- [Ollama — Documentación de llamada a herramientas](https://docs.ollama.com/capabilities/tool-calling)
+- [Ollama — Modelos con capacidad para herramientas (categoría Tools)](https://ollama.com/search?c=tools)
+- [Biblioteca de Ollama](https://ollama.com/library)
+- [LangGraph (GitHub — langchain-ai/langgraph)](https://github.com/langchain-ai/langgraph)
+- [Visión general de LangGraph — documentación de LangChain](https://docs.langchain.com/oss/python/langgraph/overview)
+- [CrewAI — Conectar a cualquier LLM (incl. Ollama)](https://docs.crewai.com/en/learn/llm-connections)
+- [OpenAI Agents SDK — documentación](https://openai.github.io/openai-agents-python/)
+- [OpenAI Agents SDK — integración con LiteLLM (modelos no OpenAI / locales)](https://openai.github.io/openai-agents-python/models/litellm/)
