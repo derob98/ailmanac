@@ -114,6 +114,17 @@ export default function Quiz({questions, title}: QuizProps): ReactNode {
         </span>
       </div>
 
+      {/* Slim progress meter — fills as questions are answered. Purely visual
+          (the count above carries the accessible label), transform-only so it
+          stays compositor-cheap, and starts at scaleX(0) on both server and
+          first client render → hydration-safe. */}
+      <div className={styles.meter} aria-hidden="true">
+        <span
+          className={`${styles.meterFill} ${allDone ? styles.meterDone : ''}`}
+          style={{transform: `scaleX(${total === 0 ? 0 : answeredCount / total})`}}
+        />
+      </div>
+
       <ol className={styles.questions}>
         {list.map((question, qi) => {
           const pick = picks[qi];
