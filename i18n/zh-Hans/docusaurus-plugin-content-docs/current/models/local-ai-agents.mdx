@@ -1,0 +1,238 @@
+---
+sidebar_position: 11
+title: "构建本地 AI 智能体"
+description: "完全在你自己机器上运行的自主智能体，使用本地开放权重模型——私密、离线、运行免费。架构、权衡取舍，以及如何上手。"
+keywords: [local AI agent, offline agent, Ollama agent, private AI agent, local LLM tool use, self-hosted agent]
+---
+
+<LevelBadge level="advanced" />
+
+**本地 AI 智能体**是一个完全运行在你自己硬件上的自主循环：一个开放权重模型（由 [Ollama](/docs/models/run-models-locally-ollama) 或 LM Studio 提供服务）决定要做什么、调用你给它的**工具**、读取结果，并持续运行直到任务完成——而且**没有任何数据离开你的机器**。没有云 API、没有按次计费、无需联网。代价是：一个小到能在笔记本电脑上运行的模型，在困难推理和长周期规划上比前沿模型更弱，而且*你*要为它的可靠性和安全性负责。本页讲述本地智能体的诚实理由、最小架构、真正在本地运行的东西，以及打造你第一个智能体的现实路径。
+
+<Callout type="objectives" items={[
+  "知道为什么你会想构建一个在本地运行的智能体——以及相对云 API 智能体的诚实权衡",
+  "理解最小架构：本地模型 + 工具调用循环 + 工具 + 护栏/停止条件",
+  "挑选一个真正能做工具调用/智能体工作的本地模型",
+  "了解哪些智能体框架可以通过指向本地端点在本地运行（LangGraph、CrewAI、OpenAI Agents SDK）",
+  "遵循一条从单次工具调用到带护栏循环的“由简入繁”路径",
+  "对智能体做沙箱隔离和预算上限，让自主循环无法造成真正的破坏",
+]} />
+
+## 为什么要构建*本地*智能体（以及何时不该）
+
+一个普通的[工具使用智能体](/docs/api/tool-use)调用的是云模型。而*本地*智能体把那次云调用换成了运行在你自己机器上的模型。你放弃一些能力，并承担一些运维负担；作为交换，你得到四样其他方式很难获得的东西：
+
+- **隐私**——提示词、工具输入和工具输出永远不离开机器。这正是身处受监管、敏感或气隙隔离环境的团队构建本地智能体的全部原因：数据在物理上无法送到第三方。
+- **离线**——无需联网、无 API 依赖、不受服务商宕机影响。智能体就是你磁盘上的文件；它能在飞机上或防火墙后运行。
+- **无按次成本**——一个智能体循环每个任务可能触发几十次模型调用。在本地这些调用是“免费”的（你付出的是电费和硬件，而非 token），所以你可以让它反复迭代而不必盯着计费表。
+- **完全掌控**——固定一个确切的模型版本、自定义行为，运行时不受速率限制或服务条款变动的意外影响。
+
+诚实的权衡取舍——在你投入之前请清醒看待这些：
+
+- **能力差距。**智能体最难的部分是*推理*：规划多步工作、从失败的工具调用中恢复、知道何时该停下。一个你能在笔记本电脑上运行的模型（大约 1B–14B 参数）在这方面明显弱于前沿模型。简单、范围明确的循环在本地运行得很好；长周期、开放式的任务恰恰是本地智能体最常出轨的地方。
+- **可靠性和安全性由你负责。**没有服务商为你过滤、监控或设护栏。如果智能体无限循环、调用了错误的工具，或采取了破坏性行动，那是你的设计问题。（见下方警告——这是人们最容易低估的部分。）
+- **硬件限制。**更大、更聪明的模型需要比大多数机器更多的 RAM/VRAM。你通常是在选择*你的硬件能运行的最大有能力模型*，而不是现存最好的模型。
+
+一条经久不衰的经验法则：**从本地起步，当任务需要时再升级。**把本地智能体用于私密/离线/规模化廉价的工作和范围明确的循环；当任务确实需要额外推理能力时，再动用前沿 API 智能体。下面的架构无论哪种方式都完全相同——只是端点变了——所以你可以在本地做原型，之后再换模型。
+
+## 最小架构
+
+把智能体剥到核心，就只有四个部分。其余一切都是在这之上的便利功能。
+
+```
+        ┌─────────────────────────────────────────────┐
+        │                                             │
+        │   1. LOCAL MODEL  ──►  decides next action  │
+        │      (Ollama / LM Studio, tool-capable)     │
+        │                  │                          │
+        │                  ▼                          │
+        │   2. TOOL-CALLING LOOP                       │
+        │      parse the model's tool request,         │
+        │      run it, feed the result back            │
+        │                  │                          │
+        │                  ▼                          │
+        │   3. TOOLS  ──►  search / read file /        │
+        │      run code / call an API (your code)      │
+        │                  │                          │
+        │                  ▼                          │
+        │   4. GUARDRAIL / STOP CONDITION              │
+        │      max steps, budget, approval gate,       │
+        │      "done" check ──► exit the loop          │
+        │                                             │
+        └─────────────────────────────────────────────┘
+```
+
+1. **一个支持工具调用的本地模型。**该模型必须能发出调用工具的结构化请求（即*函数调用*），而不仅仅是聊天。Ollama 通过它的 API 以及在 `http://localhost:11434/v1` 上的 **OpenAI 兼容端点**暴露此功能，因此任何会说 OpenAI 格式的框架都能驱动一个本地模型。<VerifyNote lastVerified="2026-06-28" source="https://ollama.com/blog/tool-support">Ollama 支持工具调用，并在其 Tools 分类下列出支持工具的模型；OpenAI 兼容端点（`/v1`）也支持工具。随着新版本发布，哪些确切模型支持工具会发生变化——请在 <a href="https://ollama.com/search?c=tools">ollama.com/search?c=tools</a> 查看当前的 Tools 列表。</VerifyNote>
+2. **工具调用循环。**智能体的核心：把对话发给模型，看它是否请求调用工具，运行那个工具，追加结果，然后重复。当模型不请求工具而直接回答时，循环结束。
+3. **工具。**你暴露给模型的普通函数——搜索网络、读取文件、运行 shell 命令、查询数据库、调用 API。每个工具都有一个名称、一段描述和一个带类型的输入 schema，好让模型知道何时以及如何使用它。
+4. **一个护栏/停止条件。**对自主性而言不可妥协。至少要有一个**最大步数上限**，让循环无法永远运行；此外——对任何会写入、删除、花钱或发送的操作——还要有一个**审批门**或一个沙箱。没有这个，你拥有的就不是智能体，而是一个能访问文件的死循环。
+
+第 2 步里的循环确实很小。这里用 Python 伪代码针对本地 Ollama 端点展示它：
+
+<PromptCard title="一个最小的本地智能体循环（Python 伪代码，指向本地 Ollama）">{`from openai import OpenAI
+
+# Point the OpenAI client at your LOCAL Ollama endpoint — nothing leaves the machine
+client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "read_file",
+        "description": "Read a UTF-8 text file and return its contents",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+}]
+
+def run_tool(name, args):
+    if name == "read_file":
+        # GUARDRAIL: only allow reads inside a sandboxed directory
+        return safe_read(args["path"])
+    raise ValueError(f"unknown tool: {name}")
+
+messages = [{"role": "user", "content": "Summarize ./notes/today.md"}]
+
+for step in range(8):                       # GUARDRAIL: hard step cap
+    resp = client.chat.completions.create(
+        model="llama3.1", messages=messages, tools=tools,
+    )
+    msg = resp.choices[0].message
+    messages.append(msg)
+
+    if not msg.tool_calls:                  # STOP: model answered, we're done
+        print(msg.content)
+        break
+
+    for call in msg.tool_calls:
+        result = run_tool(call.function.name, json.loads(call.function.arguments))
+        messages.append({
+            "role": "tool", "tool_call_id": call.id, "content": str(result),
+        })
+else:
+    print("Stopped: hit the step cap without finishing.")`}</PromptCard>
+
+这就是全部模式。框架在这之上加了记忆、重试、多智能体编排、追踪和结构化状态——但它们中的每一个都是这个循环的更健壮版本。
+
+## 哪些本地模型适合智能体/工具使用工作
+
+并非每个开放权重模型都能驱动一个智能体。门槛是**可靠的工具调用**：模型必须能稳定发出格式正确的工具请求、挑选正确的工具，并且不臆造参数。选择时用两个筛选条件：
+
+- **它必须是一个支持工具的模型。**Ollama 会给这些打标签——浏览 [Tools 分类](https://ollama.com/search?c=tools)获取当前列表，而不要想当然。常被提及在本地工具使用上表现扎实的模型包括 Qwen 和 Llama 的指令微调系列；具体最佳选择每个季度都在变。
+- **它必须适配你的硬件并为上下文留出余地。**智能体循环会累积很长的消息历史（每次工具结果都会被追加），所以你既需要权重*也*需要内存里充裕的上下文窗口。一个能舒适装下并快速运行的较小模型，往往胜过一个换页到磁盘、在循环中途卡住的较大模型。
+
+<VerifyNote lastVerified="2026-06-28" source="https://ollama.com/search?c=tools">
+随着新的开放权重模型发布，具体的模型名称及其工具调用可靠性变化很快。把任何具名模型（Llama、Qwen、Mistral 等）都当作易逝品——在投入之前，对照 Ollama 当前的 Tools 分类以及你自己的一次快速评测加以验证。想更全面地了解开放模型格局，见 <a href="/docs/models/deepseek-qwen-open-models">DeepSeek 与 Qwen 开放模型</a>。
+</VerifyNote>
+
+决定性的一步不是读基准分数——而是拿*你自己*任务的一个小型[评测](/docs/power-user/evals)去跑两三个候选模型。一个在排行榜上登顶的模型，在你智能体所需的具体工具上仍可能不可靠。要在你自己的循环上度量。
+
+## 可在本地运行的框架
+
+你可以手写上面的循环，对于第一个智能体来说这是很好的学习方式。但对于任何正式的东西，框架会给你重试、记忆、多智能体协调和追踪。关键事实是：主流的智能体框架都是**模型无关的**——只要你把它们指向正确的端点，它们不在乎模型是在云端还是在 `localhost` 上。
+
+- **[LangGraph](https://github.com/langchain-ai/langgraph)**——一个用于有状态智能体的低层编排框架（持久执行、持久化、人在环中）。模型无关；通过 LangChain 的 Ollama 集成把它接到本地模型，无需任何变通手段。当你需要对智能体的状态图进行显式控制时很合适。
+- **[CrewAI](https://docs.crewai.com/en/learn/llm-connections)**——一个用于编排一个或多个基于角色的智能体（“crews”）的更高层框架。通过 LiteLLM 实现模型无关；用 `LLM(model="ollama/llama3.1", base_url="http://localhost:11434")` 把智能体指向本地模型。当你想快速组合多个协作智能体时很合适。
+- **[OpenAI Agents SDK](https://openai.github.io/openai-agents-python/)**——一个轻量级的多智能体框架。尽管名字如此，它其实是**服务商无关的**：通过它的 [LiteLLM 集成](https://openai.github.io/openai-agents-python/models/litellm/)，你可以把它指向一个本地 Ollama 模型而非 OpenAI 的模型。当你想在本地后端上获得 OpenAI 的智能体使用体验时很合适。
+
+<VerifyNote lastVerified="2026-06-28" source="https://openai.github.io/openai-agents-python/models/litellm/">
+在验证之日，这三个框架都能运行本地开放权重模型——LangGraph 和 CrewAI 原生支持，OpenAI Agents SDK 则通过它的 LiteLLM 适配器。适配器状态、安装附加项以及确切配置（模型名前缀、基础 URL）在不同版本之间会变化。构建之前请对照各项目当前的文档确认。想更广泛地比较这些及其他框架，见 <a href="/docs/models/open-source-agent-frameworks">开源智能体框架</a>。
+</VerifyNote>
+
+挑一个框架并把它学透，而不是三个都浅尝辄止。概念（智能体、工具、循环、状态）是可迁移的；API 只是细节。
+
+## 构建你的第一个本地智能体
+
+一条现实的路径会分成刻意的几步，从“完全没有循环”走到“带护栏的自主循环”。别跳到第 4 步——人们在本地智能体上遇到的多数失败，都来自太早给一个弱模型太多自由。
+
+<Steps items={[
+  {title: "让一个支持工具的模型在本地跑起来", body: "安装 Ollama（见“在本地运行模型”），然后拉取一个带工具标签的模型，例如 ollama pull llama3.1。确认它在 http://localhost:11434 上提供服务，且 ollama list 能看到它。还没有智能体——只是一个你能调用的模型。"},
+  {title: "让一次工具调用跑通（无循环）", body: "发送一个只定义了一个工具的单次请求（例如一个 get_time 或 read_file 函数），检查模型是否真的返回一个格式正确、参数有效的工具调用。如果一个模型连一次干净的工具调用都做不稳，它就撑不过一个循环——现在就换模型，别等以后。"},
+  {title: "把它包进一个有界循环", body: "加上上面 PromptCard 里的“运行—执行—回传”循环，配一个硬性最大步数上限（从 6–8 起步）。给它一个小而范围明确的任务，工具只读。盯着每一步打印，好看到模型的推理，及时抓住它兜圈或误用工具。"},
+  {title: "在任何写入/破坏性工具之前加上护栏", body: "只在此时才引入会改变状态的工具（写文件、运行命令、调用花钱的 API）。把每一个都放在一个审批提示之后，或在沙箱/容器里运行，并加上预算或时钟上限。刻意测试各种失败模式：喂给它一个它无法完成的任务，确认它能干净地停下。"},
+  {title: "毕业到一个框架（可选）", body: "一旦手写循环能用，就把它移植到 LangGraph、CrewAI 或指向你本地端点的 OpenAI Agents SDK。你会免费得到重试、记忆和多智能体编排——而模型仍然待在原地，在你的机器上。"},
+]} />
+
+<Callout type="warning" items={["一个带工具的本地智能体仍然可以采取真实的行动——给它做沙箱隔离、对破坏性步骤要求审批，并对它的循环/预算设上限。"]} />
+
+## 自测一下
+
+<Quiz title="自测一下" questions={[
+  {
+    q: "团队构建在本地运行而非调用云 API 的智能体，最重要的单一原因是什么？",
+    options: [
+      "本地模型在长周期推理上比前沿模型更聪明",
+      "隐私/掌控——提示词、工具输入和输出永远不离开机器",
+      "本地智能体不需要停止条件或护栏",
+      "像 LangGraph 这样的框架只能在本地运行"
+    ],
+    answer: 1,
+    explain: "隐私是决定性的优势：数据在物理上无法到达第三方。本地模型在困难推理上通常更弱，仍然需要护栏，而且这些框架是模型无关的（云端或本地都能运行）。"
+  },
+  {
+    q: "构成最小本地智能体架构的四个部分是哪些？",
+    options: [
+      "一块 GPU、一个数据库、一个 Web 服务器和一个前端",
+      "一个支持工具的本地模型、一个工具调用循环、若干工具，以及一个护栏/停止条件",
+      "一个云 API 密钥、一个向量库、一个提示词模板和一个定时任务",
+      "三个协作的智能体和一个监督者"
+    ],
+    answer: 1,
+    explain: "剥到最简，一个智能体是：一个能请求工具的模型、一个运行这些请求并回传结果的循环、工具本身，以及一个约束循环的护栏（步数/预算上限、审批门）。"
+  },
+  {
+    q: "说 LangGraph、CrewAI 和 OpenAI Agents SDK 在本地使用上“模型无关”是什么意思？",
+    options: [
+      "它们内置了自己的本地模型",
+      "它们可以被指向一个本地端点（例如 Ollama 的 OpenAI 兼容 /v1）而非云模型",
+      "它们只能与 OpenAI 模型配合使用",
+      "它们要求为每个模型重写你的智能体"
+    ],
+    answer: 1,
+    explain: "模型无关意味着框架不在乎模型在哪里——你把它指向一个本地端点即可。OpenAI Agents SDK 通过它的 LiteLLM 适配器接入本地模型；LangGraph 和 CrewAI 则原生做到。"
+  },
+  {
+    q: "你正在构建你的第一个本地智能体。在加入任何会写文件或运行命令的工具之前，你应该做什么？",
+    options: [
+      "移除步数上限，好让它能完成复杂任务",
+      "确认一次干净的只读工具调用能跑通，运行一个有界循环，然后把破坏性工具放在审批/沙箱 + 预算上限之后",
+      "不管硬件如何，都切换到可用的最大模型",
+      "给它联网权限，让它自由迭代"
+    ],
+    answer: 1,
+    explain: "循序渐进：先验证一次工具调用，再做一个有界的只读循环，只有到那时才引入会改变状态的工具——放在审批门或沙箱之后，配上步数和预算上限。移除限制或太早放开，恰恰是本地智能体造成真正破坏的方式。"
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "什么是“本地 AI 智能体”？", back: "一个完全运行在你自己硬件上的自主循环：一个开放权重模型（经由 Ollama/LM Studio）决定行动、调用工具、读取结果，并重复直到完成——没有数据离开机器，也没有按次成本。" },
+  { front: "最小智能体架构的四个部分", back: "1）一个支持工具的本地模型，2）一个工具调用循环（运行请求 → 回传结果），3）工具（你的函数），4）一个护栏/停止条件（步数上限、预算、审批门）。" },
+  { front: "是什么让任何 OpenAI 格式的框架都能驱动本地模型？", back: "Ollama 在 http://localhost:11434/v1 暴露了一个支持工具调用的 OpenAI 兼容端点，所以框架把它们的 OpenAI 客户端指向那里，而非指向云端。" },
+  { front: "本地智能体最大的诚实权衡", back: "推理/长周期规划上的能力差距：一个笔记本电脑大小的模型（约 1B–14B）明显弱于前沿模型，而且所有可靠性和安全性都由你自己负责。" },
+  { front: "如何为智能体工作挑选本地模型", back: "要求可靠的工具调用（用 Ollama 的 Tools 分类），确保它能适配你的硬件并为不断增长的上下文留出余地，然后拿你自己的任务在 2–3 个候选上跑一个小型评测，而不是相信排行榜。" },
+  { front: "三个能在本地模型上运行智能体的框架", back: "LangGraph 和 CrewAI（模型无关，原生支持 Ollama）以及 OpenAI Agents SDK（通过它的 LiteLLM 适配器实现服务商无关）——都能指向一个本地端点。" }
+]} />
+
+<Callout type="takeaways" items={[
+  "本地智能体就是标准的工具使用循环，只是把云模型换成了你机器上的开放权重模型——私密、离线、可免费迭代。",
+  "最小架构 = 支持工具的本地模型 + 工具调用循环 + 工具 + 护栏/停止条件。循环本身很小。",
+  "Ollama 的 OpenAI 兼容端点（/v1）支持工具调用，所以任何 OpenAI 格式的框架都能驱动本地模型。",
+  "LangGraph、CrewAI 和 OpenAI Agents SDK 都是模型无关的——把它们指向一个本地端点而非云端。",
+  "挑一个适配你硬件的、支持工具的模型，然后用你自己任务的一个小型评测来决定——而不是排行榜。",
+  "对能力差距要诚实，并对安全性负责：给循环和预算设上限、给工具做沙箱、对任何破坏性操作要求审批。",
+  "从简单起步：一次干净的工具调用 → 有界的只读循环 → 带护栏的破坏性工具 →（可选）一个框架。"
+]} />
+
+## 来源与延伸阅读
+
+- [Ollama —— 工具支持（博客）](https://ollama.com/blog/tool-support)
+- [Ollama —— 工具调用文档](https://docs.ollama.com/capabilities/tool-calling)
+- [Ollama —— 支持工具的模型（Tools 分类）](https://ollama.com/search?c=tools)
+- [Ollama 模型库](https://ollama.com/library)
+- [LangGraph（GitHub —— langchain-ai/langgraph）](https://github.com/langchain-ai/langgraph)
+- [LangGraph 概览 —— LangChain 文档](https://docs.langchain.com/oss/python/langgraph/overview)
+- [CrewAI —— 连接到任意 LLM（含 Ollama）](https://docs.crewai.com/en/learn/llm-connections)
+- [OpenAI Agents SDK —— 文档](https://openai.github.io/openai-agents-python/)
+- [OpenAI Agents SDK —— LiteLLM 集成（非 OpenAI / 本地模型）](https://openai.github.io/openai-agents-python/models/litellm/)
