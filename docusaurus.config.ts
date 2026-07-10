@@ -196,6 +196,15 @@ const config: Config = {
           ],
         },
         {
+          // Kept right-positioned for the desktop top bar, but placed EARLY in
+          // this array so the mobile drawer (which renders items in array
+          // order) shows the language switcher right under "Guide" — users
+          // were not finding it buried mid-list.
+          type: 'localeDropdown',
+          position: 'right',
+          className: 'navbar-locale-dropdown',
+        },
+        {
           to: '/docs/start-here/welcome',
           label: 'Start Here',
           position: 'left',
@@ -209,11 +218,6 @@ const config: Config = {
           to: '/docs/whats-new/models-and-pricing',
           label: "What's New",
           position: 'left',
-        },
-        {
-          type: 'localeDropdown',
-          position: 'right',
-          className: 'navbar-locale-dropdown',
         },
         {
           href: GITHUB_URL,
