@@ -157,7 +157,7 @@ export default function Steps({
         })}>
         <div
           className={styles.progressFill}
-          style={{width: `${progressPct}%`}}
+          style={{transform: `scaleX(${progressPct / 100})`}}
         />
       </div>
 
@@ -223,7 +223,10 @@ export default function Steps({
                     className={styles.navBtn}
                     onClick={() => go(idx - 1)}
                     disabled={atStart}>
-                    ← {translate({id: 'steps.prev', message: 'Previous'})}
+                    <span className={styles.navArrow} aria-hidden="true">
+                      ←
+                    </span>
+                    {translate({id: 'steps.prev', message: 'Previous'})}
                   </button>
                   {atEnd ? (
                     <span className={styles.doneBadge}>
@@ -234,7 +237,10 @@ export default function Steps({
                       type="button"
                       className={`${styles.navBtn} ${styles.navBtnPrimary}`}
                       onClick={() => go(idx + 1)}>
-                      {translate({id: 'steps.next', message: 'Next'})} →
+                      {translate({id: 'steps.next', message: 'Next'})}
+                      <span className={styles.navArrow} aria-hidden="true">
+                        →
+                      </span>
                     </button>
                   )}
                 </div>
