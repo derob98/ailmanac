@@ -1,0 +1,87 @@
+---
+sidebar_position: 19
+title: "La tassa sui token di MCP"
+description: "Perché collegare server MCP può bruciare 50k–150k token prima della tua prima richiesta — e le tre soluzioni: Tool Search, esecuzione di codice e sapere quando una chiamata CLI vince."
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-07-13" source="https://www.anthropic.com/engineering/advanced-tool-use">
+Le cifre sui token, i nomi delle funzionalità (`defer_loading`, Tool Search Tool, Programmatic Tool Calling) e la soglia di attivazione automatica di Claude Code cambiano in fretta. Verifica sui post di ingegneria di Anthropic e sulla [documentazione MCP di Claude Code](https://code.claude.com/docs/en/mcp) prima di citare numeri esatti.
+</VerifyNote>
+
+Questo mese c'è una battaglia su Hacker News e X: *perché bruciare decine di migliaia di token su una singola operazione MCP quando la stessa cosa via CLI costa un paio di centinaia?* Sembra un attacco a MCP. Non lo è. Chi discute più forte sono proprio quelli che amano gli agenti — hanno solo visto il conto. Questa pagina è la guida pratica a quel conto: dove finiscono davvero i token, i due costi che quasi nessuno separa e le tre soluzioni che trasformano un flusso di lavoro da 150.000 token in uno da 2.000.
+
+<Callout type="objectives" items={["Separare i DUE costi distinti in token di MCP: caricamento delle definizioni degli strumenti e risultati intermedi", "Capire perché il costo dello schema si paga per-conversazione, non una volta sola", "Usare defer_loading e il Tool Search Tool per caricare gli schemi degli strumenti su richiesta", "Usare l'esecuzione di codice / Programmatic Tool Calling per tenere i risultati grandi fuori dal contesto", "Decidere, per ogni task, quando uno strumento MCP vale la pena e quando vince una semplice chiamata CLI"]} />
+
+## Due costi, non uno
+
+Quando colleghi un server MCP, il client gli chiede `tools/list` e riceve indietro **ogni strumento con il suo schema JSON completo**. Quell'intero blocco viene iniettato nel contesto del modello. La maggior parte delle persone ferma qui la propria contabilità mentale. Ma ci sono due tasse distinte, e la seconda è di solito la più grande.
+
+**Costo 1 — Definizioni degli strumenti.** Nome, descrizione e schema dei parametri di ogni strumento collegato stanno nel contesto. Le parole di Anthropic: *"Nei casi in cui gli agenti sono collegati a migliaia di strumenti, dovranno elaborare centinaia di migliaia di token prima di leggere una richiesta."* Un singolo server enterprise può pubblicare da decine a centinaia di strumenti; analisi di terze parti stimano un server da 400 strumenti a circa 400.000 token di solo schema — più di quanto la finestra di contesto da 200k di Claude possa contenere.
+
+**Costo 2 — Risultati intermedi.** Quando il modello chiama uno strumento direttamente, **ogni risultato torna indietro attraverso il contesto del modello**, anche le parti che non volevi mai fargli leggere. L'esempio di Anthropic: estrai la trascrizione di una riunione di due ore da uno strumento e passala a un altro, e la trascrizione completa attraversa il modello *due volte* — potenzialmente ~50.000 token — solo per produrre un riassunto di una riga.
+
+<Callout type="warning" items={["Il Costo 1 si paga OGNI turno finché non entra in gioco il prompt caching — gli schemi vengono re-inviati a ogni richiesta della conversazione, non caricati una volta sola. Un grande catalogo di strumenti è una tassa sull'intera sessione, non un costo una tantum.", "Il Costo 2 cresce con i tuoi DATI, non con il numero di strumenti. Dieci strumenti minuscoli possono costare meno di un singolo strumento che restituisce un blob gigante."]} />
+
+### I numeri, dalle fonti primarie
+
+| Soluzione | Task | Prima | Dopo | Riduzione |
+| --- | --- | --- | --- | --- |
+| Esecuzione di codice con MCP | Flusso Google Drive → Salesforce | 150.000 | 2.000 | **98,7%** |
+| Tool Search Tool | Caricare le def. prima di iniziare | ~77.000 | ~8.700 | **85%** |
+| Programmatic Tool Calling | Task di ricerca complesso | 43.588 | 27.297 | **37%** |
+
+Tutte e tre le righe sono cifre pubblicate da Anthropic. La parte sorprendente non è il costo — è l'**accuratezza**: con il Tool Search Tool, l'accuratezza nella selezione degli strumenti *è salita* (Opus 4.5 è passato dal 79,5% all'88,1%; Opus 4 dal 49% al 74%). Meno strumenti ad affollare il contesto significa che il modello sceglie quello giusto più spesso. Qui costo e qualità si muovono nella stessa direzione, cosa rara.
+
+## Soluzione 1 — Caricare gli schemi degli strumenti su richiesta
+
+Invece di iniettare tutti gli schemi in anticipo, contrassegnali con `defer_loading: true`. Claude vede allora solo un indice leggero; quando gli serve GitHub, chiama il **Tool Search Tool**, che restituisce *solo* gli schemi GitHub corrispondenti — non i 50+ strumenti di ogni altro server. Anthropic riferisce che questo preserva ~191.300 token di contesto contro ~122.800 con tutto precaricato.
+
+Stai osservando questo schema proprio adesso se usi Claude Code con molti server MCP: gli strumenti arrivano **differiti (deferred)**, e l'agente recupera ogni schema tramite un passaggio di ricerca solo quando un task ne ha bisogno. Segnalazioni della community dicono che Claude Code abilita automaticamente MCP Tool Search quando le descrizioni degli strumenti collegati supererebbero ~10% della finestra di contesto — verifica la soglia esatta nella tua versione.
+
+<Steps items={[{title: "Fai l'audit di ciò che hai collegato", body: "Elenca i server attivi e più o meno quanti strumenti pubblica ciascuno. Un server che hai collegato per un task la scorsa settimana sta ancora tassando ogni turno oggi."}, {title: "Scollega ciò che questo task non usa", body: "La soluzione più economica sono meno server. Collega i due o tre che un task usa davvero, non tutto il tuo catalogo."}, {title: "Differisci il resto", body: "Per i server che tieni collegati ma usi raramente, preferisci un client/config che supporta defer_loading + Tool Search così i loro schemi si caricano solo quando cercati."}]} />
+
+## Soluzione 2 — Tenere i risultati fuori dal contesto con l'esecuzione di codice
+
+La soluzione più profonda mira al Costo 2. Invece che il modello chiami gli strumenti uno a uno con ogni risultato che gli passa attraverso, il modello **scrive codice** che chiama gli strumenti, e i dati intermedi restano nell'ambiente di esecuzione. Anthropic espone i server MCP come un **albero di file di strumenti** che l'agente esplora come un filesystem, caricando solo le definizioni che gli servono — e *"i risultati intermedi restano nell'ambiente di esecuzione per impostazione predefinita… l'agente vede solo ciò che tu esplicitamente logghi o restituisci."*
+
+Quell'unico cambiamento di design è ciò che fa collassare il flusso Drive→Salesforce da 150.000 a 2.000 token: i record si muovono attraverso il codice, e solo il conteggio finale torna al modello. Sulla Developer Platform la stessa idea arriva come **Programmatic Tool Calling** — Claude scrive Python che orchestra diversi strumenti e filtra gli output prima che raggiungano il suo contesto.
+
+<Callout type="tip" items={["Regola pratica: se uno strumento RESTITUISCE qualcosa di grande (una trascrizione, un dump di query, un file), vuoi l'esecuzione di codice così il blob viene elaborato fuori dal contesto. Se uno strumento si limita a FARE qualcosa di piccolo (creare una issue, inviare una riga), una chiamata diretta va bene."]} />
+
+## Soluzione 3 — Sapere quando una chiamata CLI vince e basta
+
+A volte la risposta giusta non è una configurazione MCP migliore — è niente MCP. L'argomento su HN/X ha un punto reale: un comando di shell come `gh pr list` o `psql -c '…'` costa un paio di centinaia di token andata e ritorno, mentre il percorso MCP equivalente paga per gli schemi più un risultato strutturato. Se l'agente ha già un terminale e la CLI esiste, quello è spesso il percorso più snello.
+
+<PromptCard title="Preferisci la CLI quando lo strumento è già una CLI">
+{`# Instead of connecting a GitHub MCP server for read-only work,
+# let the agent use the gh CLI it already has:
+gh pr list --state open --json number,title,author
+
+# ~200 tokens of command + compact output, no schema tax,
+# no server to keep connected across the session.`}
+</PromptCard>
+
+MCP si guadagna il suo overhead quando ti serve una capacità **tipizzata, con permessi, cross-superficie** — un database con un ruolo di sola lettura, un browser che può guidare, un'API SaaS con OAuth — o quando gli stessi strumenti vengono riusati su molti turni così che il caching ammortizza il costo dello schema. Ricorri a una CLI quando la capacità è una tantum, già scriptabile e restituisce qualcosa di piccolo. Nessuno dei due è "migliore"; sono punti diversi su una curva di costo.
+
+<Callout type="takeaways" items={["MCP ha due costi in token: gli schemi delle definizioni degli strumenti (pagati ~ogni turno) e i risultati intermedi (crescono con i tuoi dati).", "Tool Search + defer_loading tagliano il costo degli schemi ~85% E aumentano l'accuratezza nella selezione degli strumenti — carica gli schemi solo quando cercati.", "L'esecuzione di codice / Programmatic Tool Calling tengono i risultati grandi nell'ambiente di esecuzione; solo ciò che logghi o restituisci raggiunge il modello (150k → 2k nell'esempio di Anthropic).", "L'ottimizzazione più economica è collegare meno server per task.", "Quando la capacità è una tantum che restituisce qualcosa di piccolo e ha già una CLI, una chiamata di shell (~200 token) batte un round-trip MCP."]} />
+
+<Flashcards title="Termini di economia MCP" cards={[{front: "La tassa sui token di MCP", back: "Token spesi su schemi degli strumenti + risultati intermedi, non sul lavoro effettivo — il costo nascosto di collegare server."}, {front: "defer_loading", back: "Un flag che tiene lo schema di uno strumento FUORI dal contesto finché Claude non lo cerca tramite il Tool Search Tool."}, {front: "Tool Search Tool", back: "Permette a Claude di scoprire gli strumenti su richiesta; cercare 'github' restituisce solo gli schemi GitHub invece di ogni strumento collegato. Taglio ~85% dei token-schema nelle cifre di Anthropic."}, {front: "Programmatic Tool Calling", back: "Claude scrive codice che orchestra gli strumenti; i risultati intermedi vengono filtrati nell'ambiente di esecuzione così solo l'output finale entra nel contesto."}, {front: "Progressive disclosure", back: "Schema generale: esporre in anticipo un indice leggero degli strumenti, recuperare gli schemi completi solo quando servono."}]} />
+
+<Quiz title="Mettiti alla prova" questions={[{q: "Perché il costo delle definizioni degli strumenti è peggiore di un costo una tantum?", options: ["Gli schemi sono salvati su disco e riletti lentamente", "Gli schemi vengono re-inviati a ogni richiesta della conversazione finché non si applica il prompt caching", "Ogni chiamata a uno strumento raddoppia la dimensione dello schema"], answer: 1, explain: "Gli schemi degli strumenti vivono nel contesto che viene inviato a ogni turno, quindi un grande catalogo tassa l'intera sessione — non solo il primo messaggio — finché il caching non entra in gioco."}, {q: "Uno strumento estrae una trascrizione di 2 ore e la passa a uno strumento di riepilogo tramite chiamate dirette. Qual è il costo nascosto?", options: ["Niente — solo il riassunto usa token", "La trascrizione completa passa attraverso il contesto del modello, potenzialmente ~50k token, anche se volevi solo un riassunto", "La trascrizione viene fatturata una volta sul server, non sul modello"], answer: 1, explain: "Con le chiamate dirette agli strumenti ogni risultato intermedio passa attraverso il modello. L'esecuzione di codice tiene la trascrizione nell'ambiente di esecuzione così torna solo il riassunto."}, {q: "Ti serve un singolo 'elenca le PR aperte' in sola lettura durante una sessione di coding e l'agente ha un terminale. Opzione più snella?", options: ["Collegare un server GitHub MCP completo", "Eseguire la CLI gh direttamente — ~200 token, nessuna tassa sugli schemi, niente da tenere collegato", "Caricare tutti gli strumenti GitHub con defer_loading disattivato"], answer: 1, explain: "Per una tantum che restituisce qualcosa di piccolo e ha già una CLI, una chiamata di shell evita del tutto la tassa sugli schemi. MCP si guadagna il suo costo per capacità riusata, tipizzata e con permessi."}, {q: "Cosa succede di sorprendente all'accuratezza nella selezione degli strumenti quando usi il Tool Search Tool?", options: ["Cala, perché Claude vede meno strumenti", "Resta uguale; cambia solo il costo", "Sale — meno strumenti ad affollare il contesto significa che Claude sceglie quello giusto più spesso"], answer: 2, explain: "Anthropic riferisce che l'accuratezza è SALITA (Opus 4.5: 79,5% → 88,1%) con Tool Search. Costo e qualità si sono mossi nella stessa direzione."}]} />
+
+## Correlati su AILmanac
+
+- [Server MCP in Claude Code](/docs/claude-code/mcp) — come aggiungere, delimitare e mettere in sicurezza i server.
+- [The Token Economy](/docs/power-user/token-economy) — comprimere l'output dei comandi prima che raggiunga il modello.
+- [Dynamic Workflows](/docs/claude-code/dynamic-workflows) — dove emerge il costo di orchestrazione, e come suddividere per stimare la spesa.
+- [Tool Use sull'API](/docs/api/tool-use) — la forma richiesta/risposta dietro tutto questo.
+
+## Fonti e approfondimenti
+
+- [Code execution with MCP: building more efficient AI agents](https://www.anthropic.com/engineering/code-execution-with-mcp) — Anthropic Engineering. Fonte della cifra 150.000 → 2.000 token (98,7%) e dello schema "i risultati intermedi restano nell'ambiente di esecuzione".
+- [Introducing advanced tool use on the Claude Developer Platform](https://www.anthropic.com/engineering/advanced-tool-use) — Anthropic Engineering. Tool Search Tool (`defer_loading`, riduzione ~85%, guadagni di accuratezza) e Programmatic Tool Calling (43.588 → 27.297 token).
+- [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp) — riferimento ufficiale per collegare e delimitare i server.
+- [modelcontextprotocol — Progressive Tool Discovery discussion](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/1923) — conversazione di design della community sul caricamento degli strumenti su richiesta.
+- [MCP Progressive Disclosure](https://www.solo.io/blog/mcp-progressive-disclosure) (Solo.io) — walkthrough di terze parti dello schema indice-leggero / recupera-schema-su-richiesta.
