@@ -1,0 +1,138 @@
+---
+sidebar_position: 20
+title: "Velocità dei token: perché l'inferenza AI è diventata di colpo 10-15× più veloce"
+description: "Chip wafer-scale e LPU servono modelli di frontiera a centinaia di token al secondo. Cosa limita davvero la velocità di inferenza, la nuova corsa all'hardware, e perché i token veloci cambiano agenti, voce e ragionamento."
+keywords: [inference speed, tokens per second, Cerebras, Groq LPU, wafer scale, speculative decoding, time to first token]
+---
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-07-13" source="https://artificialanalysis.ai/">
+Ogni cifra di token-al-secondo, latenza e prezzo su questa pagina è deperibile — i record di velocità cadono ogni mese e i prezzi dei provider cambiano senza preavviso. Controlla le classifiche live su Artificial Analysis e le pagine di ciascun provider prima di citare numeri in una decisione.
+</VerifyNote>
+
+Questa settimana OpenAI ha presentato in anteprima **GPT-5.6 Sol**, un modello di frontiera servito su hardware wafer-scale Cerebras a **fino a 750 token di output al secondo** — grosso modo 5–10× i 70–150 token/secondo per utente che i modelli di frontiera serviti su GPU forniscono tipicamente. I titoli l'hanno chiamato magia. Non lo è. È il frutto di uno spostamento del collo di bottiglia che si prepara da due anni, e quasi nessuno al di fuori dell'ingegneria dell'inferenza ne capisce il meccanismo. Questa lezione è la versione chiara: cosa limita davvero la velocità dei token, la corsa all'hardware specializzato che ha appena rotto il limite, i trucchi software che la moltiplicano ulteriormente, e perché i token veloci cambiano silenziosamente ciò che i prodotti AI possono *essere*.
+
+<Callout type="objectives" items={["Spiegare perché l'inferenza LLM è limitata dalla larghezza di banda della memoria, non dalla potenza di calcolo grezza — e cosa significa fisicamente", "Descrivere come i chip wafer-scale Cerebras, le LPU Groq e le RDU SambaNova attaccano ciascuno il muro della memoria", "Nominare i tre moltiplicatori software — decodifica speculativa, quantizzazione, batching — e il compromesso che ciascuno fa", "Prevedere quali prodotti trasformano per primi i token veloci: agenti, modelli di ragionamento e voce", "Misurare correttamente la velocità di inferenza per il tuo carico di lavoro: token/sec E time-to-first-token, mai uno solo"]} />
+
+## Il collo di bottiglia che nessuno si aspetta: larghezza di banda della memoria, non calcolo
+
+Ecco il fatto che riorganizza tutto il resto: **per generare un singolo token, il modello deve leggere praticamente tutti i suoi pesi (attivi) dalla memoria.** Non alcuni di essi — tutti, una volta per ogni token.
+
+Un modello da 70 miliardi di parametri a precisione a 16 bit è circa 140 GB di pesi. Genera un token: trasmetti 140 GB dalla memoria alle unità di calcolo. Genera il token successivo: trasmetti di nuovo gli stessi 140 GB. La matematica delle matrici in sé è quasi banale al confronto — i chip moderni hanno calcolo in abbondanza. Il tubo tra memoria e calcolo è ciò che è saturo.
+
+Fai i conti e l'esperienza dell'"AI lenta" si spiega da sola. La larghezza di banda della memoria HBM di una NVIDIA H100 è circa 3,35 TB/s. Dividi 3,35 TB/s per 140 GB per token e ottieni un tetto rigido di circa **24 token al secondo per un singolo utente** su una GPU, prima di qualsiasi altro overhead. Ecco perché i chatbot scrivono a velocità di lettura: non perché il chip non sappia moltiplicare abbastanza in fretta, ma perché non riesce a *leggere il proprio cervello* abbastanza in fretta. Gli ingegneri dell'inferenza chiamano questo il **muro della memoria** (memory wall), e sia [Cerebras](https://www.cerebras.ai/blog/introducing-cerebras-inference-ai-at-instant-speed) sia [Groq](https://groq.com/blog/the-groq-lpu-explained) lo descrivono come *il* vincolo fondamentale dell'AI generativa.
+
+E si aggrava: insieme ai pesi, ogni nuovo token legge anche la **KV cache** — le chiavi e i valori di attention memorizzati per ogni token già presente nel contesto. I contesti lunghi rendono ogni token successivo più costoso da produrre.
+
+<Steps items={[{title: "Prefill: il prompt viene ingerito", body: "L'intero prompt viene elaborato in un unico passaggio parallelo. Questa fase è limitata dal calcolo (molta matematica, pesi letti una volta per molti token alla volta) e determina il tuo time-to-first-token."}, {title: "Decode: leggi tutti i pesi…", body: "Per produrre il token N+1, l'hardware trasmette ogni peso attivo dalla memoria attraverso le unità di calcolo. Per un modello da 70B a FP16 sono ~140 GB di letture — per UN token."}, {title: "…e leggi la KV cache", body: "L'attention legge anche le chiavi/valori memorizzati di ogni token precedente. Più lunga la conversazione, più byte per token. Questa fase è limitata dalla larghezza di banda della memoria, ed è dove va quasi tutto il tempo di generazione."}, {title: "Aggiungi e ripeti", body: "Il nuovo token viene aggiunto alla sequenza e il ciclo riparte. Sequenziale per natura — il token N+1 non può iniziare finché il token N non esiste. La velocità di questo ciclo È i tuoi token/secondo."}]} />
+
+Quindi la corsa all'inferenza veloce è in realtà una corsa a spostare i byte dei pesi più velocemente. Ci sono esattamente due modi per vincere: costruire memoria radicalmente più veloce, o ridurre i byte che devi spostare. Le aziende hardware hanno scelto la prima strada. I trucchi software (sotto) hanno scelto la seconda. L'attuale esplosione di velocità è entrambe insieme.
+
+## La corsa all'hardware: metti i pesi SUL chip
+
+La memoria più veloce in qualsiasi computer è la **SRAM** — la memoria sullo stesso die del calcolo. È di ordini di grandezza più veloce dell'HBM impilata accanto a una GPU, ma minuscola: megabyte, non gigabyte. Le tre aziende di inferenza specializzata hanno fatto tutte la stessa scommessa audace — *rendere la memoria on-chip abbastanza grande (o il numero di chip abbastanza alto) da contenere l'intero modello in SRAM* — e ognuna l'ha ingegnerizzata diversamente.
+
+### Cerebras: un chip grande come un piatto da portata
+
+Cerebras costruisce il **Wafer-Scale Engine (WSE-3)**: invece di tagliare un wafer di silicio in centinaia di piccoli chip, l'intero wafer da 300mm *è* un unico chip — 46.225 mm², 4 trilioni di transistor, 900.000 core, **44 GB di SRAM on-chip**, e circa **21 petabyte/secondo** di larghezza di banda della memoria. Cerebras lo commercializza come circa 7.000× la larghezza di banda della memoria di una H100, ed è tutto il trucco: i pesi che vivono nella SRAM non attraversano mai un bus off-chip lento. I risultati pubblici includono Llama 3.1-405B a [969 token/secondo con un time-to-first-token di 240 ms](https://www.cerebras.ai/press-release/cerebras-inference-llama-405b) e Llama 3.1 70B a oltre 2.100 token/secondo.
+
+### La notizia di GPT-5.6 Sol, decodificata
+
+È questo il macchinario dietro l'annuncio di questa settimana. [L'anteprima di GPT-5.6 Sol di OpenAI](https://openai.com/index/previewing-gpt-5-6-sol/) accoppia un modello di frontiera con Cerebras che serve a fino a **750 token/secondo** — contro i ~70 token/secondo che la stessa classe di modello gestisce per utente su serving GPU classe H100, un salto di 10× (~15× rispetto ai deployment mainstream più lenti). Sol viene lanciato a **$5 input / $30 output per milione di token** come punta di diamante di una famiglia di tre modelli (Sol, Terra, Luna), con accesso anticipato limitato a un piccolo insieme di organizzazioni prima della disponibilità generale a metà luglio 2026. Gli analisti della community stimano che Sol sia servito su circa 70–100 wafer — approssimativamente *un layer transformer per wafer* — anche se OpenAI non ha confermato la topologia, quindi tratta quel layout come speculazione informata. Ciò che segnala in ogni caso: per la prima volta, un modello *di classe frontiera*, non solo un modello a pesi aperti, viene servito a velocità da hardware specializzato.
+
+### Groq: centinaia di piccoli chip deterministici
+
+La **LPU (Language Processing Unit)** di Groq prende la forma opposta. Ogni LPU **non ha alcuna DRAM esterna** — solo qualche centinaio di megabyte di SRAM on-chip a ~80 TB/s (contro i 3,35 TB/s dell'H100). Un modello grande viene distribuito su centinaia di chip: Llama 3 70B a FP8 occupa un rack di oltre 300 LPU, ciascuna con una fetta di ~230 MB. L'ingrediente magico è il **determinismo**: non ci sono cache, non c'è scheduling dinamico — il compilatore pianifica l'intera esecuzione, inclusa la comunicazione chip-a-chip, fino al singolo ciclo di clock, così nulla aspetta mai qualcosa di imprevedibile. La frase di Groq è "determinism is speed" (il determinismo è velocità), e con la decodifica speculativa hanno mostrato Llama 3 70B a [oltre 1.660 token/secondo](https://groq.com/blog/inside-the-lpu-deconstructing-groq-speed).
+
+### SambaNova: tre livelli di memoria, modelli giganti
+
+La **RDU (Reconfigurable Dataflow Unit)** di SambaNova mescola gli approcci con un sistema di memoria a tre livelli (SRAM + HBM + DRAM), che è come serve efficientemente i modelli *più grandi*: il DeepSeek-R1 completo da 671 miliardi di parametri a ~[198–250 token/secondo su appena 16 chip SN40L](https://sambanova.ai/blog/only-inference-provider-with-high-speed-support-for-the-largest-models) — un modello che gestisce 30–80 token/secondo su serving GPU tipico — e Llama 3 8B a 1.000 token/secondo, validato indipendentemente da Artificial Analysis.
+
+| Approccio | Idea chiave | Memoria per i pesi | Esempio di velocità verificata |
+|---|---|---|---|
+| **GPU (classe H100)** | General-purpose, throughput-first | HBM off-chip, ~3,35 TB/s | ~70–150 tok/s per utente, modelli di frontiera |
+| **Cerebras WSE-3** | Intero wafer = un chip | 44 GB SRAM on-chip, ~21 PB/s | Llama 3.1-405B a 969 tok/s; GPT-5.6 Sol fino a 750 tok/s |
+| **Groq LPU** | Dataflow deterministico, schedulato dal compilatore | Solo SRAM (~230 MB/chip), modello distribuito su 300+ chip | Llama 3 70B a 1.660+ tok/s (con dec. speculativa) |
+| **SambaNova RDU** | Dataflow riconfigurabile, memoria a 3 livelli | SRAM + HBM + DRAM | DeepSeek-R1 671B a ~250 tok/s su 16 chip |
+
+<Callout type="note" items={["Nessuno di questi numeri è calcolo magico: ogni voce di questa tabella è una risposta diversa alla stessa domanda — come trasmettiamo i byte dei pesi alle unità matematiche più velocemente?", "I record di velocità sono velocità per-utente (per-sessione). Il throughput totale del datacenter è una metrica diversa in cui le GPU rimangono eccellenti — quella distinzione è il compromesso del batching qui sotto."]} />
+
+## Moltiplicatori software: token più veloci su QUALSIASI hardware
+
+L'hardware non è l'unica leva. Tre tecniche software moltiplicano la velocità sia su GPU sia su chip specializzati — e spiegano gran parte del perché anche il serving GPU ordinario è diventato più veloce quest'anno.
+
+**Decodifica speculativa** (speculative decoding) — quella controintuitiva. Un piccolo, veloce modello *draft* indovina i prossimi diversi token; il modello grande poi *verifica* tutti quanti in un singolo forward pass. La verifica di N token draft costa grosso modo lo stesso streaming di pesi della generazione di un token — quindi quando gli indovinelli sono giusti (e per testo prevedibile di solito lo sono), ottieni diversi token al prezzo-memoria di uno. La parte che pochi conoscono: **l'output è dimostrabilmente identico a ciò che il modello grande avrebbe prodotto da solo.** Non è un'approssimazione — gli indovinelli sbagliati sono semplicemente rifiutati e rigenerati. È la tecnica dietro la cifra di 1.660 tok/s di Groq, e ogni grande provider ora usa qualche variante.
+
+**Quantizzazione** — quella diretta. Se il collo di bottiglia sono i byte spostati per token, dimezza i byte: memorizza i pesi a 8 bit o 4 bit invece che a 16 bit e la velocità di decodifica sale quasi proporzionalmente perché trasmetti letteralmente metà (o un quarto) dei dati. Il compromesso è un costo di accuratezza di solito piccolo, occasionalmente reale — misuralo sul tuo compito, non a naso.
+
+**Batching** — quello del compromesso. Le GPU recuperano efficienza servendo molti utenti in un passaggio: i pesi vengono trasmessi una volta e riutilizzati sull'intero batch, così il throughput *totale* schizza. Ma i token di ciascun singolo utente escono comunque al ritmo sequenziale condiviso — batch grandi significano alto throughput del datacenter e velocità per-utente mediocre. È il numero più frainteso nel marketing dell'inferenza: un provider che cita "migliaia di token al secondo" può intendere throughput aggregato, non ciò che *tu* sperimenterai in una sessione.
+
+## Perché i token veloci cambiano tutto
+
+La velocità suona come una funzione di comodità. È in realtà una soglia di capacità, perché diverse categorie di prodotto funzionano solo sotto una certa latenza wall-clock.
+
+**Gli agenti ottengono il moltiplicatore più grande.** Un ciclo di agente è *seriale*: chiama il modello, esegui uno strumento, rimanda indietro i risultati, ripeti — 20 chiamate al modello in sequenza sono ordinaria amministrazione. A 70 tok/s, 20 chiamate con una media di 800 token di output ciascuna sono ~230 secondi di pura generazione: una pausa caffè, quindi gli agenti vengono relegati a job in background. A 750 tok/s lo stesso ciclo è ~21 secondi: *interattivo*. Lo speedup si moltiplica su ogni passo del ciclo, quindi token 10× più veloci non rendono un agente il 10% più gradevole — lo spostano oltre la linea da strumento batch a partner di conversazione. (Costruisci agenti? Parti da [Scegliere un modello](/docs/models/choosing-a-model).)
+
+**I modelli di ragionamento pensano di più al secondo.** La qualità di un modello di ragionamento scala con quanti token di pensiero può spendere. A velocità GPU, "sforzo alto" significa minuti di attesa, quindi gli utenti abbassano il pensiero. A velocità wafer-scale lo stesso budget di pensiero si completa in secondi — ottieni *più intelligenza alla stessa latenza wall-clock*, che è probabilmente il vero punto strategico dell'accoppiamento OpenAI–Cerebras.
+
+**La voce diventa genuinamente in tempo reale.** La conversazione umana tollera ~500 ms di divario di risposta. Un serving veloce con un time-to-first-token sotto i 300 ms (Cerebras ha dimostrato 240 ms su un modello da 405B) più generazione ben oltre la velocità del parlato rende finalmente fattibile lo scambio parlato naturale — con un modello *di frontiera*, non uno piccolo distillato.
+
+**Le dinamiche di costo diventano interessanti.** Veloce non è automaticamente economico: il serving specializzato comanda prezzi premium (i $30/M token di output di Sol sono di fascia alta), e la stessa velocità che delizia gli utenti lascia anche che gli agenti brucino token più in fretta. Ma i provider wafer-scale sostengono anche che il loro costo *per token* batte le GPU su scala, quindi aspettati che i livelli di velocità diventino un asse di prezzo standard, come la spedizione express. Il contesto di budget vive in [Cosa costa l'AI tra i provider](/docs/models/what-ai-costs-across-providers).
+
+## Come valutare la velocità — per il TUO carico di lavoro
+
+L'errore di benchmarking più comune: trattare "token al secondo" come tutta la storia. Ci sono **due** numeri, prodotti da due colli di bottiglia *diversi*:
+
+- **Time-to-first-token (TTFT)** — quanto ci vuole prima che l'output inizi. Dominato dalla fase di *prefill* limitata dal calcolo, quindi cresce con la lunghezza del tuo prompt. È ciò che sentono gli utenti di chat e voce.
+- **Token di output/secondo** — quanto velocemente scorre il testo una volta iniziato. Dominato dalla fase di *decode* limitata dalla memoria. È ciò che sentono le generazioni lunghe e i cicli di agente.
+
+Un provider può vincere uno e perdere l'altro, perché sollecitano limiti hardware diversi. Un'app RAG che infila contesti da 50K token vive e muore col TTFT; un agente che scrive lunghi file di codice vive e muore con la velocità di decode. Classifiche indipendenti come [Artificial Analysis](https://artificialanalysis.ai/) riportano entrambi — ma le forme dei tuoi prompt, le lunghezze di contesto e i pattern di traffico sono tuoi, quindi misura con il tuo carico di lavoro. (Lo streaming rende la latenza percepita ≈ TTFT invece del tempo totale — vedi [Streaming](/docs/api/streaming).)
+
+<Steps items={[{title: "Fissa un insieme di compiti realistico", body: "Scegli 10–20 prompt reali dal tuo prodotto — system prompt reale, lunghezza di contesto reale. La velocità varia enormemente con la dimensione dell'input; prompt giocattolo producono numeri giocattolo."}, {title: "Misura TTFT e token/sec separatamente", body: "Con lo streaming attivo, registra (a) il tempo fino al primo chunk di contenuto e (b) i token di output divisi per il tempo di generazione dopo il primo chunk. Registrali come due metriche, mai una."}, {title: "Testa alla tua concorrenza reale", body: "Esegui 1, poi 10, poi il tuo numero di picco di richieste parallele. Il batching significa che la velocità per-utente può degradare sotto carico — i numeri di picco citati raramente sopravvivono alla concorrenza."}, {title: "Calcola la latenza end-to-end del compito", body: "Per gli agenti, moltiplica la latenza per-chiamata per il tuo numero tipico di chiamate seriali, più il tempo degli strumenti. Una differenza di 2× nel TTFT può contare più di una differenza di 3× nei token/sec in un ciclo di 20 chiamate."}, {title: "Rieseguilo mensilmente", body: "Le classifiche di velocità si rimescolano costantemente — i record sono caduti ripetutamente solo nell'ultimo anno. Automatizza il benchmark e ricontrolla prima di qualsiasi impegno con un provider."}]} />
+
+<PromptCard title="Un compito di benchmark per misurare la velocità di generazione reale">{`Write a complete Python module implementing a rate limiter with three strategies
+(fixed window, sliding window, token bucket), a shared abstract base class,
+type hints throughout, docstrings, and a pytest test suite covering edge cases
+(burst traffic, clock skew, zero-capacity buckets). Target roughly 2,000 tokens
+of output. Do not truncate or summarize - produce the full code.
+
+--- How to use this prompt as a benchmark ---
+1. Send it with streaming enabled and your production system prompt attached.
+2. Record TTFT = time from request to first streamed chunk.
+3. Record decode speed = output_tokens / (total_time - TTFT).
+4. Repeat 5 times at 3 different times of day; report medians, not best runs.
+5. Re-run the same prompt with 30K tokens of context pasted above it -
+   watch what happens to TTFT. That difference is your prefill cost.`}</PromptCard>
+
+<Quiz title="Mettiti alla prova" questions={[{q: "Qual è il limite fisico primario su quanto velocemente un LLM genera token oggi?", options: ["Il calcolo grezzo (FLOP) del chip", "Larghezza di banda della memoria — trasmettere i pesi per ogni token", "Latenza di rete tra utente e datacenter", "La velocità del tokenizer"], answer: 1, explain: "Ogni token generato richiede la lettura di praticamente tutti i pesi attivi del modello (più la KV cache) dalla memoria. I chip moderni hanno calcolo in eccesso; è il tubo della memoria a saturarsi — il muro della memoria."}, {q: "Come batte il muro della memoria l'approccio wafer-scale di Cerebras?", options: ["Usa stack HBM più veloci di NVIDIA", "Comprime il modello al volo", "L'intero wafer è un chip, quindi i pesi vivono in una massiccia SRAM on-chip con petabyte/sec di banda", "Salta il calcolo dell'attention"], answer: 2, explain: "Il WSE-3 è un singolo chip da 46.225 mm² con 44 GB di SRAM on-chip a circa 21 PB/s — i pesi non attraversano mai un bus off-chip lento."}, {q: "Qual è il trucco della decodifica speculativa?", options: ["La qualità dell'output è leggermente degradata", "Non c'è alcun trucco di qualità — gli output sono identici; lo speedup varia solo con quanto è prevedibile il testo", "Funziona solo su GPU", "Raddoppia la memoria richiesta"], answer: 1, explain: "Il modello grande verifica ogni token abbozzato, rifiutando gli indovinelli sbagliati, quindi l'output corrisponde a ciò che avrebbe prodotto da solo. Il guadagno dipende dall'accuratezza del draft, non da un compromesso di qualità."}, {q: "Un provider pubblicizza 3.000 token/secondo. Cosa devi controllare prima di dare per scontato che i tuoi utenti lo vedranno?", options: ["Se è throughput aggregato in batch o velocità per-utente, e qual è il TTFT", "Se il modello supporta la modalità JSON", "Il vendor GPU del provider", "Niente — token al secondo sono token al secondo"], answer: 0, explain: "Il batching lascia schizzare il throughput totale mentre ogni singola sessione scorre molto più lentamente, e i token/sec non dicono nulla sul time-to-first-token. Misura entrambi, per utente, sul tuo carico di lavoro."}, {q: "Perché i token più veloci giovano agli agenti più della semplice chat?", options: ["Gli agenti usano modelli più piccoli", "I cicli di agente fanno molte chiamate seriali al modello, quindi lo speedup si moltiplica su ogni passo", "Gli utenti di chat non notano la latenza", "Gli agenti non usano la KV cache"], answer: 1, explain: "Un ciclo seriale di 20 chiamate compone la latenza per-chiamata. Un guadagno di velocità di 10× trasforma minuti di generazione cumulativa in secondi — attraversando da job in background a strumento interattivo."}]} />
+
+<Flashcards title="Vocabolario dell'inferenza veloce" cards={[
+  {front: "Muro della memoria (memory wall)", back: "Il limite dominante sulla velocità di decode di un LLM: ogni token generato richiede di trasmettere tutti i pesi attivi del modello dalla memoria, quindi la larghezza di banda della memoria — non il calcolo — fissa il tetto."},
+  {front: "KV cache", back: "Chiavi/valori di attention memorizzati per ogni token già nel contesto. Letti a ogni nuovo token, quindi i contesti lunghi rendono ogni token successivo più costoso da generare."},
+  {front: "Prefill vs decode", back: "Il prefill ingerisce il prompt in un unico passaggio parallelo limitato dal calcolo (fissa il TTFT). Il decode genera i token uno a uno, limitato dalla larghezza di banda della memoria (fissa i token/sec). Colli di bottiglia diversi — misura entrambi."},
+  {front: "Time-to-first-token (TTFT)", back: "Ritardo dall'invio di una richiesta al primo token di output. Cresce con la lunghezza del prompt. Ciò che gli utenti di chat e voce sentono davvero; i token/sec non lo catturano."},
+  {front: "Wafer-scale engine", back: "L'approccio di Cerebras: l'intero wafer di silicio è un chip (WSE-3: 46.225 mm², 4T transistor, 44 GB SRAM, ~21 PB/s), così i pesi restano in memoria on-chip ultra-veloce."},
+  {front: "LPU (Groq)", back: "Language Processing Unit: nessuna DRAM esterna, solo SRAM on-chip (~80 TB/s per chip), modello distribuito su centinaia di chip, esecuzione schedulata dal compilatore fino al ciclo di clock. 'Il determinismo è velocità.'"},
+  {front: "Decodifica speculativa", back: "Un piccolo modello draft propone diversi token; il modello grande li verifica in un passaggio a grosso modo il costo di streaming dei pesi di un token. L'output è identico al solo modello grande."},
+  {front: "Quantizzazione (per la velocità)", back: "Memorizzare i pesi in meno bit (8/4-bit) riduce i byte trasmessi per token, aumentando la velocità di decode quasi proporzionalmente — a un piccolo costo di accuratezza dipendente dal compito."},
+  {front: "Compromesso del batching", back: "Servire molti utenti per passaggio riutilizza ogni lettura di pesi, massimizzando il throughput totale ma limitando la velocità per-utente. I token/sec aggregati ≠ la velocità che sperimenta una sessione."},
+  {front: "GPT-5.6 Sol", back: "Modello di frontiera di OpenAI (luglio 2026) servito su hardware wafer-scale Cerebras a fino a 750 tok/s — grosso modo 10× il serving GPU tipico per-utente; punta di diamante della famiglia Sol/Terra/Luna a $5/$30 per M token."},
+]} />
+
+<Callout type="takeaways" items={["La velocità di inferenza è un problema di larghezza di banda della memoria: ogni token richiede di trasmettere tutti i pesi attivi, quindi un modello da 70B FP16 significa ~140 GB di letture per token — è tutto il collo di bottiglia.", "La corsa all'hardware specializzato (SRAM wafer-scale di Cerebras, LPU deterministiche senza DRAM di Groq, RDU a tre livelli di SambaNova) batte il muro tenendo i pesi in memoria on-chip — e GPT-5.6 Sol a 750 tok/s ha appena portato quella velocità a un modello di frontiera.", "Il software la moltiplica ulteriormente: decodifica speculativa (output identico, verifica multi-token), quantizzazione (meno byte per token), batching (throughput su, velocità per-utente giù — leggi con attenzione le affermazioni dei provider).", "I token veloci sono una soglia di capacità, non una funzione di comodità: i cicli seriali di agente diventano interattivi, i modelli di ragionamento pensano di più per secondo wall-clock, e la voce con modello di frontiera diventa in tempo reale.", "Valuta con due numeri — TTFT (prefill, sensibile alla lunghezza del prompt) e token di output/sec (decode) — misurati sui tuoi prompt alla tua concorrenza, ricontrollati mensilmente."]} />
+
+Nuovo a come funzionano i modelli sotto il cofano? La sezione [Fondamenti](/docs/foundations) copre token, finestre di contesto e basi dei modelli su cui questa lezione si costruisce.
+
+## Fonti e approfondimenti
+
+- [OpenAI — Previewing GPT-5.6 Sol](https://openai.com/index/previewing-gpt-5-6-sol/)
+- [Cerebras — Introducing Cerebras Inference: AI at Instant Speed](https://www.cerebras.ai/blog/introducing-cerebras-inference-ai-at-instant-speed) — il collo di bottiglia della larghezza di banda della memoria, spiegato da chi ci ha costruito attorno
+- [Cerebras — pagina del chip WSE-3](https://www.cerebras.ai/chip) e [comunicato stampa Llama 3.1-405B a 969 tok/s](https://www.cerebras.ai/press-release/cerebras-inference-llama-405b)
+- [Groq — What is a Language Processing Unit?](https://groq.com/blog/the-groq-lpu-explained) e [Inside the LPU: Deconstructing Groq's Speed](https://groq.com/blog/inside-the-lpu-deconstructing-groq-speed)
+- [SambaNova — High-speed support for the largest models (DeepSeek-R1 671B)](https://sambanova.ai/blog/only-inference-provider-with-high-speed-support-for-the-largest-models) e [copertura TechRadar del risultato su 16 chip](https://www.techradar.com/pro/nvidia-rival-claims-deepseek-world-record-as-it-delivers-industry-first-performance-with-95-percent-fewer-chips)
+- [VentureBeat — SambaNova breaks Llama 3 speed record with 1,000 tokens per second](https://venturebeat.com/ai/sambanova-breaks-llama-3-speed-record-with-1000-tokens-per-second)
+- [arXiv — A Comparison of Cerebras Wafer-Scale Integration with NVIDIA GPU-based Systems](https://arxiv.org/abs/2503.11698)
+- [Artificial Analysis — classifiche indipendenti di velocità e latenza](https://artificialanalysis.ai/)
+- [byteiota — Cerebras + GPT-5.6 Sol: 750 tok/s changes your agent latency](https://byteiota.com/cerebras-gpt-5-6-sol-750-tok-s-changes-your-agent-latency/)
+- Correlati su AILmanac: [Scegliere un modello](/docs/models/choosing-a-model) · [Cosa costa l'AI tra i provider](/docs/models/what-ai-costs-across-providers) · [Streaming](/docs/api/streaming) · [Fondamenti](/docs/foundations)
