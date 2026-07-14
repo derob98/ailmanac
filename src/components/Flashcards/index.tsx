@@ -50,7 +50,9 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
   const current = clamp(index, total - 1);
   const card = cards[current];
   const isLast = current === total - 1;
-  const progress = ((current + 1) / total) * 100;
+  // 0–1 ratio, consumed by CSS as scaleX() — a compositor-only fill (the old
+  // width-based fill relaid out the track on every frame).
+  const progress = (current + 1) / total;
   const cardId = `${baseId}-card`;
   const instrId = `${baseId}-instr`;
 
@@ -76,6 +78,13 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
   const flipLabel = flipped
     ? translate({id: 'flashcards.showTerm', message: 'Show term'})
     : translate({id: 'flashcards.showDefinition', message: 'Show definition'});
+
+  // Decorative corner hint. Previously hardcoded English, so it leaked "tap to
+  // flip" into all 11 non-English locales; the glyph is kept out of the string
+  // so a translation can never drop it.
+  const hintText = flipped
+    ? translate({id: 'flashcards.hintBack', message: 'show term'})
+    : translate({id: 'flashcards.hintFlip', message: 'flip'});
 
   const counterText = translate(
     {id: 'flashcards.counter', message: '{current} / {total}'},
@@ -108,7 +117,8 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
         aria-label={flipLabel}
         aria-describedby={`${cardId} ${instrId}`}>
         <span className={styles.flipHint} aria-hidden="true">
-          {flipped ? '↩ term' : 'tap to flip ✨'}
+          <span className={styles.flipHintGlyph}>{flipped ? '↩' : '✨'}</span>
+          {hintText}
         </span>
         <span className={styles.inner} id={cardId}>
           {/* Both faces are always in the DOM so screen-reader users and the
@@ -157,7 +167,9 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
             id: 'flashcards.prev',
             message: 'Previous card',
           })}>
-          <span aria-hidden="true">←</span>
+          <span className={styles.navArrow} aria-hidden="true">
+            ←
+          </span>
           <span className={styles.btnLabel}>
             {translate({id: 'flashcards.prevShort', message: 'Prev'})}
           </span>
@@ -175,9 +187,12 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
           )}>
           <span className={styles.counterText}>{counterText}</span>
           <span className={styles.progressTrack} aria-hidden="true">
+            {/* The ratio is handed to CSS as a custom property rather than an
+                inline transform: the stylesheet then owns transform-origin, so
+                the fill grows from the inline-start edge in LTR *and* RTL. */}
             <span
               className={styles.progressFill}
-              style={{width: `${progress}%`}}
+              style={{'--ail-fc-progress': progress} as React.CSSProperties}
             />
           </span>
         </div>
@@ -193,7 +208,9 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
               ? translate({id: 'flashcards.doneShort', message: 'Done 🎉'})
               : translate({id: 'flashcards.nextShort', message: 'Next'})}
           </span>
-          <span aria-hidden="true">→</span>
+          <span className={styles.navArrow} aria-hidden="true">
+            →
+          </span>
         </button>
       </div>
     </section>
