@@ -1,0 +1,240 @@
+---
+sidebar_position: 21
+title: "Agenti Computer-Use a confronto"
+description: "Claude, GPT e Gemini possono ormai tutti pilotare uno schermo — ma ciascuno espone uno spazio d'azione, un contratto sulle coordinate e un gate di sicurezza diversi. Cosa si rompe davvero, e come costruire un loop che sopravviva."
+keywords: [computer use, computer-use agent, Claude computer use, OpenAI computer use, Gemini computer use, OSWorld, GUI agent, browser agent, coordinate scaling, prompt injection screenshot]
+---
+
+<LevelBadge level="advanced" />
+
+Ogni grande laboratorio ora rilascia un modello capace di guardare uno schermo e cliccarci sopra. Il tool computer use di Anthropic, il tool `computer` di OpenAI e il tool `computer_use` di Google risolvono tutti lo stesso tipo di problema — cattura uno screenshot, decidi un'azione, eseguila, cattura di nuovo — e tutti e tre sono *incompatibili tra loro a livello di protocollo in modi che non risultano ovvi finché i tuoi click non iniziano ad atterrare 40 pixel più in là*.
+
+Questa pagina è la guida a livello di harness, non la classifica. La classifica cambia ogni mese; le modalità di fallimento qui sotto sono le stesse fin dalla prima preview.
+
+<Callout type="objectives" items={[
+  "Capire il loop dell'agente che tutti e tre i provider condividono — e i tre punti in cui divergono",
+  "Risolvere il bug delle coordinate che rompe silenziosamente la maggior parte dei primi tentativi (Retina, downscaling e limiti di dimensione delle immagini)",
+  "Conoscere il gate di sicurezza di ciascun provider, perché fa parte del protocollo, non è un componente opzionale",
+  "Leggere OSWorld con onestà: cosa significa davvero la baseline umana",
+  "Scegliere il livello di reasoning effort correttamente — l'impostazione più economica non è quella che immagineresti",
+]} />
+
+<VerifyNote lastVerified="2026-07-14" source="https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool">
+Nomi dei modelli, header beta, limiti sui pixel e punteggi dei benchmark in questo ambito si muovono in fretta, e ogni provider etichetta ancora la propria superficie computer-use come preview o beta. La *meccanica* descritta qui sotto è duratura; verifica di nuovo qualsiasi numero, header o id di modello specifico sulla documentazione del provider linkata in Fonti prima di andare in produzione.
+</VerifyNote>
+
+## Il loop che tutti condividono
+
+Togli il branding e tutti e tre sono la stessa macchina a stati:
+
+<Steps items={[
+  {title: "Invia il task più uno screenshot", body: "Il modello riceve la tua istruzione e un'immagine dello schermo attuale. Alcuni provider vogliono anche l'URL corrente o una breve cronologia delle azioni recenti."},
+  {title: "Il modello restituisce un'azione, non un risultato", body: "Clicca a (x, y). Scrivi questo. Scrolla qui. È una richiesta perché il tuo codice faccia qualcosa — il modello non può toccare la macchina da solo."},
+  {title: "Il tuo harness la esegue", body: "Questo è compito tuo. Anthropic lo dice chiaramente: la tua applicazione deve eseguire il tool; Claude non può eseguirlo direttamente. Sei tu a implementare la cattura dello screenshot, il mouse, la tastiera."},
+  {title: "Screenshot di nuovo, e rimandalo indietro", body: "La nuova schermata torna al modello come risultato del tool. Il modello vede la conseguenza della propria azione — questo è l'intero segnale di feedback."},
+  {title: "Ripeti finché non arriva più nessuna azione", body: "La terminazione è l'assenza di un'ulteriore richiesta di azione, non un flag 'fatto'. Il tuo loop ha bisogno di un proprio limite di passi e di un rilevatore di stallo."},
+]} />
+
+La conseguenza che sfugge a molti: **l'unica percezione del mondo che il modello ha è l'immagine che gli invii.** Ogni fallimento descritto qui sotto è in realtà un fallimento di quell'immagine, o dello spazio di coordinate che implica.
+
+## Dove i tre divergono
+
+La divergenza non è "chi è più intelligente". È il *contratto*.
+
+| | Anthropic (Claude) | OpenAI (GPT) | Google (Gemini) |
+|---|---|---|---|
+| **Spazio d'azione** | Primitive desktop grezze: `screenshot`, `left_click`, `type`, `key`, `scroll`, `drag`, `hold_key`, `wait`, più `zoom` nella versione più recente del tool | Azioni UI strutturate: `click`, `double_click`, `scroll`, `type`, `keypress`, `drag`, `move`, `wait`, `screenshot` | Azioni semantiche: non solo `click`/`type` ma `navigate`, `go_back`, `go_forward`, `open_app`, `long_press` — i concetti di browser e mobile sono di prima classe |
+| **Coordinate** | Invii le dimensioni in pixel; il modello restituisce coordinate pixel grezze in *quello* spazio | Stesso contratto sui pixel, con dimensioni desktop consigliate | Uguale, con un campo `intent` che spiega il ragionamento dietro ogni azione |
+| **Impianto del loop** | Blocchi di risultato del tool che trasportano un'immagine | `computer_call` → `computer_call_output` legati da `call_id`; `previous_response_id` porta la cronologia così non devi reinviarla | Function call → `function_result` con uno screenshot fresco |
+| **Gate di sicurezza** | I classificatori anti-injection girano automaticamente sugli screenshot | `pending_safety_checks` che devi riconoscere esplicitamente | `safety_decision` con categorie di policy |
+| **Punto di forza** | Controllo generale desktop / a livello di OS | Desktop e browser, più un percorso di esecuzione di codice | Browser-first; forte sul mobile; esplicitamente *non* ottimizzato per il controllo del sistema operativo desktop |
+
+Quell'ultima riga Anthropic/Google è quella che decide l'architettura. Lo spazio d'azione di Google è **semantico** — `go_back` è un concetto che il modello può nominare. Quello di Anthropic è **meccanico** — tornare indietro significa che il modello deve trovare e cliccare il pulsante indietro, o premere la giusta combinazione di tasti. Le azioni semantiche sono più affidabili dentro un browser e inutili fuori. Le primitive meccaniche funzionano ovunque e falliscono più spesso.
+
+Quindi: portare un agente computer-use da un provider all'altro **non** è uno scambio di modello. È riscrivere l'executor delle azioni dell'harness. Regolati di conseguenza. (Stessa lezione di [CLI per Coding Agent a confronto](/docs/models/coding-agent-clis-compared): l'harness, non il modello, è la cosa con cui sei davvero sposato.)
+
+## Il bug delle coordinate che ti mangia la prima settimana
+
+Questa è la cosa di maggior valore in questa pagina, perché quasi tutti ci sbattono contro e il sintomo sembra "il modello è scarso a cliccare".
+
+**Non è scarso a cliccare. La tua immagine e il tuo spazio di coordinate non sono d'accordo.**
+
+Tre cause indipendenti, che si sommano:
+
+### 1. Retina / HiDPI raddoppia la tua immagine
+
+I display Retina macOS catturano gli screenshot con un device pixel ratio di 2 — l'immagine ha il *doppio* della risoluzione delle coordinate logiche dello schermo. Inviala così com'è e il modello ragiona su un'immagine larga 2880 mentre il tuo executor dei click pensa in punti logici da 1440. Ogni click atterra a circa metà della posizione voluta, in modo costante, in una direzione.
+
+Rimedio: fai il downscale per 2 prima di inviare, **oppure** dimezza le coordinate che il modello restituisce. Non entrambe le cose.
+
+### 2. L'API fa silenziosamente il downscale delle immagini troppo grandi
+
+I modelli hanno limiti di dimensione per le immagini — e differiscono *tra modelli dello stesso laboratorio*. Claude Sonnet 5, Opus 4.8 e Opus 4.7 accettano fino a **2576 pixel** sul lato lungo; i modelli Claude precedenti accettano **1568 pixel** e circa 1,15 megapixel totali.
+
+Ecco la trappola: se invii qualcosa di più grande, l'API **fa il downscale al posto tuo** invece di restituire un errore. Il modello restituisce poi le coordinate nello spazio dell'immagine che *lui* ha visto — e tu non hai mai saputo il fattore di scala, perché il resize è avvenuto lato server. Solo immagini davvero enormi (oltre ~8.000 px per lato) vengono rifiutate del tutto con un errore di validazione.
+
+Quindi il comportamento "gentile" è il bug. **Fai sempre il resize lato client**, imposta `display_width_px`/`display_height_px` alle dimensioni che hai effettivamente inviato, e riscala tu stesso le coordinate restituite.
+
+### 3. Impostazioni di dettaglio e aspect ratio
+
+Sul tool di OpenAI, gli screenshot dovrebbero usare `detail: "original"` — sia `"high"` che `"low"` degradano la precisione dei click proprio per questo tipo di task. E se fai il resize senza preservare l'aspect ratio, i click atterrano nella *regione* giusta e mancano il *bersaglio*.
+
+<PromptCard title="Scalatura delle coordinate — la forma della soluzione">
+{`# Before sending: shrink to fit the model's image limit, remember the factor.
+LONG_EDGE_LIMIT = 2576   # check YOUR model's limit; older Claude models: 1568
+
+scale = min(1.0, LONG_EDGE_LIMIT / max(width, height))
+sent_w, sent_h = round(width * scale), round(height * scale)
+# -> send the resized image, and declare display_width_px=sent_w, display_height_px=sent_h
+
+# After the model replies: map its coordinates back to the real screen.
+real_x, real_y = model_x / scale, model_y / scale
+# On a Retina capture you did NOT pre-downscale, divide by the device pixel ratio too.`}
+</PromptCard>
+
+### Sintomo → causa, foglio riassuntivo
+
+| Sintomo | Quasi certamente |
+|---|---|
+| I click sono costantemente sfasati in una direzione | I tuoi `display_width_px`/`display_height_px` dichiarati non corrispondono all'immagine che hai davvero inviato |
+| I click atterrano nell'area giusta ma mancano i bersagli piccoli | Dettaglio perso nel downscaling, o aspect ratio distorto nel resize |
+| Precisione scarsa ovunque | Risoluzione troppo *bassa* — prova 1280x720 come minimo |
+| Il modello legge male testo minuscolo (titoli di tab, nomi di file, numeri di riga) | Ha bisogno di zoomare, e tu non l'hai abilitato |
+
+**Indicazioni sulla risoluzione, direttamente dai vendor:** Anthropic suggerisce 1024x768 o 1280x720 per il desktop generico, 1280x800 o 1366x768 per le web app, e dice esplicitamente di evitare di superare 1920x1080. OpenAI raccomanda 1440x900 o 1600x900. Più grande *non* è meglio — paghi token per i pixel e poi butti via il dettaglio nel downscale.
+
+### La via d'uscita dello zoom
+
+La versione più recente del computer tool di Claude (`computer_20251124`) aggiunge un'azione `zoom`, disattivata di default — devi impostare `enable_zoom: true`. Con lo zoom attivo, Claude ingrandisce una regione quando ha bisogno di leggere testo piccolo non leggibile alla risoluzione base dello screenshot: nomi di file nella sidebar, titoli di tab, testo della barra di stato, numeri di riga.
+
+Nota operativa non ovvia: se Claude *non* sta zoomando quando te lo aspetteresti, il rimedio di solito è chiedere di **una regione o di un elemento specifico** invece che dello schermo nel suo complesso.
+
+## I gate di sicurezza fanno parte del protocollo
+
+Non trattarli come un'aggiunta posticcia. In tutte e tre le API, il meccanismo di sicurezza cambia la forma del tuo loop.
+
+**Anthropic** ha addestrato il modello a resistere alla prompt injection *e* fa girare automaticamente dei classificatori sui tuoi prompt quando i tool computer-use sono in gioco. Quando un classificatore individua una probabile injection **in uno screenshot**, indirizza il modello a chiedere conferma all'utente prima dell'azione successiva. Ottimo con un umano presente, e attivamente sbagliato per una pipeline non presidiata — motivo per cui esiste un opt-out, subordinato al contatto con il supporto.
+
+**OpenAI** espone `pending_safety_checks` che il tuo codice deve riconoscere esplicitamente (`acknowledged_safety_checks`) prima che il loop prosegua. Il gate è nelle tue mani, e saltarlo è una decisione che prendi nel codice.
+
+**Google** restituisce una `safety_decision` — consentito, `require_confirmation`, o bloccato — guidata da categorie di policy tra cui `FINANCIAL_TRANSACTIONS`, `COMMUNICATION_TOOL`, `ACCOUNT_CREATION`, `SENSITIVE_DATA_MODIFICATION` e `LEGAL_TERMS_AND_AGREEMENTS`. Lo screening anti-prompt-injection degli screenshot è disponibile come opt-in.
+
+La minaccia è reale e specifica: **uno screenshot è input non fidato.** Il testo renderizzato su una pagina web, in un'immagine, in un PDF che l'agente ha aperto — tutto arriva al modello attraverso lo stesso canale delle tue istruzioni. La documentazione di Anthropic nota che Claude, in alcune circostanze, seguirà istruzioni trovate nei contenuti anche quando sono in conflitto con le tue. La mitigazione di ogni provider converge sulle stesse tre regole: isola l'ambiente, tieni un umano sulle azioni ad alto impatto, e tratta tutto ciò che è sullo schermo come ostile.
+
+Se l'agente deve fare login, il rischio sale bruscamente — credenziali più contenuto iniettabile è la peggiore combinazione in questo campo. Vedi [Mettere in sicurezza agenti locali e ibridi](/docs/models/securing-local-and-hybrid-agents) e [Prompt Injection](/docs/security/prompt-injection) per il playbook difensivo.
+
+## Leggere OSWorld con onestà
+
+**OSWorld** è il metro condiviso, ed è un buon metro perché è difficile da falsare: cala un agente dentro un OS reale con applicazioni reali, e valuta con verifica **basata sull'esecuzione** — uno script controlla se il file è stato davvero salvato, non se l'agente sostiene di averlo fatto. Il benchmark copre **369 task** (361 nel set di valutazione standard, dato che una manciata di task su Google Drive richiede setup manuale) e include **134 funzioni di valutazione basate sull'esecuzione**. OSWorld-Verified è la revisione ripulita, con gli esempi rotti segnalati dalla community corretti e il tempo di valutazione ridotto a circa un'ora su AWS.
+
+Due numeri da tenere insieme:
+
+- **La baseline umana è ~72,4%.** Non 100%. Questi task sono davvero pignoli, e anche gli umani ci inciampano.
+- **Quando OSWorld è uscito, il modello migliore segnava 12,24%.**
+
+Gli agenti di frontiera oggi riportano punteggi dai 70 in su — il che significa che il titolo "gli agenti hanno raggiunto il livello umano nel computer use" è *aritmeticamente difendibile e praticamente fuorviante*. Il punteggio di un benchmark è un risultato di **modello + harness + scaffold**, esattamente come per un benchmark di coding (vedi [Il divario capacità–affidabilità](/docs/frontiers/the-capability-reliability-gap)). Il tuo harness non è il loro harness. E un tasso di successo del 75% su singoli task si compone in modo brutale: un workflow di otto passi in cui ogni passo è affidabile al 95% riesce circa il 66% delle volte.
+
+Considera OSWorld come prova che la *capacità* esiste, e il tuo set di eval come l'unica prova che il tuo *prodotto* funziona.
+
+## Il risultato sul reasoning effort che nessuno si aspetta
+
+Per il computer use di Claude in particolare, il benchmarking interno di Anthropic dà indicazioni che ribaltano l'intuizione abituale:
+
+- **Opus 4.7:** effort `high` come default; scendi a `low` per carichi ad alto throughput o sensibili al costo.
+- **Sonnet 4.6 e Opus 4.6:** `medium` è il miglior rapporto accuratezza/costo. **Evita `max`** — sui task di UI aggiunge costo in token senza migliorare l'accuratezza.
+- Il controintuitivo: su quei modelli, l'effort **`low` usa *meno* token di output rispetto a disabilitare del tutto il thinking.** Un po' di ragionamento previene gli errori, e gli errori ti costano retry — e i retry costano molti più token di quanti ne costasse il thinking.
+
+Quindi "spegni il thinking per risparmiare" è, per il computer use, spesso sbagliato. Il più economico è *un po'* di thinking.
+
+Un'ultima sfumatura nella scelta del modello: la precisione meccanica dei click non è lo stesso asse dell'intelligenza. Sonnet 4.6 è meccanicamente *più* preciso nei click di Opus 4.6, ed è più robusto quando gli screenshot sono stati fortemente ridimensionati. Opus 4.7 riduce quel divario e alza il limite sui pixel, quindi ha bisogno di meno downscaling in partenza.
+
+<Flashcards cards={[
+  {front: "Perché su un Mac i click atterrano a metà della posizione voluta?", back: "Retina cattura con device pixel ratio 2 — lo screenshot è 2x lo spazio di coordinate logico. Fai il downscale dell'immagine per 2, oppure dimezza le coordinate restituite. Non entrambe le cose."},
+  {front: "Perché il downscaling lato server delle immagini è una trappola?", back: "L'API ridimensiona gli screenshot troppo grandi invece di dare errore. Il modello restituisce coordinate nello spazio dell'immagine che ha visto lui, e tu non hai mai saputo il fattore di scala. Fai sempre il resize lato client."},
+  {front: "Limiti sulle immagini di Claude per il computer use", back: "Sonnet 5 / Opus 4.8 / Opus 4.7: fino a 2576 px sul lato lungo. Modelli precedenti: 1568 px e ~1,15 MP. Oltre ~8000 px per lato viene rifiutato del tutto."},
+  {front: "Baseline umana di OSWorld", back: "~72,4% — non 100%. I task sono davvero difficili, e il punteggio del miglior modello iniziale era 12,24%."},
+  {front: "Il reasoning effort più economico per il computer use di Claude", back: "Non 'spento'. Su Sonnet 4.6 / Opus 4.6, `low` usa meno token di output che disabilitare il thinking, perché meno errori significa meno retry. Evita `max` sui task di UI."},
+  {front: "Spazio d'azione di Gemini vs quello di Anthropic", back: "Gemini è semantico e browser-first (navigate, go_back, open_app); Anthropic è fatto di primitive desktop meccaniche. Il semantico è più affidabile in un browser e inutile fuori."},
+  {front: "safety_decision / pending_safety_checks", back: "Google restituisce una safety_decision (allowed / require_confirmation / blocked) per categoria di policy; OpenAI restituisce pending_safety_checks che il tuo codice deve riconoscere prima di continuare. Il gate è dentro il loop, non intorno."},
+]} />
+
+## Un harness che sopravvive al contatto
+
+<Steps items={[
+  {title: "Sandbox prima di tutto, sempre", body: "Un container o una VM senza niente di prezioso dentro. Ogni provider lo dice e tutti lo intendono sul serio: prima o poi l'agente cliccherà qualcosa che non volevi."},
+  {title: "Fissa lo spazio di coordinate", body: "Cattura, ridimensiona lato client al limite del tuo modello, dichiara le dimensioni esatte che hai inviato, e conserva il fattore di scala. Scrivilo una volta e non pensarci mai più."},
+  {title: "Metti un tetto al loop", body: "La terminazione è 'nessuna ulteriore azione restituita' — che non scatta mai se l'agente è bloccato in una modale che non riesce a chiudere. Aggiungi un budget massimo di passi e un rilevatore di stallo (screenshot identici N volte di fila)."},
+  {title: "Decidi esplicitamente la tua policy sul gate di sicurezza", body: "Umano nel loop, oppure non presidiato con un opt-out e un raggio d'azione più stretto. Non scoprirlo per caso quando un prompt di conferma manda in deadlock il tuo cron job."},
+  {title: "Costruisci una eval da dieci task prima di costruire la seconda feature", body: "Verificata sull'esecuzione, come fa OSWorld: controlla che il mondo sia cambiato, non che l'agente lo abbia dichiarato. È l'unico numero sul tuo sistema che significhi qualcosa."},
+  {title: "Preferisci l'API ai pixel dove puoi", body: "L'agente computer-use più affidabile è quello che non deve usare il computer. Se il bersaglio ha un'API, un server MCP o una CLI, quella strada è più veloce, più economica e di ordini di grandezza più affidabile. Gli schermi sono il ripiego, non l'obiettivo."},
+]} />
+
+Quest'ultimo passo è quello strategico. Il computer use è l'adattatore universale per il software senza API — app desktop legacy, portali di fornitori, qualsiasi cosa dietro un login senza una storia di integrazione. È un hack magnifico, e resta comunque un hack. Prima di tutto punta a [MCP e ai tool veri](/docs/models/claude-mcp-local-tools).
+
+<Quiz questions={[
+  {
+    q: "I click del tuo agente computer-use sono costantemente sfasati in una direzione. Qual è la causa più probabile?",
+    options: [
+      "Il modello non è abbastanza intelligente per i task di UI",
+      "Le dimensioni di display dichiarate non corrispondono alle dimensioni dell'immagine effettivamente inviata",
+      "La risoluzione dello schermo è troppo alta per l'applicazione",
+      "Devi abilitare l'extended thinking"
+    ],
+    answer: 1,
+    explain: "Uno sfasamento direzionale costante è la firma di un disallineamento nello spazio di coordinate — classicamente una cattura Retina 2x, o un'immagine di cui l'API ha fatto il downscale lato server mentre i tuoi display_width_px/display_height_px dichiarati descrivevano ancora l'originale. Ridimensiona lato client e dichiara esattamente ciò che hai inviato."
+  },
+  {
+    q: "Perché affidarsi al downscaling automatico dell'API sugli screenshot troppo grandi è un bug e non una comodità?",
+    options: [
+      "Rende la richiesta più lenta",
+      "Elimina informazioni sul colore di cui il modello ha bisogno",
+      "Il modello restituisce coordinate nello spazio dell'immagine ridimensionata, e tu non conosci il fattore di scala per riportarle indietro",
+      "Fa sì che la richiesta venga rifiutata"
+    ],
+    answer: 2,
+    explain: "Il resize avviene lato server, quindi il tuo codice non ha alcun fattore di scala. Le coordinate del modello sono corrette — per un'immagine che tu non hai mai visto. Ridimensiona lato client così il fattore è tuo."
+  },
+  {
+    q: "Per il computer use di Claude su Sonnet 4.6, quale impostazione di reasoning effort costa tipicamente MENO token di output?",
+    options: [
+      "Thinking disabilitato del tutto",
+      "low",
+      "max",
+      "Sono tutte identiche come costo"
+    ],
+    answer: 1,
+    explain: "Controintuitivo ma documentato: `low` usa meno token di output che spegnere il thinking, perché un po' di ragionamento previene gli errori, e gli errori causano retry che costano molto più del thinking. `max` aggiunge costo senza guadagni di accuratezza sui task di UI."
+  },
+  {
+    q: "La baseline umana di OSWorld è circa il 72%. Cosa implica questo su un agente che segna il 75%?",
+    options: [
+      "L'agente è sovrumano e pronto per la produzione su qualsiasi task di UI",
+      "Il benchmark è rotto e andrebbe ignorato",
+      "Ha superato un'asticella difficile su singoli task in media — ma il punteggio è un risultato di modello+harness, e l'affidabilità multi-step si compone verso il basso",
+      "Significa che l'agente riuscirà nel 75% dei casi sul tuo workflow"
+    ],
+    answer: 2,
+    explain: "Il numero è reale ma è un accoppiamento di modello, harness e scaffold — non un punteggio del modello trasferibile. E il successo per passo si compone: otto passi al 95% ciascuno danno solo ~66% end-to-end. Costruisci la tua eval verificata sull'esecuzione."
+  },
+  {
+    q: "Perché uno screenshot è considerato input non fidato?",
+    options: [
+      "Gli screenshot possono trasportare malware nella codifica dell'immagine",
+      "Il testo renderizzato sullo schermo raggiunge il modello attraverso lo stesso canale delle tue istruzioni, quindi il contenuto della pagina può agire come istruzione iniettata",
+      "Gli screenshot sono sempre troppo grandi per l'API",
+      "Il modello non sa leggere il testo nelle immagini in modo affidabile"
+    ],
+    answer: 1,
+    explain: "Questa è prompt injection via pixel. La documentazione di Anthropic nota che Claude talvolta segue istruzioni trovate nei contenuti anche quando sono in conflitto con le tue. Da qui i classificatori automatici sugli screenshot, la safety_decision di Google e i pending_safety_checks di OpenAI — il gate è integrato nel protocollo."
+  }
+]} />
+
+## Fonti e approfondimenti
+
+- [Anthropic — Computer use tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool) — header beta, set di azioni, limiti sulle immagini, scalatura delle coordinate, indicazioni sull'effort, classificatori anti-injection.
+- [OpenAI — Guida al computer use](https://developers.openai.com/api/docs/guides/tools-computer-use) — il loop `computer_call` / `computer_call_output`, i safety check, le risoluzioni consigliate.
+- [Google — Gemini computer use](https://ai.google.dev/gemini-api/docs/computer-use) — lo spazio d'azione semantico tra browser, mobile e desktop; le categorie di policy di `safety_decision`.
+- [OSWorld](http://osworld-v1.xlang.ai/) e [xlang-ai/OSWorld](https://github.com/xlang-ai/OSWorld) — il benchmark, la sua verifica basata sull'esecuzione, e la baseline umana.
+- [anthropics/anthropic-quickstarts](https://github.com/anthropics/anthropic-quickstarts) — l'implementazione di riferimento `computer-use-demo` (container, display virtuale, loop dell'agente).
+- [openai/openai-cua-sample-app](https://github.com/openai/openai-cua-sample-app) — l'harness computer-use di riferimento di OpenAI.
+- [browser-use/browser-use](https://github.com/browser-use/browser-use) — un harness per agenti browser molto usato e indipendente dal modello, se vuoi il caso browser senza costruirti il loop da solo.
