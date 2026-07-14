@@ -1,0 +1,158 @@
+---
+sidebar_position: 8
+title: "What Your Coding Agent Actually Uploads"
+description: "A CLI shipped whole git bundles to a cloud bucket while its privacy toggle said no. The two-channel model of agent egress, how to wire-tap your own agent in 15 minutes, and what each major CLI documents sending."
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Separate the two egress channels every coding agent has — and understand why only one of them is visible to you", "Read the Grok Build wire capture: 196 KB of model traffic vs 5.10 GiB of repository upload, from the same session", "Learn why a permission denial and a \"don't train on my data\" toggle can both be honored while your repo still leaves the machine", "Wire-tap your own agent with mitmproxy and a canary repo, and count the bytes per endpoint yourself", "Compare what Claude Code, Cursor, Gemini CLI and Codex each document sending — and where the documentation ends"]} />
+
+You almost certainly model your coding agent's privacy like this: *it sends what it reads.* Approve a file read, that file goes to the model. Deny it, it doesn't. Your prompts and the files in context are the payload; everything else is metadata.
+
+That model is wrong for at least one shipping agent, and structurally incomplete for several others. In July 2026 a researcher pointed a proxy at xAI's Grok Build CLI and found that a 12 GB repository left the machine as a git bundle — full history, never-read files, `.env` contents — through a channel that had nothing to do with what the agent read, while the setting a user would reach for to stop it governed something else entirely.
+
+This page is not really about Grok. It's about the channel it exposed, which most agents have in some form, and about the fact that you can check your own in an afternoon instead of trusting a marketing page.
+
+## The two channels
+
+Every agent CLI that talks to a hosted model has **Channel A**. Some also have **Channel B**.
+
+**Channel A — the model turn.** Your prompt, the system prompt, tool definitions, and the contents of files the agent actually read. This is the channel your intuition tracks. It's the one permission prompts gate, the one `.gitignore`-style deny rules affect, the one you can roughly predict from the transcript. It's also *small*: a working session moves kilobytes to low megabytes.
+
+**Channel B — the ambient channel.** Anything the client uploads on its own initiative, not as part of answering your turn: codebase indexing, session traces, crash reports, usage analytics, feedback bundles. It runs on the client's schedule, not the model's reasoning. It's not in your transcript. It doesn't ask. And because it's driven by a code path rather than an LLM decision, **no amount of prompting affects it** — telling the agent "do not read any files" constrains Channel A and says nothing about Channel B.
+
+Channel B is not inherently sinister. Cursor's server-side index is a Channel B and it's documented in detail. The danger isn't its existence — it's that user-facing controls are almost always designed for Channel A, so people reason about a system with two exits while looking at one.
+
+## The wire capture
+
+A researcher publishing as **cereblab** ran Grok Build CLI `0.2.93` (macOS arm64, commit `f00f96316d4b`) through `mitmproxy` on `127.0.0.1:8080` with a trusted CA, against throwaway repos containing planted canary strings. The harness, the captured evidence, and SHA-256 checksums are published as a reproduction repo, so this is a claim you can re-run rather than one you have to believe.
+
+What the capture showed:
+
+**Two endpoints, wildly different volumes.** In a single session against a 12 GB repository:
+
+| Channel | Endpoint | Bytes | Requests |
+|---|---|---|---|
+| A — model turns | `POST cli-chat-proxy.grok.com/v1/responses` | 196,705 | 5 |
+| B — repository upload | `POST cli-chat-proxy.grok.com/v1/storage` | 5,476,228,005 (5.10 GiB) | 82, all HTTP 200 |
+
+Roughly a **27,800× ratio**. That gap is the whole argument: a volume like that cannot be sourced from what the model read. It's sourced from the codebase itself. The uploads went out as ~75 MB chunks (73 of them in the logged run) and the capture was cut off *while they were still succeeding*, meaning 5.10 GiB is a floor, not a total.
+
+**The canary that was never read.** The agent was prompted, in plain terms, `Reply exactly OK, do not read any files`. A file at `src/_probe/never_read_canary.txt` containing a unique marker did not appear in any `/v1/responses` body — Channel A behaved exactly as instructed. It *did* appear in an uploaded git bundle recovered from the intercepted `/v1/storage` request. The researcher `git clone`d the captured bundle and got the repository back, marker and full history intact. A separate canary, a fake DB password in a `.env` file, showed up verbatim and unredacted in both channels.
+
+**The destination was a named bucket.** Strings in the binary and staged upload metadata pointed at a Google Cloud Storage bucket, `grok-code-session-traces`, with object paths of the form `gs://grok-code-session-traces/repo_changes_dedup/v2/…`. Nothing in the CLI's setup materials described this.
+
+<VerifyNote lastVerified="2026-07-14" source="cereblab wire-level analysis (gist + grok-build-exfil-repro), Hacker News threads 48892468 / 48896493, The Hacker News coverage" />
+
+**The fix, and the shape of the response.** On 2026-07-13 the same unchanged `0.2.93` binary stopped issuing `/v1/storage` requests across six retests — a server-side flag flip (`disable_codebase_upload: true`), not a client update. xAI responded on X rather than with a formal advisory: enterprise zero-data-retention customers were said to be unaffected, individual subscribers were pointed at a `/privacy` command, and previously uploaded data was said to be deleted. Treat the current state as fixed-for-now; treat the *class* of bug as permanent.
+
+## Three things this breaks that you probably believed
+
+`★` **"The agent only sends what it reads."** False whenever a Channel B exists. Reading is an LLM decision; indexing is a code path. They are not the same subsystem and they do not share a gate.
+
+`★` **"I denied the file, so it's safe."** A permission denial operates at the *tool* layer — it stops the agent from pulling the file into context. It is not a network egress rule. In the Grok case, a denied file still shipped inside the git bundle. If your threat model needs a file to not leave the machine, the enforcement point has to be the filesystem or the network, not the agent's own permission prompt.
+
+`★` **"Don't train on my data" ≠ "don't transmit my data."** These are two different controls and vendors routinely expose only the first. Grok's "Improve the model" toggle mapped to training consent; with it off, the server still returned `trace_upload_enabled: true` and the repo uploads continued unchanged. Anthropic's docs draw the same distinction explicitly for Claude Code — the training-data setting and the telemetry/feedback switches are separate knobs with separate env vars. Read every privacy toggle as answering *"may you keep it?"*, never as answering *"will you take it?"*
+
+## Wire-tap your own agent
+
+You do not need to trust anyone's documentation — including this page. Fifteen minutes and a proxy gives you ground truth for whatever agent you run. Do this on a throwaway repo with fake secrets, on your own machine.
+
+<Steps items={[
+  {"title": "Install a MITM proxy and trust its CA", "body": "mitmproxy generates a local CA on first run. Install it into the system trust store so the agent's TLS calls terminate at the proxy instead of failing. This is the whole trick — agent CLIs are ordinary HTTPS clients and most respect standard proxy environment variables."},
+  {"title": "Build a canary repo", "body": "Create a throwaway git repo. Plant a unique marker in a .env file (a fake credential), and a second unique marker in a file you will explicitly tell the agent never to open. Commit both — committed files are what a git-bundle upload would carry. Markers must be strings that cannot occur naturally, so a grep over the capture is unambiguous."},
+  {"title": "Run the agent through the proxy with a null task", "body": "Point HTTPS_PROXY at the listener and give the agent a task that requires reading nothing at all. If the agent is only using Channel A, an almost-empty session should move almost no bytes."},
+  {"title": "Count bytes per endpoint", "body": "Sum request body sizes grouped by host and path. This is the measurement that matters. A session that reads nothing but moves hundreds of megabytes has a Channel B, whatever the docs say."},
+  {"title": "Grep the capture for your canaries", "body": "Search the raw flows — and decompress any archives or bundles you find — for both markers. The never-read marker appearing anywhere in the capture is a positive result: something is uploading files independent of what the model read."},
+  {"title": "Re-run with every privacy toggle set to maximum", "body": "Now turn off training consent, telemetry, analytics, indexing — everything the vendor exposes — and repeat. The delta between the two runs tells you exactly what those toggles actually control, which is the question the toggle's label rarely answers."}
+]} />
+
+<PromptCard title="Minimal wire-tap harness">
+{`# 1. proxy + CA (macOS; on Linux use your distro's trust store)
+brew install mitmproxy
+mitmdump -w flows.mitm --set confdir=~/.mitmproxy &
+sudo security add-trusted-cert -d -r trustRoot \\
+  -k /Library/Keychains/System.keychain ~/.mitmproxy/mitmproxy-ca-cert.pem
+
+# 2. canary repo
+mkdir -p /tmp/canary/src/_probe && cd /tmp/canary && git init
+echo 'DB_PASS=CANARY-AAAA-ENVSECRET' > .env
+echo 'CANARY-BBBB-NEVERREAD' > src/_probe/never_read.txt
+git add -A && git commit -m "canary"
+
+# 3. run the agent through the proxy, asking it to read nothing
+HTTPS_PROXY=http://127.0.0.1:8080 HTTP_PROXY=http://127.0.0.1:8080 \\
+  <your-agent-cli> "Reply exactly OK. Do not read any files."
+
+# 4. bytes per endpoint — the number that matters
+mitmdump -nr flows.mitm \\
+  --set console_eventlog_verbosity=info \\
+  -s <(echo 'def response(f): print(f.request.pretty_host, f.request.path,
+      len(f.request.raw_content or b""))')
+
+# 5. did a file you never opened leave the machine?
+strings flows.mitm | grep -c 'CANARY-BBBB-NEVERREAD'`}
+</PromptCard>
+
+If step 5 returns anything but `0`, you have found a Channel B — and you found it yourself, which is the only kind of finding that ages well.
+
+## What the major CLIs document
+
+Documentation is a *claim*; a wire capture is *evidence*. The gap between them is the entire lesson of this page. Still, the claims differ enough to be worth knowing — and knowing them tells you what to look for when you run the capture.
+
+**Claude Code.** No whole-repo indexing or bundle-upload channel appears in the documented data flow; the agent searches with tools and sends file contents as part of the model turn, so the file contents that leave are the ones pulled into context. Operational telemetry is separate and, per Anthropic's docs, "does not include any code or file paths" (`DISABLE_TELEMETRY=1`); Sentry error reporting is separate again (`DISABLE_ERROR_REPORTING=1`). The channels that *do* carry code are explicit and opt-in: `/feedback` sends conversation history including code (`DISABLE_FEEDBACK_COMMAND=1`), and the session-quality survey's transcript-share step uploads a transcript only if you actively choose **Yes**, with known key and token patterns redacted first. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is the single kill switch for the lot. Retention: 30 days for commercial (Team/Enterprise/API), 30 days for consumers who leave model-improvement off and 5 years for those who turn it on; zero data retention exists for qualifying Enterprise accounts. Anthropic does not train on code sent under commercial terms unless the org opts in.
+
+**Cursor.** A textbook documented Channel B: the codebase index is built by chunking your repo, embedding the chunks, and sending **embeddings plus encrypted file paths** to Cursor's servers. Per the docs, code content is held in memory during indexing and then discarded rather than stored in plaintext, and chunks are decrypted client-side when the agent retrieves them. This is a real whole-repo upload of a *derived* artifact — a materially different risk profile from a raw git bundle, and materially different from Claude Code's read-what-you-need model. Which of the three you want is a judgment call. Not knowing which one you're running is not.
+
+**Gemini CLI.** Usage statistics are on by default and disabled with `privacy.usageStatisticsEnabled: false` in `settings.json`; the docs state that prompt and response content and the contents of files read or written are not logged. OpenTelemetry instrumentation is separate and can be pointed at a collector you control (`telemetry.enabled: false` to turn it off).
+
+**Codex CLI.** Anonymous client analytics are on by default and disabled via the analytics config flag; OTel export is routable to your own collector, and prompt logging (`log_user_prompt`) is off unless you enable it. Session transcripts persist locally under `CODEX_HOME` — see below.
+
+<VerifyNote lastVerified="2026-07-14" source="code.claude.com/docs/en/data-usage, cursor.com/docs codebase indexing, google-gemini/gemini-cli docs, developers.openai.com/codex config" />
+
+## The half nobody checks: your own disk
+
+Egress is only one direction. Every one of these agents also writes your session — prompts, file contents, tool output, sometimes secrets — to local disk in plaintext, and those files outlive the session.
+
+Claude Code stores transcripts under `~/.claude/projects/` for 30 days by default (tune with `cleanupPeriodDays`). Codex persists history under `CODEX_HOME`. Grok Build staged its uploads in `~/.grok/upload_queue` — reportedly on the order of gigabytes per turn, and under load capable of growing until it filled the disk, which is a denial-of-service bug hiding inside a privacy bug.
+
+Consequence: a laptop backup, a synced folder, or a second process with read access to your home directory is an exfiltration path that never touches the network stack you just instrumented. Any secret that entered a session is now on disk in cleartext somewhere you didn't put it.
+
+## Hardening that actually holds
+
+The recurring theme in the Hacker News discussion — hundreds of comments across both threads — was that markdown-level instructions are not a security boundary. `CLAUDE.md` and its equivalents are guidance to a model, not enforcement against a binary. If a control has to hold against the *client*, it must live below the client.
+
+<Steps items={[
+  {"title": "Give the agent a filesystem, not your filesystem", "body": "Run it in a container or devcontainer with only the working repo mounted. This is the single highest-leverage change: an agent that cannot see ~/.ssh, ~/.aws, your shell history, your other clients' repos, or your password vault cannot upload them through any channel, documented or not. A separate OS user achieves much of the same with less ceremony."},
+  {"title": "Make egress an allowlist", "body": "Deny outbound by default from the agent's container and allow only the model API host it needs. A Channel B you never approved cannot dial out through a closed egress policy. As a bonus, this converts every future undocumented upload channel from an incident into a connection error in your logs."},
+  {"title": "Keep secrets out of the blast radius entirely", "body": "The .env in your working tree is the single most valuable file an agent can leak, and it is the one most likely to be committed and therefore carried by any bundle-shaped upload. Inject secrets from a secret manager or the environment at run time; keep them out of the repo and out of the mounted tree."},
+  {"title": "Test the toggles, don't trust them", "body": "Run the capture from the previous section once, with all privacy settings maxed. Fifteen minutes buys you a fact instead of a claim — and it's the only step here that would have caught this incident before the researcher did."},
+  {"title": "If you ran an affected tool: rotate, don't reason", "body": "Do not try to reconstruct what was and wasn't uploaded. If SSH keys, cloud credentials, or API tokens were reachable in a directory an agent had access to during an exposure window, treat them as disclosed and rotate them. Credential rotation is cheap; a forensic argument about which bytes moved is not."},
+  {"title": "Buy the contract if the code matters", "body": "Zero-data-retention and commercial terms are not a substitute for the controls above, but they change what a vendor is permitted to keep and what recourse you have. If you are running an agent over a codebase you cannot afford to leak, the consumer tier is the wrong tier."}
+]} />
+
+<Quiz questions={[{"q": "In the Grok Build capture, a file the agent was explicitly told not to read still left the machine. Why?", "options": ["The model disobeyed the instruction and read it anyway", "The file left through a separate whole-repo upload channel that does not depend on what the model reads", "The instruction was in the wrong prompt format", "The file was not covered by .gitignore, so the model was allowed to read it"], "answer": 1, "explain": "The model-turn channel obeyed perfectly — the marker never appeared in any /v1/responses body. It appeared in a git bundle uploaded via a separate /v1/storage channel, which is a client code path, not an LLM decision. Prompting cannot constrain a channel the model does not control."}, {"q": "A vendor's \"do not use my data to improve the model\" toggle is switched off. What have you established?", "options": ["Your code will not be sent to the vendor's servers", "Your code will not be retained at all", "Only that the vendor claims it will not train on the data — transmission and retention are separate controls", "Nothing at all; such toggles are always ignored"], "answer": 2, "explain": "Training consent, transmission, and retention are three different controls, and most products only expose the first. Grok's toggle mapped to training consent while the repository upload continued. Always ask a privacy toggle the second question: not 'may you keep it?' but 'will you take it?'"}, {"q": "Which measurement most reliably reveals an undocumented Channel B?", "options": ["Reading the vendor's privacy policy carefully", "Checking whether the agent's transcript mentions reading files", "Running a session that reads nothing and summing request-body bytes per endpoint", "Counting the tokens the agent reports using"], "answer": 2, "explain": "A session that reads nothing should move almost nothing. If bytes-per-endpoint shows hundreds of megabytes leaving during a no-op turn, the volume cannot have come from the model turn — that gap is the fingerprint of an ambient upload channel. The 27,800x ratio in the Grok capture is exactly this measurement."}, {"q": "Which control would have prevented this class of upload regardless of the vendor's implementation?", "options": ["Adding 'never upload my repository' to CLAUDE.md or the equivalent instructions file", "Denying the file-read permission when the agent asked", "Running the agent in a container with only the working repo mounted and a default-deny egress policy", "Setting the model's temperature to 0"], "answer": 2, "explain": "Instruction files are guidance to a model, and permission prompts gate the tool layer — neither is a network boundary. Only enforcement below the client (what the process can see, and what it can dial) constrains a code path that never consults the model."}]} />
+
+<Flashcards cards={[{"front": "Channel A", "back": "The model turn: prompts, system prompt, tool definitions, and contents of files the agent actually read. Gated by permissions, visible in the transcript, typically kilobytes to megabytes."}, {"front": "Channel B", "back": "The ambient channel: indexing, session traces, crash reports, analytics, feedback bundles. Client-driven, not LLM-driven — so prompting and permission denials do not constrain it. May be documented (Cursor's index) or not (Grok's /v1/storage)."}, {"front": "The 27,800x tell", "back": "In the Grok Build capture, a single 12 GB-repo session moved 196,705 bytes on the model endpoint and 5,476,228,005 bytes (5.10 GiB) on the storage endpoint. Volume that far above what was read cannot come from the model turn."}, {"front": "Canary file", "back": "A file with a unique, never-naturally-occurring marker that you explicitly instruct the agent not to open. If the marker shows up anywhere in a wire capture, something is uploading files independent of what the model read."}, {"front": "Git bundle upload", "back": "Shipping the repository as a git bundle carries every tracked file plus full history — including files the agent was denied, and secrets that were ever committed. A permission denial does not touch it."}, {"front": "Training consent vs transmission", "back": "Two different controls. 'Do not train on my data' says the vendor will not learn from it; it says nothing about whether the bytes leave your machine or how long they are kept."}, {"front": "Zero data retention (ZDR)", "back": "A contractual/technical mode where the provider does not persist request data server-side. Available on qualifying Anthropic Enterprise accounts for Claude Code; changes what may be kept, not what a buggy client may send."}, {"front": "Default-deny egress", "back": "The container-level control that turns any future undocumented upload channel from an incident into a connection error in your logs. The only defense on this page that does not depend on the vendor being correct."}]} />
+
+## Where this goes next
+
+Nothing about this incident was model-specific, and nothing about it required a novel attack. It required a client that did something reasonable-sounding — cache the repo server-side to give the agent better context — without surfacing it, and a settings screen whose vocabulary ("Improve the model") didn't map onto the question users were actually asking.
+
+Both of those are extremely common. The agent CLI category is eighteen months old, moving fast, and shipping features that upload code because uploading code makes the product better. Expect more of these. The defensible position is not picking the vendor with the best privacy page; it's building the habit of *measuring*, and running the thing inside a box that limits what a wrong answer can cost you.
+
+If you want the adversarial side of the same problem — untrusted content steering an agent that already has your permissions — read [When Coding Agents Get Weaponized](/docs/security/coding-agents-under-attack) and [Hardening Autonomous Runs](/docs/security/hardening-autonomous-runs). For how the CLIs differ on everything *other* than data flow, see [Coding Agent CLIs Compared](/docs/models/coding-agent-clis-compared).
+
+## Sources & further reading
+
+- [cereblab — "What xAI Grok Build CLI actually sends to xAI: a wire-level analysis (grok 0.2.93)"](https://gist.github.com/cereblab/dc9a40bc26120f4540e4e09b75ffb547) — the primary capture: endpoints, byte counts, canary methodology, binary hashes.
+- [cereblab/grok-build-exfil-repro](https://github.com/cereblab/grok-build-exfil-repro) — the mitmproxy harness, canary repo, and evidence directory. Reproduce it yourself.
+- [Hacker News — "Grok CLI uploaded the whole home directory to GCS"](https://news.ycombinator.com/item?id=48892468) — 400+ comments, mostly on isolation strategy.
+- [Hacker News — "xAI's Grok Build CLI Uploads Git Repositories to a Google Cloud Bucket"](https://news.ycombinator.com/item?id=48896493) — the thread on the wire-level analysis.
+- [The Hacker News — "Grok Build Uploaded Entire Git Repositories to xAI Storage"](https://thehackernews.com/2026/07/grok-build-uploads-entire-git.html) — timeline and xAI's response.
+- [Anthropic — Claude Code data usage](https://code.claude.com/docs/en/data-usage) — telemetry, feedback, retention, and the env vars that control each.
+- [Cursor — Codebase indexing](https://cursor.com/docs/context/codebase-indexing) — what the index uploads and what it doesn't store.
+- [Gemini CLI — configuration and telemetry](https://google-gemini.github.io/gemini-cli/docs/cli/telemetry.html) — `usageStatisticsEnabled`, OTel routing.
+- [mitmproxy](https://mitmproxy.org/) — the tool that turns a privacy claim into a measurement.
+</content>
