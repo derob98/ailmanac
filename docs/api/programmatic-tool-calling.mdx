@@ -1,0 +1,159 @@
+---
+sidebar_position: 17
+title: "Programmatic Tool Calling"
+description: "Let Claude call your tools from Python inside the code-execution sandbox — cutting round-trips and keeping intermediate results out of context."
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={[
+  "Understand what actually happens when Claude calls your tool from inside a sandbox — and why your tool still runs on your own machine",
+  "Enable it correctly with allowed_callers, and know why it is not a security boundary",
+  "Know the real numbers: what it saves, on which workloads, and where it costs you",
+  "Avoid the five failure modes that produce 400s and TimeoutErrors in production"
+]} />
+
+<VerifyNote lastVerified="2026-07-14" source="https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling">
+Tool version strings, container timeouts and code-execution pricing move faster than most API surfaces. The mechanism below is stable; re-check the exact identifiers and per-hour price against the official docs before you ship.
+</VerifyNote>
+
+## The problem it solves
+
+Classic tool use is a conversation. Claude asks for one tool call, you answer, the whole result lands in the context window, Claude reads it and asks for the next one. Twenty lookups means twenty inference passes and twenty raw payloads sitting in context forever.
+
+Most of that payload is waste. If you want to know which of twenty employees blew their expense budget, Claude does not need every line item — it needs the handful of names. But in classic tool use, the line items have to pass *through* the model to get filtered by it.
+
+Programmatic tool calling inverts that. Claude writes a Python script, the script calls your tools in a loop, filters the results, and only what the script *prints* comes back to the model. The raw data never enters the context window at all.
+
+## What is actually happening
+
+Here is the part almost every summary of this feature gets wrong: **your tool does not run inside the sandbox.** Anthropic's container has no access to your database.
+
+What really happens is that Claude's Python code pauses mid-execution, the API hands the call back to *you*, and the interpreter resumes once you answer:
+
+<Steps items={[
+  {title: "Claude writes the script", body: "It runs inside the code-execution container. Your tools appear to that code as async Python functions — one per tool, each taking a single dict of arguments and returning a string."},
+  {title: "The script calls your tool, and execution freezes", body: "The API returns a normal tool_use block for query_database, exactly as in classic tool use — except it now carries a caller field pointing back at the code-execution run that made the call."},
+  {title: "You execute the tool, on your own infrastructure", body: "Same as always: run the query, send back a tool_result block. The container ID is REQUIRED on this follow-up request, not optional — the API rejects the request without it, because it needs to find the paused interpreter."},
+  {title: "The interpreter resumes where it stopped", body: "Your result becomes the return value of that await expression. The loop continues. Claude is not sampled in between — no inference pass, no tokens."},
+  {title: "Only stdout comes back", body: "When the script finishes, Claude receives a code_execution_tool_result containing stdout, stderr and a return_code. Everything the script fetched but did not print is simply gone."}
+]} />
+
+Because the functions are `async`, Claude can fan out with `asyncio.gather` and hit ten tools concurrently — something classic tool use can only approximate with parallel tool blocks.
+
+<PromptCard title="What Claude's generated code actually looks like">
+{`import json
+
+rows = json.loads(await query_database({"sql": "<sql>"}))
+top = sorted(rows, key=lambda r: r["revenue"], reverse=True)[:5]
+print(f"Top 5 customers: {top}")`}
+</PromptCard>
+
+Note the `json.loads`. The tool function returns a **string** — the literal text of the `tool_result` you send back. If your tool description does not say "returns a list of rows as JSON objects", Claude has no way to know it can deserialize the thing, and it will handle your data as an opaque blob. **The output-format sentence in your tool description stops being documentation and becomes load-bearing code.** That is the single highest-leverage line you will write when adopting this feature.
+
+## Turning it on
+
+One field on the tool you want called from code, plus the code-execution tool in the request:
+
+<PromptCard title="Enabling programmatic calling on a tool">
+{`{
+  "name": "query_database",
+  "description": "Execute a SQL query against the sales database. Returns a list of rows as JSON objects.",
+  "input_schema": { "type": "object", "properties": { "sql": { "type": "string" } }, "required": ["sql"] },
+  "allowed_callers": ["code_execution_20260120"]
+}`}
+</PromptCard>
+
+`allowed_callers` takes three shapes:
+
+| Value | Meaning |
+| --- | --- |
+| `["direct"]` | Classic tool use. This is the default when the field is omitted. |
+| `["code_execution_20260120"]` | Claude is guided to call it only from inside code. |
+| `["direct", "code_execution_20260120"]` | Either. The docs advise **against** this — pick one, so Claude gets an unambiguous signal. |
+
+Every `tool_use` block in the response now carries a `caller`: either `{"type": "direct"}` or a code-execution caller whose `tool_id` matches the `server_tool_use` block that ran the script. That is how you attribute a call to the script that made it.
+
+### It is not a security boundary
+
+The docs are unusually blunt about this, and it is worth repeating because it is easy to assume the opposite: `allowed_callers` **controls how the tool is presented to Claude**. It is not a hard API-level block. Claude is strongly guided to respect it — but your client must still be prepared to receive a direct `tool_use` for any tool it defines, and you must not use this field as an authorization mechanism. Authorization belongs in your tool handler, where it always did.
+
+## The numbers
+
+Anthropic's own reported figures, so you can judge whether the complexity is worth it:
+
+- On complex research tasks, average usage fell **from 43,588 to 27,297 tokens — a 37% reduction**.
+- On the GIA benchmarks, accuracy rose **from 46.5% to 51.2%**; on internal knowledge retrieval, **25.6% to 28.5%**. Fewer tokens *and* better answers, because the model reasons over conclusions instead of drowning in raw payloads.
+- On agentic search benchmarks (BrowseComp, DeepSearchQA), layering programmatic calling on top of basic search tools improved performance by **an average of 11% while using 24% fewer input tokens**.
+- Latency: orchestrating 20+ tool calls in one code block eliminates **19+ inference passes**.
+
+The shape of the win is the tell. It pays when you have **3+ dependent calls, a loop, a filter, or a fan-out**. It pays nothing — and costs you a container — when Claude needs exactly one tool call and wants to read the whole answer anyway.
+
+<Callout type="warning" items={[
+  "Claude Haiku 4.5 accepts the newer tool types but does NOT support programmatic tool calling or the REPL state persistence that depends on it. The newer versions silently behave like code_execution_20250825 there. If you are routing to Haiku for cost, you are not getting this feature — and you will not get an error telling you so."
+]} />
+
+## What it costs
+
+Programmatic tool calling is billed as code execution, and code execution is billed by **container-hour, not by call**:
+
+- **1,550 free hours per month, per organization.**
+- Beyond that, **$0.05 per hour, per container**.
+- Execution time has a **minimum of 5 minutes** — a two-second script still bills five minutes of container.
+- If you attach files to the request, **execution time is billed even if the tool is never invoked**, because the files get preloaded onto a container regardless.
+- It is **free** when the same request also uses web search or web fetch (`web_search_20260209` / `web_fetch_20260209` or later).
+
+Two consequences worth internalizing. First, the 5-minute floor means *many short-lived containers* is the expensive pattern; reusing one container across a session is the cheap one. Second, this feature is **not eligible for Zero Data Retention** — if ZDR is a contractual requirement for you, this is a hard stop, not a tuning knob.
+
+## The five ways this breaks
+
+<Steps items={[
+  {title: "You put text in the reply. 400.", body: "When there are pending programmatic tool calls, your response message must contain ONLY tool_result blocks. Not text plus tool results. Not tool results followed by a polite sentence. Only tool_result blocks."},
+  {title: "You took too long. TimeoutError.", body: "A pending programmatic tool call times out after roughly four minutes and raises a TimeoutError inside Claude's running code (the docs' example stderr reads 'no response after 270s'). Claude sees it in stderr and usually retries. Put a timeout on your own tool execution so you fail fast rather than hanging the container."},
+  {title: "Your schema is recursive. 400 'Circular $ref detected'.", body: "An input_schema with a self-referencing $ref cannot be enabled for programmatic calling — even though the exact same schema is accepted for direct calling. Unroll the recursion to a fixed depth and describe deeper nesting in the innermost description, or keep that one tool direct-only."},
+  {title: "You forced it with tool_choice. 400.", body: "You cannot force programmatic calling of a specific tool. Naming a tool in tool_choice whose allowed_callers lacks 'direct' is an invalid_request_error. Also unsupported: strict: true (structured outputs) and disable_parallel_tool_use: true."},
+  {title: "The tool came from an MCP connector. It will not work.", body: "Tools provided by an MCP connector cannot be called programmatically. If you want an MCP-backed capability inside the sandbox, you have to expose it as a regular custom tool yourself."}
+]} />
+
+## Version strings, decoded
+
+All three code-execution versions are generally available and need **no beta header**:
+
+| Version | What it adds |
+| --- | --- |
+| `code_execution_20250825` | The baseline. Bash + Python + file ops. Supported on every current model. |
+| `code_execution_20260120` | Adds **REPL state persistence** and programmatic tool calling. This is the one you need. |
+| `code_execution_20260521` | **Identical runtime** to `20260120`. The only difference is that the tool description tells Claude about the 90-second wall-clock limit per Python cell, so it can budget long-running cells. A cell that blows the limit returns a non-zero `return_code` with a `detection_timeout` status. |
+
+That last row is a nice piece of API design to notice: a version bump whose entire payload is *a better prompt for the model*. Both strings are interchangeable inside `allowed_callers`, and responses always tag the caller as `code_execution_20260120` regardless of which you declared.
+
+The container itself has **no internet access** — Claude cannot `pip install` at runtime, so you get the pre-installed library set (pandas, numpy, scipy, scikit-learn, statsmodels, and friends) and nothing more. Containers are checkpointed after about five minutes of inactivity, restorable by ID, and expire 30 days after creation.
+
+## When to reach for it
+
+Reach for programmatic tool calling when the model is being used as a **loop and a filter** rather than as a reasoner: batch lookups across N entities, early termination once a condition is met, conditional tool selection based on an intermediate result, or crushing a 200 KB log dump down to the ten lines that matter.
+
+Reach for the [Tool Search Tool](/docs/api/tool-use) instead when your problem is that *definitions* are eating your context before a single call is made — mark tools `defer_loading: true` and Claude loads them on demand. The two are complements, not alternatives: tool search finds the right tool, programmatic calling executes it cheaply. If your tool definitions exceed roughly 10K tokens, you probably need both.
+
+And if you are hitting this from the other end — an agent whose context is drowning in MCP tool results — start with [MCP token cost](/docs/claude-code/mcp-token-cost) and [Context Engineering](/docs/frontiers/context-engineering), because the cheapest tokens are still the ones you never send.
+
+<Quiz questions={[{q:"Where does your tool actually execute during programmatic tool calling?",options:["Inside Anthropic's code-execution container","On your own infrastructure — the API pauses the container and returns a tool_use block to you","On the model's inference host","Inside an MCP server"],answer:1,explain:"The sandbox has no access to your systems. The Python interpreter freezes mid-call, the API hands you a normal tool_use block (tagged with a caller field), you execute it and return a tool_result, and the interpreter resumes. The container ID is required on that follow-up request."},{q:"Can you rely on allowed_callers to prevent a tool from being invoked directly?",options:["Yes — the API blocks direct invocation","No — it guides Claude but is not a hard block, so your client must still handle a direct tool_use","Yes, but only on Opus models","Only if you also set strict: true"],answer:1,explain:"The docs state explicitly that allowed_callers controls how the tool is presented to Claude and is not a security boundary. Authorization belongs in your tool handler."},{q:"Your agent routes to Claude Haiku 4.5 to save money and passes code_execution_20260120. What happens?",options:["A 400 error tells you the model is unsupported","Programmatic tool calling works normally","The tool type is accepted, but programmatic calling and REPL persistence silently do not work — it behaves like code_execution_20250825","The request falls back to Sonnet automatically"],answer:2,explain:"Haiku 4.5 accepts the newer tool types but supports neither programmatic tool calling nor the REPL state persistence that depends on it. There is no error — you just quietly lose the feature."},{q:"When there is a pending programmatic tool call, what may your reply message contain?",options:["tool_result blocks and a short text explanation","Only tool_result blocks","Any content, in any order","A text block followed by tool_result blocks"],answer:1,explain:"Replies to pending programmatic tool calls must contain ONLY tool_result blocks. Adding text — even after the results — is a formatting error."},{q:"A two-second script runs in a fresh container. How much code-execution time is billed?",options:["Two seconds","Nothing — code execution is always free","A minimum of 5 minutes","One hour"],answer:2,explain:"Execution time has a 5-minute minimum, billed at $0.05/hour per container beyond the org's 1,550 free hours per month. Many short-lived containers is the expensive pattern; reusing one is the cheap one."}]} />
+
+<Flashcards cards={[
+  {front: "allowed_callers", back: "Tool-definition field selecting who may invoke a tool: [\"direct\"] (default), [\"code_execution_20260120\"], or both. Guidance to the model, NOT an enforcement boundary."},
+  {front: "caller", back: "Field on every tool_use block in the response. Either {type: direct} or a code-execution caller whose tool_id points at the server_tool_use block that ran the script."},
+  {front: "code_execution_20260120", back: "The code-execution tool version that adds REPL state persistence and programmatic tool calling. Generally available; no beta header needed."},
+  {front: "code_execution_20260521", back: "Same runtime as 20260120. Only difference: the tool description tells Claude about the 90-second per-cell wall-clock limit."},
+  {front: "detection_timeout", back: "Status returned (with a non-zero return_code) when a single Python cell exceeds the 90-second wall-clock limit. Distinct from execution_time_exceeded, which covers the whole tool invocation."},
+  {front: "The 4-minute rule", back: "A pending programmatic tool call times out after about four minutes and raises TimeoutError inside Claude's running Python. Time-box your own tool execution."},
+  {front: "Why the tool description matters more here", back: "Tools are exposed to Claude's code as async functions returning a STRING. Documenting the output format (e.g. 'returns JSON rows') is what lets Claude json.loads it instead of treating the payload as opaque text."}
+]} />
+
+## Sources & further reading
+
+- [Programmatic tool calling — Claude Platform docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling) — `allowed_callers`, the `caller` field, the pause/resume flow, formatting restrictions and the constraint list.
+- [Code execution tool — Claude Platform docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool) — tool versions, container lifecycle and expiry, pre-installed libraries, and the 1,550-free-hours / $0.05-per-hour pricing.
+- [Introducing advanced tool use on the Claude Developer Platform](https://www.anthropic.com/engineering/advanced-tool-use) — the 43,588 → 27,297 token figure, the GIA and knowledge-retrieval accuracy gains, and how the Tool Search Tool composes with this.
+- [Improved web search with dynamic filtering](https://claude.com/blog/improved-web-search-with-dynamic-filtering) — the +11% / −24% input-token result on agentic search, and how dynamic filtering runs code execution for you.
+- [BrowseComp](https://arxiv.org/abs/2504.12516) and [DeepSearchQA](https://github.com/google-deepmind/deepsearchqa) — the agentic-search benchmarks behind those numbers.
+- Related on AILmanac: [Tool Use / Function Calling](/docs/api/tool-use) · [MCP](/docs/api/mcp) · [MCP token cost](/docs/claude-code/mcp-token-cost) · [Context Engineering](/docs/frontiers/context-engineering) · [Tokens & Pricing](/docs/api/tokens-and-pricing)
