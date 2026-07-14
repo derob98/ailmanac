@@ -1,0 +1,159 @@
+---
+sidebar_position: 17
+title: "Appel d'outils par programme"
+description: "Laissez Claude appeler vos outils depuis du Python exécuté dans le bac à sable d'exécution de code — moins d'allers-retours, et les résultats intermédiaires restent hors du contexte."
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={[
+  "Comprendre ce qui se passe réellement quand Claude appelle votre outil depuis un bac à sable — et pourquoi votre outil s'exécute malgré tout sur votre propre machine",
+  "L'activer correctement avec allowed_callers, et savoir pourquoi ce n'est pas une frontière de sécurité",
+  "Connaître les vrais chiffres : ce que cela économise, sur quelles charges de travail, et là où cela vous coûte",
+  "Éviter les cinq modes de défaillance qui produisent des 400 et des TimeoutError en production"
+]} />
+
+<VerifyNote lastVerified="2026-07-14" source="https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling">
+Les chaînes de version des outils, les délais d'expiration des conteneurs et la tarification de l'exécution de code évoluent plus vite que la plupart des surfaces d'API. Le mécanisme décrit ci-dessous est stable ; revérifiez les identifiants exacts et le prix horaire dans la documentation officielle avant de passer en production.
+</VerifyNote>
+
+## Le problème que cela résout
+
+L'usage classique des outils est une conversation. Claude demande un appel d'outil, vous répondez, tout le résultat atterrit dans la fenêtre de contexte, Claude le lit et demande le suivant. Vingt recherches, c'est vingt passes d'inférence et vingt charges utiles brutes qui restent dans le contexte pour toujours.
+
+L'essentiel de cette charge utile est du gaspillage. Si vous voulez savoir lesquels de vingt employés ont fait exploser leur budget de frais, Claude n'a pas besoin de chaque ligne de dépense — il a besoin de la poignée de noms. Mais dans l'usage classique des outils, les lignes de dépense doivent *traverser* le modèle pour être filtrées par lui.
+
+L'appel d'outils par programme inverse cela. Claude écrit un script Python, le script appelle vos outils dans une boucle, filtre les résultats, et seul ce que le script *imprime* revient au modèle. Les données brutes n'entrent jamais dans la fenêtre de contexte.
+
+## Ce qui se passe réellement
+
+Voici la partie que presque tous les résumés de cette fonctionnalité ratent : **votre outil ne s'exécute pas dans le bac à sable.** Le conteneur d'Anthropic n'a aucun accès à votre base de données.
+
+Ce qui se passe réellement, c'est que le code Python de Claude se met en pause au milieu de son exécution, l'API vous renvoie l'appel à *vous*, et l'interpréteur reprend une fois que vous avez répondu :
+
+<Steps items={[
+  {title: "Claude écrit le script", body: "Il s'exécute dans le conteneur d'exécution de code. Vos outils apparaissent à ce code comme des fonctions Python async — une par outil, chacune prenant un unique dictionnaire d'arguments et renvoyant une chaîne de caractères."},
+  {title: "Le script appelle votre outil, et l'exécution se fige", body: "L'API renvoie un bloc tool_use normal pour query_database, exactement comme dans l'usage classique des outils — sauf qu'il porte désormais un champ caller qui pointe vers l'exécution de code à l'origine de l'appel."},
+  {title: "Vous exécutez l'outil, sur votre propre infrastructure", body: "Comme toujours : exécutez la requête, renvoyez un bloc tool_result. L'ID du conteneur est OBLIGATOIRE sur cette requête de suivi, pas optionnel — l'API rejette la requête sans lui, car elle doit retrouver l'interpréteur en pause."},
+  {title: "L'interpréteur reprend là où il s'était arrêté", body: "Votre résultat devient la valeur de retour de cette expression await. La boucle continue. Claude n'est pas échantillonné entre-temps — aucune passe d'inférence, aucun token."},
+  {title: "Seule la sortie standard revient", body: "Quand le script se termine, Claude reçoit un code_execution_tool_result contenant stdout, stderr et un return_code. Tout ce que le script a récupéré mais n'a pas imprimé disparaît, tout simplement."}
+]} />
+
+Parce que les fonctions sont `async`, Claude peut se déployer en éventail avec `asyncio.gather` et solliciter dix outils simultanément — ce que l'usage classique des outils ne peut qu'approcher avec des blocs d'outils parallèles.
+
+<PromptCard title="À quoi ressemble réellement le code généré par Claude">
+{`import json
+
+rows = json.loads(await query_database({"sql": "<sql>"}))
+top = sorted(rows, key=lambda r: r["revenue"], reverse=True)[:5]
+print(f"Top 5 customers: {top}")`}
+</PromptCard>
+
+Notez le `json.loads`. La fonction outil renvoie une **chaîne de caractères** — le texte littéral du `tool_result` que vous renvoyez. Si la description de votre outil ne dit pas « renvoie une liste de lignes sous forme d'objets JSON », Claude n'a aucun moyen de savoir qu'il peut désérialiser la chose, et il traitera vos données comme un bloc opaque. **La phrase sur le format de sortie dans la description de votre outil cesse d'être de la documentation et devient du code porteur.** C'est la ligne au plus fort effet de levier que vous écrirez en adoptant cette fonctionnalité.
+
+## L'activer
+
+Un champ sur l'outil que vous voulez appeler depuis du code, plus l'outil d'exécution de code dans la requête :
+
+<PromptCard title="Activer l'appel par programme sur un outil">
+{`{
+  "name": "query_database",
+  "description": "Execute a SQL query against the sales database. Returns a list of rows as JSON objects.",
+  "input_schema": { "type": "object", "properties": { "sql": { "type": "string" } }, "required": ["sql"] },
+  "allowed_callers": ["code_execution_20260120"]
+}`}
+</PromptCard>
+
+`allowed_callers` prend trois formes :
+
+| Valeur | Signification |
+| --- | --- |
+| `["direct"]` | Usage classique des outils. C'est la valeur par défaut quand le champ est omis. |
+| `["code_execution_20260120"]` | Claude est guidé pour ne l'appeler que depuis du code. |
+| `["direct", "code_execution_20260120"]` | L'un ou l'autre. La documentation le **déconseille** — choisissez-en un, pour que Claude reçoive un signal sans ambiguïté. |
+
+Chaque bloc `tool_use` de la réponse porte désormais un `caller` : soit `{"type": "direct"}`, soit un appelant d'exécution de code dont le `tool_id` correspond au bloc `server_tool_use` qui a exécuté le script. C'est ainsi que vous attribuez un appel au script qui l'a émis.
+
+### Ce n'est pas une frontière de sécurité
+
+La documentation est exceptionnellement franche sur ce point, et il vaut la peine de le répéter car il est facile de supposer le contraire : `allowed_callers` **contrôle la façon dont l'outil est présenté à Claude**. Ce n'est pas un blocage strict au niveau de l'API. Claude est fortement guidé pour le respecter — mais votre client doit rester prêt à recevoir un `tool_use` direct pour n'importe quel outil qu'il définit, et vous ne devez pas utiliser ce champ comme mécanisme d'autorisation. L'autorisation appartient à votre gestionnaire d'outil, là où elle a toujours été.
+
+## Les chiffres
+
+Les chiffres publiés par Anthropic elle-même, pour que vous puissiez juger si la complexité en vaut la peine :
+
+- Sur des tâches de recherche complexes, l'usage moyen est passé **de 43 588 à 27 297 tokens — une réduction de 37 %**.
+- Sur les benchmarks GIA, la précision est montée **de 46,5 % à 51,2 %** ; sur la récupération de connaissances internes, **de 25,6 % à 28,5 %**. Moins de tokens *et* de meilleures réponses, car le modèle raisonne sur des conclusions au lieu de se noyer dans des charges utiles brutes.
+- Sur les benchmarks de recherche agentique (BrowseComp, DeepSearchQA), superposer l'appel par programme aux outils de recherche de base a amélioré les performances de **11 % en moyenne tout en utilisant 24 % de tokens d'entrée en moins**.
+- Latence : orchestrer plus de 20 appels d'outils dans un seul bloc de code élimine **plus de 19 passes d'inférence**.
+
+La forme du gain est révélatrice. Cela paie quand vous avez **au moins 3 appels dépendants, une boucle, un filtre ou un déploiement en éventail**. Cela ne rapporte rien — et vous coûte un conteneur — quand Claude n'a besoin que d'un seul appel d'outil et veut de toute façon lire la réponse entière.
+
+<Callout type="warning" items={[
+  "Claude Haiku 4.5 accepte les nouveaux types d'outils mais ne prend PAS en charge l'appel d'outils par programme ni la persistance d'état du REPL qui en dépend. Les versions plus récentes s'y comportent silencieusement comme code_execution_20250825. Si vous routez vers Haiku pour réduire les coûts, vous n'obtenez pas cette fonctionnalité — et aucune erreur ne vous le dira."
+]} />
+
+## Ce que cela coûte
+
+L'appel d'outils par programme est facturé comme de l'exécution de code, et l'exécution de code est facturée **à l'heure-conteneur, pas à l'appel** :
+
+- **1 550 heures gratuites par mois, par organisation.**
+- Au-delà, **0,05 $ par heure, par conteneur**.
+- Le temps d'exécution a un **minimum de 5 minutes** — un script de deux secondes facture quand même cinq minutes de conteneur.
+- Si vous attachez des fichiers à la requête, **le temps d'exécution est facturé même si l'outil n'est jamais invoqué**, car les fichiers sont préchargés sur un conteneur quoi qu'il arrive.
+- C'est **gratuit** quand la même requête utilise aussi la recherche web ou la récupération web (`web_search_20260209` / `web_fetch_20260209` ou plus récent).
+
+Deux conséquences à intégrer. D'abord, le plancher de 5 minutes signifie que *beaucoup de conteneurs éphémères* est le schéma coûteux ; réutiliser un seul conteneur sur toute une session est le schéma économique. Ensuite, cette fonctionnalité **n'est pas éligible à la rétention zéro des données (ZDR)** — si le ZDR est une exigence contractuelle pour vous, c'est un arrêt net, pas un réglage.
+
+## Les cinq façons dont cela casse
+
+<Steps items={[
+  {title: "Vous mettez du texte dans la réponse. 400.", body: "Quand des appels d'outils par programme sont en attente, votre message de réponse ne doit contenir QUE des blocs tool_result. Pas du texte plus des résultats d'outils. Pas des résultats d'outils suivis d'une phrase polie. Uniquement des blocs tool_result."},
+  {title: "Vous avez été trop lent. TimeoutError.", body: "Un appel d'outil par programme en attente expire après environ quatre minutes et lève une TimeoutError à l'intérieur du code en cours d'exécution de Claude (l'exemple de stderr de la documentation indique « no response after 270s »). Claude le voit dans stderr et réessaie généralement. Mettez un délai d'expiration sur votre propre exécution d'outil afin d'échouer vite plutôt que de bloquer le conteneur."},
+  {title: "Votre schéma est récursif. 400 « Circular $ref detected ».", body: "Un input_schema avec un $ref auto-référencé ne peut pas être activé pour l'appel par programme — alors même que le schéma identique est accepté pour l'appel direct. Déroulez la récursion sur une profondeur fixe et décrivez l'imbrication plus profonde dans la description la plus interne, ou gardez cet outil en direct uniquement."},
+  {title: "Vous l'avez forcé avec tool_choice. 400.", body: "Vous ne pouvez pas forcer l'appel par programme d'un outil précis. Nommer dans tool_choice un outil dont allowed_callers ne contient pas 'direct' est une invalid_request_error. Également non pris en charge : strict: true (sorties structurées) et disable_parallel_tool_use: true."},
+  {title: "L'outil vient d'un connecteur MCP. Cela ne marchera pas.", body: "Les outils fournis par un connecteur MCP ne peuvent pas être appelés par programme. Si vous voulez une capacité adossée à MCP dans le bac à sable, vous devez l'exposer vous-même comme un outil personnalisé classique."}
+]} />
+
+## Les chaînes de version, décodées
+
+Les trois versions d'exécution de code sont disponibles en disponibilité générale et ne nécessitent **aucun en-tête bêta** :
+
+| Version | Ce qu'elle ajoute |
+| --- | --- |
+| `code_execution_20250825` | La base. Bash + Python + opérations sur fichiers. Prise en charge sur tous les modèles actuels. |
+| `code_execution_20260120` | Ajoute la **persistance d'état du REPL** et l'appel d'outils par programme. C'est celle dont vous avez besoin. |
+| `code_execution_20260521` | **Runtime identique** à `20260120`. La seule différence est que la description de l'outil informe Claude de la limite de 90 secondes de temps réel par cellule Python, afin qu'il puisse budgéter les cellules longues. Une cellule qui dépasse la limite renvoie un `return_code` non nul avec un statut `detection_timeout`. |
+
+Cette dernière ligne est un beau morceau de conception d'API à remarquer : un incrément de version dont toute la charge utile est *un meilleur prompt pour le modèle*. Les deux chaînes sont interchangeables dans `allowed_callers`, et les réponses étiquettent toujours l'appelant comme `code_execution_20260120`, quelle que soit celle que vous avez déclarée.
+
+Le conteneur lui-même n'a **aucun accès à Internet** — Claude ne peut pas faire de `pip install` à l'exécution, vous disposez donc du jeu de bibliothèques préinstallées (pandas, numpy, scipy, scikit-learn, statsmodels et consorts) et de rien d'autre. Les conteneurs sont sauvegardés après environ cinq minutes d'inactivité, restaurables par ID, et expirent 30 jours après leur création.
+
+## Quand y recourir
+
+Recourez à l'appel d'outils par programme quand le modèle est utilisé comme une **boucle et un filtre** plutôt que comme un raisonneur : recherches par lots sur N entités, arrêt anticipé dès qu'une condition est remplie, sélection conditionnelle d'outil selon un résultat intermédiaire, ou réduction d'un dump de logs de 200 Ko aux dix lignes qui comptent.
+
+Recourez plutôt au [Tool Search Tool](/docs/api/tool-use) quand votre problème est que les *définitions* dévorent votre contexte avant même le premier appel — marquez les outils `defer_loading: true` et Claude les charge à la demande. Les deux sont complémentaires, pas alternatifs : la recherche d'outils trouve le bon outil, l'appel par programme l'exécute à moindre coût. Si vos définitions d'outils dépassent environ 10 000 tokens, il vous faut probablement les deux.
+
+Et si vous abordez le problème par l'autre bout — un agent dont le contexte se noie dans les résultats d'outils MCP — commencez par [Coût en tokens de MCP](/docs/claude-code/mcp-token-cost) et [Ingénierie du contexte](/docs/frontiers/context-engineering), car les tokens les moins chers restent ceux que vous n'envoyez jamais.
+
+<Quiz questions={[{q:"Où votre outil s'exécute-t-il réellement lors d'un appel d'outil par programme ?",options:["Dans le conteneur d'exécution de code d'Anthropic","Sur votre propre infrastructure — l'API met le conteneur en pause et vous renvoie un bloc tool_use","Sur l'hôte d'inférence du modèle","Dans un serveur MCP"],answer:1,explain:"Le bac à sable n'a aucun accès à vos systèmes. L'interpréteur Python se fige au milieu de l'appel, l'API vous remet un bloc tool_use normal (étiqueté avec un champ caller), vous l'exécutez et renvoyez un tool_result, et l'interpréteur reprend. L'ID du conteneur est obligatoire sur cette requête de suivi."},{q:"Pouvez-vous compter sur allowed_callers pour empêcher qu'un outil soit invoqué directement ?",options:["Oui — l'API bloque l'invocation directe","Non — cela guide Claude mais n'est pas un blocage strict, votre client doit donc toujours gérer un tool_use direct","Oui, mais uniquement sur les modèles Opus","Seulement si vous définissez aussi strict: true"],answer:1,explain:"La documentation indique explicitement qu'allowed_callers contrôle la façon dont l'outil est présenté à Claude et n'est pas une frontière de sécurité. L'autorisation appartient à votre gestionnaire d'outil."},{q:"Votre agent route vers Claude Haiku 4.5 pour économiser et passe code_execution_20260120. Que se passe-t-il ?",options:["Une erreur 400 vous indique que le modèle n'est pas pris en charge","L'appel d'outils par programme fonctionne normalement","Le type d'outil est accepté, mais l'appel par programme et la persistance du REPL ne fonctionnent pas, silencieusement — cela se comporte comme code_execution_20250825","La requête bascule automatiquement vers Sonnet"],answer:2,explain:"Haiku 4.5 accepte les nouveaux types d'outils mais ne prend en charge ni l'appel d'outils par programme ni la persistance d'état du REPL qui en dépend. Il n'y a aucune erreur — vous perdez simplement la fonctionnalité sans le savoir."},{q:"Quand un appel d'outil par programme est en attente, que peut contenir votre message de réponse ?",options:["Des blocs tool_result et une courte explication textuelle","Uniquement des blocs tool_result","N'importe quel contenu, dans n'importe quel ordre","Un bloc de texte suivi de blocs tool_result"],answer:1,explain:"Les réponses aux appels d'outils par programme en attente ne doivent contenir QUE des blocs tool_result. Ajouter du texte — même après les résultats — est une erreur de formatage."},{q:"Un script de deux secondes s'exécute dans un conteneur neuf. Combien de temps d'exécution de code est facturé ?",options:["Deux secondes","Rien — l'exécution de code est toujours gratuite","Un minimum de 5 minutes","Une heure"],answer:2,explain:"Le temps d'exécution a un minimum de 5 minutes, facturé 0,05 $/heure par conteneur au-delà des 1 550 heures gratuites mensuelles de l'organisation. Beaucoup de conteneurs éphémères est le schéma coûteux ; en réutiliser un seul est le schéma économique."}]} />
+
+<Flashcards cards={[
+  {front: "allowed_callers", back: "Champ de définition d'outil qui sélectionne qui peut invoquer un outil : [\"direct\"] (par défaut), [\"code_execution_20260120\"], ou les deux. Une orientation donnée au modèle, PAS une frontière d'application stricte."},
+  {front: "caller", back: "Champ présent sur chaque bloc tool_use de la réponse. Soit {type: direct}, soit un appelant d'exécution de code dont le tool_id pointe vers le bloc server_tool_use qui a exécuté le script."},
+  {front: "code_execution_20260120", back: "La version de l'outil d'exécution de code qui ajoute la persistance d'état du REPL et l'appel d'outils par programme. Disponible en disponibilité générale ; aucun en-tête bêta nécessaire."},
+  {front: "code_execution_20260521", back: "Même runtime que 20260120. Seule différence : la description de l'outil informe Claude de la limite de 90 secondes de temps réel par cellule."},
+  {front: "detection_timeout", back: "Statut renvoyé (avec un return_code non nul) quand une seule cellule Python dépasse la limite de 90 secondes de temps réel. À distinguer d'execution_time_exceeded, qui couvre toute l'invocation de l'outil."},
+  {front: "La règle des 4 minutes", back: "Un appel d'outil par programme en attente expire après environ quatre minutes et lève une TimeoutError dans le Python en cours d'exécution de Claude. Bornez le temps de votre propre exécution d'outil."},
+  {front: "Pourquoi la description de l'outil compte davantage ici", back: "Les outils sont exposés au code de Claude comme des fonctions async renvoyant une CHAÎNE. Documenter le format de sortie (par ex. « renvoie des lignes JSON ») est ce qui permet à Claude de faire json.loads dessus au lieu de traiter la charge utile comme du texte opaque."}
+]} />
+
+## Sources et lectures complémentaires
+
+- [Appel d'outils par programme — documentation de la plateforme Claude](https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling) — `allowed_callers`, le champ `caller`, le flux pause/reprise, les restrictions de formatage et la liste des contraintes.
+- [Outil d'exécution de code — documentation de la plateforme Claude](https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool) — versions de l'outil, cycle de vie et expiration des conteneurs, bibliothèques préinstallées, et la tarification 1 550 heures gratuites / 0,05 $ l'heure.
+- [Introducing advanced tool use on the Claude Developer Platform](https://www.anthropic.com/engineering/advanced-tool-use) — le chiffre 43 588 → 27 297 tokens, les gains de précision GIA et sur la récupération de connaissances, et comment le Tool Search Tool se compose avec cette fonctionnalité.
+- [Improved web search with dynamic filtering](https://claude.com/blog/improved-web-search-with-dynamic-filtering) — le résultat +11 % / −24 % de tokens d'entrée sur la recherche agentique, et comment le filtrage dynamique exécute du code pour vous.
+- [BrowseComp](https://arxiv.org/abs/2504.12516) et [DeepSearchQA](https://github.com/google-deepmind/deepsearchqa) — les benchmarks de recherche agentique derrière ces chiffres.
+- Sur AILmanac : [Utilisation d'outils / Function calling](/docs/api/tool-use) · [MCP](/docs/api/mcp) · [Coût en tokens de MCP](/docs/claude-code/mcp-token-cost) · [Ingénierie du contexte](/docs/frontiers/context-engineering) · [Tokens et tarification](/docs/api/tokens-and-pricing)
