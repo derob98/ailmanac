@@ -1,0 +1,157 @@
+---
+sidebar_position: 8
+title: "Ce que votre agent de code téléverse réellement"
+description: "Un CLI a expédié des bundles git entiers vers un bucket cloud alors que son commutateur de confidentialité disait non. Le modèle à deux canaux de l'exfiltration d'agent, comment mettre votre propre agent sur écoute en 15 minutes, et ce que chaque CLI majeur documente comme envoi."
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Distinguer les deux canaux d'exfiltration que possède chaque agent de code — et comprendre pourquoi un seul d'entre eux vous est visible", "Lire la capture réseau de Grok Build : 196 Ko de trafic du modèle contre 5,10 Gio de téléversement du dépôt, depuis la même session", "Comprendre pourquoi un refus de permission et un commutateur « ne pas entraîner sur mes données » peuvent tous deux être respectés pendant que votre dépôt quitte quand même la machine", "Mettre votre propre agent sur écoute avec mitmproxy et un dépôt canari, et compter les octets par point d'accès vous-même", "Comparer ce que Claude Code, Cursor, Gemini CLI et Codex documentent chacun comme envoi — et là où la documentation s'arrête"]} />
+
+Vous modélisez presque certainement la confidentialité de votre agent de code ainsi : *il envoie ce qu'il lit.* Approuvez une lecture de fichier, ce fichier part vers le modèle. Refusez-la, il ne part pas. Vos prompts et les fichiers en contexte sont la charge utile ; tout le reste est des métadonnées.
+
+Ce modèle est faux pour au moins un agent en production, et structurellement incomplet pour plusieurs autres. En juillet 2026, un chercheur a pointé un proxy vers le CLI Grok Build de xAI et a découvert qu'un dépôt de 12 Go quittait la machine sous forme de bundle git — historique complet, fichiers jamais lus, contenu du `.env` — par un canal qui n'avait rien à voir avec ce que l'agent lisait, tandis que le réglage qu'un utilisateur atteindrait pour l'arrêter gouvernait tout autre chose.
+
+Cette page ne parle pas vraiment de Grok. Elle parle du canal qu'il a exposé, que la plupart des agents possèdent sous une forme ou une autre, et du fait que vous pouvez vérifier le vôtre en un après-midi au lieu de faire confiance à une page marketing.
+
+## Les deux canaux
+
+Chaque CLI d'agent qui dialogue avec un modèle hébergé possède le **Canal A**. Certains possèdent aussi le **Canal B**.
+
+**Canal A — le tour du modèle.** Votre prompt, le prompt système, les définitions d'outils et le contenu des fichiers que l'agent a réellement lus. C'est le canal que suit votre intuition. C'est celui que les invites de permission contrôlent, celui que les règles de refus de type `.gitignore` affectent, celui que vous pouvez à peu près prédire à partir de la transcription. Il est aussi *petit* : une session de travail déplace des kilo-octets à quelques méga-octets.
+
+**Canal B — le canal ambiant.** Tout ce que le client téléverse de sa propre initiative, pas dans le cadre de la réponse à votre tour : indexation du code, traces de session, rapports de plantage, analytique d'usage, bundles de retour. Il fonctionne selon le planning du client, pas selon le raisonnement du modèle. Il n'est pas dans votre transcription. Il ne demande pas. Et parce qu'il est piloté par un chemin de code plutôt que par une décision de LLM, **aucun prompt ne l'affecte** — dire à l'agent « ne lis aucun fichier » contraint le Canal A et ne dit rien du Canal B.
+
+Le Canal B n'est pas intrinsèquement sinistre. L'index côté serveur de Cursor est un Canal B et il est documenté en détail. Le danger n'est pas son existence — c'est que les contrôles destinés à l'utilisateur sont presque toujours conçus pour le Canal A, si bien que les gens raisonnent sur un système à deux sorties en n'en regardant qu'une.
+
+## La capture réseau
+
+Un chercheur publiant sous le nom **cereblab** a fait passer Grok Build CLI `0.2.93` (macOS arm64, commit `f00f96316d4b`) par `mitmproxy` sur `127.0.0.1:8080` avec une AC de confiance, contre des dépôts jetables contenant des chaînes canari plantées. Le harnais, les preuves capturées et les sommes de contrôle SHA-256 sont publiés sous forme de dépôt de reproduction, c'est donc une affirmation que vous pouvez rejouer plutôt qu'une que vous devez croire.
+
+Ce que la capture a montré :
+
+**Deux points d'accès, des volumes radicalement différents.** Dans une seule session contre un dépôt de 12 Go :
+
+| Canal | Point d'accès | Octets | Requêtes |
+|---|---|---|---|
+| A — tours du modèle | `POST cli-chat-proxy.grok.com/v1/responses` | 196 705 | 5 |
+| B — téléversement du dépôt | `POST cli-chat-proxy.grok.com/v1/storage` | 5 476 228 005 (5,10 Gio) | 82, toutes en HTTP 200 |
+
+Un ratio d'environ **27 800×**. Cet écart est tout l'argument : un volume pareil ne peut pas provenir de ce que le modèle a lu. Il provient du code lui-même. Les téléversements sont partis en morceaux d'environ 75 Mo (73 d'entre eux dans l'exécution journalisée) et la capture a été coupée *alors qu'ils réussissaient encore*, ce qui signifie que 5,10 Gio est un plancher, pas un total.
+
+**Le canari qui n'a jamais été lu.** L'agent a reçu, en termes clairs, le prompt `Reply exactly OK, do not read any files`. Un fichier à `src/_probe/never_read_canary.txt` contenant un marqueur unique n'est apparu dans aucun corps `/v1/responses` — le Canal A s'est comporté exactement comme instruit. Il *est* apparu dans un bundle git téléversé, récupéré depuis la requête `/v1/storage` interceptée. Le chercheur a fait un `git clone` du bundle capturé et a récupéré le dépôt, marqueur et historique complet intacts. Un canari distinct, un faux mot de passe de base de données dans un fichier `.env`, est apparu textuellement et non caviardé dans les deux canaux.
+
+**La destination était un bucket nommé.** Des chaînes dans le binaire et dans les métadonnées de téléversement en attente pointaient vers un bucket Google Cloud Storage, `grok-code-session-traces`, avec des chemins d'objets de la forme `gs://grok-code-session-traces/repo_changes_dedup/v2/…`. Rien dans les documents de configuration du CLI ne décrivait cela.
+
+<VerifyNote lastVerified="2026-07-14" source="cereblab wire-level analysis (gist + grok-build-exfil-repro), Hacker News threads 48892468 / 48896493, The Hacker News coverage" />
+
+**Le correctif, et la forme de la réponse.** Le 2026-07-13, le même binaire `0.2.93` inchangé a cessé d'émettre des requêtes `/v1/storage` sur six retests — une bascule de flag côté serveur (`disable_codebase_upload: true`), pas une mise à jour du client. xAI a répondu sur X plutôt que par un avis formel : les clients entreprise à rétention zéro de données étaient dits non affectés, les abonnés individuels étaient orientés vers une commande `/privacy`, et les données précédemment téléversées étaient dites supprimées. Traitez l'état actuel comme corrigé-pour-l'instant ; traitez la *classe* de bug comme permanente.
+
+## Trois choses que cela brise et que vous croyiez probablement
+
+`★` **« L'agent n'envoie que ce qu'il lit. »** Faux dès qu'un Canal B existe. Lire est une décision de LLM ; indexer est un chemin de code. Ce ne sont pas le même sous-système et ils ne partagent pas de barrière.
+
+`★` **« J'ai refusé le fichier, donc c'est sûr. »** Un refus de permission opère à la couche *outil* — il empêche l'agent de tirer le fichier dans le contexte. Ce n'est pas une règle d'exfiltration réseau. Dans le cas Grok, un fichier refusé est quand même parti à l'intérieur du bundle git. Si votre modèle de menace exige qu'un fichier ne quitte pas la machine, le point d'application doit être le système de fichiers ou le réseau, pas l'invite de permission de l'agent lui-même.
+
+`★` **« Ne pas entraîner sur mes données » ≠ « ne pas transmettre mes données ».** Ce sont deux contrôles différents et les fournisseurs n'exposent régulièrement que le premier. Le commutateur « Improve the model » de Grok correspondait au consentement à l'entraînement ; désactivé, le serveur renvoyait quand même `trace_upload_enabled: true` et les téléversements du dépôt continuaient sans changement. La documentation d'Anthropic fait explicitement la même distinction pour Claude Code — le réglage des données d'entraînement et les commutateurs de télémétrie/retour sont des boutons distincts avec des variables d'environnement distinctes. Lisez chaque commutateur de confidentialité comme répondant à *« puis-je le garder ? »*, jamais à *« vais-je le prendre ? »*
+
+## Mettez votre propre agent sur écoute
+
+Vous n'avez besoin de faire confiance à la documentation de personne — y compris cette page. Quinze minutes et un proxy vous donnent la vérité terrain pour quel que soit l'agent que vous utilisez. Faites-le sur un dépôt jetable avec de faux secrets, sur votre propre machine.
+
+<Steps items={[
+  {"title": "Installez un proxy MITM et faites confiance à son AC", "body": "mitmproxy génère une AC locale au premier lancement. Installez-la dans le magasin de confiance du système pour que les appels TLS de l'agent se terminent au proxy au lieu d'échouer. C'est toute l'astuce — les CLI d'agent sont des clients HTTPS ordinaires et la plupart respectent les variables d'environnement proxy standard."},
+  {"title": "Construisez un dépôt canari", "body": "Créez un dépôt git jetable. Plantez un marqueur unique dans un fichier .env (un faux identifiant), et un deuxième marqueur unique dans un fichier que vous direz explicitement à l'agent de ne jamais ouvrir. Committez les deux — les fichiers committés sont ce qu'un téléversement de bundle git emporterait. Les marqueurs doivent être des chaînes qui ne peuvent pas apparaître naturellement, pour qu'un grep sur la capture soit sans ambiguïté."},
+  {"title": "Exécutez l'agent à travers le proxy avec une tâche nulle", "body": "Pointez HTTPS_PROXY vers l'écouteur et donnez à l'agent une tâche qui ne nécessite de lire absolument rien. Si l'agent n'utilise que le Canal A, une session quasi vide devrait déplacer presque aucun octet."},
+  {"title": "Comptez les octets par point d'accès", "body": "Additionnez les tailles des corps de requête regroupées par hôte et par chemin. C'est la mesure qui compte. Une session qui ne lit rien mais déplace des centaines de méga-octets possède un Canal B, quoi que disent les docs."},
+  {"title": "Cherchez vos canaris dans la capture avec grep", "body": "Cherchez dans les flux bruts — et décompressez toute archive ou tout bundle que vous trouvez — les deux marqueurs. Le marqueur jamais-lu apparaissant n'importe où dans la capture est un résultat positif : quelque chose téléverse des fichiers indépendamment de ce que le modèle a lu."},
+  {"title": "Rejouez avec chaque commutateur de confidentialité au maximum", "body": "Maintenant désactivez le consentement à l'entraînement, la télémétrie, l'analytique, l'indexation — tout ce que le fournisseur expose — et répétez. Le delta entre les deux exécutions vous dit exactement ce que ces commutateurs contrôlent réellement, ce qui est la question à laquelle l'étiquette du commutateur répond rarement."}
+]} />
+
+<PromptCard title="Harnais d'écoute réseau minimal">
+{`# 1. proxy + CA (macOS; on Linux use your distro's trust store)
+brew install mitmproxy
+mitmdump -w flows.mitm --set confdir=~/.mitmproxy &
+sudo security add-trusted-cert -d -r trustRoot \\
+  -k /Library/Keychains/System.keychain ~/.mitmproxy/mitmproxy-ca-cert.pem
+
+# 2. canary repo
+mkdir -p /tmp/canary/src/_probe && cd /tmp/canary && git init
+echo 'DB_PASS=CANARY-AAAA-ENVSECRET' > .env
+echo 'CANARY-BBBB-NEVERREAD' > src/_probe/never_read.txt
+git add -A && git commit -m "canary"
+
+# 3. run the agent through the proxy, asking it to read nothing
+HTTPS_PROXY=http://127.0.0.1:8080 HTTP_PROXY=http://127.0.0.1:8080 \\
+  <your-agent-cli> "Reply exactly OK. Do not read any files."
+
+# 4. bytes per endpoint — the number that matters
+mitmdump -nr flows.mitm \\
+  --set console_eventlog_verbosity=info \\
+  -s <(echo 'def response(f): print(f.request.pretty_host, f.request.path,
+      len(f.request.raw_content or b""))')
+
+# 5. did a file you never opened leave the machine?
+strings flows.mitm | grep -c 'CANARY-BBBB-NEVERREAD'`}
+</PromptCard>
+
+Si l'étape 5 renvoie autre chose que `0`, vous avez trouvé un Canal B — et vous l'avez trouvé vous-même, ce qui est le seul type de découverte qui vieillit bien.
+
+## Ce que documentent les CLI majeurs
+
+La documentation est une *affirmation* ; une capture réseau est une *preuve*. L'écart entre les deux est toute la leçon de cette page. Néanmoins, les affirmations diffèrent assez pour valoir la peine d'être connues — et les connaître vous dit quoi chercher quand vous lancez la capture.
+
+**Claude Code.** Aucun canal d'indexation du dépôt entier ni de téléversement de bundle n'apparaît dans le flux de données documenté ; l'agent cherche avec des outils et envoie le contenu des fichiers dans le cadre du tour du modèle, si bien que le contenu de fichier qui part est celui tiré dans le contexte. La télémétrie opérationnelle est séparée et, selon la documentation d'Anthropic, « ne comprend aucun code ni chemin de fichier » (`DISABLE_TELEMETRY=1`) ; le rapport d'erreurs Sentry est séparé à son tour (`DISABLE_ERROR_REPORTING=1`). Les canaux qui *transportent* du code sont explicites et optionnels : `/feedback` envoie l'historique de conversation y compris le code (`DISABLE_FEEDBACK_COMMAND=1`), et l'étape de partage de transcription de l'enquête de qualité de session ne téléverse une transcription que si vous choisissez activement **Oui**, avec les motifs de clés et de jetons connus caviardés au préalable. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` est l'unique interrupteur d'arrêt pour l'ensemble. Rétention : 30 jours pour le commercial (Team/Enterprise/API), 30 jours pour les particuliers qui laissent l'amélioration du modèle désactivée et 5 ans pour ceux qui l'activent ; la rétention zéro de données existe pour les comptes Enterprise éligibles. Anthropic n'entraîne pas sur du code envoyé sous conditions commerciales sauf si l'organisation y consent.
+
+**Cursor.** Un Canal B documenté de manuel : l'index du code est construit en découpant votre dépôt en morceaux, en encodant les morceaux, et en envoyant **les embeddings plus des chemins de fichiers chiffrés** aux serveurs de Cursor. Selon la documentation, le contenu du code est conservé en mémoire pendant l'indexation puis rejeté plutôt que stocké en clair, et les morceaux sont déchiffrés côté client quand l'agent les récupère. C'est un vrai téléversement du dépôt entier d'un artefact *dérivé* — un profil de risque nettement différent d'un bundle git brut, et nettement différent du modèle lire-ce-dont-vous-avez-besoin de Claude Code. Lequel des trois vous voulez est un jugement. Ne pas savoir lequel vous exécutez ne l'est pas.
+
+**Gemini CLI.** Les statistiques d'usage sont activées par défaut et désactivées avec `privacy.usageStatisticsEnabled: false` dans `settings.json` ; la documentation indique que le contenu des prompts et réponses et le contenu des fichiers lus ou écrits ne sont pas journalisés. L'instrumentation OpenTelemetry est séparée et peut être pointée vers un collecteur que vous contrôlez (`telemetry.enabled: false` pour la désactiver).
+
+**Codex CLI.** L'analytique client anonyme est activée par défaut et désactivée via le flag de config d'analytique ; l'export OTel est routable vers votre propre collecteur, et la journalisation des prompts (`log_user_prompt`) est désactivée sauf si vous l'activez. Les transcriptions de session persistent localement sous `CODEX_HOME` — voir ci-dessous.
+
+<VerifyNote lastVerified="2026-07-14" source="code.claude.com/docs/en/data-usage, cursor.com/docs codebase indexing, google-gemini/gemini-cli docs, developers.openai.com/codex config" />
+
+## La moitié que personne ne vérifie : votre propre disque
+
+L'exfiltration n'est qu'une direction. Chacun de ces agents écrit aussi votre session — prompts, contenu de fichiers, sortie d'outils, parfois des secrets — sur le disque local en clair, et ces fichiers survivent à la session.
+
+Claude Code stocke les transcriptions sous `~/.claude/projects/` pendant 30 jours par défaut (à ajuster avec `cleanupPeriodDays`). Codex persiste l'historique sous `CODEX_HOME`. Grok Build préparait ses téléversements dans `~/.grok/upload_queue` — de l'ordre, selon les rapports, de gigaoctets par tour, et sous charge capable de croître jusqu'à remplir le disque, ce qui est un bug de déni de service caché à l'intérieur d'un bug de confidentialité.
+
+Conséquence : une sauvegarde de portable, un dossier synchronisé, ou un second processus avec accès en lecture à votre répertoire home est un chemin d'exfiltration qui ne touche jamais la pile réseau que vous venez d'instrumenter. Tout secret entré dans une session est désormais sur le disque en clair, quelque part où vous ne l'avez pas mis.
+
+## Un durcissement qui tient vraiment
+
+Le thème récurrent dans la discussion Hacker News — des centaines de commentaires sur les deux fils — était que les instructions au niveau markdown ne sont pas une frontière de sécurité. `CLAUDE.md` et ses équivalents sont des directives pour un modèle, pas une contrainte contre un binaire. Si un contrôle doit tenir contre le *client*, il doit vivre en dessous du client.
+
+<Steps items={[
+  {"title": "Donnez à l'agent un système de fichiers, pas le vôtre", "body": "Exécutez-le dans un conteneur ou un devcontainer avec seulement le dépôt de travail monté. C'est le changement au plus fort levier : un agent qui ne peut pas voir ~/.ssh, ~/.aws, votre historique de shell, les dépôts de vos autres clients, ou votre coffre-fort de mots de passe ne peut pas les téléverser par aucun canal, documenté ou non. Un utilisateur OS distinct obtient une grande partie du même résultat avec moins de cérémonie."},
+  {"title": "Faites de l'exfiltration une liste blanche", "body": "Refusez le trafic sortant par défaut depuis le conteneur de l'agent et autorisez seulement l'hôte de l'API du modèle dont il a besoin. Un Canal B que vous n'avez jamais approuvé ne peut pas composer un numéro sortant à travers une politique d'exfiltration fermée. En prime, cela convertit chaque futur canal de téléversement non documenté d'un incident en une erreur de connexion dans vos journaux."},
+  {"title": "Gardez les secrets entièrement hors du rayon d'impact", "body": "Le .env dans votre arbre de travail est le fichier unique le plus précieux qu'un agent puisse fuiter, et c'est celui le plus susceptible d'être committé et donc emporté par tout téléversement en forme de bundle. Injectez les secrets depuis un gestionnaire de secrets ou l'environnement à l'exécution ; gardez-les hors du dépôt et hors de l'arbre monté."},
+  {"title": "Testez les commutateurs, ne leur faites pas confiance", "body": "Lancez la capture de la section précédente une fois, avec tous les réglages de confidentialité au maximum. Quinze minutes vous achètent un fait au lieu d'une affirmation — et c'est la seule étape ici qui aurait détecté cet incident avant le chercheur."},
+  {"title": "Si vous avez exécuté un outil affecté : renouvelez, ne raisonnez pas", "body": "N'essayez pas de reconstruire ce qui a été et n'a pas été téléversé. Si des clés SSH, des identifiants cloud ou des jetons d'API étaient accessibles dans un répertoire auquel un agent avait accès pendant une fenêtre d'exposition, traitez-les comme divulgués et renouvelez-les. Le renouvellement d'identifiants est bon marché ; un argument forensique sur quels octets ont bougé ne l'est pas."},
+  {"title": "Achetez le contrat si le code compte", "body": "La rétention zéro de données et les conditions commerciales ne remplacent pas les contrôles ci-dessus, mais elles changent ce qu'un fournisseur est autorisé à garder et le recours dont vous disposez. Si vous exécutez un agent sur un code que vous ne pouvez pas vous permettre de fuiter, le niveau grand public est le mauvais niveau."}
+]} />
+
+<Quiz questions={[{"q": "Dans la capture de Grok Build, un fichier que l'agent avait explicitement reçu l'ordre de ne pas lire a quand même quitté la machine. Pourquoi ?", "options": ["Le modèle a désobéi à l'instruction et l'a lu quand même", "Le fichier est parti par un canal séparé de téléversement du dépôt entier qui ne dépend pas de ce que le modèle lit", "L'instruction était dans le mauvais format de prompt", "Le fichier n'était pas couvert par .gitignore, donc le modèle était autorisé à le lire"], "answer": 1, "explain": "Le canal du tour du modèle a obéi parfaitement — le marqueur n'est jamais apparu dans aucun corps /v1/responses. Il est apparu dans un bundle git téléversé via un canal /v1/storage séparé, qui est un chemin de code du client, pas une décision de LLM. Le prompt ne peut pas contraindre un canal que le modèle ne contrôle pas."}, {"q": "Le commutateur « ne pas utiliser mes données pour améliorer le modèle » d'un fournisseur est désactivé. Qu'avez-vous établi ?", "options": ["Votre code ne sera pas envoyé aux serveurs du fournisseur", "Votre code ne sera pas du tout conservé", "Seulement que le fournisseur affirme qu'il n'entraînera pas sur les données — transmission et rétention sont des contrôles séparés", "Rien du tout ; de tels commutateurs sont toujours ignorés"], "answer": 2, "explain": "Consentement à l'entraînement, transmission et rétention sont trois contrôles différents, et la plupart des produits n'exposent que le premier. Le commutateur de Grok correspondait au consentement à l'entraînement tandis que le téléversement du dépôt continuait. Posez toujours à un commutateur de confidentialité la deuxième question : non pas « puis-je le garder ? » mais « vais-je le prendre ? »"}, {"q": "Quelle mesure révèle le plus fiablement un Canal B non documenté ?", "options": ["Lire attentivement la politique de confidentialité du fournisseur", "Vérifier si la transcription de l'agent mentionne la lecture de fichiers", "Exécuter une session qui ne lit rien et additionner les octets de corps de requête par point d'accès", "Compter les jetons que l'agent déclare utiliser"], "answer": 2, "explain": "Une session qui ne lit rien devrait déplacer presque rien. Si les octets-par-point-d'accès montrent des centaines de méga-octets qui partent pendant un tour nul, le volume ne peut pas provenir du tour du modèle — cet écart est l'empreinte d'un canal de téléversement ambiant. Le ratio de 27 800× dans la capture de Grok est exactement cette mesure."}, {"q": "Quel contrôle aurait empêché cette classe de téléversement quelle que soit l'implémentation du fournisseur ?", "options": ["Ajouter « ne jamais téléverser mon dépôt » à CLAUDE.md ou au fichier d'instructions équivalent", "Refuser la permission de lecture de fichier quand l'agent l'a demandée", "Exécuter l'agent dans un conteneur avec seulement le dépôt de travail monté et une politique d'exfiltration par refus par défaut", "Régler la température du modèle à 0"], "answer": 2, "explain": "Les fichiers d'instructions sont des directives pour un modèle, et les invites de permission contrôlent la couche outil — ni l'un ni l'autre n'est une frontière réseau. Seule une application en dessous du client (ce que le processus peut voir, et ce qu'il peut composer) contraint un chemin de code qui ne consulte jamais le modèle."}]} />
+
+<Flashcards cards={[{"front": "Canal A", "back": "Le tour du modèle : prompts, prompt système, définitions d'outils, et contenu des fichiers que l'agent a réellement lus. Contrôlé par les permissions, visible dans la transcription, typiquement des kilo-octets à des méga-octets."}, {"front": "Canal B", "back": "Le canal ambiant : indexation, traces de session, rapports de plantage, analytique, bundles de retour. Piloté par le client, pas par le LLM — donc le prompt et les refus de permission ne le contraignent pas. Peut être documenté (l'index de Cursor) ou non (le /v1/storage de Grok)."}, {"front": "L'indice du 27 800×", "back": "Dans la capture de Grok Build, une seule session sur un dépôt de 12 Go a déplacé 196 705 octets sur le point d'accès du modèle et 5 476 228 005 octets (5,10 Gio) sur le point d'accès de stockage. Un volume aussi supérieur à ce qui a été lu ne peut pas provenir du tour du modèle."}, {"front": "Fichier canari", "back": "Un fichier avec un marqueur unique, ne pouvant pas apparaître naturellement, que vous ordonnez explicitement à l'agent de ne pas ouvrir. Si le marqueur apparaît n'importe où dans une capture réseau, quelque chose téléverse des fichiers indépendamment de ce que le modèle a lu."}, {"front": "Téléversement de bundle git", "back": "Expédier le dépôt sous forme de bundle git emporte chaque fichier suivi plus l'historique complet — y compris les fichiers refusés à l'agent, et les secrets un jour committés. Un refus de permission n'y touche pas."}, {"front": "Consentement à l'entraînement vs transmission", "back": "Deux contrôles différents. « Ne pas entraîner sur mes données » dit que le fournisseur n'apprendra pas d'elles ; cela ne dit rien sur le fait que les octets quittent votre machine ni sur leur durée de conservation."}, {"front": "Rétention zéro de données (ZDR)", "back": "Un mode contractuel/technique où le fournisseur ne persiste pas les données de requête côté serveur. Disponible sur les comptes Anthropic Enterprise éligibles pour Claude Code ; change ce qui peut être gardé, pas ce qu'un client bogué peut envoyer."}, {"front": "Exfiltration par refus par défaut", "back": "Le contrôle au niveau conteneur qui transforme tout futur canal de téléversement non documenté d'un incident en une erreur de connexion dans vos journaux. La seule défense de cette page qui ne dépend pas de la justesse du fournisseur."}]} />
+
+## Où cela mène ensuite
+
+Rien dans cet incident n'était spécifique à un modèle, et rien n'a nécessité une attaque nouvelle. Il a fallu un client qui a fait quelque chose de raisonnable en apparence — mettre le dépôt en cache côté serveur pour donner à l'agent un meilleur contexte — sans le faire remonter, et un écran de réglages dont le vocabulaire (« Improve the model ») ne correspondait pas à la question que les utilisateurs posaient réellement.
+
+Ces deux choses sont extrêmement courantes. La catégorie des CLI d'agent a dix-huit mois, avance vite, et livre des fonctionnalités qui téléversent du code parce que téléverser du code améliore le produit. Attendez-vous à d'autres cas. La position défendable n'est pas de choisir le fournisseur avec la meilleure page de confidentialité ; c'est de prendre l'habitude de *mesurer*, et d'exécuter la chose à l'intérieur d'une boîte qui limite ce qu'une mauvaise réponse peut coûter.
+
+Si vous voulez le côté adverse du même problème — du contenu non fiable qui pilote un agent disposant déjà de vos permissions — lisez [Quand les agents de code deviennent des armes](/docs/security/coding-agents-under-attack) et [Durcir les exécutions autonomes](/docs/security/hardening-autonomous-runs). Pour la façon dont les CLI diffèrent sur tout *autre* chose que le flux de données, voir [Comparaison des CLI d'agents de code](/docs/models/coding-agent-clis-compared).
+
+## Sources et lectures complémentaires
+
+- [cereblab — « What xAI Grok Build CLI actually sends to xAI: a wire-level analysis (grok 0.2.93) »](https://gist.github.com/cereblab/dc9a40bc26120f4540e4e09b75ffb547) — la capture primaire : points d'accès, décomptes d'octets, méthodologie canari, hachages du binaire.
+- [cereblab/grok-build-exfil-repro](https://github.com/cereblab/grok-build-exfil-repro) — le harnais mitmproxy, le dépôt canari et le répertoire de preuves. Reproduisez-le vous-même.
+- [Hacker News — « Grok CLI uploaded the whole home directory to GCS »](https://news.ycombinator.com/item?id=48892468) — 400+ commentaires, surtout sur la stratégie d'isolation.
+- [Hacker News — « xAI's Grok Build CLI Uploads Git Repositories to a Google Cloud Bucket »](https://news.ycombinator.com/item?id=48896493) — le fil sur l'analyse au niveau réseau.
+- [The Hacker News — « Grok Build Uploaded Entire Git Repositories to xAI Storage »](https://thehackernews.com/2026/07/grok-build-uploads-entire-git.html) — chronologie et réponse de xAI.
+- [Anthropic — Utilisation des données de Claude Code](https://code.claude.com/docs/en/data-usage) — télémétrie, retour, rétention, et les variables d'environnement qui contrôlent chacun.
+- [Cursor — Indexation du code](https://cursor.com/docs/context/codebase-indexing) — ce que l'index téléverse et ce qu'il ne stocke pas.
+- [Gemini CLI — configuration et télémétrie](https://google-gemini.github.io/gemini-cli/docs/cli/telemetry.html) — `usageStatisticsEnabled`, routage OTel.
+- [mitmproxy](https://mitmproxy.org/) — l'outil qui transforme une affirmation de confidentialité en une mesure.
