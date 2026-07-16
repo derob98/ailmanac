@@ -1,0 +1,186 @@
+---
+sidebar_position: 8.6
+title: "Inkling: il modello open-weights di Thinking Machines"
+description: "Il Thinking Machines Lab di Mira Murati ha rilasciato Inkling — un MoE multimodale da 975B parametri sotto Apache 2.0, con una manopola continua per lo sforzo di ragionamento. Cosa ha sbagliato la copertura del lancio, perché perde i benchmark di proposito e cosa fa davvero quella manopola."
+keywords: [Inkling, Thinking Machines Lab, Mira Murati, modello open weights, LLM Apache 2.0, mixture of experts, thinking effort, sforzo di ragionamento, Tinker, MoE multimodale, incertezza calibrata, NVFP4]
+---
+
+<LevelBadge level="intermediate" />
+
+Il 15 luglio 2026 il Thinking Machines Lab — il laboratorio di Mira Murati — ha rilasciato **Inkling**, il suo primo modello interno, con pesi aperti sotto licenza Apache 2.0. È finito in prima pagina su Hacker News nel giro di una notte, e la copertura si è assestata su due forme pigre: "modello aperto da mille miliardi di parametri!" e una tabella di benchmark in cui perde.
+
+Entrambe mancano il punto. Inkling è un rilascio insolito che *deliberatamente* non punta a dominare la classifica, e la sua caratteristica più interessante — una manopola continua per lo sforzo di ragionamento, addestrata dentro i pesi — è stata ampiamente descritta male dalla prima ondata di articoli. Questa pagina è la lettura pratica.
+
+<Callout type="objectives" items={[
+  "Capire cos'è davvero Inkling: un MoE sparso da 975B con 41B attivi, Apache 2.0, contesto da 1M, nativamente multimodale su testo/immagini/audio/video",
+  "Scoprire cos'è realmente la manopola dello sforzo — un float continuo addestrato con RL, non l'enum discreto low/medium/high che ti mostrano i wrapper API",
+  "Vedere perché 'pesi aperti' non significa 'gira sulla tua macchina': il pavimento reale di VRAM è ~600 GB anche quantizzato",
+  "Sapere perché Inkling perde i benchmark di proposito, e l'unica metrica dove vince e che nessuno ha messo in un titolo",
+]} />
+
+## La versione in una frase
+
+Inkling è un **transformer Mixture-of-Experts con 975B parametri totali e 41B attivi per token**, preaddestrato su **45 mila miliardi di token** di testo, immagini, audio e video, con una **finestra di contesto da 1M token**, rilasciato sotto **Apache 2.0** — posizionato non come il miglior modello disponibile, ma come la migliore *base da personalizzare*.
+
+Quest'ultima clausola è tutta la strategia. Thinking Machines lo dice apertamente: Inkling "non è il modello complessivamente più forte disponibile oggi, né aperto né chiuso". Rilasciare un modello accompagnandolo con quella frase non è modestia, è posizionamento — e spiega ogni scelta di progettazione qui sotto.
+
+## Quattro cose che sorprendono
+
+### 1. La manopola dello sforzo è un float, e le notizie hanno sbagliato il range
+
+È la caratteristica di punta ed è il dettaglio più mal riportato del lancio. Diverse testate hanno descritto il parametro di sforzo come compreso tra "0,2 e 0,99", oppure come un enum di nomi — `none | minimal | low | medium | high | xhigh`.
+
+La documentazione ufficiale di Tinker dice qualcosa di diverso. Lo sforzo è un **condizionamento continuo del ragionamento**: qualsiasi float da `0.0` incluso fino a `1.0` escluso. Il valore predefinito è `0.9`. I livelli con nome sono solo *valori consigliati per uno sweep*, non l'interfaccia vera:
+
+| Preset | Valore |
+|--------|-------|
+| none | 0.0 |
+| minimal | 0.1 |
+| low | 0.2 |
+| medium | 0.7 |
+| high | 0.9 |
+| xhigh | 0.99 |
+
+Il pavimento di `0.2` che è stato riportato è semplicemente il preset *low* — non un limite. Nulla ti impedisce di passare `0.45`. Nota anche quanto siano non lineari i preset: il salto da *low* a *medium* è `0.5`, mentre da *high* a *xhigh* è `0.09`. La risoluzione utile è tutta ammassata in cima all'intervallo.
+
+Questo conta perché la maggior parte delle persone incontrerà Inkling attraverso un wrapper compatibile con OpenAI che espone `reasoning_effort="high"`. Quell'enum è un **adattatore con perdita su una manopola continua**. Se stai calibrando il costo contro la qualità, l'enum ti nasconde gran parte della corsa della manopola.
+
+<PromptCard title="Impostare lo sforzo direttamente con il renderer Tinker">{`renderer = TmlV0Renderer(get_tokenizer("thinkingmachines/Inkling"))
+messages = [Message(role="user", content="Solve this problem step by step.")]
+prompt = renderer.build_generation_prompt(messages, effort=0.9)`}</PromptCard>
+
+Lo stesso argomento `effort` si porta dentro il fine-tuning, ed è la parte su cui vale la pena fermarsi — puoi addestrare *a un livello di sforzo scelto*:
+
+<PromptCard title="Fine-tuning a un livello di sforzo fisso">{`model_input, weights = renderer.build_supervised_example(
+    messages_with_assistant_response,
+    effort=0.9,
+)`}</PromptCard>
+
+<VerifyNote lastVerified="2026-07-16" source="https://tinker-docs.thinkingmachines.ai/cookbook/inkling/thinking-effort/" />
+
+### 2. Lo sforzo non è un trucco di prompt — è stato addestrato con una tassa sui token
+
+Il motivo per cui la manopola è continua è che non è stata attaccata sopra al momento dell'inferenza. Durante il reinforcement learning il team impostava lo sforzo **cambiando il messaggio di sistema e aggiustando il costo per token** — tassando letteralmente il modello per il fatto di pensare. Il modello ha imparato a spendere budget di token diversi su rollout diversi, e la manopola è il residuo di quell'addestramento.
+
+È un meccanismo genuinamente diverso da "per favore ragiona passo passo, ma in breve", ed è il motivo per cui il ritorno è reale: Thinking Machines riporta che Inkling eguaglia **Nemotron 3 Ultra su Terminal Bench 2.1 usando circa un terzo dei token di ragionamento**.
+
+Spiega anche l'avvertenza che la documentazione dichiara con cura, e che vale la pena prendere sul serio: "Valori più grandi generalmente incoraggiano più ragionamento, ma non garantiscono risposte più lunghe né maggiore accuratezza su ogni campione". Lo sforzo è una *tendenza appresa*, non una garanzia. Portarlo a `0.99` aspettandosi un miglioramento monotono significa fraintendere cos'è. E uno sforzo più alto "può richiedere un budget di generazione più ampio per evitare il troncamento" — alza lo sforzo senza alzare i max token e ti ritroverai il modello tagliato a metà pensiero.
+
+### 3. Pesi aperti, ma quasi certamente non riesci a eseguirlo
+
+"975B parametri, Apache 2.0, pesi su Hugging Face" invita a un'assunzione che la tabella dell'hardware demolisce:
+
+| Formato numerico | Pavimento di VRAM aggregata | Configurazione di esempio |
+|---------|----------------------|----------------------|
+| BF16 | almeno **2 TB** | 8× NVIDIA B300, oppure 16× NVIDIA H200 |
+| NVFP4 (W4A4) | almeno **600 GB** | 4× NVIDIA B300 |
+| NVFP4 (W4A16) | almeno **600 GB** | 8× NVIDIA H200 |
+
+Anche completamente quantizzato a 4 bit, il pavimento è circa **600 GB di VRAM aggregata**. Questo è un modello da cluster multi-GPU, non un modello da workstation, e nemmeno lontanamente un modello da portatile. I 41B parametri *attivi* rendono economico *far passare un token*; non fanno nulla per ridurre quello che devi *tenere in memoria*. Tutti i 975B parametri devono essere residenti, perché il router può pescare fra tutti su qualsiasi token.
+
+Se il tuo interesse per i pesi aperti è "eseguirlo in locale", Inkling è il modello sbagliato e [eseguire modelli in locale con Ollama](/docs/models/run-models-locally-ollama) è la pagina giusta. Se il tuo interesse è la *libertà legale di modificare e commercializzare* — Apache 2.0, genuinamente permissiva — allora Inkling è adatto, e le GPU le affitterai da TogetherAI, Fireworks, Modal, Databricks o Baseten. Sono due ragioni diverse per volere pesi aperti, e questo rilascio serve solo la seconda.
+
+### 4. Perde i benchmark di proposito — e vince quello che nessuno ha riportato
+
+La tabella dei benchmark non è lusinghiera, e Thinking Machines l'ha pubblicata comunque:
+
+| Benchmark | Inkling | Un concorrente più forte |
+|-----------|---------|----------------------|
+| Terminal Bench 2.1 | 63,8% | GLM 5.2: 82,7% |
+| SWEBench Verified | 77,6% | Kimi K2.6: 80,2% |
+| SimpleQA Verified | 43,9% | DeepSeek V4 Pro: 57,0% |
+| FORTRESS Adversarial | **78,0%** | Nemotron 3 Ultra: 77,6% |
+
+Tre sconfitte, una vittoria di misura. Ma il risultato interessante non è affatto in quella tabella — è la **calibrazione**. Il team ha addestrato con reinforcement learning basato su **regole di scoring proprie**, che premiano un modello per dire "sono sicuro al 70%" e avere ragione il 70% delle volte, invece che per suonare sicuro. Il modello è stato premiato per *stimare bene la propria incertezza* invece di produrre con sicurezza risposte sbagliate, e si vede nelle valutazioni di forecasting come ForecastBench e Prophet Arena.
+
+Per qualsiasi contesto in cui una risposta sbagliata-ma-sicura costa più di una prudente — triage, ricerca, instradamento, estrazione con un revisore umano a valle — un 44% ben calibrato vale più di un 57% sovraconfidente. Quella proprietà non entra in una colonna di classifica, che è più o meno il motivo per cui nessuno ci ha aperto.
+
+## L'architettura, in breve
+
+I pezzi che vale la pena conoscere, oltre al conteggio dei parametri:
+
+<Steps items={[
+  {title: "Routing MoE sparso", body: "Un transformer decoder-only a 66 layer. Ogni layer contiene 256 esperti instradati più 2 esperti condivisi, con 6 esperti instradati attivi per token. Gli esperti condivisi si accendono sempre — portano la capacità generale — mentre il router sceglie gli specialisti token per token."},
+  {title: "Embedding posizionali relativi, non RoPE", body: "Una deviazione deliberata dal default quasi universale. La ragione dichiarata è una migliore estrapolazione su sequenze più lunghe, che è il modo in cui una finestra di contesto da 1M token dovrebbe reggere invece di degradare sulla coda."},
+  {title: "Forma dell'attenzione", body: "Layer a finestra scorrevole e layer globali mescolati in rapporto 5:1 con 8 teste KV, più convoluzioni corte applicate agli input dell'attenzione. Cinque layer locali economici per ogni layer globale costoso è ciò che rende sostenibile il contesto da 1M."},
+  {title: "Multimodalità nativa", body: "Le immagini entrano come patch da 40×40 pixel attraverso un hMLP a quattro layer; l'audio come spettrogrammi dMel. Entrambi passano per un layer di embedding leggero e vengono elaborati insieme ai token di testo — un unico flusso, non un encoder visivo attaccato sopra. L'output è solo testo UTF-8."},
+  {title: "Ottimizzatore ibrido", body: "Muon per i pesi matriciali grandi, Adam per tutto il resto — una scelta insolita a questa scala, e coerente con l'interesse pubblico del laboratorio per il comportamento degli ottimizzatori."},
+]} />
+
+## A cosa serve, onestamente
+
+Punta su Inkling quando:
+
+- **Devi possedere e modificare un modello multimodale capace.** Apache 2.0 più multimodalità vera più supporto al fine-tuning di prima classe su Tinker è una combinazione rara. È l'uso previsto.
+- **Il costo per task conta più del punteggio di picco.** La manopola dello sforzo a un terzo dei token di ragionamento è una leva reale, e puoi regolarla in continuo invece che in tre scatti.
+- **La calibrazione conta.** Se la tua pipeline sa agire su "il modello non è sicuro", questo modello è insolitamente adatto.
+
+Non puntarci quando vuoi l'agente di coding più forte (la tabella dice che GLM 5.2 e Kimi K2.6 lo battono), quando vuoi fare self-hosting sul tuo hardware (vedi il pavimento di VRAM), o quando vuoi il massimo richiamo fattuale (43,9% su SimpleQA non è competitivo).
+
+Una nota di sicurezza che la model card dichiara direttamente: Inkling ha una residua "occasionale tendenza ad assecondare prompt di role-play e formulati indirettamente su argomenti dannosi", e la card raccomanda esplicitamente di **sovrapporre una moderazione esterna** — nomina Llama Guard — invece di affidarsi ai rifiuti integrati. VentureBeat ha inquadrato la postura del modello come "resistenza alla censura"; leggi invece il linguaggio della model card stessa come guida operativa, e metti in budget uno strato di moderazione se lo metti in produzione. La card elenca anche i soliti limiti residui: allucinazioni, aderenza imperfetta alle istruzioni, e prestazioni degradate nelle conversazioni lunghe a più turni.
+
+<Quiz questions={[
+  {
+    q: "Qual è il range davvero valido del parametro di thinking-effort di Inkling?",
+    options: [
+      "Un float da 0.0 incluso fino a 1.0 escluso",
+      "Un float da 0.2 a 0.99",
+      "Uno di sei livelli con nome: none, minimal, low, medium, high, xhigh",
+      "Un intero da 1 a 10"
+    ],
+    answer: 0,
+    explain: "La documentazione di Tinker specifica un condizionamento continuo su qualsiasi float in [0.0, 1.0), con default 0.9. Il range 0,2–0,99 ampiamente riportato è solo l'estensione dei preset consigliati, e i livelli con nome sono suggerimenti per uno sweep — non l'interfaccia."
+  },
+  {
+    q: "Inkling ha 41B parametri attivi su 975B totali. Cosa significa per la memoria?",
+    options: [
+      "Ti serve VRAM solo per ~41B parametri",
+      "Tutti i 975B parametri devono essere residenti in memoria; la sparsità taglia il calcolo, non la memoria",
+      "Gli esperti inattivi vengono trasmessi dal disco su richiesta senza costi",
+      "La memoria scala solo con la lunghezza del contesto"
+    ],
+    answer: 1,
+    explain: "La sparsità rende economico calcolare ogni token, ma il router può selezionare qualsiasi esperto su qualsiasi token, quindi i 975B completi devono restare residenti. Il pavimento è ~2 TB di VRAM aggregata a BF16, o ~600 GB a NVFP4."
+  },
+  {
+    q: "Perché Thinking Machines ha addestrato Inkling con regole di scoring proprie nell'RL?",
+    options: [
+      "Per accorciare le risposte",
+      "Per dominare la classifica SWEBench",
+      "Per migliorare la calibrazione — così la confidenza dichiarata segue l'accuratezza reale",
+      "Per abilitare l'input multimodale"
+    ],
+    answer: 2,
+    explain: "Le regole di scoring proprie premiano stime oneste dell'incertezza invece di risposte sbagliate dal suono sicuro. È il motivo per cui Inkling va bene sulle valutazioni di forecasting come ForecastBench e Prophet Arena — una proprietà che nessuna colonna di classifica cattura."
+  },
+  {
+    q: "Impostare effort=0.99 invece di 0.9 garantisce cosa?",
+    options: [
+      "Una risposta più lunga",
+      "Maggiore accuratezza su ogni campione",
+      "Niente di garantito — incoraggia più ragionamento, ma la documentazione avverte che può servire un budget di generazione più ampio per evitare il troncamento",
+      "Minore latenza"
+    ],
+    answer: 2,
+    explain: "La documentazione afferma che valori più grandi 'generalmente incoraggiano più ragionamento, ma non garantiscono risposte più lunghe né maggiore accuratezza su ogni campione'. Lo sforzo è una tendenza appresa dal condizionamento sul costo dei token in RL, non un controllo rigido — e alzarlo senza alzare i max token rischia il troncamento."
+  }
+]} />
+
+## Dove si colloca rispetto a quello che già conosci
+
+Se hai già letto [Kimi K2 per utenti Claude](/docs/models/kimi-k2-for-claude-users), la forma è familiare — un MoE sparso da circa mille miliardi di parametri con licenza permissiva — ma l'intento è diverso. Kimi K2 ottimizza per lunghe catene agentiche di tool. Inkling ottimizza per essere *rimodellato*: input multimodale, un budget di sforzo regolabile, e il fine-tuning come percorso di prima classe.
+
+Per il quadro più ampio, vedi [scegliere un modello](/docs/models/choosing-a-model), [i modelli aperti DeepSeek e Qwen](/docs/models/deepseek-qwen-open-models) per il resto del panorama open-weights, e [quanto costa l'AI tra i vari provider](/docs/models/what-ai-costs-across-providers) per l'economia a cui la manopola dello sforzo punta.
+
+<VerifyNote lastVerified="2026-07-16" source="https://thinkingmachines.ai/model-card/inkling/ — model released 2026-07-15; benchmark comparisons and competitor scores move quickly, and hosted pricing was not published at launch." />
+
+## Fonti e approfondimenti
+
+- [Inkling: il nostro modello open-weights](https://thinkingmachines.ai/news/introducing-inkling/) — l'annuncio del Thinking Machines Lab: architettura, addestramento, benchmark, posizionamento.
+- [Model card di Inkling](https://thinkingmachines.ai/model-card/inkling/) — licenza, requisiti hardware, limitazioni note, indicazioni di sicurezza.
+- [Thinking effort — documentazione Tinker](https://tinker-docs.thinkingmachines.ai/cookbook/inkling/thinking-effort/) — il riferimento autorevole per range, default e preset del parametro di sforzo.
+- [Cookbook di Inkling — documentazione Tinker](https://tinker-docs.thinkingmachines.ai/cookbook/inkling/) — renderer, input multimodale, punti d'ingresso per il fine-tuning.
+- [tinker-cookbook su GitHub](https://github.com/thinking-machines-lab/tinker-cookbook) — ricette eseguibili, incluso `sample_reasoning.py` per confrontare valori di sforzo.
+- [thinkingmachines/inkling su Hugging Face](https://huggingface.co/thinkingmachines/inkling) — pesi e ricette di deploy per SGLang, vLLM, TokenSpeed, Unsloth e Transformers.
+- [Together AI: Inkling dal day 0](https://www.together.ai/blog/together-ai-brings-thinking-machines-labs-new-model-inkling-on-day-0) — accesso hosted e la superficie `reasoning_effort` compatibile con OpenAI.
+- [TechCrunch](https://techcrunch.com/2026/07/15/thinking-machines-amps-up-its-bet-against-one-size-fits-all-ai-with-its-first-open-model-inkling/) e [VentureBeat](https://venturebeat.com/technology/thinking-machines-open-sources-first-multimodal-language-model-inkling-focused-on-low-cost-and-resistance-to-censorship) — copertura del lancio e inquadramento strategico.
