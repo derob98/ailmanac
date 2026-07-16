@@ -1,0 +1,159 @@
+---
+sidebar_position: 17
+title: "Programmatic Tool Calling"
+description: "코드 실행 샌드박스 안의 Python에서 Claude가 여러분의 도구를 호출하게 하기 — 왕복을 줄이고 중간 결과를 컨텍스트 밖에 둡니다."
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={[
+  "Claude가 샌드박스 안에서 도구를 호출할 때 실제로 무슨 일이 일어나는지 — 그리고 도구가 여전히 여러분의 머신에서 실행되는 이유 이해하기",
+  "allowed_callers로 올바르게 활성화하고, 그것이 왜 보안 경계가 아닌지 알기",
+  "실제 숫자 알기: 무엇을, 어떤 워크로드에서 절약하고, 어디서 비용이 드는지",
+  "프로덕션에서 400과 TimeoutError를 만들어내는 다섯 가지 실패 모드 피하기"
+]} />
+
+<VerifyNote lastVerified="2026-07-14" source="https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling">
+도구 버전 문자열, 컨테이너 타임아웃, 코드 실행 가격은 대부분의 API 표면보다 빠르게 움직입니다. 아래 메커니즘은 안정적이지만, 출시 전에 정확한 식별자와 시간당 가격은 공식 문서에서 다시 확인하세요.
+</VerifyNote>
+
+## 이것이 해결하는 문제
+
+고전적인 도구 사용은 대화입니다. Claude가 도구 호출 하나를 요청하고, 여러분이 답하고, 결과 전체가 컨텍스트 윈도우에 들어오고, Claude가 그것을 읽고 다음을 요청합니다. 스무 번의 조회는 스무 번의 추론 패스와, 컨텍스트에 영원히 앉아 있는 스무 개의 원시 페이로드를 뜻합니다.
+
+그 페이로드의 대부분은 낭비입니다. 스무 명의 직원 중 누가 경비 예산을 초과했는지 알고 싶다면 Claude에게 모든 항목이 필요한 게 아닙니다 — 몇 개의 이름이 필요할 뿐입니다. 그런데 고전적인 도구 사용에서는 항목들이 모델에 의해 필터링되기 위해 모델을 *통과해야* 합니다.
+
+Programmatic tool calling은 그것을 뒤집습니다. Claude가 Python 스크립트를 작성하고, 스크립트가 루프에서 여러분의 도구를 호출하고, 결과를 필터링하고, 스크립트가 *출력한* 것만 모델로 돌아옵니다. 원시 데이터는 컨텍스트 윈도우에 아예 들어오지 않습니다.
+
+## 실제로 벌어지는 일
+
+이 기능에 대한 거의 모든 요약이 틀리는 지점이 여기입니다. **여러분의 도구는 샌드박스 안에서 실행되지 않습니다.** Anthropic의 컨테이너는 여러분의 데이터베이스에 접근할 수 없습니다.
+
+실제로 벌어지는 일은, Claude의 Python 코드가 실행 도중 멈추고, API가 그 호출을 *여러분에게* 넘기고, 여러분이 답하면 인터프리터가 재개되는 것입니다.
+
+<Steps items={[
+  {title: "Claude가 스크립트를 작성한다", body: "코드 실행 컨테이너 안에서 실행됩니다. 여러분의 도구는 그 코드에 async Python 함수로 보입니다 — 도구당 하나씩, 각각 인자 딕셔너리 하나를 받고 문자열을 반환합니다."},
+  {title: "스크립트가 여러분의 도구를 호출하고, 실행이 얼어붙는다", body: "API는 query_database에 대해 고전적 도구 사용과 똑같이 평범한 tool_use 블록을 반환합니다 — 다만 이제 그 호출을 만든 코드 실행 런을 가리키는 caller 필드를 함께 담습니다."},
+  {title: "여러분이 자신의 인프라에서 도구를 실행한다", body: "늘 하던 대로입니다: 쿼리를 실행하고 tool_result 블록을 돌려보냅니다. 이 후속 요청에는 컨테이너 ID가 선택이 아니라 필수입니다 — 멈춰 있는 인터프리터를 찾아야 하므로, 없으면 API가 요청을 거부합니다."},
+  {title: "인터프리터가 멈춘 자리에서 재개된다", body: "여러분의 결과가 그 await 표현식의 반환값이 됩니다. 루프가 계속됩니다. 그 사이 Claude는 샘플링되지 않습니다 — 추론 패스도, 토큰도 없습니다."},
+  {title: "stdout만 돌아온다", body: "스크립트가 끝나면 Claude는 stdout, stderr, return_code를 담은 code_execution_tool_result를 받습니다. 스크립트가 가져왔지만 출력하지 않은 모든 것은 그냥 사라집니다."}
+]} />
+
+함수가 `async`이므로 Claude는 `asyncio.gather`로 팬아웃해 열 개의 도구를 동시에 칠 수 있습니다 — 고전적 도구 사용은 병렬 도구 블록으로 근사하는 게 고작인 일입니다.
+
+<PromptCard title="Claude가 생성하는 코드가 실제로 어떻게 생겼는지">
+{`import json
+
+rows = json.loads(await query_database({"sql": "<sql>"}))
+top = sorted(rows, key=lambda r: r["revenue"], reverse=True)[:5]
+print(f"Top 5 customers: {top}")`}
+</PromptCard>
+
+`json.loads`를 눈여겨보세요. 도구 함수는 **문자열**을 반환합니다 — 여러분이 돌려보낸 `tool_result`의 문자 그대로의 텍스트입니다. 도구 설명에 "행 목록을 JSON 객체로 반환합니다"라고 적혀 있지 않으면 Claude는 그것을 역직렬화할 수 있다는 걸 알 방법이 없고, 데이터를 불투명한 블롭으로 다룹니다. **도구 설명의 출력 형식 문장은 문서이길 그만두고 하중을 받는 코드가 됩니다.** 이 기능을 도입할 때 여러분이 쓰게 될 가장 지렛대가 큰 한 줄입니다.
+
+## 켜기
+
+코드에서 호출되길 원하는 도구에 필드 하나, 그리고 요청에 코드 실행 도구를 추가하면 됩니다.
+
+<PromptCard title="도구에 프로그래매틱 호출 활성화하기">
+{`{
+  "name": "query_database",
+  "description": "Execute a SQL query against the sales database. Returns a list of rows as JSON objects.",
+  "input_schema": { "type": "object", "properties": { "sql": { "type": "string" } }, "required": ["sql"] },
+  "allowed_callers": ["code_execution_20260120"]
+}`}
+</PromptCard>
+
+`allowed_callers`는 세 가지 형태를 취합니다.
+
+| 값 | 의미 |
+| --- | --- |
+| `["direct"]` | 고전적 도구 사용. 필드를 생략했을 때의 기본값입니다. |
+| `["code_execution_20260120"]` | Claude는 코드 안에서만 호출하도록 유도됩니다. |
+| `["direct", "code_execution_20260120"]` | 둘 다. 문서는 이것을 **권장하지 않습니다** — 하나를 골라 Claude에게 모호하지 않은 신호를 주세요. |
+
+이제 응답의 모든 `tool_use` 블록은 `caller`를 담습니다. `{"type": "direct"}`이거나, `tool_id`가 스크립트를 실행한 `server_tool_use` 블록과 일치하는 코드 실행 caller입니다. 호출을 그것을 만든 스크립트에 귀속시키는 방법이 이것입니다.
+
+### 보안 경계가 아닙니다
+
+문서는 이 점에 대해 유난히 직설적이고, 반대로 가정하기 쉬우므로 반복할 가치가 있습니다. `allowed_callers`는 **도구가 Claude에게 어떻게 제시되는지를 통제합니다**. API 수준의 단단한 차단이 아닙니다. Claude는 그것을 존중하도록 강하게 유도되지만, 여러분의 클라이언트는 여전히 자신이 정의한 어떤 도구에 대해서도 직접 `tool_use`를 받을 준비가 되어 있어야 하고, 이 필드를 인가 메커니즘으로 써서는 안 됩니다. 인가는 늘 그랬듯 여러분의 도구 핸들러에 속합니다.
+
+## 숫자
+
+복잡성이 값어치를 하는지 판단할 수 있도록, Anthropic이 직접 보고한 수치입니다.
+
+- 복잡한 리서치 작업에서 평균 사용량이 **43,588에서 27,297 토큰으로 — 37% 감소**했습니다.
+- GIA 벤치마크에서 정확도가 **46.5%에서 51.2%로** 올랐고, 내부 지식 검색에서는 **25.6%에서 28.5%로** 올랐습니다. 토큰이 줄면서 *동시에* 답도 좋아집니다. 모델이 원시 페이로드에 빠지는 대신 결론 위에서 추론하기 때문입니다.
+- 에이전틱 검색 벤치마크(BrowseComp, DeepSearchQA)에서 기본 검색 도구 위에 프로그래매틱 호출을 얹으니 **입력 토큰을 24% 적게 쓰면서 성능이 평균 11%** 향상되었습니다.
+- 지연시간: 코드 블록 하나에서 20개 이상의 도구 호출을 오케스트레이션하면 **19번 이상의 추론 패스**가 사라집니다.
+
+승리의 형태가 단서입니다. **3개 이상의 의존적 호출, 루프, 필터, 팬아웃**이 있을 때 값을 합니다. Claude가 정확히 한 번의 도구 호출만 필요하고 어차피 전체 답을 읽고 싶어 할 때는 아무 값도 못 하고 컨테이너 값만 나갑니다.
+
+<Callout type="warning" items={[
+  "Claude Haiku 4.5는 새로운 도구 타입을 받아들이지만 programmatic tool calling이나 그것에 의존하는 REPL 상태 지속성은 지원하지 않습니다. 거기서 새 버전들은 조용히 code_execution_20250825처럼 동작합니다. 비용 때문에 Haiku로 라우팅하고 있다면 이 기능을 못 얻고 있는 것이며, 그렇다고 알려주는 에러도 없습니다."
+]} />
+
+## 비용
+
+Programmatic tool calling은 코드 실행으로 과금되고, 코드 실행은 **호출이 아니라 컨테이너-시간**으로 과금됩니다.
+
+- **조직당 월 1,550시간 무료.**
+- 그 이상은 **컨테이너당 시간당 $0.05**.
+- 실행 시간에는 **최소 5분**이 적용됩니다 — 2초짜리 스크립트도 컨테이너 5분이 과금됩니다.
+- 요청에 파일을 첨부하면 **도구가 한 번도 호출되지 않아도 실행 시간이 과금됩니다**. 파일은 어쨌든 컨테이너에 미리 로드되기 때문입니다.
+- 같은 요청이 웹 검색이나 웹 페치(`web_search_20260209` / `web_fetch_20260209` 이상)도 사용할 때는 **무료**입니다.
+
+내면화할 가치가 있는 두 가지 귀결. 첫째, 5분 하한은 *수명이 짧은 컨테이너를 많이 쓰는 것*이 비싼 패턴이고, 세션 전반에 걸쳐 컨테이너 하나를 재사용하는 것이 싼 패턴임을 뜻합니다. 둘째, 이 기능은 **Zero Data Retention 대상이 아닙니다** — ZDR이 계약상 요구사항이라면 이것은 조정 손잡이가 아니라 완전한 중단점입니다.
+
+## 이것이 깨지는 다섯 가지 방식
+
+<Steps items={[
+  {title: "답장에 텍스트를 넣었다. 400.", body: "대기 중인 프로그래매틱 도구 호출이 있을 때 여러분의 응답 메시지는 오직 tool_result 블록만 담아야 합니다. 텍스트 더하기 도구 결과도 안 됩니다. 도구 결과 뒤에 정중한 문장 한 줄도 안 됩니다. 오직 tool_result 블록만."},
+  {title: "너무 오래 걸렸다. TimeoutError.", body: "대기 중인 프로그래매틱 도구 호출은 대략 4분 후 타임아웃되고 Claude가 실행 중인 코드 안에서 TimeoutError를 발생시킵니다(문서의 예시 stderr는 'no response after 270s'라고 나옵니다). Claude는 그것을 stderr에서 보고 보통 재시도합니다. 컨테이너를 매달아 두기보다 빨리 실패하도록 여러분의 도구 실행에도 타임아웃을 거세요."},
+  {title: "스키마가 재귀적이다. 400 'Circular $ref detected'.", body: "자기 자신을 참조하는 $ref가 있는 input_schema는 프로그래매틱 호출에 활성화할 수 없습니다 — 정확히 같은 스키마가 직접 호출에는 받아들여지는데도요. 재귀를 고정된 깊이까지 펼치고 더 깊은 중첩은 가장 안쪽 description에 서술하거나, 그 도구 하나는 직접 호출 전용으로 두세요."},
+  {title: "tool_choice로 강제했다. 400.", body: "특정 도구의 프로그래매틱 호출을 강제할 수 없습니다. allowed_callers에 'direct'가 없는 도구를 tool_choice에 지정하면 invalid_request_error입니다. 또한 지원되지 않는 것: strict: true (구조화된 출력)와 disable_parallel_tool_use: true."},
+  {title: "도구가 MCP 커넥터에서 왔다. 동작하지 않습니다.", body: "MCP 커넥터가 제공하는 도구는 프로그래매틱하게 호출할 수 없습니다. 샌드박스 안에서 MCP 기반 능력을 원한다면 직접 일반 커스텀 도구로 노출해야 합니다."}
+]} />
+
+## 버전 문자열 해독
+
+세 가지 코드 실행 버전 모두 정식 제공되며 **베타 헤더가 필요 없습니다**.
+
+| 버전 | 무엇이 추가되나 |
+| --- | --- |
+| `code_execution_20250825` | 기준선. Bash + Python + 파일 조작. 현행 모든 모델에서 지원됩니다. |
+| `code_execution_20260120` | **REPL 상태 지속성**과 programmatic tool calling을 추가합니다. 필요한 건 이것입니다. |
+| `code_execution_20260521` | `20260120`과 **런타임이 동일**합니다. 유일한 차이는 도구 설명이 Python 셀당 90초 실제 시간 제한을 Claude에게 알려 주어, 오래 도는 셀의 예산을 잡을 수 있게 한다는 점입니다. 제한을 넘긴 셀은 `detection_timeout` 상태와 0이 아닌 `return_code`를 반환합니다. |
+
+마지막 행은 눈여겨볼 만한 API 설계입니다. 전체 페이로드가 *모델을 위한 더 나은 프롬프트*인 버전 번호 상승입니다. 두 문자열은 `allowed_callers` 안에서 서로 바꿔 쓸 수 있고, 어느 것을 선언했든 응답은 언제나 caller를 `code_execution_20260120`으로 태그합니다.
+
+컨테이너 자체는 **인터넷 접속이 없습니다** — Claude는 런타임에 `pip install`을 할 수 없으므로, 미리 설치된 라이브러리 세트(pandas, numpy, scipy, scikit-learn, statsmodels 등)만 얻고 그 이상은 없습니다. 컨테이너는 약 5분의 비활성 후 체크포인트되고, ID로 복원할 수 있으며, 생성 30일 후 만료됩니다.
+
+## 언제 손을 뻗을까
+
+모델이 추론자가 아니라 **루프이자 필터**로 쓰이고 있을 때 programmatic tool calling에 손을 뻗으세요. N개 엔티티에 걸친 일괄 조회, 조건 충족 시 조기 종료, 중간 결과에 기반한 조건부 도구 선택, 또는 200 KB 로그 덤프를 중요한 열 줄로 짓뭉개기.
+
+*정의*가 호출 하나 하기도 전에 컨텍스트를 잡아먹는 게 문제라면 대신 [Tool Search Tool](/docs/api/tool-use)에 손을 뻗으세요 — 도구를 `defer_loading: true`로 표시하면 Claude가 필요할 때 로드합니다. 둘은 대안이 아니라 보완재입니다. 도구 검색이 올바른 도구를 찾고, 프로그래매틱 호출이 그것을 싸게 실행합니다. 도구 정의가 대략 10K 토큰을 넘는다면 아마 둘 다 필요합니다.
+
+반대편에서 이 문제를 만나고 있다면 — 컨텍스트가 MCP 도구 결과에 빠져 죽는 에이전트 — [MCP 토큰 세금](/docs/claude-code/mcp-token-cost)과 [컨텍스트 엔지니어링](/docs/frontiers/context-engineering)에서 시작하세요. 가장 싼 토큰은 여전히 아예 보내지 않는 토큰이니까요.
+
+<Quiz questions={[{q:"Programmatic tool calling 중에 여러분의 도구는 실제로 어디서 실행되나요?",options:["Anthropic의 코드 실행 컨테이너 안에서","여러분의 인프라에서 — API가 컨테이너를 멈추고 tool_use 블록을 여러분에게 돌려줍니다","모델의 추론 호스트에서","MCP 서버 안에서"],answer:1,explain:"샌드박스는 여러분의 시스템에 접근할 수 없습니다. Python 인터프리터가 호출 도중 얼어붙고, API가 평범한 tool_use 블록(caller 필드로 태그된)을 넘기고, 여러분이 실행해 tool_result를 반환하면 인터프리터가 재개됩니다. 그 후속 요청에는 컨테이너 ID가 필수입니다."},{q:"도구가 직접 호출되는 것을 막기 위해 allowed_callers에 의존할 수 있나요?",options:["예 — API가 직접 호출을 차단합니다","아니오 — Claude를 유도할 뿐 단단한 차단이 아니므로, 클라이언트는 여전히 직접 tool_use를 처리해야 합니다","예, 하지만 Opus 모델에서만","strict: true도 같이 설정한 경우에만"],answer:1,explain:"문서는 allowed_callers가 도구가 Claude에게 어떻게 제시되는지를 통제하며 보안 경계가 아니라고 명시합니다. 인가는 여러분의 도구 핸들러에 속합니다."},{q:"에이전트가 비용을 아끼려 Claude Haiku 4.5로 라우팅하며 code_execution_20260120을 전달합니다. 무슨 일이 벌어지나요?",options:["400 에러가 모델이 지원되지 않는다고 알려 줍니다","Programmatic tool calling이 정상 동작합니다","도구 타입은 받아들여지지만 프로그래매틱 호출과 REPL 지속성은 조용히 동작하지 않습니다 — code_execution_20250825처럼 동작합니다","요청이 자동으로 Sonnet으로 폴백됩니다"],answer:2,explain:"Haiku 4.5는 새 도구 타입을 받아들이지만 programmatic tool calling도, 그것에 의존하는 REPL 상태 지속성도 지원하지 않습니다. 에러가 없습니다 — 조용히 기능을 잃을 뿐입니다."},{q:"대기 중인 프로그래매틱 도구 호출이 있을 때 답장 메시지에는 무엇이 담길 수 있나요?",options:["tool_result 블록과 짧은 텍스트 설명","오직 tool_result 블록만","어떤 내용이든, 어떤 순서로든","텍스트 블록 뒤에 tool_result 블록"],answer:1,explain:"대기 중인 프로그래매틱 도구 호출에 대한 답장은 오직 tool_result 블록만 담아야 합니다. 결과 뒤라 해도 텍스트를 추가하면 형식 오류입니다."},{q:"2초짜리 스크립트가 새 컨테이너에서 실행됩니다. 코드 실행 시간은 얼마나 과금되나요?",options:["2초","없음 — 코드 실행은 항상 무료입니다","최소 5분","1시간"],answer:2,explain:"실행 시간에는 5분 최소가 적용되며, 조직의 월 1,550 무료 시간을 넘으면 컨테이너당 시간당 $0.05로 과금됩니다. 수명이 짧은 컨테이너를 많이 쓰는 것이 비싼 패턴이고, 하나를 재사용하는 것이 싼 패턴입니다."}]} />
+
+<Flashcards cards={[
+  {front: "allowed_callers", back: "누가 도구를 호출할 수 있는지 선택하는 도구 정의 필드: [\"direct\"](기본), [\"code_execution_20260120\"], 또는 둘 다. 모델에 대한 유도이지 강제 경계가 아님."},
+  {front: "caller", back: "응답의 모든 tool_use 블록에 붙는 필드. {type: direct}이거나, tool_id가 스크립트를 실행한 server_tool_use 블록을 가리키는 코드 실행 caller."},
+  {front: "code_execution_20260120", back: "REPL 상태 지속성과 programmatic tool calling을 추가하는 코드 실행 도구 버전. 정식 제공, 베타 헤더 불필요."},
+  {front: "code_execution_20260521", back: "20260120과 런타임 동일. 유일한 차이: 도구 설명이 셀당 90초 실제 시간 제한을 Claude에게 알려 줌."},
+  {front: "detection_timeout", back: "단일 Python 셀이 90초 실제 시간 제한을 넘길 때 (0이 아닌 return_code와 함께) 반환되는 상태. 도구 호출 전체를 다루는 execution_time_exceeded와는 다름."},
+  {front: "4분 규칙", back: "대기 중인 프로그래매틱 도구 호출은 약 4분 후 타임아웃되어 Claude가 실행 중인 Python 안에서 TimeoutError를 발생시킴. 자신의 도구 실행에도 시간 제한을 두세요."},
+  {front: "여기서 도구 설명이 더 중요한 이유", back: "도구는 Claude의 코드에 문자열을 반환하는 async 함수로 노출됩니다. 출력 형식을 문서화하는 것(예: 'JSON 행을 반환')이 Claude가 페이로드를 불투명한 텍스트로 다루는 대신 json.loads 할 수 있게 하는 요소입니다."}
+]} />
+
+## 출처 및 더 읽을거리
+
+- [Programmatic tool calling — Claude Platform 문서](https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling) — `allowed_callers`, `caller` 필드, 일시정지/재개 흐름, 형식 제약, 제한 목록.
+- [Code execution tool — Claude Platform 문서](https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool) — 도구 버전, 컨테이너 수명주기와 만료, 미리 설치된 라이브러리, 1,550 무료 시간 / 시간당 $0.05 가격.
+- [Claude 개발자 플랫폼의 고급 도구 사용 소개](https://www.anthropic.com/engineering/advanced-tool-use) — 43,588 → 27,297 토큰 수치, GIA 및 지식 검색 정확도 향상, Tool Search Tool이 이것과 어떻게 조합되는지.
+- [동적 필터링으로 개선된 웹 검색](https://claude.com/blog/improved-web-search-with-dynamic-filtering) — 에이전틱 검색에서의 +11% / −24% 입력 토큰 결과, 그리고 동적 필터링이 어떻게 코드 실행을 대신 돌려 주는지.
+- [BrowseComp](https://arxiv.org/abs/2504.12516)와 [DeepSearchQA](https://github.com/google-deepmind/deepsearchqa) — 그 숫자들 뒤에 있는 에이전틱 검색 벤치마크.
+- AILmanac 관련 문서: [도구 사용 / 함수 호출](/docs/api/tool-use) · [MCP](/docs/api/mcp) · [MCP 토큰 세금](/docs/claude-code/mcp-token-cost) · [컨텍스트 엔지니어링](/docs/frontiers/context-engineering) · [토큰과 가격](/docs/api/tokens-and-pricing)
