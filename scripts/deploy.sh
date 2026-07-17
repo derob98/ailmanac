@@ -9,14 +9,57 @@
 # to /tmp, install deps there once, build there, and force-push build/ to gh-pages.
 # A cold run is ~3-4 min (npm ci); warm runs reuse /tmp deps and finish in <1 min.
 #
+# CONCURRENCY: scheduled AILmanac tasks can overlap, and two runs sharing $DST
+# will destroy each other -- both `rsync --delete` and `rm -rf build` into the
+# same tree, so one run deletes the other's build mid-flight (symptoms: ENOENT on
+# package.json or build/<locale>/__server/server.bundle.js, or "unable to read
+# <sha>" on push). We serialize on an atomic mkdir lock rather than giving each
+# run its own dir, because a unique dir means a cold `npm ci` over 4.3 GB of deps
+# (3-4 min) on every run instead of reusing warm deps (<1 min).
+#
 # Usage: bash scripts/deploy.sh
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
-DST=/tmp/ailmanac_deploy
+DST="${AILMANAC_DEPLOY_DIR:-/tmp/ailmanac_deploy}"
+LOCK="$DST.lock"
+LOCK_WAIT_SECS="${AILMANAC_LOCK_WAIT_SECS:-900}"
 REMOTE="https://github.com/derob98/ailmanac.git"
 NAME="Gianluca De Robertis"
 EMAIL="69207376+derob98@users.noreply.github.com"
+
+# --- Acquire the deploy lock (mkdir is atomic: exactly one caller wins) -------
+acquire_lock() {
+  local waited=0
+  while ! mkdir "$LOCK" 2>/dev/null; do
+    local holder
+    holder="$(cat "$LOCK/pid" 2>/dev/null || echo '')"
+    # Reclaim a lock whose owner died, so one crashed run can't wedge all future ones.
+    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+      echo "==> removing stale lock from dead pid $holder"
+      rm -rf "$LOCK"
+      continue
+    fi
+    if [ "$waited" -ge "$LOCK_WAIT_SECS" ]; then
+      echo "ERROR: another deploy (pid ${holder:-unknown}) has held $LOCK for ${LOCK_WAIT_SECS}s. Aborting." >&2
+      exit 1
+    fi
+    if [ "$waited" -eq 0 ]; then
+      echo "==> another deploy (pid ${holder:-unknown}) is running; waiting for the lock"
+    fi
+    sleep 10
+    waited=$((waited + 10))
+  done
+  echo $$ > "$LOCK/pid"
+  trap 'rm -rf "$LOCK"' EXIT
+  if [ "$waited" -gt 0 ]; then
+    echo "==> lock acquired after ${waited}s"
+  fi
+  # Explicit: a bare `[ ... ] && echo` tail would return 1 on the common path and
+  # trip `set -e` in the caller, killing the deploy silently.
+  return 0
+}
+acquire_lock
 
 echo "==> syncing source to $DST (outside iCloud)"
 mkdir -p "$DST"
