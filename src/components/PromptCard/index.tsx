@@ -58,7 +58,11 @@ export default function PromptCard({title, children}: PromptCardProps): ReactNod
   }, [children]);
 
   return (
-    <section className={styles.card} aria-label={title ? `Prompt: ${title}` : 'Prompt'}>
+    <section
+      className={styles.card}
+      data-copied={copied ? 'true' : undefined}
+      aria-label={title ? `Prompt: ${title}` : 'Prompt'}
+    >
       <div className={styles.head}>
         <div className={styles.heading}>
           <span className={styles.spark} aria-hidden="true">✦</span>
@@ -83,7 +87,7 @@ export default function PromptCard({title, children}: PromptCardProps): ReactNod
             onClick={openInClaude}
             aria-label="Open this prompt in Claude in a new tab"
           >
-            Open in Claude ↗
+            Open in Claude<span className={styles.openArrow} aria-hidden="true">↗</span>
           </button>
         </div>
       </div>
