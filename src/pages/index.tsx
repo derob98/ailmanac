@@ -20,7 +20,6 @@ import {Reveal, CountUp} from '@site/src/components/Reveal';
 import {Scramble} from '@site/src/components/Scramble';
 import {StackingCards} from '@site/src/components/StackingCards';
 import FreshnessPulse from '@site/src/components/FreshnessPulse';
-import {useSmoothScroll} from '@site/src/components/SmoothScroll';
 
 import styles from './index.module.css';
 
@@ -551,7 +550,6 @@ function FinalCta({lp}: {lp: string}) {
 export default function Home(): ReactNode {
   const {siteConfig} = useDocusaurusContext();
   const lp = useLocalePrefix();
-  useSmoothScroll();
   // Compute the persona tracks once and share between the deck and its fallback.
   const tracks = useTracks(lp);
   return (

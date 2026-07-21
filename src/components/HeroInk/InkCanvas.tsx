@@ -371,7 +371,7 @@ export default function InkCanvas(): React.ReactNode {
                   x="0.5"
                   y="0.62"
                   textAnchor="middle"
-                  fontFamily="'Space Grotesk', sans-serif"
+                  fontFamily="'Space Grotesk Variable', 'Space Grotesk', sans-serif"
                   fontWeight={800}
                   fontSize="0.7"
                   fill="white">
