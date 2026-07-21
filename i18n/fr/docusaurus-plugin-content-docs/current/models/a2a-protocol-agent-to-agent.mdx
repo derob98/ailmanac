@@ -1,0 +1,217 @@
+---
+sidebar_position: 6.6
+title: "A2A : le protocole agent-à-agent"
+description: "MCP connecte les agents aux outils. A2A connecte les agents à d'autres agents — à travers les frameworks, les clouds et les entreprises. Apprenez l'Agent Card, les tâches, les huit états du cycle de vie, streaming vs webhooks, et comment A2A se compose avec MCP."
+keywords: [A2A, protocole agent-à-agent, Agent2Agent, interopérabilité agent, Agent Card, communication agent, systèmes multi-agents, MCP vs A2A, Linux Foundation A2A]
+---
+
+<LevelBadge level="advanced" />
+
+D'ici mi-2026, la plupart des travaux d'agent non triviaux se font par **plusieurs** agents coopérant — un agent de recherche passe la main à un rédacteur, un agent de facturation parle à un agent de support d'un autre fournisseur, un orchestrateur délègue à un spécialiste dans le cloud d'une autre organisation. **A2A (Agent-to-Agent)** est le protocole ouvert qui permet à ces agents de *se trouver* les uns les autres, de *décrire* ce qu'ils savent faire, et de *se passer des tâches* — même quand ils ont été construits sur des frameworks différents par des équipes différentes. Là où **MCP** connecte un agent à ses **outils et données**, **A2A** connecte un agent à **un autre agent**. Ils se composent ; ils ne se concurrencent pas.
+
+<Callout type="objectives" items={[
+  "Énoncer exactement à quoi sert A2A — et où se trouve la frontière avec MCP",
+  "Lire une Agent Card et savoir ce qu'un agent récepteur en fera",
+  "Parcourir une tâche à travers les huit états du cycle de vie, y compris les deux qui sont interrompus plutôt que terminaux",
+  "Choisir entre le streaming SSE et le push webhook pour les tâches de longue durée",
+  "Reconnaître les fonctionnalités non évidentes : cartes signées, endpoints multi-tenants et parties de données structurées",
+]} />
+
+<VerifyNote lastVerified="2026-07-20" source="https://a2a-protocol.org/latest/specification/">
+A2A se stabilise mais la spec évolue encore : la version v1.0.1, les nouveaux bindings et les lacunes de fonctionnalités des SDK atterrissent régulièrement. Traitez les noms de méthodes exacts, les codes d'erreur et les revendications de support SDK ci-dessous comme périssables et vérifiez la spec liée et le dépôt `a2aproject/A2A` avant de déployer une intégration en production.
+</VerifyNote>
+
+## Pourquoi A2A existe
+
+Chaque framework d'agents — LangGraph, CrewAI, le Claude Agent SDK, l'OpenAI Agents SDK, Microsoft's Agent Framework, boucles internes personnalisées — a résolu l'*utilisation d'outils* en s'appuyant sur le tool-calling natif du modèle et, de plus en plus, sur **MCP** comme connecteur universel d'outils et de données. Cela nous a donné `agent ↔ outil`.
+
+Ce qu'aucun d'eux n'a résolu seul, c'est `agent ↔ agent` **à travers une frontière**. Deux problèmes revenaient sans cesse :
+
+- **Découverte.** Comment l'agent A sait-il que l'agent B existe, ce qu'il sait faire, comment s'authentifier auprès de lui, et s'il supporte le streaming ? Un README manuel n'est pas un protocole.
+- **Passation de tâche.** Une fois que A veut que B fasse quelque chose, comment échangent-ils le *travail* (pas le chat du modèle) — y compris les fichiers, les données structurées, les mises à jour de progression, et le fait que B pourrait devoir s'arrêter pour demander une entrée à A ?
+
+Les réponses spécifiques à chaque framework (sous-graphes LangGraph, crews CrewAI, sous-agents à l'intérieur d'un runtime) fonctionnent très bien **à l'intérieur d'un processus**. Elles s'arrêtent à la frontière de l'organisation. A2A est la pièce qui permet à un agent dans votre produit de déléguer à un agent dans le produit de quelqu'un d'autre sans qu'aucun des deux ne laisse fuiter ses internes — Todd Segal de Google appelle cela « la fondation sécurisée pour que les agents personnels, d'équipe et spécifiques à un domaine travaillent ensemble sans couture sur n'importe quelle plateforme ». La gouvernance est portée par la Linux Foundation, et en avril 2026 le projet a rapporté **plus de 150 organisations de soutien** dont AWS, Microsoft, Salesforce, SAP, ServiceNow et IBM.
+
+## MCP vs A2A — le modèle mental
+
+Les deux sont des protocoles ouverts. Les deux utilisent JSON sur HTTP. Ils résolvent des problèmes différents et sont **conçus pour se composer** :
+
+- **MCP** = *agent-à-outil.* Un serveur MCP expose des outils (`search`, `read_file`, `run_query`) et des ressources (docs, prompts) à un client piloté par un modèle. Le client est un agent ; le serveur est un fournisseur de capacités passif. Voir [MCP et connexion aux outils](/docs/api/mcp) pour comment Claude l'utilise.
+- **A2A** = *agent-à-agent.* Un endpoint A2A expose un **agent** — une entité avec sa propre boucle de raisonnement qui *décidera* comment résoudre une tâche déléguée. Les deux côtés sont des agents ; chacun peut appeler l'autre.
+
+La différence concrète apparaît dans le format de fil. Un `tools/call` MCP renvoie un résultat et se ferme. Un `SendMessage` A2A ouvre une **tâche** — une chose avec état, avec son propre cycle de vie, qui peut streamer des mises à jour, demander des clarifications, ou tourner pendant des heures en arrière-plan. Si la réponse de votre endpoint est toujours « voici le résultat d'une fonction », c'est un outil — publiez-le via MCP. Si c'est « laissez-moi y réfléchir et je vous reviens, et je pourrais devoir poser une question complémentaire », c'est un agent — publiez-le via A2A.
+
+La plupart des systèmes sérieux exécuteront **les deux** : un agent dont l'*intérieur* utilise MCP pour atteindre les outils, et dont l'*extérieur* parle A2A pour que les pairs puissent lui passer du travail.
+
+## L'Agent Card — la pièce de la spec qui compte le plus
+
+Une **Agent Card** est un document JSON servi à une URL connue qui dit à tout appelant potentiel tout ce dont il a besoin pour parler à votre agent. Pensez à **OpenAPI + robots.txt, pour agents**. Chaque interaction A2A commence par en récupérer une.
+
+La carte inclut :
+
+- **Identité** — `id`, `name`, `description`, `provider` (détails de l'organisation).
+- **Endpoints** — les URL de service et quels bindings de protocole (JSON-RPC, gRPC, REST) sont disponibles.
+- **Capabilities** — feature flags : `streaming`, `pushNotifications`, `extendedAgentCard`.
+- **Skills** — fonctions d'agent déclarées avec schémas d'entrée/sortie (c'est ce que B dit qu'il sait *faire*).
+- **Schémas de sécurité** — un ou plusieurs parmi `APIKey`, `HTTPAuth` (Basic/Bearer), `OAuth2` (Authorization Code, Client Credentials, Device Code), `OpenIdConnect`, `MutualTLS`. L'appelant lit cela pour savoir quelles identifiants apporter **avant** le premier appel.
+- **Signature** — une signature cryptographique optionnelle sur la carte.
+
+Ce dernier champ mérite qu'on s'y arrête. Une **Agent Card signée** permet à un agent récepteur de vérifier que la carte a effectivement été émise par le propriétaire du domaine — l'équivalent DNS/PKI de « oui, c'est vraiment `agents.acme.com`, pas quelque chose qu'un attaquant a planté ». Combinée à l'authentification mTLS, elle ferme la porte aux Agent Cards malveillantes servies depuis des hôtes usurpés, ce qui serait autrement une manière d'obtenir une **injection de prompt au niveau de la découverte** : l'Agent Card d'un attaquant mentant sur les outils qu'elle expose et les données qu'elle veut.
+
+## Les huit états du cycle de vie de la tâche
+
+Une fois que vous `SendMessage` à un agent A2A, le travail devient une **Task** — un objet de première classe avec un ID que vous pouvez interroger, souscrire, annuler ou lister. La tâche passe par **huit** états, et il vaut la peine de remarquer que **seuls cinq sont terminaux** :
+
+- `SUBMITTED` — le serveur a acquitté la tâche.
+- `WORKING` — traitement actif.
+- `INPUT_REQUIRED` — **interrompu :** l'agent a besoin de plus d'informations de la part de l'appelant. Pas une erreur ; attendu dans les workflows réels.
+- `AUTH_REQUIRED` — **interrompu :** l'agent a besoin que l'appelant s'authentifie (ou se réauthentifie) avant de pouvoir continuer.
+- `COMPLETED` — succès. Terminal.
+- `FAILED` — erreur. Terminal.
+- `CANCELED` — annulation initiée par l'appelant. Terminal.
+- `REJECTED` — l'agent a refusé la tâche (politique, capacité, quota). Terminal.
+
+Les états interrompus sont le sujet. Le RPC hérité présume un appel → un résultat. Le vrai travail d'agent ressemble à *« lance l'analyse, reviens une heure plus tard, remarque que je dois poser une question de clarification, attends la réponse, reprends, termine. »* A2A modélise cela nativement. Votre code appelant doit être une petite machine à états, pas un `await` synchrone.
+
+## Streaming vs notifications push
+
+Les tâches de longue durée ont besoin d'un moyen de livrer les mises à jour. A2A vous donne **deux** modèles asynchrones — choisissez par tâche, pas par agent :
+
+- **Streaming (`SendStreamingMessage` / `SubscribeToTask`).** Server-Sent Events sur la connexion HTTP ouverte. Le client reste connecté, reçoit `TaskStatusUpdateEvent` et `TaskArtifactUpdateEvent` dans l'ordre. Excellent pour les UI interactives et les tâches courtes à moyennes. Tombe si le client ne peut pas tenir une connexion (mobile, serverless, onglets de navigateur qui s'endorment).
+- **Notifications push (configuration webhook).** Le client enregistre un webhook via `CreateTaskPushNotificationConfig`. Le serveur POSTe les mises à jour à cette URL au fur et à mesure. Le client peut être totalement hors ligne entre-temps. C'est le mode pour les tâches qui dépassent la durée d'une connexion HTTP — pensez « lance ça pendant la nuit » ou « rappelle-moi quand le job batch finit ».
+
+Les deux exigent que l'agent annonce le support dans son Agent Card (`capabilities.streaming: true` et/ou `capabilities.pushNotifications: true`). Un appelant conforme vérifie d'abord et dégrade proprement.
+
+## Parties de message — pas juste du chat
+
+Un **Message** A2A est composé d'une ou plusieurs **Parts**. Chaque Part peut être :
+
+- `text` — contenu chaîne (la partie chat).
+- `raw` — fichier binaire, encodé en base64 dans le JSON.
+- `url` — une référence à un fichier externe (évite d'inliner d'énormes blobs).
+- `data` — un **objet ou tableau JSON structuré**, avec un map `metadata` optionnel.
+
+La partie `data` est ce qui rend A2A utile pour le travail machine-à-machine. Deux agents peuvent échanger des payloads typés — une commande, une spec d'achat, un diff JSON — sans prétendre avoir une conversation en langage naturel à ce sujet. C'est aussi ce qui permet à des protocoles comme **Agent Payments (AP2)** de se superposer proprement à A2A : l'intention de paiement voyage dans une partie `data` avec un schéma connu.
+
+## Endpoints multi-tenants — une URL, plusieurs agents
+
+Celle-ci est facile à manquer. Un unique endpoint A2A peut héberger **plusieurs agents**, servis via la méthode `GetExtendedAgentCard` après authentification. Un fournisseur SaaS peut offrir une URL et renvoyer des Agent Cards différentes, spécifiques au tenant, selon la clé API ou le scope OAuth que l'appelant présente. Du côté de l'appelant, ça ressemble à un endpoint par agent ; du côté du fournisseur, c'est un déploiement. Si vous construisez de l'infrastructure servant des agents, c'est le pattern qui vous permet de passer à l'échelle sans un hostname par tenant.
+
+## Une interaction minimale de bout en bout
+
+Le protocole complet a beaucoup de surface, mais le flux du chemin heureux est court :
+
+<Steps items={[
+  { title: "Découvrir", body: "Récupérez l'Agent Card à une URL connue. Vérifiez sa signature si une est présente. Lisez `capabilities`, `skills` et `securitySchemes` pour décider si cet agent peut faire ce dont vous avez besoin et quelle auth vous apporterez." },
+  { title: "Authentifier", body: "Obtenez l'identifiant que la carte demandait — une clé API, un jeton OAuth2, un certificat mTLS. Si vous allez parler à beaucoup d'agents, mettez les jetons en cache ; A2A ne dicte pas de modèle de session." },
+  { title: "Envoyer le message", body: "Appelez `a2a.SendMessage` (ou `a2a.SendStreamingMessage` pour SSE) avec un Message composé de Parts. Vous recevez un `taskId` en retour." },
+  { title: "Suivre", body: "Choisissez : gardez le stream SSE ouvert, ou interrogez `a2a.GetTask` par ID, ou enregistrez un webhook via `CreateTaskPushNotificationConfig`. Gérez `INPUT_REQUIRED` et `AUTH_REQUIRED` en répondant par des messages de suivi, pas en les traitant comme des échecs." },
+  { title: "Consommer le résultat", body: "Sur `COMPLETED`, lisez les payloads `TaskArtifactUpdateEvent` pour les sorties. Sur `FAILED` / `REJECTED`, inspectez le code d'erreur — la spec définit des erreurs typées comme `ContentTypeNotSupportedError`, `UnsupportedOperationError`, `VersionNotSupportedError` et `ExtensionSupportRequiredError`." },
+]} />
+
+## Récupérer une Agent Card (concept)
+
+La découverte est juste un GET HTTP. Voici la forme d'une requête qu'un client ferait pour inspecter un agent candidat avant de lui envoyer du travail :
+
+<PromptCard title="Récupérer et inspecter une Agent Card">
+{`GET https://agents.example.com/.well-known/agent.json
+Accept: application/json
+
+# Response (abbreviated):
+# {
+#   "id": "acme/support-router",
+#   "name": "Acme Support Router",
+#   "provider": {"organization": "Acme, Inc."},
+#   "endpoints": [
+#     {"url": "https://agents.example.com/a2a", "protocol": "jsonrpc"}
+#   ],
+#   "capabilities": {
+#     "streaming": true,
+#     "pushNotifications": true,
+#     "extendedAgentCard": true
+#   },
+#   "skills": [
+#     {"id": "route_ticket", "inputSchema": {...}, "outputSchema": {...}}
+#   ],
+#   "securitySchemes": {
+#     "primary": {"type": "oauth2", "flows": {...}}
+#   },
+#   "signature": {"alg": "EdDSA", "value": "..."}
+# }`}
+</PromptCard>
+
+Notez ce qui n'est *pas* dans la carte : rien sur le modèle derrière l'agent, son prompt, ses outils ou son état privé. Cette opacité est délibérée — A2A traite un agent pair comme une boîte noire à qui vous déléguez du travail, pas comme un système que vous introspectez.
+
+## Pièges courants
+
+- **Traiter `INPUT_REQUIRED` comme une erreur.** Ce n'en est pas une ; c'est le protocole qui demande à votre code de répondre. Si votre code appelant ne branche que sur « a-t-il réussi ou échoué », vous casserez chaque workflow interactif.
+- **Ignorer les `capabilities` de l'Agent Card.** Envoyer une requête streaming à un agent qui n'a pas annoncé `streaming: true` vous vaut un `UnsupportedOperationError`. Lisez la carte, dégradez proprement.
+- **Présumer que la connexion streaming est durable.** Les clients mobiles, les runtimes serverless, les onglets de navigateur — tous laissent tomber la connexion SSE. Pour tout ce qui dure plus longtemps qu'« un tour de chat », préférez les notifications push.
+- **Sauter la vérification de signature parce qu'elle est optionnelle.** Si vous consommez des Agent Cards depuis l'extérieur de votre organisation, vérifiez la signature — sinon vous avez créé un vecteur d'injection de prompt au niveau de la découverte.
+- **Confondre A2A avec MCP.** Publier un endpoint A2A pour une fonction sans état à un coup est excessif ; c'est un outil, et MCP est le bon protocole. Publier un outil MCP pour quelque chose qui prend des minutes et doit poser des questions de clarification est sous-ingénié ; c'est un agent, et A2A est le bon protocole.
+
+<Quiz questions={[
+  {
+    q: "Laquelle de ces choses est le travail d'A2A — la chose pour laquelle MCP n'est *pas* conçu ?",
+    options: [
+      "Exposer une fonction comme read_file pour qu'un agent puisse l'appeler",
+      "Permettre à un agent de déléguer une tâche stateful et de longue durée à un autre agent d'un autre fournisseur",
+      "Streamer des tokens depuis un LLM vers une UI de chat",
+      "Stocker des embeddings pour un pipeline RAG",
+    ],
+    answer: 1,
+    explain: "MCP est agent-à-outil : il publie des capacités appelables. A2A est agent-à-agent : un agent passe une tâche stateful à un autre. Les deux utilisent JSON sur HTTP ; ils résolvent des moitiés différentes du problème et se composent."
+  },
+  {
+    q: "A2A définit huit états de tâche. Lesquels sont *interrompus* plutôt que terminaux ?",
+    options: [
+      "SUBMITTED et WORKING",
+      "FAILED et REJECTED",
+      "INPUT_REQUIRED et AUTH_REQUIRED",
+      "COMPLETED et CANCELED",
+    ],
+    answer: 2,
+    explain: "INPUT_REQUIRED (l'agent a besoin de plus d'infos) et AUTH_REQUIRED (l'agent a besoin que l'appelant s'authentifie) sont des pauses attendues dans un workflow réel, pas des échecs. Votre code appelant doit y répondre, pas les remonter comme des erreurs."
+  },
+  {
+    q: "Vous devez lancer une tâche A2A qui prendra une heure. Le client est une fonction serverless qui ne peut pas tenir une connexion HTTP ouverte. Quel est le bon modèle de livraison ?",
+    options: [
+      "Streaming SSE via SendStreamingMessage — la spec l'exige pour les tâches longues",
+      "Interroger GetTask chaque seconde pour toujours",
+      "Enregistrer un webhook via CreateTaskPushNotificationConfig et laisser l'agent POSTer les mises à jour",
+      "Bufferiser le résultat entier et le télécharger à la fin via GetExtendedAgentCard",
+    ],
+    answer: 2,
+    explain: "Les notifications push sont exactement pour ce cas : le client peut être hors ligne entre les mises à jour, l'agent POSTe TaskStatusUpdateEvent / TaskArtifactUpdateEvent à votre webhook. Le streaming présume une connexion durable ; l'interrogation est gaspilleuse ; GetExtendedAgentCard est pour la découverte, pas les résultats."
+  },
+  {
+    q: "Contre quoi une Agent Card *signée* vous protège-t-elle ?",
+    options: [
+      "Attaques de rate-limiting",
+      "Un attaquant publiant une fausse Agent Card à un hôte usurpé et mentant sur ses capacités ou son auth",
+      "L'agent hallucinant dans ses réponses",
+      "Les outils MCP renvoyant du contenu malveillant",
+    ],
+    answer: 1,
+    explain: "La découverte est là où commence la confiance. Une signature sur l'Agent Card permet à l'appelant de vérifier que la carte vient vraiment du propriétaire du domaine — fermant une attaque d'injection-de-prompt-à-la-découverte où une carte malveillante ment sur les outils, les schémas ou l'auth."
+  },
+]} />
+
+## Où A2A se situe dans votre stack
+
+Combiné au reste du tableau des agents :
+
+- À l'intérieur d'un agent, MCP est comment vous atteignez les [outils et données](/docs/api/mcp) — y compris des serveurs MCP distants que vous n'avez pas écrits.
+- Entre agents dans un même framework, vous utilisez ce que le framework vous donne — [sous-agents](/docs/claude-code/subagents) dans Claude Code, sous-graphes LangGraph, crews CrewAI, etc. C'est le plus rapide mais cela vous verrouille à un runtime.
+- Entre agents à travers des frameworks, équipes ou fournisseurs, A2A est ce que vous saisissez. Lisez [Frameworks d'agents IA open source](/docs/models/open-source-agent-frameworks) pour le côté runtime ; A2A est le fil entre ces runtimes.
+
+La règle du pouce : **si la frontière est une frontière de processus, les passations natives du framework conviennent. Si c'est une frontière d'organisation, de cloud ou de confiance, utilisez A2A.**
+
+## Sources et lectures complémentaires
+
+- [Spécification du protocole A2A (v1.0.1)](https://a2a-protocol.org/latest/specification/) — la source de vérité pour les états de tâches, les parties de message, les méthodes JSON-RPC et les codes d'erreur.
+- [`a2aproject/A2A` sur GitHub](https://github.com/a2aproject/A2A) — Apache-2.0, gouverné par la Linux Foundation, ~25k étoiles, SDK en Python, Go, JavaScript, Java, .NET, Rust.
+- [Announcing the Agent2Agent Protocol (A2A) — Google Developers Blog](https://developers.googleblog.com/en/a2a-a-new-era-of-agent-interoperability/) — le post de lancement original expliquant l'intention de conception et la relation avec MCP.
+- [Agent2Agent protocol is getting an upgrade — Google Cloud Blog](https://cloud.google.com/blog/products/ai-machine-learning/agent2agent-protocol-is-getting-an-upgrade) — changements v1.0 : Agent Cards signées, endpoints multi-tenants, flux de sécurité modernisés.
+- [A2A Protocol Surpasses 150 Organizations — communiqué de presse Linux Foundation, avril 2026](https://www.linuxfoundation.org/press/a2a-protocol-surpasses-150-organizations-lands-in-major-cloud-platforms-and-sees-enterprise-production-use-in-first-year) — statut de déploiement en production dans Azure AI Foundry et Amazon Bedrock AgentCore.
+- [MCP et connexion aux outils](/docs/api/mcp) — le protocole frère ; à lire avec cette page.
