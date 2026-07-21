@@ -1,5 +1,6 @@
 import React, {type ReactNode} from 'react';
 import Translate, {translate} from '@docusaurus/Translate';
+import {CheckIcon} from '@site/src/components/icons';
 import styles from './styles.module.css';
 
 /**
@@ -18,8 +19,9 @@ export default function VerifyNote({
 }): ReactNode {
   return (
     <aside className={styles.verify} role="note" aria-label="Freshness note">
+      {/* Decorative: the copy right next to it already says "Last verified". */}
       <span className={styles.icon} aria-hidden="true">
-        ✅
+        <CheckIcon className={styles.iconGlyph} />
       </span>
       <div className={styles.body}>
         <strong>

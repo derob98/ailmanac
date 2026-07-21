@@ -1,9 +1,11 @@
 import React, {type ReactNode} from 'react';
+import clsx from 'clsx';
 import Layout from '@theme/Layout';
 import Link from '@docusaurus/Link';
 import Heading from '@theme/Heading';
 import Translate, {translate} from '@docusaurus/Translate';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
+import styles from './styles.module.css';
 
 // Branded, localized 404 — turns a dead end into a helpful on-ramp.
 export default function NotFound(): ReactNode {
@@ -13,30 +15,21 @@ export default function NotFound(): ReactNode {
     <Layout
       title={translate({id: 'notfound.title', message: 'Page Not Found'})}
       description={translate({id: 'notfound.desc', message: 'This page wandered off.'})}>
-      <main
-        className="container margin-vert--xl"
-        style={{textAlign: 'center', maxWidth: '42rem'}}>
-        <Heading as="h1" style={{fontSize: 'clamp(3rem, 12vw, 6rem)', marginBottom: '0.25rem'}}>
+      <main className={clsx('container', 'margin-vert--xl', styles.notFound)}>
+        <Heading as="h1" className={styles.code}>
           404
         </Heading>
-        <p style={{fontSize: '1.25rem', fontWeight: 600}}>
+        <p className={styles.heading}>
           <Translate id="notfound.heading">
             This page wandered off — let's get you back on track.
           </Translate>
         </p>
-        <p style={{opacity: 0.85}}>
+        <p className={styles.sub}>
           <Translate id="notfound.sub">
             The link may be old or mistyped. Try one of these, or search from the top bar.
           </Translate>
         </p>
-        <div
-          style={{
-            display: 'flex',
-            gap: '0.75rem',
-            justifyContent: 'center',
-            flexWrap: 'wrap',
-            marginTop: '1.75rem',
-          }}>
+        <div className={styles.actions}>
           <Link className="button button--primary button--lg" to={`${lp}/docs/start-here/welcome`}>
             <Translate id="notfound.cta.start">Start Here</Translate>
           </Link>

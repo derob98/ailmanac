@@ -1,5 +1,6 @@
 import React, {useId, useState, type ReactNode} from 'react';
 import {translate} from '@docusaurus/Translate';
+import {SparkleIcon} from '@site/src/components/icons';
 import styles from './styles.module.css';
 
 export interface Flashcard {
@@ -117,7 +118,9 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
         aria-label={flipLabel}
         aria-describedby={`${cardId} ${instrId}`}>
         <span className={styles.flipHint} aria-hidden="true">
-          <span className={styles.flipHintGlyph}>{flipped ? '↩' : '✨'}</span>
+          <span className={styles.flipHintGlyph}>
+            {flipped ? '↩' : <SparkleIcon className={styles.flipHintIcon} />}
+          </span>
           {hintText}
         </span>
         <span className={styles.inner} id={cardId}>
@@ -203,6 +206,10 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
           onClick={() => go(current + 1)}
           disabled={isLast}
           aria-label={translate({id: 'flashcards.next', message: 'Next card'})}>
+          {/* NOTE: the 🎉 here is baked INTO the translated message, and the same
+              emoji is already shipped inside all 11 locale files. Swapping it for
+              <PartyIcon /> means rewording the English source string and editing
+              every locale — out of scope for a glyph swap, so it stays for now. */}
           <span className={styles.btnLabel}>
             {isLast
               ? translate({id: 'flashcards.doneShort', message: 'Done 🎉'})

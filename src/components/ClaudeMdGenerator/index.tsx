@@ -1,4 +1,5 @@
 import React, {useState, type ReactNode} from 'react';
+import {CheckIcon} from '@site/src/components/icons';
 import styles from './styles.module.css';
 
 type Guardrail = {id: string; label: string; line: string};
@@ -266,7 +267,16 @@ export default function ClaudeMdGenerator(): ReactNode {
       <div className={styles.outHead}>
         <span>CLAUDE.md <span className={styles.count}>· {lineCount} lines</span></span>
         <div className={styles.actions}>
-          <button className={styles.btn} type="button" onClick={copy}>{copied ? '✓ Copied' : 'Copy'}</button>
+          <button className={styles.btn} type="button" onClick={copy}>
+            {copied ? (
+              <>
+                <CheckIcon className={styles.btnIcon} />
+                Copied
+              </>
+            ) : (
+              'Copy'
+            )}
+          </button>
           <button className={styles.btn} type="button" onClick={download}>Download</button>
         </div>
       </div>

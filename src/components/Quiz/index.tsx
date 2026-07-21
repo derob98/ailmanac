@@ -1,5 +1,13 @@
 import React, {useId, useState, type ReactNode} from 'react';
 import {translate} from '@docusaurus/Translate';
+import {
+  BrainIcon,
+  CheckIcon,
+  CrossIcon,
+  SeedlingIcon,
+  SparkleIcon,
+  TrophyIcon,
+} from '@site/src/components/icons';
 import styles from './styles.module.css';
 
 export interface QuizQuestion {
@@ -23,23 +31,24 @@ export interface QuizProps {
 // One per question: -1 means "not yet answered", otherwise the chosen index.
 type Picks = number[];
 
-function band(score: number, total: number): {emoji: string; line: string} {
+function band(score: number, total: number): {icon: ReactNode; line: string} {
   // Deterministic — never random. Pure function of score/total.
+  // The mark is decorative: the line right next to it says the same thing.
   const pct = total === 0 ? 0 : score / total;
   if (pct === 1) {
     return {
-      emoji: '🏆',
+      icon: <TrophyIcon className={styles.resultIcon} />,
       line: translate({id: 'quiz.band.perfect', message: 'Flawless. You really know this.'}),
     };
   }
   if (pct >= 0.6) {
     return {
-      emoji: '✨',
+      icon: <SparkleIcon className={styles.resultIcon} />,
       line: translate({id: 'quiz.band.good', message: 'almost there!'}),
     };
   }
   return {
-    emoji: '🌱',
+    icon: <SeedlingIcon className={styles.resultIcon} />,
     line: translate({id: 'quiz.band.keepGoing', message: 'keep going — a quick re-read will nail it.'}),
   };
 }
@@ -61,7 +70,7 @@ export default function Quiz({questions, title}: QuizProps): ReactNode {
       <div className={styles.wrap} role="group" aria-label={heading}>
         <div className={styles.head}>
           <span className={styles.kicker} aria-hidden="true">
-            🧠
+            <BrainIcon className={styles.kickerIcon} />
           </span>
           <h3 className={styles.title}>{heading}</h3>
         </div>
@@ -106,7 +115,7 @@ export default function Quiz({questions, title}: QuizProps): ReactNode {
     <div className={styles.wrap} role="group" aria-label={heading}>
       <div className={styles.head}>
         <span className={styles.kicker} aria-hidden="true">
-          🧠
+          <BrainIcon className={styles.kickerIcon} />
         </span>
         <h3 className={styles.title}>{heading}</h3>
         <span className={styles.count} aria-label={progressLabel}>
@@ -152,12 +161,15 @@ export default function Quiz({questions, title}: QuizProps): ReactNode {
                         : isChosen
                           ? styles.wrong
                           : styles.muted;
+                    // Tick vs cross: the two marks differ in SHAPE, not only in
+                    // the green/red tint, so the verdict survives a colour-blind
+                    // reader and a monochrome print.
                     const mark = !locked
                       ? null
                       : isCorrect
-                        ? '✓'
+                        ? (<CheckIcon className={styles.markIcon} />)
                         : isChosen
-                          ? '✗'
+                          ? (<CrossIcon className={styles.markIcon} />)
                           : null;
                     return (
                       <button
@@ -170,7 +182,16 @@ export default function Quiz({questions, title}: QuizProps): ReactNode {
                         aria-disabled={locked}>
                         <span className={styles.optText}>{opt}</span>
                         {mark && (
-                          <span className={styles.mark} aria-hidden="true">
+                          <span className={styles.mark}>
+                            {/* The SVG is aria-hidden, and nothing else on this
+                                row says which option was right — so the mark
+                                ships its own label, reusing the verdict wording
+                                already translated below. */}
+                            <span className={styles.srOnly}>
+                              {isCorrect
+                                ? translate({id: 'quiz.correct', message: 'Correct'})
+                                : translate({id: 'quiz.incorrect', message: 'Not quite'})}
+                            </span>
                             {mark}
                           </span>
                         )}
@@ -202,7 +223,7 @@ export default function Quiz({questions, title}: QuizProps): ReactNode {
         <div className={styles.result} role="status">
           <p className={styles.resultLine}>
             <span className={styles.resultEmoji} aria-hidden="true">
-              {result.emoji}
+              {result.icon}
             </span>
             <span className={styles.resultScore}>
               {score}/{total}

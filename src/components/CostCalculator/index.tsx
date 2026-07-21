@@ -57,7 +57,7 @@ export default function CostCalculator(): ReactNode {
         {field('Cached input', cachePct, setCachePct, '% of prefix')}
       </div>
 
-      <div className={styles.result}>
+      <div className={styles.result} data-savings={cached > 0 && savings > 0 ? 'true' : undefined}>
         <div className={styles.big}>
           <span className={styles.num}>{money(total)}</span>
           <span className={styles.cap}>estimated / month</span>

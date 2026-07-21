@@ -1,4 +1,5 @@
 import React, {useState, type ReactNode} from 'react';
+import {CheckIcon} from '@site/src/components/icons';
 import styles from './styles.module.css';
 
 type Server = {
@@ -65,7 +66,16 @@ export default function McpConfigBuilder(): ReactNode {
       <div className={styles.outHead}>
         <span>.mcp.json</span>
         <div className={styles.actions}>
-          <button className={styles.btn} type="button" onClick={copy}>{copied ? '✓ Copied' : 'Copy'}</button>
+          <button className={styles.btn} type="button" onClick={copy} data-copied={copied ? 'true' : undefined}>
+            {copied ? (
+              <>
+                <CheckIcon className={styles.btnIcon} />
+                Copied
+              </>
+            ) : (
+              'Copy'
+            )}
+          </button>
           <button className={styles.btn} type="button" onClick={download}>Download</button>
         </div>
       </div>
