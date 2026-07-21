@@ -1,5 +1,17 @@
 import React, {type ReactNode} from 'react';
 import {translate} from '@docusaurus/Translate';
+import clsx from 'clsx';
+import {
+  ArrowRightIcon,
+  CheckCircleIcon,
+  DotIcon,
+  LightbulbIcon,
+  SparkleIcon,
+  StarIcon,
+  TargetIcon,
+  WarningIcon,
+  type CalloutIconProps,
+} from './icons';
 import styles from './styles.module.css';
 
 /**
@@ -29,44 +41,76 @@ export interface CalloutProps {
   children?: ReactNode;
 }
 
+/** Every marker is a prop-less-by-default, stateless SVG component. */
+type IconComponent = (props: CalloutIconProps) => ReactNode;
+
 interface Variant {
-  /** Decorative emoji — meaning is carried by the visible heading text. */
-  icon: string;
+  /** Decorative header marker — meaning is carried by the visible heading text. */
+  Icon: IconComponent;
   /** Default heading; resolved per-locale at render time. */
   heading: () => string;
-  /** Bullet glyph used for each checklist row. */
-  bullet: string;
+  /** Marker drawn at the start of each checklist row. */
+  Bullet: IconComponent;
+  /** True when the bullet points somewhere — it gets mirrored in RTL. */
+  bulletIsDirectional?: boolean;
 }
 
 // One config object per variant keeps the JSX tiny and the CSS data-driven.
 const VARIANTS: Record<CalloutType, Variant> = {
   objectives: {
-    icon: '🎯',
+    Icon: TargetIcon,
     heading: () =>
       translate({
         id: 'callout.objectives.title',
         message: "What you'll learn",
       }),
-    bullet: '✅',
+    Bullet: CheckCircleIcon,
   },
   takeaways: {
-    icon: '💡',
+    Icon: LightbulbIcon,
     heading: () =>
       translate({id: 'callout.takeaways.title', message: 'Key takeaways'}),
-    bullet: '⭐',
+    Bullet: StarIcon,
   },
   tip: {
-    icon: '✨',
+    Icon: SparkleIcon,
     heading: () => translate({id: 'callout.tip.title', message: 'Pro tip'}),
-    bullet: '→',
+    Bullet: ArrowRightIcon,
+    bulletIsDirectional: true,
   },
   warning: {
-    icon: '⚠️',
+    Icon: WarningIcon,
     heading: () =>
       translate({id: 'callout.warning.title', message: 'Watch out'}),
-    bullet: '•',
+    Bullet: DotIcon,
   },
 };
+
+/**
+ * Matches ONE leading emoji (incl. flags, variation selectors and ZWJ
+ * sequences) plus the whitespace after it.
+ *
+ * Why a plain regex and not Intl.Segmenter: a feature-detect branch could
+ * resolve differently in the Node SSR pass and in the browser, which is exactly
+ * how hydration mismatches (React #418/#425) happen. This is a pure,
+ * deterministic transform that runs identically in both.
+ */
+const LEADING_EMOJI_RE =
+  /^(?:\p{Regional_Indicator}{2}|\p{Extended_Pictographic}\uFE0F?(?:\u200D\p{Extended_Pictographic}\uFE0F?)*)\s*/u;
+
+/**
+ * Defensive strip: legacy MDX authors sometimes typed a bullet emoji into the
+ * item text itself, which would now render right next to the SVG marker.
+ * Only strings are touched — JSX items pass through byte-identical.
+ */
+function stripLeadingEmoji(item: ReactNode): ReactNode {
+  if (typeof item !== 'string') {
+    return item;
+  }
+  const stripped = item.replace(LEADING_EMOJI_RE, '');
+  // An emoji-only item would otherwise be erased entirely — keep it as authored.
+  return stripped.length > 0 ? stripped : item;
+}
 
 export default function Callout({
   type = 'objectives',
@@ -78,6 +122,11 @@ export default function Callout({
   const key: CalloutType = VARIANTS[type] ? type : 'objectives';
   const variant = VARIANTS[key];
   const heading = title ?? variant.heading();
+  const {Icon, Bullet} = variant;
+  const bulletClass = clsx(
+    styles.bulletIcon,
+    variant.bulletIsDirectional && styles.bulletDirectional,
+  );
 
   return (
     <section
@@ -88,7 +137,7 @@ export default function Callout({
       <div className={styles.accent} aria-hidden="true" />
       <header className={styles.header}>
         <span className={styles.icon} aria-hidden="true">
-          {variant.icon}
+          <Icon className={styles.headerIcon} />
         </span>
         <span className={styles.title}>{heading}</span>
       </header>
@@ -98,9 +147,9 @@ export default function Callout({
           {items.map((item, i) => (
             <li key={i} className={styles.item}>
               <span className={styles.check} aria-hidden="true">
-                {variant.bullet}
+                <Bullet className={bulletClass} />
               </span>
-              <span className={styles.itemText}>{item}</span>
+              <span className={styles.itemText}>{stripLeadingEmoji(item)}</span>
             </li>
           ))}
         </ul>

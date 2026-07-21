@@ -259,8 +259,62 @@ const config: Config = {
     },
     prism: {
       theme: prismThemes.github,
-      darkTheme: prismThemes.dracula,
+      // nightOwl over dracula: dracula's background is #282a36, noticeably
+      // lighter and greyer than this site's dark surface (#14161f), so every
+      // code block showed a visible seam against the page. nightOwl sits at
+      // #011627 — near-black, and its soft-violet keywords / warm-tan strings
+      // already lean toward the brand's violet+amber without looking foreign.
+      darkTheme: prismThemes.nightOwl,
       additionalLanguages: ['bash', 'python', 'json', 'toml', 'diff', 'yaml'],
+    },
+
+    /**
+     * Mermaid theming.
+     *
+     * Two channels, and they are not interchangeable:
+     * - `themeVariables` feeds mermaid's internal colour maths (it derives
+     *   lighter/darker variants), so those MUST be literal hex — a CSS var()
+     *   would break the computation.
+     * - `themeCSS` is injected into the light DOM, so var(--ifm-*) resolves
+     *   live per [data-theme] there. Since `options` is one shared object
+     *   across light and dark, the real per-mode adaptation has to happen
+     *   here, with themeVariables as a light-leaning fallback.
+     * The container frame itself lives in custom.css.
+     */
+    mermaid: {
+      theme: {light: 'base', dark: 'base'},
+      options: {
+        fontFamily: "'Inter Variable', 'Inter', system-ui, sans-serif",
+        themeVariables: {
+          primaryColor: '#eef2ff',
+          primaryTextColor: '#312e81',
+          primaryBorderColor: '#4f46e5',
+          lineColor: '#7c3aed',
+          secondaryColor: '#fef3c7',
+          tertiaryColor: '#ffffff',
+        },
+        themeCSS: `
+          .node rect, .node polygon, .node circle, .node ellipse {
+            fill: var(--ifm-background-surface-color) !important;
+            stroke: var(--ifm-color-primary) !important;
+            stroke-width: 1.4px !important;
+          }
+          .nodeLabel, .label { color: var(--ifm-font-color-base) !important; }
+          .edgeLabel {
+            background-color: var(--ifm-background-color) !important;
+            color: var(--ifm-font-color-base) !important;
+          }
+          .edgePath .path, .flowchart-link {
+            stroke: var(--ail-violet) !important;
+            stroke-width: 1.6px !important;
+          }
+          marker { fill: var(--ail-violet) !important; stroke: var(--ail-violet) !important; }
+          .cluster rect {
+            fill: color-mix(in srgb, var(--ifm-color-primary) 6%, transparent) !important;
+            stroke: var(--ifm-color-emphasis-300) !important;
+          }
+        `,
+      },
     },
   } satisfies Preset.ThemeConfig,
 };

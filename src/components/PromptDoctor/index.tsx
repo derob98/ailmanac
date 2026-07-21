@@ -1,4 +1,5 @@
 import React, {useMemo, useState, type ReactNode} from 'react';
+import {CheckIcon, CrossIcon} from '@site/src/components/icons';
 import styles from './styles.module.css';
 
 /**
@@ -203,7 +204,15 @@ function buildScaffold(raw: string, findings: Finding[]): string {
   return lines.join('\n').trim();
 }
 
-const ICON: Record<Status, string> = {pass: '✓', warn: '!', fail: '✕', na: '–'};
+// Pass and fail are drawn marks: a tick and a cross differ in SHAPE, so the
+// verdict does not rest on the green/red badge tint alone. Warn and N/A stay
+// typographic. Every badge carries LABEL as its accessible name (see below).
+const ICON: Record<Status, ReactNode> = {
+  pass: <CheckIcon className={styles.badgeIcon} />,
+  warn: '!',
+  fail: <CrossIcon className={styles.badgeIcon} />,
+  na: '–',
+};
 const LABEL: Record<Status, string> = {pass: 'Optimal', warn: 'Tune', fail: 'Critical', na: 'N/A'};
 
 const RING = {r: 52, c: 2 * Math.PI * 52};
@@ -321,7 +330,9 @@ export default function PromptDoctor(): ReactNode {
                 className={`${styles.finding} ${styles[f.status]}`}
                 style={{animationDelay: `${i * 55}ms`}}
               >
-                <span className={styles.badge} aria-label={LABEL[f.status]}>{ICON[f.status]}</span>
+                {/* role="img" keeps the existing aria-label exposed now that the
+                    pass/fail badges hold an aria-hidden SVG instead of a character. */}
+                <span className={styles.badge} role="img" aria-label={LABEL[f.status]}>{ICON[f.status]}</span>
                 <div className={styles.fbody}>
                   <div className={styles.ftitle}>
                     {f.title} <span className={styles.fstatus}>{LABEL[f.status]}</span>
@@ -340,7 +351,16 @@ export default function PromptDoctor(): ReactNode {
           <div className={styles.scaffoldBox}>
             <div className={styles.scaffoldHead}>
               <strong>⟢ reconstructed scaffold</strong>
-              <button className={styles.copy} onClick={copy}>{copied ? 'copied ✓' : 'copy'}</button>
+              <button className={styles.copy} onClick={copy}>
+                {copied ? (
+                  <>
+                    copied
+                    <CheckIcon className={styles.copyIcon} />
+                  </>
+                ) : (
+                  'copy'
+                )}
+              </button>
             </div>
             <pre className={styles.scaffold}>{scaffold}</pre>
           </div>

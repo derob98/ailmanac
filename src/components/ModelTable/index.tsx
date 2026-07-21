@@ -1,5 +1,6 @@
 import React, {type ReactNode} from 'react';
 import data from '@site/data/models.json';
+import {CheckIcon} from '@site/src/components/icons';
 import styles from './styles.module.css';
 
 type Model = {
@@ -21,7 +22,8 @@ export default function ModelTable(): ReactNode {
   return (
     <div className={styles.wrap}>
       <p className={styles.stamp}>
-        <span aria-hidden="true">✅</span> <strong>Last verified:</strong>{' '}
+        {/* Decorative: "Last verified" right after it carries the meaning. */}
+        <CheckIcon className={styles.stampIcon} /> <strong>Last verified:</strong>{' '}
         {data.lastVerified} ·{' '}
         <a href={data.source} target="_blank" rel="noreferrer">
           Official models &amp; pricing

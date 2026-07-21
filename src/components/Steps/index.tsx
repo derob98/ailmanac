@@ -5,6 +5,7 @@ import React, {
   type ReactNode,
 } from 'react';
 import {translate} from '@docusaurus/Translate';
+import {PartyIcon} from '@site/src/components/icons';
 import styles from './styles.module.css';
 
 /**
@@ -230,7 +231,10 @@ export default function Steps({
                   </button>
                   {atEnd ? (
                     <span className={styles.doneBadge}>
-                      🎉 {translate({id: 'steps.allDone', message: 'All done!'})}
+                      {/* Decorative: the label right beside it says "All done!".
+                          The gap comes from CSS, so no translation can lose it. */}
+                      <PartyIcon className={styles.doneIcon} />
+                      {translate({id: 'steps.allDone', message: 'All done!'})}
                     </span>
                   ) : (
                     <button

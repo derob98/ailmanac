@@ -26,11 +26,18 @@ type Status = 'fresh' | 'aging' | 'stale' | 'unverified';
 const FRESH_DAYS = 90;
 const AGING_DAYS = 180;
 
-const STATUS_META: Record<Status, {label: string; emoji: string}> = {
-  fresh: {label: 'Fresh', emoji: '🟢'},
-  aging: {label: 'Aging', emoji: '🟡'},
-  stale: {label: 'Stale', emoji: '🔴'},
-  unverified: {label: 'Unverified', emoji: '⚪'},
+/**
+ * Status marks are rendered as tinted CSS discs, not emoji — the hue comes
+ * from the same per-status class the cards and badges already use, so the
+ * traffic-light reading survives without pasting coloured pictographs into
+ * the markup. Colour is never the only channel: the visible label sits
+ * directly beside every disc.
+ */
+const STATUS_META: Record<Status, {label: string}> = {
+  fresh: {label: 'Fresh'},
+  aging: {label: 'Aging'},
+  stale: {label: 'Stale'},
+  unverified: {label: 'Unverified'},
 };
 
 function daysSince(date: string): number {
@@ -103,7 +110,7 @@ function FreshnessDashboardInner(): ReactNode {
             className={`${styles.card} ${styles[s]} ${statusFilter === s ? styles.cardActive : ''}`}
             onClick={() => setStatusFilter(statusFilter === s ? 'all' : s)}>
             <span className={styles.cardNum}>
-              {STATUS_META[s].emoji} {counts[s]}
+              <span className={styles.dot} aria-hidden="true" /> {counts[s]}
             </span>
             <span className={styles.cardLabel}>{STATUS_META[s].label}</span>
           </button>
@@ -114,7 +121,9 @@ function FreshnessDashboardInner(): ReactNode {
         <strong>{verifiedPct}%</strong> of pages carry a freshness stamp · last
         index rebuild <code>{data.generatedAt}</code>. A page is{' '}
         <em>Fresh</em> for {FRESH_DAYS} days after its last verification,{' '}
-        <em>Aging</em> up to {AGING_DAYS}, then <em>Stale</em>. ⚪ Unverified pages
+        <em>Aging</em> up to {AGING_DAYS}, then <em>Stale</em>.{' '}
+        <span className={`${styles.dot} ${styles.unverified}`} aria-hidden="true" />{' '}
+        Unverified pages
         have no <code>&lt;VerifyNote&gt;</code> yet — the perfect first contribution.
       </p>
 
@@ -174,7 +183,8 @@ function FreshnessDashboardInner(): ReactNode {
                 </td>
                 <td>
                   <span className={`${styles.badge} ${styles[p.status]}`}>
-                    {STATUS_META[p.status].emoji} {STATUS_META[p.status].label}
+                    <span className={styles.dot} aria-hidden="true" />{' '}
+                    {STATUS_META[p.status].label}
                   </span>
                 </td>
                 <td className={styles.actions}>

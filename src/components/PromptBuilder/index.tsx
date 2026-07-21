@@ -1,5 +1,6 @@
 import React, {useState, type ReactNode} from 'react';
 import Translate, {translate} from '@docusaurus/Translate';
+import {CheckIcon} from '@site/src/components/icons';
 import styles from './styles.module.css';
 
 /**
@@ -86,10 +87,20 @@ export default function PromptBuilder(): ReactNode {
       </label>
       <div className={styles.outHead}>
         <span><Translate id="pb.output">Your prompt</Translate></span>
-        <button className={styles.copy} onClick={copy} type="button">
-          {copied
-            ? translate({id: 'pb.copied', message: '✓ Copied'})
-            : translate({id: 'pb.copy', message: 'Copy'})}
+        <button
+          className={styles.copy}
+          onClick={copy}
+          type="button"
+          data-copied={copied ? 'true' : undefined}
+        >
+          {copied ? (
+            <>
+              <CheckIcon className={styles.copyIcon} />
+              {translate({id: 'pb.copied', message: 'Copied'})}
+            </>
+          ) : (
+            translate({id: 'pb.copy', message: 'Copy'})
+          )}
         </button>
       </div>
       <pre className={styles.out}>{prompt}</pre>

@@ -1,4 +1,5 @@
 import React, {useState, useRef, useCallback, type ReactNode} from 'react';
+import {CheckIcon, SparkleIcon} from '@site/src/components/icons';
 import styles from './styles.module.css';
 
 type PromptCardProps = {
@@ -65,7 +66,9 @@ export default function PromptCard({title, children}: PromptCardProps): ReactNod
     >
       <div className={styles.head}>
         <div className={styles.heading}>
-          <span className={styles.spark} aria-hidden="true">✦</span>
+          <span className={styles.spark} aria-hidden="true">
+            <SparkleIcon className={styles.sparkIcon} />
+          </span>
           {title ? (
             <h4 className={styles.title}>{title}</h4>
           ) : (
@@ -79,7 +82,16 @@ export default function PromptCard({title, children}: PromptCardProps): ReactNod
             onClick={copy}
             aria-label={copied ? 'Prompt copied to clipboard' : 'Copy prompt to clipboard'}
           >
-            {copied ? '✓ Copied!' : 'Copy'}
+            {/* The tick is decorative — the button's aria-label already
+                announces the copy result. */}
+            {copied ? (
+              <>
+                <CheckIcon className={styles.btnIcon} />
+                Copied!
+              </>
+            ) : (
+              'Copy'
+            )}
           </button>
           <button
             type="button"
