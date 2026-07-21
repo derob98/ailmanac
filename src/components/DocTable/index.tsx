@@ -22,7 +22,7 @@ import styles from './styles.module.css';
  */
 export default function DocTable(
   props: React.ComponentProps<'table'>,
-): JSX.Element {
+): React.JSX.Element {
   return (
     <div
       className={styles.tableScroll}
