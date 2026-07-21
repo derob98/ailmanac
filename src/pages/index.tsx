@@ -15,7 +15,7 @@ import {
   useVelocity,
 } from 'framer-motion';
 
-import HeroInk from '@site/src/components/HeroInk';
+import HeroField from '@site/src/components/HeroField';
 import {Reveal, CountUp} from '@site/src/components/Reveal';
 import {Scramble} from '@site/src/components/Scramble';
 import {StackingCards} from '@site/src/components/StackingCards';
@@ -200,8 +200,9 @@ function Hero({lp}: {lp: string}) {
           reduced-motion gated). Purely decorative. */}
       <div className={styles.aurora} aria-hidden="true" />
       <div className={styles.canvasWrap} aria-hidden="true">
-        {/* The lighter v3 WebGL accent: ink word + self-drawing constellation. */}
-        <HeroInk />
+        {/* "The Almanac Field" — one depth-fogged particle field + constellation,
+            identical on every engine. Idle-deferred and BrowserOnly. */}
+        <HeroField />
       </div>
       <div className={clsx('container', styles.heroInner)}>
         <p className={styles.eyebrow}>
@@ -388,42 +389,32 @@ function CardGrid({title, lead, cards, big}: {title: string; lead?: string; card
 }
 
 /**
- * One outcome panel inside the pinned horizontal gallery. The giant kinetic verb
- * clip-wipes IN driven by scroll (not hover): we read the gallery's scroll
- * progress and reveal the verb as this panel passes the centre of the viewport.
- * Hover/focus remain an enhancement; reduced motion shows the verb statically.
+ * One outcome panel. The giant kinetic verb clip-wipes in when the panel scrolls
+ * into the carousel's own viewport (`viewport.root` is the horizontal scroller,
+ * so intersection is measured sideways). Hover/focus stay an enhancement;
+ * reduced motion shows the verb statically.
  */
 function OutcomePanel({
   card,
   verb,
-  index,
-  count,
-  progress,
+  scroller,
   reduce,
 }: {
   card: Card;
   verb: string;
-  index: number;
-  count: number;
-  progress: ReturnType<typeof useScroll>['scrollYProgress'];
+  scroller: React.RefObject<HTMLDivElement | null>;
   reduce: boolean;
 }) {
-  // Spread each panel's reveal window across the gallery's scroll travel.
-  const span = 1 / count;
-  const start = Math.max(0, index * span - span * 0.4);
-  const mid = index * span + span * 0.35;
-  // clip-path inset right edge: 100% (hidden) → 0% (fully wiped in).
-  const inset = useTransform(progress, [start, mid], [100, 0], {clamp: true});
-  const clipPath = useTransform(inset, (v) => `inset(0 ${v}% 0 0)`);
-  const opacity = useTransform(progress, [start, mid], [0.2, 0.85], {clamp: true});
-
   return (
     <Link to={card.to} className={clsx(styles.card, styles.hCard)}>
       <span className={styles.cardGlow} aria-hidden="true" />
       <motion.span
         className={styles.kineticVerb}
         aria-hidden="true"
-        style={reduce ? undefined : {clipPath, opacity}}>
+        initial={reduce ? false : {clipPath: 'inset(0 100% 0 0)', opacity: 0.2}}
+        whileInView={{clipPath: 'inset(0 0% 0 0)', opacity: 0.85}}
+        viewport={{root: scroller, once: true, amount: 0.4}}
+        transition={{duration: 0.7, ease: [0.22, 1, 0.36, 1]}}>
         {verb}
       </motion.span>
       <span className={styles.cardEmoji} aria-hidden="true">{card.emoji}</span>
@@ -435,56 +426,89 @@ function OutcomePanel({
 }
 
 /**
- * Pinned horizontal-scroll gallery: as you scroll down the tall section, the
- * sticky inner row slides sideways. Each panel carries a giant kinetic verb that
- * clip-wipes in (scroll-driven, see OutcomePanel). Falls back to a normal grid
- * on small screens and under prefers-reduced-motion (where scroll-jacking hurts
- * UX).
+ * Outcomes carousel — a NATIVE horizontal scroller with scroll-snap.
+ *
+ * This replaces a pinned scroll-jacking gallery: a 280vh section whose sticky
+ * row translated sideways as you scrolled down. That approach hijacked the
+ * page's vertical scroll, and on the live site it rendered as ~2000px of black
+ * void when the pin and the transform disagreed. It also needed a separate
+ * grid fallback for mobile and reduced-motion, i.e. three code paths to keep
+ * honest.
+ *
+ * A native scroller is one code path for everyone: it snaps on touch, it
+ * respects RTL for free (logical properties, no transform math), it is
+ * keyboard-scrollable, and vertical page scroll is never touched. Desktop gets
+ * grab-to-drag on top, since a trackpad user may not think to swipe sideways.
  */
-function HorizontalGallery({title, lead, cards}: {title: string; lead?: string; cards: Card[]}) {
+function OutcomeCarousel({title, lead, cards}: {title: string; lead?: string; cards: Card[]}) {
   const reduce = useReducedMotion();
-  const ref = useRef<HTMLDivElement>(null);
-  const [enabled, setEnabled] = useState(false);
+  const scroller = useRef<HTMLDivElement>(null);
   const verbs = useOutcomeVerbs();
 
+  // Pointer-drag to pan. Only for fine pointers — on touch the native gesture
+  // is already right, and intercepting it would break momentum scrolling.
   useEffect(() => {
-    const decide = () =>
-      setEnabled(!reduce && window.matchMedia('(min-width: 997px)').matches);
-    decide();
-    window.addEventListener('resize', decide);
-    return () => window.removeEventListener('resize', decide);
-  }, [reduce]);
+    const el = scroller.current;
+    if (!el) return undefined;
+    if (window.matchMedia('(pointer: coarse)').matches) return undefined;
 
-  const {scrollYProgress} = useScroll({
-    target: ref,
-    offset: ['start start', 'end end'],
-    layoutEffect: false,
-  });
-  const x = useTransform(scrollYProgress, [0, 1], ['2%', '-64%']);
+    let down = false;
+    let startX = 0;
+    let startScroll = 0;
 
-  if (!enabled) {
-    return <CardGrid title={title} lead={lead} cards={cards} big />;
-  }
+    const onDown = (e: PointerEvent) => {
+      // Let clicks on the card links behave normally until a drag actually
+      // starts; we only claim the pointer once it moves past the threshold.
+      down = true;
+      startX = e.clientX;
+      startScroll = el.scrollLeft;
+    };
+    const onMove = (e: PointerEvent) => {
+      if (!down) return;
+      const dx = e.clientX - startX;
+      if (Math.abs(dx) < 6) return;
+      if (!el.hasPointerCapture(e.pointerId)) {
+        el.setPointerCapture(e.pointerId);
+        el.classList.add(styles.dragging);
+      }
+      el.scrollLeft = startScroll - dx;
+    };
+    const end = (e: PointerEvent) => {
+      down = false;
+      if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+      el.classList.remove(styles.dragging);
+    };
+
+    el.addEventListener('pointerdown', onDown);
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+    return () => {
+      el.removeEventListener('pointerdown', onDown);
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', end);
+      el.removeEventListener('pointercancel', end);
+    };
+  }, []);
 
   return (
-    <section ref={ref} className={styles.hScroll} aria-label={title}>
-      <div className={styles.hSticky}>
-        <div className="container">
-          <Heading as="h2" className={clsx(styles.sectionTitle, styles.hTitle)}>{title}</Heading>
-        </div>
-        <motion.div className={styles.hTrack} style={{x}}>
+    <section className={styles.section} aria-label={title}>
+      <div className="container">
+        <Heading as="h2" className={styles.sectionTitle}>{title}</Heading>
+        {lead ? <p className={styles.sectionLead}>{lead}</p> : null}
+      </div>
+      <div className={styles.carouselWrap}>
+        <div className={styles.carousel} ref={scroller} tabIndex={0}>
           {cards.map((c, i) => (
             <OutcomePanel
               key={c.title}
               card={c}
               verb={verbs[i]}
-              index={i}
-              count={cards.length}
-              progress={scrollYProgress}
+              scroller={scroller}
               reduce={!!reduce}
             />
           ))}
-        </motion.div>
+        </div>
       </div>
     </section>
   );
@@ -573,7 +597,7 @@ export default function Home(): ReactNode {
             />
           }
         />
-        <HorizontalGallery
+        <OutcomeCarousel
           title={translate({id: 'home.outcomes.title', message: "What you'll be able to do"})}
           cards={useOutcomes(lp)}
         />
