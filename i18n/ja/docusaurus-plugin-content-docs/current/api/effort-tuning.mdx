@@ -1,0 +1,222 @@
+---
+sidebar_position: 8.6
+title: "Effort チューニング:5 レベル、モデル別デフォルト、キャッシュの罠"
+description: "2026 年 7 月の effort パラメータは 5 レベル(low、medium、high、xhigh、max)で、トップレベルではなく output_config 内にあります。thinking だけでなくツール呼び出しにも影響し、会話中に変更するとプロンプトキャッシュを無効化し、各モデルは異なる推奨開始点を持ちます。実践的なチューニングガイド。"
+keywords: [Claude effort parameter, output_config effort, effort low medium high xhigh max, adaptive thinking, ultracode, ultrathink, CLAUDE_CODE_EFFORT_LEVEL, Managed Agents effort, prompt caching effort, Opus 4.7 effort, Opus 4.8 effort, Sonnet 5 effort, Fable 5 effort, Claude Code effort]
+---
+
+<LevelBadge level="intermediate" />
+
+**2026 年 7 月 22 日**、Anthropic は Claude Managed Agents のモデル設定に `effort` を展開し、Messages API がひっそりと 5 レベルに成長したコントロールのループを閉じました。2026 年初頭のブログ投稿から `messages.create` のトップレベルに `effort="high"` をコピペしているなら、リクエストは有効に見えますが Claude はあなたが思うフィールドを尊重していないかもしれません — パラメータは今 `output_config` 内にあり、API はモデルカードにドキュメント化されたレベルのみを強制します。
+
+これは実践的なチューニングガイドです。`effort` がリクエストのどこに実際に入るか、5 レベルが実際に何をするか(thinking の深さだけでなくツール呼び出し回数を変える)、驚くほどのモデル別デフォルト、そして支出を静かに膨らませる 1 つの落とし穴 — 会話中に effort を変更するとプロンプトキャッシュが無効化されること。
+
+<Callout type="objectives" items={[
+  "effort フィールドを正しく配置する — Messages API では output_config 内、Managed Agents では model オブジェクト内、Claude Code では /effort または CLAUDE_CODE_EFFORT_LEVEL",
+  "モデルごとに開始レベルを選ぶ — API のデフォルトは high だが推奨開始 effort はモデルによって異なる(Sonnet 5 high、Sonnet 4.6 medium、Opus 4.7/4.8 xhigh、Fable 5 high)",
+  "effort はすべてのトークンに影響することを理解する — テキスト、ツール呼び出し、(アクティブなとき)thinking — なので effort を下げると単なる冗長さではなくツール呼び出し回数を減らす",
+  "キャッシュの罠を避ける — 1 つの会話内で effort を変えるとプロンプトキャッシュが無効化され、静かに請求が倍になる可能性がある",
+  "Claude Code の effort 表面を知る — /effort、ultrathink(1 ターン)、ultracode(xhigh + 常時マルチエージェント許可)、CLAUDE_CODE_EFFORT_LEVEL 環境オーバーライド",
+]} />
+
+<VerifyNote lastVerified="2026-07-23" source="https://platform.claude.com/docs/en/build-with-claude/effort">
+Anthropic の公式 effort ドキュメントと 2026 年 7 月 22 日のプラットフォームリリースノートに対して検証しました。サポートされるモデル、`output_config.effort` フィールド、モデル別推奨レベルは変化します — 本番で挙動を固定する前にソースを再確認してください。
+</VerifyNote>
+
+## 5 レベル(そして「ultracode」の位置)
+
+2026 年 7 月 22 日時点の effort スケールは、API が受け付ける **5** つの値を持ちます:
+
+| レベル | 何をするか | いつ使うか |
+|---|---|---|
+| `low` | 最も効率的。ある程度の能力低下を伴う顕著なトークン節約。ツール呼び出しが少なく、簡潔な確認、前置きなし。 | シンプルな分類、大量ワークロード、チャット、レイテンシに敏感な UX、スコープされた作業を行うサブエージェント |
+| `medium` | バランス型。high に対して適度なトークン節約。 | 速度 + コスト + 品質のバランスが必要なエージェントタスク。high からのコスト意識的なステップダウン |
+| `high` | 高能力。**パラメータを省略するのと等価。** | 複雑な推論、難しいコーディング、速度より品質が重要なエージェントタスク |
+| `xhigh` | 長時間作業のための拡張能力。high より意味のあるほどトークン使用量が高いと予期される。 | 長時間(30 分以上)のエージェント・コーディングタスク、数百万トークンの予算、深い複数ファイルリファクタ |
+| `max` | 絶対的な最大能力、トークン支出の制約なし。 | 真のフロンティア問題のみ。構造化出力タスクでは考えすぎる可能性あり。 |
+
+`max` は effort をサポートするモデル全体で普遍的です。`xhigh` はより新しく、**Fable 5、Mythos 5、Opus 4.8、Opus 4.7、Sonnet 5** でのみサポートされます。古い effort 対応モデル(Sonnet 4.6、Opus 4.6、Opus 4.5)は `max` を理解しますが `xhigh` は理解しません。
+
+<Callout type="tip" items={[
+  "effort='high' を設定するのはパラメータを省略するのと全く同じ挙動を生みます — キャッシュされた会話で「明示的に」設定しないでください。あるリクエストでフィールドを書いて他で書かないとキャッシュが無効化されるためです。",
+  "'ultracode' は 6 番目のレベルではありません。xhigh + Claude Code がマルチエージェントワークフローを起動する常時許可の組み合わせで、会話途中のシステムメッセージを介して付与されます。API は 5 つの値を受け付けます。",
+]} />
+
+## 多くのブログ投稿が間違えるフィールド構造
+
+2026 年初頭の effort パラメータの書き方はトップレベルフィールドを示していました:
+
+```python
+# WRONG on current models — silently ignored or 400
+client.messages.create(
+    model="claude-opus-4-8",
+    effort="medium",
+    ...
+)
+```
+
+現在の API は `effort` を `output_config` オブジェクト内に配置し、`messages`/`model` の兄弟として渡します:
+
+<PromptCard title="Messages API での正しい effort 配置">
+{`import anthropic
+
+client = anthropic.Anthropic()
+
+response = client.messages.create(
+    model="claude-opus-4-8",
+    max_tokens=4096,
+    output_config={"effort": "medium"},
+    messages=[{
+        "role": "user",
+        "content": "Analyse the trade-offs between microservices and monoliths."
+    }],
+)
+
+print(response.content[0].text)`}
+</PromptCard>
+
+Claude Managed Agents(2026 年 7 月 22 日の変更)では、`effort` はエージェントの `model` オブジェクト内に作成時に入ります。セッションはそれを設定しません — エージェントのバージョンが設定します。
+
+<PromptCard title="Managed Agents での正しい effort 配置(POST /v1/agents)">
+{`# Effort travels with the versioned agent config,
+# not the per-run session. Every session pinned to
+# this agent version runs at xhigh.
+
+POST https://api.anthropic.com/v1/agents
+{
+  "name": "code-reviewer",
+  "model": {
+    "id": "claude-opus-4-8",
+    "effort": "xhigh"
+  },
+  "system_prompt": "You review pull requests for security issues.",
+  "tools": [...],
+  "mcp_servers": [...]
+}`}
+</PromptCard>
+
+## Effort は thinking コントロールではない
+
+これが 2 つ目の大きな誤解です。Effort は **thinking が有効かどうかに関わらず** 動作し、レスポンスの thinking 以外の部分に Claude が費やすトークンを変えます:
+
+- **ツール呼び出し。** effort が低い → ツール呼び出しが少ない。Claude は操作を単一の呼び出しにまとめ、オプションの探索をスキップし、前置きなしにアクションに進みます。
+- **テキスト長。** effort が低い → 出力が引き締まる。ツール呼び出し後の詳細なサマリーではなく簡潔な確認。コードコメントが少なく。
+- **Thinking の深さ**(thinking がオンのとき)。effort が低い → 簡単なプロンプトでは thinking を完全にスキップ。真に難しい問題では引き続き考える、少なく。
+
+最後の点が重要:`low` effort でも証明問題では Claude はまだ考えます、タスクがそれを要求するので。Effort は *挙動シグナル* であり、厳格なトークン予算ではありません。ハードキャップを期待しないでください。
+
+`thinking` パラメータと `effort` パラメータは異なる質問に答えます。`thinking` は Claude が thinking ブロックを生成するかどうかを決めます。`effort` はレスポンス全体にどれだけの作業が入るかを決めます — adaptive thinking がオンのときに Claude がどれだけ頻繁にどれだけ深く考えるかを含めて。`effort="adaptive"` を渡すのは一般的な間違いです。`adaptive` は *thinking モード* であり、effort レベルではありません。
+
+<Callout type="tip">
+<strong>Opus 4.5</strong> — effort をサポートする唯一の extended-thinking-only モデル — では effort <em>と</em> `budget_tokens` を一緒に設定します。タスク用に effort レベルを選び、次に推論の深さ用に thinking トークン予算をサイジングしてください。他のすべての effort 対応モデルは adaptive thinking を使用し `budget_tokens` を取りません。
+</Callout>
+
+## チームを驚かせるモデル別開始点
+
+API のデフォルトはパラメータをサポートするすべてのモデルで `high` です。しかし Anthropic の *推奨開始 effort* はモデルによって異なり、そのミスマッチが過剰・過少支出の元です。
+
+<Steps items={[
+  {title: "Sonnet 5 — high(デフォルト)から始める", body: "Sonnet 5 は API と Claude Code の両方で high をデフォルトとし、推奨は一致します。最も難しいコーディング・エージェントタスクにのみ xhigh にステップアップしてください。コスト削減の動きとして medium にステップダウン — Sonnet 5 の medium は Sonnet 4.6 の high に匹敵します。チャットや非コーディング、レイテンシ敏感なワークロードには low を使ってください。"},
+  {title: "Sonnet 4.6 — medium から始める、デフォルトを上書きする", body: "Sonnet 4.6 のデフォルトは high ですが Anthropic 自身のガイダンスは、エージェントコーディングを含むほとんどのアプリケーションのバランスの取れたデフォルトとして medium を推奨します。effort='medium' を明示的に設定してください — さもなくば high を継承し、頼んでいないレイテンシに支払うことになります。"},
+  {title: "Opus 4.7 と 4.8 — コーディングは xhigh から、それ以外は high から始める", body: "デフォルトは high ですが、コーディングとエージェント作業の推奨は xhigh です。知能に敏感なワークロードには最小として high を使ってください。評価が品質が保たれることを示す場合にのみ medium にステップしてください。真にフロンティアな問題のために max を予約してください — ほとんどのワークロードで max は小さな品質向上のために大きなコストを追加し、構造化出力タスクでは考えすぎる可能性があります。"},
+  {title: "Opus 4.7 は low/medium をより厳密に尊重する — 深さが必要ならプロンプトする", body: "Opus 4.7(と 4.8)は Opus 4.6 よりも low/medium で作業をより厳密にスコープします。複雑なプロンプトで low で浅い推論を観察した場合、プロンプトで回避せずに effort を上げてください。レイテンシが low に留めるよう強制する場合、'This task involves multistep reasoning. Think carefully before responding.' のようなターゲットされた行を追加してください。"},
+  {title: "Fable 5 と Mythos 5 — high が主要コントロール", body: "Effort は Fable 5 の主要な知能/レイテンシ/コストレバーです。high(デフォルト)から始め、最も能力に敏感な作業には xhigh を使い、定型タスクには medium または low に下げてください — Fable 5 の低いレベルでも xhigh の以前のモデルを超えます。high/xhigh では大きな max_tokens を設定してください。thinking + response テキストを合わせてキャップされるからです。"},
+  {title: "Opus 4.7/4.8 の xhigh または max — max_tokens を少なくとも 64k に上げる", body: "両モデルは xhigh/max でサブエージェントとツール呼び出しにわたって大量に支出できます。Anthropic は max_tokens を 64k から始めてそこから調整することを推奨します。4096 のままにすると有望なスタートの後に stop_reason='max_tokens' の切り詰められたレスポンスを得ます。"},
+]} />
+
+## キャッシュの罠 — 静かに請求を倍にするもの
+
+プロンプトキャッシングは標準入力価格の約 10% でキャッシュ読み取りを提供します。同じ会話内でリクエスト間で effort を変えると、モデルを切り替えるのと全く同じように **キャッシュが無効化** されます。長いコンテキストでは、$0.03 のキャッシュ読み取りと履歴全体の $0.30 のフルプライス再読み取りの差です — すべてのフォローアップターンで。
+
+<Callout type="tip" items={[
+  "effort は ワークロード間で変えて、キャッシュされた会話内では変えないでください。会話開始時にレベルを選び、/clear するまで一定に保ってください。",
+  "Claude Code では、セッション途中の /effort はモデル切り替えと同等です — 次のターンで大きなキャッシュミスを予期してください。",
+  "1 ターンだけ深さをエスカレートする必要がある場合、/effort xhigh ではなく Claude Code の 'ultrathink'(1 ターンの深い推論バンプ)を使ってください — セッション設定を変えないので回避できます。",
+  "残りのセッションでエスカレートしなければならない場合、早めにやってください。ターン 3 での切り替えは安い。ターン 30 での切り替えはフルプライスで 30 ターンのコンテキストを再読み取ります。",
+]} />
+
+その帰結:キャッシュされたリクエストの一部で `effort="high"` を明示的に設定し、他で省略するのも同じ方法でキャッシュを無効化します — 両者は *挙動的に* 等価だが *テキスト的に* 異なるからです。1 つの規約を選んで(常に設定するか、常に省略するか)、それを保ってください。
+
+## Claude Code — CLI 表面
+
+Claude Code は effort をインタラクティブコマンド、起動フラグ、環境変数として公開します(逆順で最も優先度の高いものが勝つ):
+
+```bash
+# In-session (interactive slider, or direct)
+/effort
+/effort xhigh
+/effort auto           # reset to model default
+
+# At launch
+claude --effort low
+
+# Environment (overrides everything else)
+CLAUDE_CODE_EFFORT_LEVEL=high claude
+```
+
+関連する 2 つのコマンドは effort レベルではないが隣接して振る舞うので知る価値があります:
+
+- **`ultrathink`** — セッションの effort を *変えない* 1 ターンの深い推論バンプ。次のターンにより深く考えさせたいが、その後のすべてのターンでキャッシュを無効化したくない場合に使ってください。
+- **`ultracode`** — セッション全体で `xhigh` を設定し、**加えて** Claude Code にマルチエージェントワークフローを起動する常時許可を(会話途中のシステムメッセージを介して)付与します。API には `ultracode` 値はありません — CLI の便宜で、`xhigh` にオーケストレーション許可を組み合わせたものです。
+
+覚えておくべき永続性ルール:`low`、`medium`、`high`、`xhigh` は一度設定すると Claude Code セッション間で永続化されます。`max` は現在のセッションのみに適用されます — 次回再適用しなければなりません。
+
+## チューニングウォークスルー — 1 つのプロンプト、3 つの effort
+
+直感をキャリブレートするために、*同じ* プロンプトを 3 つのレベルで実行して出力の形を比較してください:
+
+<PromptCard title="チューニングキャリブレーションプロンプト(low、high、xhigh で実行)">
+{`Task: Review this pull request for security issues.
+
+<pr_diff>
+[paste a real diff — 300+ lines, multi-file, at least one auth-touching change]
+</pr_diff>
+
+Report: severity-tagged findings + a one-line fix per finding.
+Do not restate what the diff does.`}
+</PromptCard>
+
+おおよそ予期してください:
+
+- **low** — 明らかな高深刻度の問題(SQL 文字列連結、ヘッダー内の未チェックユーザー入力)を捕まえる。微妙なロジックバグは見逃す。ツールが利用可能なら 1〜2 ツール呼び出し。短い出力。速い。
+- **high** — 完全な分析。微妙なものを含むほとんどの脆弱性を捕まえる。関連ファイルを読むための複数のターゲットされたツール呼び出し。構造化された所見。ほとんどのチームがここで止まる。
+- **xhigh** — 網羅的。新しい攻撃ベクトルと多層防御を考慮。low/high が触れなかった隣接ファイルを読む。はるかに多くのツール呼び出し。意味のあるほど高いトークン使用量。
+
+評価が `high` と `xhigh` が同じ所見をコードベースで生成することを示す場合、`high` で出荷してください。Xhigh の価値は、タスクが繰り返しのツール呼び出しと詳細な探索から利益を得るときに具体的に現れます — それは Anthropic が推奨するときです。
+
+## Sonnet 5 はキャリブレーションをシフト — レベルを盲目的に移植しない
+
+Sonnet 4.6 を `high` で走らせていて Sonnet 5 に移行した場合、同じレベルを保つと Sonnet 5 は Sonnet 4.6 が `max` で費やしたものに近く支出します — Sonnet 5 の effort スケールは *シフト* しています。Anthropic 自身のガイダンス:**Sonnet 5 の medium ≈ Sonnet 4.6 の high**。effort を調整せずにトラフィックを再生した場合、リクエスト単価のスイングは確認する価値があります。完全な移行ストーリーは [Sonnet 5 フィールドガイド](/docs/models/sonnet-5-field-guide) を参照してください。
+
+## 確定させる
+
+<Flashcards cards={[
+  {front: "Messages API で effort フィールドはどこに入るか?", back: "messages.create のトップレベルの output_config オブジェクト内 — output_config: {effort: 'medium'}。トップレベルの effort 引数ではありません。"},
+  {front: "5 つの effort レベルは?", back: "low、medium、high(デフォルト)、xhigh、max。"},
+  {front: "Effort は thinking 以外に影響するか?", back: "はい — レスポンス内のすべてのトークンに影響します:テキスト、ツール呼び出し(低 effort → 呼び出しが少ない)、アクティブなときの thinking。"},
+  {front: "会話途中で effort を変えると何が起こるか?", back: "モデル切り替えと同じようにプロンプトキャッシングを無効化します。すべてのフォローアップターンは標準入力価格でフルコンテキストを再読み取りします。"},
+  {front: "'ultracode' は 6 番目の effort レベルか?", back: "いいえ。ultracode は xhigh を設定し、加えてマルチエージェントオーケストレーションの常時許可を付与する Claude Code CLI の便宜です。API はドキュメント化された 5 レベルのみを受け付けます。"},
+  {front: "Opus 4.7/4.8 のコーディングタスクの推奨 effort は?", back: "xhigh — そして max_tokens を少なくとも 64k に上げて、モデルにサブエージェントにわたって推論とツール呼び出しの余裕を与えてください。"},
+  {front: "Sonnet 5 の effort スケールは Sonnet 4.6 とどう比較するか?", back: "シフトしています。Sonnet 5 の medium は Sonnet 4.6 の high におおよそ相当します。移行を越えて effort レベルを 1:1 で移植しないでください。"},
+  {front: "Claude Managed Agents で effort はどこに入るか?", back: "エージェント作成時(POST /v1/agents)にバージョン付きエージェント設定の model オブジェクト内 — セッションごとではありません。2026 年 7 月 22 日にロールアウト。"},
+]} />
+
+<Quiz title="確認しよう" questions={[
+  {q: "Messages API で有効な effort 値でないのはどれ?", options: ["low", "medium", "adaptive", "xhigh"], answer: 2, explain: "'adaptive' は thinking モードであり、effort レベルではありません。有効な 5 値は low、medium、high、xhigh、max です。"},
+  {q: "キャッシュされた 20 ターンの会話を走らせています。ターン 21 で effort を high から xhigh に切り替えると何が起こる?", options: ["何も — effort はキャッシュに触れない実行時ヒント", "Claude がより多く考えるので次のリクエストが少し高くなる", "次のリクエストはキャッシュを無効化し、前の 20 ターンすべてをフル入力価格で再読み取り", "effort は会話途中で変えられないので API が 400 を返す"], answer: 2, explain: "キャッシュされた会話内で effort を変えるとモデル切り替えのようにプロンプトキャッシングが無効化されます。長い履歴では次のターンの入力請求を 10 倍にする可能性があります。"},
+  {q: "Claude Code にいて、セッションの effort 設定に触れずに次のターンだけをより強く推論させたい。最良の動きは?", options: ["/effort max、ターン後に /effort auto", "そのターンに ultrathink を使う", "--effort xhigh で Claude Code を再起動", "サブシェルで CLAUDE_CODE_EFFORT_LEVEL=max を設定"], answer: 1, explain: "ultrathink はまさにこれです — セッション effort を変えない 1 ターンの深い推論バンプなので、後続ターンでキャッシュを無効化しません。"},
+  {q: "Opus 4.8 で effort='xhigh' のとき、長い thinking の後にレスポンスが stop_reason='max_tokens' で切り詰まり続けます。最も可能性の高い修正は?", options: ["effort を high に下げる", "max_tokens を 64k 以上に上げる", "thinking をオフにする", "Opus 4.7 に切り替える"], answer: 1, explain: "max_tokens は thinking + response テキストを合わせてキャップします。xhigh では Anthropic は max_tokens を 64k から始めることを推奨します。「答えだけ」用にサイズした上限は、重い内部推論を伴うレスポンスを切り詰めます。"},
+  {q: "Claude Managed Agents エージェントを作成するとき(2026 年 7 月の更新)effort はどこに入るか?", options: ["POST /v1/sessions で各セッションに", "POST /v1/agents のトップレベルフィールドとして", "POST /v1/agents の model オブジェクト内", "会話途中のシステムメッセージ内"], answer: 2, explain: "2026 年 7 月 22 日の更新でエージェント作成時に model オブジェクト内に 'effort' を渡せます。セッションは固定されたエージェントバージョンの effort を継承 — 実行ごとに設定しません。"},
+  {q: "Sonnet 5 の 'medium' を Sonnet 4.6 の 'high' に最も近く振る舞わせる変化は?", options: ["Sonnet 5 は小さいコンテキストウィンドウを使う", "2 モデル間で effort スケールがシフトした", "Sonnet 5 は medium でツール使用を無効化する", "medium が Sonnet 5 でリネームされた"], answer: 1, explain: "Anthropic 自身のガイダンス:Sonnet 5 の medium ≈ Sonnet 4.6 の high。移行を越えて effort レベルを 1:1 で移植しないでください。"}
+]} />
+
+## ソースとさらに読む
+
+- [Anthropic — Effort (build-with-claude/effort)](https://platform.claude.com/docs/en/build-with-claude/effort) — 5 レベル、`output_config.effort`、モデル別推奨の権威あるリファレンス
+- [Anthropic — Thinking (build-with-claude/thinking)](https://platform.claude.com/docs/en/build-with-claude/thinking) — effort が adaptive thinking とどう相互作用するか、どのコントロールに手を伸ばすか
+- [Anthropic プラットフォームリリースノート — 2026 年 7 月 22 日エントリ](https://platform.claude.com/docs/en/release-notes/overview) — Managed Agents の `effort` ロールアウトと同日出荷の webhook / セッションシーディング変更
+- [Prompting Claude Sonnet 5 — effort と thinking 深さのキャリブレーション](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-sonnet-5) — Sonnet 5 の effort スケールシフトと xhigh に手を伸ばすタイミング
+- [Anthropic — タスク予算](https://platform.claude.com/docs/en/build-with-claude/task-budgets) — 完全なエージェントループのアドバイザリートークン予算、長時間実行での effort への補完
+- [AILmanac — Extended Thinking と Effort](/docs/api/thinking-and-effort) — このページが前提とする入門フレーミング
+- [AILmanac — Claude Sonnet 5: フィールドガイド](/docs/models/sonnet-5-field-guide) — 移行と再キャリブレーションのストーリー
+- [AILmanac — プロンプトキャッシング](/docs/api/prompt-caching) — 会話途中の effort 変更を高くするキャッシュ経済

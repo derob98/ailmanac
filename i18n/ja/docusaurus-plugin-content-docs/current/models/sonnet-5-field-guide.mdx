@@ -1,0 +1,287 @@
+---
+sidebar_position: 1.6
+title: "Claude Sonnet 5: フィールドガイド"
+description: "Sonnet 5 は Claude Code の新しいデフォルトであり、Sonnet 4.6 のドロップイン後継モデルです。ただし、移行時に 400 を返す 3 つの API 制約と、新しいトークナイザーが同じテキストで約 30% 多くのトークンを生成します。価格計算、effort の再マッピング(Sonnet 5 medium ≈ Sonnet 4.6 high)、そしてチームがつまずくプロンプトの変化を解説します。"
+keywords: [Claude Sonnet 5, claude-sonnet-5, adaptive thinking, Sonnet 5 tokenizer, Sonnet 5 pricing, effort xhigh, Priority Tier, sampling parameters 400, extended thinking removed, Claude Code default model, cybersecurity safeguards]
+---
+
+<LevelBadge level="intermediate" />
+
+2026 年 6 月 30 日、Anthropic は **Claude Sonnet 5**(`claude-sonnet-5`)をリリースし、同時にひっそりと **Claude Code のデフォルトモデル** にしました。書類上は Sonnet 4.6 と同じ表示価格のドロップイン後継です。しかし実際には、3 つの API 制約により素朴な移行では `400 Bad Request` が返り、新しいトークナイザーは **同じテキストに対して約 30% 多くのトークン** を生成し(コンテキスト予算とリクエスト単価の両方が変わります)、effort スケールは「すべてそのまま」が「同じ」ではないほどシフトしました。Sonnet 4.6 の `high` で運用していた場合、Sonnet 5 の `high` は Sonnet 4.6 の `max` に近いです。
+
+このページは実践的なフィールドガイドです。何が変わったか、何が壊れるか、正確な移行チェックリスト、トークナイザーシフトの価格計算、そして多くのチームが最初に再調整するプロンプトパターンをまとめます。
+
+<Callout type="objectives" items={[
+  "Sonnet 5 の実体を理解する — 1M コンテキストがデフォルト、adaptive thinking が既定でオン、リアルタイムのサイバーセキュリティセーフガードを備える初の Sonnet",
+  "既存コードを 400 にする 3 つの API 制約と、それぞれの一行修正を知る",
+  "新トークナイザーの価格計算をモデル化する:$/token は同じでも約 30% 多いトークン = リクエスト単価が変わる",
+  "effort レベルを再キャリブレーションする:Sonnet 5 medium ≈ Sonnet 4.6 high、Sonnet 5 high ≈ Sonnet 4.6 max",
+  "最も変化するプロンプトパターンを調整する:冗長さ、ツール使用のトリガー、コードレビューの再現率、デザインの既定値",
+]} />
+
+<VerifyNote lastVerified="2026-07-23" source="https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5">
+モデル ID、コンテキストウィンドウ、出力上限、価格、トークナイザーの挙動、API 制約は、2026 年 7 月 23 日時点で Anthropic の公式「What's new in Claude Sonnet 5」ページとプラットフォームリリースノートに対して検証しました。`claude-sonnet-5` は 2026 年 6 月 30 日にリリース。導入価格 $2 in / $10 out per MTok は 2026 年 8 月 31 日まで、以降は標準価格 $3 in / $15 out per MTok が適用されます。1M トークンコンテキストがデフォルト(小型バリアントなし)、最大出力 128k、adaptive thinking は明示的に無効化しない限り常時オン。Priority Tier は **利用不可** です。モデルを固定する前に [Current Models & Pricing](/docs/whats-new/models-and-pricing) 表を確認してください。
+</VerifyNote>
+
+## 一段落版
+
+Sonnet 5 はバランスの取れた「まずここから」の Sonnet 層で、Sonnet 4.6 の上に同じ表示価格で位置し、現在 Claude Code のデフォルトです。1M トークンコンテキストウィンドウをデフォルトでサポート(小型コンテキストのバリアントはありません)、最大出力 128k、adaptive thinking はデフォルトでオンです。移行時に 3 つの API 契約が壊れます:手動の extended thinking(`thinking: {type: "enabled", budget_tokens: N}`)は削除され 400 を返し、デフォルト以外のサンプリングパラメータ(`temperature`、`top_p`、`top_k`)は 400 を返し、トークナイザーが変わったため同じ入力テキストで Sonnet 4.6 より約 30% 多いトークンを生成します。Sonnet 5 では Priority Tier は利用できません。これがリリースの全体像です。
+
+## 「ドロップイン」に注釈が必要な理由
+
+Anthropic 自身のドキュメントは Sonnet 5 を「Claude Sonnet 4.6 のドロップイン置き換え」と表現しています。プロンプトの内容についてはその通りです。しかし API 表面は「モデル文字列を差し替えて出荷」では昨日動いていたリクエストがエラーを返すほど変わりました。統合を壊す頻度順に、注意すべきは 4 つです。
+
+- **`temperature`、`top_p`、`top_k` を非デフォルト値に設定すると `400` を返すようになりました。** サイレントに無視されず、クリップもされず、ハードエラーです。Sonnet 級モデルでは新しく、Opus 4.7 で同じ制約が導入されました。SDK ラッパーが常に `temperature: 0.7` を送信している場合、今後は常に失敗します。
+- **手動 extended thinking は削除されました。** `thinking: {type: "enabled", budget_tokens: N}` は 4.6 で非推奨となり、Sonnet 5 では `400` を返します。代わりに [effort パラメータ](/docs/api/thinking-and-effort) で adaptive thinking を使ってください。
+- **Adaptive thinking はデフォルトでオン。** Sonnet 4.6 では `thinking` フィールドなしのリクエストは thinking なしで実行されました。Sonnet 5 では adaptive thinking で実行されます。`max_tokens` は総出力(thinking + response テキスト)へのハードキャップなので、Sonnet 4.6 で「答えだけ」用にサイズした上限は Sonnet 5 で回答を切り詰める可能性があります。
+- **新トークナイザーが同じテキストで約 30% 多くのトークンを生成します。** API 変更ではありません — リクエストとレスポンスの形は同じです — が、トークンで測定・予算する全てが多く出るようになります。
+
+## 400 を返す API 制約
+
+<Steps items={[
+  {title: "非デフォルトのサンプリングパラメータは 400 を返す", body: "API のデフォルトでない temperature、top_p、top_k を削除してください。アプリがスタイル的な多様性を必要とする場合、temperature の代わりにシステムプロンプトの指示を使ってください(これが唯一のレバーになりました)。多様なデザイン出力が必要なら、モデルに N 個の異なる方向を提案させて 1 つ選ばせてください — 固定サンプリングでも実行間で多様性が得られます。"},
+  {title: "手動 extended thinking は 400 を返す", body: "リクエストビルダーから thinking: {type: \"enabled\", budget_tokens: N} を削除してください。代わりに effort(low / medium / high / xhigh / max)を設定し、adaptive thinking にいつ考えるかを決めさせます。リクエストごとに thinking 予算を動的計算していた場合、そのロジックを effort セレクタに置き換えてください — Anthropic は旧挙動を再現しようとしないことを明示的に推奨しています。"},
+  {title: "デフォルトオンの adaptive thinking が max_tokens 予算を食う", body: "Sonnet 4.6 では thinking フィールドを省略すると thinking なしを意味しました。Sonnet 5 では adaptive thinking を意味します。max_tokens は総出力(thinking ブロック + response テキスト)へのハードキャップなので、大部分が thinking で回答が切り詰められ stop_reason: \"max_tokens\" になることがあります。max_tokens を上げるか、effort を medium に下げるか、本当に thinking を無効にしたい場合は thinking: {type: \"disabled\"} を渡してください。"},
+  {title: "Assistant メッセージのプレフィルは引き続き未対応", body: "これは Sonnet 4.6 から継承されたもので新規ではありません — しかし Sonnet 4.5 以前から移行する多くのチームは、この表面に触れたときに初めてつまずきます。代わりに structured outputs、システムプロンプト指示、output_config.format を使ってください。プレフィルは 400 エラーを返します。"}
+]} />
+
+<PromptCard title="最小限の安全な移行 — ワンディフ">
+{`# Before (Sonnet 4.6) — worked
+response = client.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=4096,
+    temperature=0.7,                          # 400 on Sonnet 5
+    thinking={"type": "enabled",
+              "budget_tokens": 8000},         # 400 on Sonnet 5
+    messages=[...],
+)
+
+# After (Sonnet 5) — one-liner replacements
+response = client.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=8192,                          # raise: thinking now shares the budget
+    # temperature removed — use system prompt instead
+    # thinking removed — adaptive is on by default
+    extra_body={"effort": "high"},            # was implicit in budget_tokens
+    messages=[...],
+)`}
+</PromptCard>
+
+## トークナイザーシフトは価格の話であって API の話ではない
+
+新トークナイザーは、財務チームが最も驚く変化です。リクエストとレスポンスはワイヤ上では同じに見えますが、同じ入力テキストが Sonnet 4.6 と比べて約 **30% 多いトークン** を生成します。正確な倍率はコンテンツ次第です — コード、英語散文、非英語テキスト、構造化データはそれぞれ違ってシフトします — が、30% は Anthropic が引用する数字です。
+
+これが同時に変える 3 つ:
+
+- **リクエスト単価。** Sonnet 4.6 からトークン単価は変わらず、標準では $3 / $15 per MTok(2026 年 8 月 31 日までは $2 / $10)です。しかし同じテキストが 30% 多いトークンを生成するなら、標準料金が適用されたときに同じテキストは約 30% 高くなります。
+- **テキストベースでのコンテキスト容量。** コンテキストウィンドウは依然として 1M トークンですが、各トークンが平均でカバーするテキストが減りました。同じドキュメントがウィンドウの約 30% 多くを占めます。
+- **`max_tokens` 切り詰めリスク。** Sonnet 4.6 で「およそこの程度のテキスト」用に調整された出力上限は、Sonnet 5 で同等の出力をサイレントに切り詰めることがあります。予想出力長に近くサイズしたあらゆる上限を見直してください。
+
+価格計算を正直に並べると:
+
+| 期間 | 表示価格 | 同じテキスト → Sonnet 4.6 比コスト |
+|---|---|---|
+| 現在 → 2026 年 8 月 31 日(導入) | $2 in / $10 out | 約 **13% 安い**(30% 多いトークン × $2 vs. Sonnet 4.6 の $3) |
+| 2026 年 9 月 1 日〜(標準) | $3 in / $15 out | 同等テキストで約 **30% 高い** |
+
+導入価格のトークンでアプリを値付けし、9 月 1 日の切り替えをモデル化していない場合、気づくことになります。
+
+<PromptCard title="新トークナイザーでプロンプトを再カウント">
+{`# Recount before you migrate — don't trust old numbers
+count = client.messages.count_tokens(
+    model="claude-sonnet-5",     # count under the NEW tokenizer
+    messages=[{"role": "user", "content": your_prompt}],
+    system=your_system,
+)
+print(count.input_tokens)        # roughly 30% higher than on claude-sonnet-4-6`}
+</PromptCard>
+
+## effort スケールがシフト — 比較前に再キャリブレーション
+
+[effort パラメータ](/docs/api/effort-tuning)(`low` / `medium` / `high` / `xhigh` / `max`)は 5 つの値のままですが、Anthropic は移行時のモデル間マッピングを明示していて、多くのチームが最初の読みで見落とします:
+
+- **Sonnet 5 の `medium` ≈ Sonnet 4.6 の `high`。**
+- **Sonnet 5 の `high` ≈ Sonnet 4.6 の `max`。**
+- **`xhigh`** は最も難しいコーディング・エージェント作業に推奨。
+- **`max`** はトークン支出制約を完全に外す。
+
+2 つの含意:
+
+- Sonnet 4.6 で `high` を使っていて effort を変えずにモデルを差し替えた場合、より多くの thinking、より多くのトークン、おそらくより良い出力になります — が、請求も大きくなります。`medium` に下げることを検討してください。
+- Sonnet 4.6 で `max` を使っていて Sonnet 5 の `max` に差し替えた場合、必要のないヘッドルームに支払っている可能性があります。まず `xhigh` を試してください。
+
+Anthropic は Sonnet 5 が effort を **厳密に** 尊重すること、特に低い側で、と警告しています。`low` と `medium` は依頼された範囲に作業をスコープします。「期待以上」はしません。レイテンシとコストには良いですが、`low` の中程度に複雑なタスクでは思考不足のリスクが実在します。推奨される修正はプロンプトで回避するのではなく effort を上げることです。
+
+## Sonnet 5 は今 Claude Code のデフォルト — 何が変わるか
+
+Claude Code v2.1.197(2026 年 6 月 30 日)から、`claude-sonnet-5` がデフォルトモデルです。何も設定しなければ、セッションは Sonnet 5 で動きます。実務上の帰結:
+
+- **1M コンテキストが得られるが、`max_tokens` と effort 設定は継承される。** Claude Code のデフォルトは新モデル用に調整されています。`max_tokens` をピンしたり effort を上書きするカスタム CLAUDE.md 設定は再検証すべきです。
+- **より速く、よりエージェント的なデフォルト挙動。** Sonnet 5 は箱から出した状態で Sonnet 4.6 よりエージェント的です — ツールに手を伸ばし、自己検証ループをより積極的に走らせます。Claude Code がコマンド実行に慎重だと感じていた場合、より積極的になると予期してください。
+- **定期的なユーザー向け進捗更新。** Sonnet 5 は長時間トレース中により高品質な中間更新を既に提供します。「3 ツール呼び出しごとに進捗を要約」のようなプロンプト足場は通常削除できます。
+- **Sonnet 4.6 はレガシーモデルに。** まだ利用可能(理由があれば `claude-sonnet-4-6` をピン)ですが、もはや入口ではありません。
+
+## 多くのチームが再調整する 4 つのプロンプトパターン
+
+### 1. 冗長さはタスクの複雑さに合わせる
+
+Sonnet 5 は固定の冗長さをデフォルトにするのではなく、タスクの複雑さに基づいて回答の長さを選びます。単純な検索は短い回答、オープンエンドな分析は長い回答になります。プロダクトが一貫したスタイルを求める場合、プロンプトを調整してください — Anthropic 自身のスニペットが機能します:
+
+<PromptCard title="固定した声が必要なときに冗長さを抑える">
+{`Provide concise, focused responses. Skip non-essential context, and keep examples minimal.`}
+</PromptCard>
+
+肯定的な例(「このように簡潔に表現して」)は否定的な例(「過剰に説明しないで」)より効果的です。
+
+### 2. ツール使用のトリガーはよりエージェント的 — 調整可能
+
+Sonnet 5 は 4.6 より積極的にツールに手を伸ばします。2 つのレバー:
+
+- **Effort。** `high` または `xhigh` はエージェント検索とコーディングワークロードでツール使用が実質的に増えます。`low` と `medium` は作業を厳密にスコープします。
+- **Thinking オフ。** `thinking: {type: "disabled"}` にすると、モデルはツールに手を伸ばしにくく *なります*。thinking を無効にしつつツール呼び出しに依存する場合、システムプロンプトで明示的な後押しを追加してください。
+
+### 3. コードレビューハーネスは再現率低下に見える可能性 — モデルがより字義通りなだけ
+
+レビュープロンプトが「高深刻度の問題のみ報告」または「重箱の隅をつつくな」と言っていると、Sonnet 5 は忠実に従うかもしれません — 同じくらい徹底的に調査し、同じバグを見つけ、それでも述べた基準以下と判断した所見を報告しません。適合率は通常上がり、再現率は下がって見えます。Anthropic が推奨する修正は、発見段階とランキング段階を分離することです:
+
+<PromptCard title="Sonnet 5 向け再現率重視のコードレビュープロンプト">
+{`Report every issue you find, including ones you are uncertain about or consider low-severity.
+Do not filter for importance or confidence at this stage - a separate verification step will do that.
+Your goal here is coverage: it is better to surface a finding that later gets filtered out than to silently drop a real bug.
+For each finding, include your confidence level and an estimated severity so a downstream filter can rank them.`}
+</PromptCard>
+
+プロンプトを機能させるために実際に第 2 ステップを構築する必要はありません — 発見ステップから信頼度フィルタリングを移すこと自体が挙動を変えます。
+
+### 4. デザインの既定は「ハウススタイル」に落ち着く — 明示的に上書きする
+
+オープンエンドなフロントエンドとデザインのブリーフでは、Sonnet 5 は一貫したデフォルトビジュアルスタイルに傾きます。一部のプロダクトには合いますが、ダッシュボード、開発ツール、金融、医療、エンタープライズアプリには合いません。一般的な押し戻し(「もっと汎用的でなく」)はモデルを *別の* 固定スタイルにシフトさせがちで、多様性を生みません。機能する 2 つのパターン:
+
+- **具体的な代替を指定する** — hex コード、書体名、レイアウトルール。Sonnet 5 は明示的な仕様を正確に従います。
+- **構築前に N 個の選択肢を提案させる。** 非デフォルトの `temperature` は 400 を返すため、これが実行間で意味のある異なるデザイン方向を生む推奨方法になりました。
+
+<PromptCard title="temperature なしでデザインの多様性を強制">
+{`Before building, propose 4 distinct visual directions tailored to this brief
+(each as: bg hex / accent hex / typeface, plus a one-line rationale).
+Ask the user to pick one, then implement only that direction.`}
+</PromptCard>
+
+## サイバーセキュリティセーフガード:HTTP 200 としての拒否
+
+Sonnet 5 は **リアルタイムのサイバーセキュリティセーフガードを備えた初の Sonnet 級モデル** です。リクエストが拒否されると、エラーではなく `stop_reason: "refusal"` の **成功した HTTP 200** として返されます。拒否処理ブランチを構築していない場合、アプリは空のレスポンスを成功した空の回答として扱い、静かにユーザーに配信します。
+
+修正はレスポンスへの 1 分岐です:
+
+<PromptCard title="拒否をきれいに処理">
+{`resp = client.messages.create(model="claude-sonnet-5", messages=[...])
+if resp.stop_reason == "refusal":
+    # Show a graceful message. Optionally retry on a fallback model
+    # (Opus 4.8 is a common choice). You are NOT billed for a refusal
+    # returned before any output was generated.
+    return handle_refusal(resp)
+# Otherwise process resp.content as normal`}
+</PromptCard>
+
+これは Fable 5 のインバンド拒否と同じ形です — 既に処理している場合はカバー済みです。初めての場合は、`fallbacks` パラメータを含むより完全なパターンについて [Fable 5 フィールドガイド](/docs/models/fable-5-mythos-5-flagship) を参照してください。
+
+## Priority Tier は利用不可 — 回避を計画する
+
+現行の他のすべての Anthropic モデルは、予約容量と予測可能なレイテンシのために Priority Tier をサポートしています。**Sonnet 5 はサポートしていません。** 今日 Priority Tier コミットメントに依存するエンタープライズワークロードがある場合、選択肢は:
+
+- ワークロードを **Sonnet 4.6** に維持(まだサポート、まだ Priority Tier 上)。
+- ワークロードを **Opus 4.8** に移行(Priority Tier 上で、Sonnet 5 が難タスクで比較されるモデル)。
+- Sonnet 5 の標準ティアに移り、予約されていない容量を受け入れる。
+
+ベータヘッダーの回避策はありません。Priority Tier が重要な場合、これが最初に計画すべき移行ブロッカーです。
+
+## Sonnet 5 vs Sonnet 4.6 vs Opus 4.8 — どれを選ぶか
+
+| 選択肢 | 選ぶとき |
+|---|---|
+| **Sonnet 5** | 新規なら何でもデフォルト。コーディング、エージェントタスク、1M コンテキスト、価格感度、すべてここを指します。 |
+| **Sonnet 4.6** | Priority Tier が必要、まだ書き換えできない非デフォルトのサンプリングパラメータに依存するプロンプトがある、または評価途中で安定ベースラインが欲しい。 |
+| **Opus 4.8** | Sonnet 5 が届かない推論の深さや長時間の安定性、またはトップエンドで Priority Tier が必要。effort オーバーライドと組み合わせて — Opus 4.8 の `xhigh` はよくあるスイートスポット。 |
+| **Fable 5 / Mythos 5** | Opus 4.8 では足りないと検証済みで、複数日の自律実行のために Sonnet 5 出力価格の 5 倍を払う覚悟がある。[Fable 5 フィールドガイド](/docs/models/fable-5-mythos-5-flagship) を参照。 |
+
+## 移行チェックリスト
+
+<Steps items={[
+  {title: "新トークナイザーでプロンプトを再カウント", body: "長さが重要な各プロンプトについて、model=\"claude-sonnet-5\" でトークンカウント API を使用してください。固定 1M トークン予算と比較する箇所では、約 30% 多い使用量を仮定してください。max_tokens がタイトな箇所では上げてください。"},
+  {title: "非デフォルトのサンプリングパラメータを削除", body: "コードベースで temperature、top_p、top_k を grep してください。非デフォルト値は Sonnet 5 で 400 を返すようになりました。削除するかデフォルトに設定してください。"},
+  {title: "手動 extended thinking を削除、代わりに effort を設定", body: "thinking={\"type\": \"enabled\" を grep して削除してください。effort セレクタを追加(high から始める)。thinking を全く望まない場合、thinking: {type: \"disabled\"} を明示的に渡してください。"},
+  {title: "stop_reason: \"refusal\" ブランチを追加", body: "サイバーセキュリティセーフガードは Sonnet 級で新しいです。拒否は HTTP 200 でエラーではありません — ブランチしないと空の回答を静かに配信します。"},
+  {title: "Priority Tier コミットメントを検証", body: "いずれかのワークロードが Priority Tier に依存する場合、Sonnet 4.6 に維持するか Opus 4.8 に移行してください — Sonnet 5 は Priority Tier を提供しません。"},
+  {title: "9 月 1 日の価格切り替えをモデル化", body: "導入価格は 2026 年 8 月 31 日まで。9 月 1 日から、同じテキストは Sonnet 4.6 の同じテキストより約 30% 高くなります。トークンでアプリを値付けしている場合、カレンダーに入れてください。"}
+]} />
+
+## 確認クイズ
+
+<Quiz questions={[
+  {
+    q: "既存の Sonnet 4.6 コードが temperature: 0.7 と thinking: {type: \"enabled\", budget_tokens: 8000} を設定しています。モデルを claude-sonnet-5 に差し替えました。何が起きますか?",
+    options: [
+      "動作します — Sonnet 5 は Sonnet 4.6 のドロップインと説明されています。",
+      "動作しますが、temperature と thinking はサイレントに無視されます。",
+      "API は 400 エラーを返します:非デフォルトのサンプリングパラメータと手動 extended thinking の両方が Sonnet 5 で非対応です。",
+      "動作しますが、レイテンシとコストがおおよそ倍になります。"
+    ],
+    answer: 2,
+    explain: "両方とも Sonnet 5 では 400 のハードエラーです。サンプリングパラメータはデフォルト(または省略)である必要があり、手動 extended thinking は削除されました — 代わりに effort パラメータで adaptive thinking を使ってください。"
+  },
+  {
+    q: "Sonnet 4.6 でシステムプロンプトが 40,000 トークンと測定されました。同じテキストが Sonnet 5 でおよそ何トークンとカウントされると予想すべきですか?",
+    options: [
+      "ほぼ同じ — トークナイザーはモデルファミリー間で安定しています。",
+      "約 52,000 トークン — 新しい Sonnet 5 トークナイザーは同じテキストで約 30% 多いトークンを生成します。",
+      "約 28,000 トークン — Sonnet 5 はより効率的なトークナイザーを使います。",
+      "正確に 40,000 トークン — Anthropic はトークンカウントの安定性を保証しています。"
+    ],
+    answer: 1,
+    explain: "新しい Sonnet 5 トークナイザーは同じテキストで約 30% 多くのトークンを生成します。移行前にトークンカウント API で再カウントしてください。"
+  },
+  {
+    q: "Sonnet 4.6 で Priority Tier コミットメントのあるエンタープライズワークロードがあります。Sonnet 5 に移行したい。ブロッカーは何ですか?",
+    options: [
+      "1M コンテキストウィンドウが Sonnet 5 で利用できない。",
+      "Priority Tier が Sonnet 5 で利用不可 — ワークロードを Sonnet 4.6 に維持するか Opus 4.8 に移行する必要がある。",
+      "Sonnet 5 はピンする前に新しいベータヘッダーを要求する。",
+      "ブロッカーはない — Priority Tier の可用性は変わらない。"
+    ],
+    answer: 1,
+    explain: "Priority Tier は Sonnet 5 で明示的に利用不可です。Sonnet 4.6(まだサポート)と Opus 4.8 は両方とも Priority Tier を維持します。"
+  },
+  {
+    q: "Anthropic のモデル間 effort マッピングによると、Sonnet 5 を effort=medium で動かすのは、Sonnet 4.6 のどの設定を動かすのとおおよそ同等の知能ですか?",
+    options: [
+      "Sonnet 4.6 の low。",
+      "Sonnet 4.6 の medium。",
+      "Sonnet 4.6 の high。",
+      "Sonnet 4.6 の max。"
+    ],
+    answer: 2,
+    explain: "Anthropic は Sonnet 5 の medium ≈ Sonnet 4.6 の high、Sonnet 5 の high ≈ Sonnet 4.6 の max を明示的にマッピングしています。移行時に effort を一定に保つと、以前より多くの thinking に対して支払うことになります。"
+  },
+  {
+    q: "Sonnet 5 リクエストが content: [] と stop_reason: \"refusal\" の HTTP 200 レスポンスを返しました。何が起こらなかったですか?",
+    options: [
+      "サイバーセキュリティセーフガードがリアルタイムでリクエストを拒否した。",
+      "出力が生成されなかったにもかかわらず入力トークンで請求された。",
+      "レスポンスは通常の成功メッセージで、アプリはブランチする必要がある。",
+      "リクエストは通常の生成と同じ形でレート制限にカウントされなかった。"
+    ],
+    answer: 1,
+    explain: "出力が生成される前に返された拒否については、請求されません。入力トークンは usage に表示されますが課金されません。拒否はアプリが明示的にブランチする必要のある通常の HTTP 200 です — さもなくば静かに空の回答を配信します。"
+  }
+]} />
+
+## ソースとさらに読む
+
+- [What's new in Claude Sonnet 5 — 公式ドキュメント](https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5)
+- [Prompting Claude Sonnet 5 — 公式ドキュメント](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-sonnet-5)
+- [移行ガイド — Sonnet 4.6 → Sonnet 5](https://platform.claude.com/docs/en/about-claude/models/migration-guide)
+- [Claude Platform リリースノート](https://platform.claude.com/docs/en/release-notes/overview) — 2026 年 6 月 30 日エントリを参照
+- [Effort パラメータリファレンス](https://platform.claude.com/docs/en/build-with-claude/effort)
+- [Adaptive thinking リファレンス](https://platform.claude.com/docs/en/build-with-claude/thinking-steering-and-cost)
+- [トークンカウント API](https://platform.claude.com/docs/en/build-with-claude/token-counting) — 新トークナイザーで測定するには `model="claude-sonnet-5"` を使用
+- [Claude Code チェンジログ](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md) — v2.1.197 が Sonnet 5 をデフォルトに
+- AILmanac 関連:[Claude Fable 5 & Mythos 5: フラッグシップフィールドガイド](/docs/models/fable-5-mythos-5-flagship)、[モデルの選び方](/docs/models/choosing-a-model)、[Thinking と Effort](/docs/api/thinking-and-effort)、[現在のモデルと価格](/docs/whats-new/models-and-pricing)
