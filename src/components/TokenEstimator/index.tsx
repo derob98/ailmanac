@@ -23,8 +23,13 @@ export default function TokenEstimator(): ReactNode {
   // Put the estimate in perspective: what fraction of a 200K-token context
   // window would this text occupy? Turns an abstract number into scale.
   const CTX = 200_000;
-  const fill = Math.min(1, high / CTX);
-  const pct = high / CTX < 0.01 ? '<1' : Math.round((high / CTX) * 100).toString();
+  const ratio = high / CTX;
+  const fill = Math.min(1, ratio);
+  const pct = ratio < 0.01 ? '<1' : Math.round(ratio * 100).toString();
+  // Zone drives colour + optional overshoot pulse via CSS data-attr — the ratio
+  // is derived from state, so first server render === first client render.
+  const zone =
+    ratio > 1 ? 'over' : ratio >= 0.8 ? 'hot' : ratio >= 0.5 ? 'warn' : 'ok';
 
   return (
     <div className={styles.wrap}>
@@ -53,6 +58,7 @@ export default function TokenEstimator(): ReactNode {
       </div>
       <div
         className={styles.meter}
+        data-zone={zone}
         style={{'--fill': fill} as React.CSSProperties}
         role="img"
         aria-label={translate(
@@ -63,8 +69,11 @@ export default function TokenEstimator(): ReactNode {
           {pct},
         )}
       >
-        <div className={styles.meterTrack}>
+        <div className={styles.meterTrack} aria-hidden="true">
           <div className={styles.meterFill} />
+          <span className={styles.meterTick} style={{'--at': 0.25} as React.CSSProperties} />
+          <span className={styles.meterTick} style={{'--at': 0.5} as React.CSSProperties} />
+          <span className={styles.meterTick} style={{'--at': 0.75} as React.CSSProperties} />
         </div>
         <span className={styles.meterCap}>
           <Translate id="tokenest.meterCap" values={{pct}}>
