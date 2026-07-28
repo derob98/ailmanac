@@ -1,0 +1,229 @@
+---
+sidebar_position: 13.5
+title: "MCP 2026-07-28: The Stateless Spec"
+description: "The biggest MCP revision since launch: the session is gone, every request self-describes, and any server instance can answer any call. What actually changed on July 28, 2026, and how to migrate without breaking today's servers."
+keywords: [MCP, Model Context Protocol, 2026-07-28, stateless, Multi Round-Trip Requests, MRTR, server/discover, MCP Apps, Tasks, extensions, migration, Mcp-Session-Id]
+---
+
+<LevelBadge level="advanced" />
+
+On **July 28, 2026** the Model Context Protocol locked its biggest revision since launch. The headline: **MCP is stateless**. The `initialize` handshake and `Mcp-Session-Id` header are gone; every request carries its own identity in `_meta`; any server instance behind a load balancer can answer any call. Serverless MCP is no longer a workaround — it's the shape of the protocol.
+
+<Callout type="objectives" items={[
+  "What actually changed in the 2026-07-28 spec — the four removals and the four additions that matter",
+  "Multi Round-Trip Requests (MRTR): how a stateless server asks the user a follow-up question without a session",
+  "The Extensions framework and the two official extensions: MCP Apps and Tasks",
+  "Authorization hardening: OAuth 2.1, RFC 9207 iss validation, and what Dynamic Client Registration now requires",
+  "A concrete migration path that doesn't break your 2025-11-25 clients — with the SDK beta versions to install today",
+]} />
+
+<VerifyNote lastVerified="2026-07-28" source="https://modelcontextprotocol.io/specification/2026-07-28/">
+Spec locked **July 28, 2026**. SDK betas are shipping now; GA follows in a rolling window over the next weeks. Deprecated features (Roots, Sampling, Logging, the old Tasks experimental API) keep working for **at least 12 months** — earliest removal **July 28, 2027**. Confirm SDK version numbers and Claude rollout status against the primary sources before you ship a hard cutover.
+</VerifyNote>
+
+## The one paragraph version
+
+Before: `initialize` handshake → `Mcp-Session-Id` cookie → sticky client/server pair for the life of the session. After: no handshake, no session id, no stickiness. Client identity and capabilities ride on every request inside a `_meta` object. A new `server/discover` method replaces the initial capability exchange. Application state — a shopping cart, an in-flight task — lives in **handles** the tool returns and the client passes back on the next call, exactly like a REST resource id. That single change is what unlocks serverless and edge deployment, real horizontal scaling, and the ability for two competing implementations to sit behind the same URL.
+
+## What got removed
+
+<Callout type="warning" items={[
+  "Mcp-Session-Id header — and the entire notion of a protocol-level session",
+  "initialize / initialized handshake — replaced by _meta on every request + server/discover on demand",
+  "Roots, Sampling, and Logging — deprecated. Roots: pass paths as tool params. Sampling: call the LLM yourself. Logging: use stderr or OpenTelemetry.",
+  "tasks/list — removed even inside the new Tasks extension, because listing tasks without a session leaks across tenants",
+]} />
+
+The Roots/Sampling/Logging deprecations are the ones most existing servers actually touch. All three assumed a persistent, bidirectional server↔client channel. In a stateless world the client owns the LLM, the paths, and the log sink — the server just answers the tool call.
+
+## What got added
+
+<Steps items={[
+  {title: "server/discover method", body: "A stateless RPC clients call whenever they need to know what a server offers. Replaces the capabilities the old handshake used to return. Cache the response with the new ttlMs / cacheScope fields on the response itself — the spec inherits HTTP Cache-Control semantics."},
+  {title: "Streamable-HTTP routing headers", body: "Mcp-Method and Mcp-Name (e.g. tools/call, search) let a load balancer route without parsing JSON-RPC. MCP-Protocol-Version replaces the session as the version negotiator."},
+  {title: "Multi Round-Trip Requests (SEP-2322)", body: "The stateless answer to elicitation. If a tool needs input mid-execution, the server returns an InputRequiredResult carrying the question and an opaque requestState blob. The client re-issues the call with inputResponses plus the echoed requestState — and any server instance can pick it up."},
+  {title: "Extensions framework (SEP-2133)", body: "Reverse-DNS namespaced, independently versioned, negotiated through an extensions capability map. Official extensions ship first: MCP Apps (sandboxed HTML UIs, SEP-1865) and Tasks (long-running operations with tasks/get, tasks/update, tasks/cancel; SEP-2663). Everything else that used to demand a core-spec change now ships as an extension."},
+  {title: "Full JSON Schema 2020-12 for tool schemas", body: "Tool inputSchema and outputSchema now accept oneOf / anyOf / allOf, conditionals, and $ref. If you were flattening your schema to fit MCP's old subset, stop."},
+  {title: "W3C Trace Context propagation", body: "traceparent, tracestate, and baggage travel in _meta. Distributed tracing across a client → connector → server chain finally works out of the box."},
+  {title: "Formal deprecation policy (SEP-2577)", body: "12-month minimum between Active → Deprecated → Removed. Anything deprecated on July 28, 2026 keeps working until at least July 28, 2027, and removal needs its own SEP."},
+]} />
+
+## The one JSON change that catches everyone
+
+Missing-resource error code moved from **`-32002`** to **`-32602` (Invalid Params)**. If your client has an `if (err.code === -32002)` branch anywhere, it silently stops firing on July 28. This is the single most common integration bug in the RC.
+
+## Before / After
+
+```jsonc
+// BEFORE (2025-11-25): stateful handshake
+POST /mcp     { "method": "initialize", "params": { "capabilities": {...} } }
+              → sets Mcp-Session-Id: abc123
+POST /mcp     Mcp-Session-Id: abc123
+              { "method": "tools/call", "params": { "name": "search", ... } }
+// server assumes it "knows" you because of the session cookie
+```
+
+```jsonc
+// AFTER (2026-07-28): self-describing request
+POST /mcp     Mcp-Method: tools/call
+              Mcp-Name: search
+              MCP-Protocol-Version: 2026-07-28
+              {
+                "method": "tools/call",
+                "params": { "name": "search", "arguments": {...} },
+                "_meta": {
+                  "clientInfo": { "name": "claude-code", "version": "..." },
+                  "capabilities": { "extensions": { "com.anthropic.apps": "1" } },
+                  "traceparent": "00-..."
+                }
+              }
+// any instance can serve it; no session, no stickiness
+```
+
+## Multi Round-Trip Requests, concretely
+
+The elegant part of the spec. A server that needs to ask "which calendar?" mid-execution doesn't need to hold a socket open. It replies:
+
+```json
+{
+  "resultType": "input_required",
+  "inputRequests": {
+    "calendarId": { "type": "string", "prompt": "Which calendar?" }
+  },
+  "requestState": "base64(<opaque server-signed blob>)"
+}
+```
+
+The client shows the prompt, gathers `inputResponses`, and re-fires the original request with both fields. The server treats `requestState` as authoritative — often signing it — so it doesn't need to remember the earlier attempt at all. That's the whole trick behind stateless elicitation: **the state travels on the wire, not on the server**.
+
+## The two official extensions
+
+<Callout type="info" items={[
+  "MCP Apps (SEP-1865): a server can ship an HTML UI, rendered in a sandboxed iframe by the client. Every action inside the UI still goes through the same JSON-RPC audit path as a normal tool call — no back-door writes. Think interactive report + confirm-before-execute, not arbitrary web pages.",
+  "Tasks (SEP-2663): the long-running-operation pattern, redesigned for a session-free world. tools/call returns a task handle; the client drives tasks/get and tasks/update to poll or stream, and tasks/cancel to abort. tasks/list is intentionally gone — enumerating tasks without a session is a cross-tenant leak.",
+  "Breaking change: the 2025-11-25 experimental Tasks API is not compatible with the new extension. If you shipped against it, treat the migration as a rewrite, not an upgrade.",
+]} />
+
+## Authorization: the OAuth cleanup
+
+The old spec was OAuth-ish. The new one is OAuth 2.1 / OIDC-shaped:
+
+- Clients **must** validate the `iss` parameter on authorization responses per **RFC 9207** — the fix for the mix-up attacks that hit MCP servers earlier this year.
+- Dynamic Client Registration now requires clients to declare an OpenID Connect `application_type`, so an identity provider can enforce different rules for native vs web vs machine clients.
+- Refresh tokens follow the standard OIDC refresh flow — meaning enterprise SSO (Entra, Okta, PingID) works without custom middleware for the first time.
+
+Practical read: if you were building custom OAuth glue to make MCP fit Okta, you can delete most of it.
+
+## Install the beta today
+
+<PromptCard title="Python — mcp v2.0.0b1 (single endpoint serves both revisions)">{`uv add "mcp[cli]==2.0.0b1"
+# or
+pip install "mcp[cli]==2.0.0b1"`}</PromptCard>
+
+<PromptCard title="TypeScript — split packages, explicit opt-in for stateless">{`npm install @modelcontextprotocol/server@beta
+npm install @modelcontextprotocol/client@beta`}</PromptCard>
+
+<PromptCard title="Go — v1.7.0-pre.1">{`go get github.com/modelcontextprotocol/go-sdk@v1.7.0-pre.1`}</PromptCard>
+
+<PromptCard title="C# — v2.0.0-preview.1">{`dotnet add package ModelContextProtocol --prerelease`}</PromptCard>
+
+Compatibility promise from the SDK team: **"nothing breaks today, and nothing breaks on July 28 either."** New clients auto-negotiate down to the old handshake when they hit a 2025-11-25 server; the Python v2 server answers both revisions from the same endpoint by default; TypeScript and Go require an explicit opt-in to expose the stateless variant. TypeScript v1.x gets bug fixes and security updates for at least six months.
+
+## Migration playbook
+
+<Steps items={[
+  {title: "1. Freeze new work on Roots, Sampling, Logging", body: "They still work through July 28, 2027. Do not build new servers against them. For paths: accept them as tool arguments. For LLM calls: use your own client. For logs: write to stderr and let the harness aggregate."},
+  {title: "2. Convert every long-lived session into a handle", body: "If your server today remembers 'the user is halfway through a checkout,' return a basket_id from the tool call and require it on the next one. State on the wire, not in memory."},
+  {title: "3. Add server/discover next to your capability map", body: "Even if you keep the old handshake for now, exposing server/discover is what lets 2026-07-28 clients skip initialize entirely. This is the single change that unlocks serverless."},
+  {title: "4. Fix the -32002 → -32602 error code in your client", body: "Grep every codebase you own for 32002. This is the silent-failure trap of the migration."},
+  {title: "5. Adopt _meta round-trip on the client side", body: "Send clientInfo and capabilities in _meta on every request. Propagate traceparent while you're in there — you'll want the traces the first time something breaks in production."},
+  {title: "6. Decide on extensions per-server, not globally", body: "MCP Apps is worth it when a UI beats a chat turn (data-grid confirms, chart-driven approvals). Tasks is worth it any time an operation might exceed the client's HTTP idle timeout. Neither is free — both add client surface area."},
+  {title: "7. Retire experimental Tasks (2025-11-25) deliberately", body: "It is not upgraded. Rewrite against the extension, keep the old endpoint alive during rollout, and remove it on your own schedule."},
+]} />
+
+## Gotchas people are actually hitting in the RC
+
+<Callout type="warning" items={[
+  "Sticky load balancers still ‘work’ — until they don't. A stateless server behind a sticky LB looks fine in dev and shreds cache hit rate in prod. Turn stickiness off explicitly.",
+  "requestState is opaque to the client — but it is not free storage. Servers that pack half a megabyte of context into it will blow up client memory. Sign a small handle, store the rest server-side keyed on the handle.",
+  "MCP Apps iframes are sandboxed, not sanitized. A malicious server can still exfiltrate anything the user types into its UI. Treat an MCP App like third-party code — allowlist which servers are allowed to render UIs at all.",
+  "server/discover has no auth requirement in the base spec. Anything you expose there is discoverable by any client that reaches your URL. Do not put internal tool metadata there.",
+  "The JSON Schema 2020-12 upgrade means clients that hand-wrote a validator against the old subset can now silently under-validate. Use a real JSON Schema library, not a hand-roll.",
+]} />
+
+## Where this lands on the AILmanac map
+
+- **[MCP & Connecting to Tools](/docs/api/mcp)** — the API-side connector. Still current; the connector abstracts the transport, so the wire change is invisible to that request shape. Only the *servers* the connector talks to migrate.
+- **[MCP in Claude Code](/docs/claude-code/mcp)** — how Claude Code speaks MCP to local + remote servers. The stateless model is the reason you can finally point Claude Code at a serverless MCP endpoint without weird timeouts.
+- **[The MCP Token Tax](/docs/claude-code/mcp-token-cost)** — deferred loading is the token-side lever; the extensions framework is the *protocol*-side lever for the same problem.
+- **[Securing MCP Servers](/docs/security/securing-mcp-servers)** — the NSA's May 2026 MCP security guidance and the RC's authorization hardening reinforce each other. Read both.
+
+## Quick check
+
+<Quiz questions={[
+  {
+    q: "In the 2026-07-28 spec, where does a client's identity and capability list travel?",
+    options: [
+      "In a one-time initialize handshake, cached server-side under Mcp-Session-Id",
+      "In a _meta object attached to every request",
+      "In a special MCP-Client-Info HTTP header, once per TCP connection",
+      "It doesn't — servers can no longer see client identity in a stateless protocol"
+    ],
+    answer: 1,
+    explain: "The handshake is gone. clientInfo, capabilities, and trace context ride in _meta on every request — that's precisely what lets any server instance answer any call."
+  },
+  {
+    q: "A tool in the middle of executing needs to ask the user which calendar to write to. In the stateless spec, how does it do that without a session?",
+    options: [
+      "It opens a WebSocket back to the client and blocks",
+      "It returns an InputRequiredResult with inputRequests and an opaque requestState; the client re-fires the call with inputResponses plus the echoed requestState",
+      "It stores the partial call in a shared Redis and returns a poll URL",
+      "It cannot — mid-call elicitation is impossible without sessions"
+    ],
+    answer: 1,
+    explain: "This is Multi Round-Trip Requests (MRTR / SEP-2322). The server-signed requestState travels on the wire, so any instance can resume — no shared server memory required."
+  },
+  {
+    q: "Which of these clients-side changes silently breaks on July 28 if you skip it?",
+    options: [
+      "Adding server/discover support",
+      "Updating from Mcp-Session-Id to _meta",
+      "Changing the missing-resource error match from -32002 to -32602",
+      "Registering an OpenID Connect application_type during DCR"
+    ],
+    answer: 2,
+    explain: "-32002 → -32602 is the classic silent-failure trap: the code changes, your old branch stops matching, and error handling quietly regresses to a generic fallback."
+  },
+  {
+    q: "Which feature is NOT deprecated by the 2026-07-28 spec?",
+    options: ["Roots", "Sampling", "Logging", "server/discover"],
+    answer: 3,
+    explain: "server/discover is brand new — it's the stateless replacement for the handshake capability exchange. Roots, Sampling, and Logging are all deprecated (functional until at least July 28, 2027)."
+  }
+]} />
+
+## Vocabulary you'll see on GitHub this week
+
+<Flashcards title="MCP 2026-07-28 terminology" cards={[
+  {front: "Stateless core", back: "The protocol no longer maintains sessions. Every request is self-describing; any server instance can serve any request."},
+  {front: "_meta", back: "The object carried on every JSON-RPC request holding clientInfo, capabilities, protocol version, and W3C Trace Context. Replaces the initialize handshake."},
+  {front: "server/discover", back: "The new stateless RPC method for capability discovery. Response carries ttlMs and cacheScope — cache it, don't call it every request."},
+  {front: "Multi Round-Trip Requests (MRTR)", back: "SEP-2322. Server returns InputRequiredResult + requestState; client re-fires with inputResponses + the same requestState. Any instance can complete the round trip."},
+  {front: "requestState", back: "Opaque, typically server-signed blob returned inside InputRequiredResult. Encodes whatever context the server needs to resume — travels on the wire, not in server memory."},
+  {front: "Extensions framework (SEP-2133)", back: "Versioned, reverse-DNS-namespaced add-ons to MCP. Negotiated via an extensions capability map. First official extensions: MCP Apps and Tasks."},
+  {front: "MCP Apps (SEP-1865)", back: "Server-shipped HTML UI rendered in a sandboxed iframe by the client. All UI actions still route through the standard JSON-RPC audit path."},
+  {front: "Tasks extension (SEP-2663)", back: "Long-running operations. tools/call returns a task handle; client drives tasks/get, tasks/update, tasks/cancel. tasks/list is intentionally gone."},
+  {front: "Mcp-Method / Mcp-Name headers", back: "Streamable-HTTP routing headers. Let a load balancer route on method (tools/call) and tool name (search) without parsing JSON-RPC bodies."},
+  {front: "RFC 9207 iss validation", back: "OAuth mix-up mitigation now mandatory for MCP clients. Validate the iss parameter on authorization responses to prevent authorization-server confusion attacks."},
+  {front: "Deprecation policy (SEP-2577)", back: "12-month minimum between Active → Deprecated → Removed. Removal requires its own SEP. Anything deprecated 2026-07-28 lives until at least 2027-07-28."}
+]} />
+
+## Sources & further reading
+
+- **[The 2026-07-28 MCP Specification Release Candidate](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/)** — the primary announcement, with the removals, additions, and SEP list.
+- **[Beta SDKs for the 2026-07-28 MCP Spec RC](https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/)** — Python, TypeScript, Go, C# beta versions and the backward-compat promise.
+- **[Bringing MCP 2026-07-28 to Claude](https://claude.com/blog/bringing-mcp-2026-07-28-to-claude)** — Anthropic's rollout note for Claude and Claude Code.
+- **[MCP 2026-07-28: From Local Tool to Distributed Protocol](https://aaif.io/blog/mcp-2026-07-28-whats-changing-and-how-to-migrate)** — the sharpest third-party migration walk-through.
+- **[MCP Just Went Stateless — What the 2026 Spec Changes About Scaling](https://techcommunity.microsoft.com/blog/appsonazureblog/mcp-just-went-stateless-%E2%80%94-what-the-2026-spec-changes-about-scaling-on-app-servic/4530222)** — Microsoft's perspective on stateless MCP on App Service.
+- **[MCP Is Going Stateless. Here's What That Means](https://www.arcade.dev/blog/mcp-going-stateless/)** — Arcade.dev's practitioner take, useful for the ops implications.
+- **[NSA CSI: MCP Security Design Considerations (PDF)](https://media.defense.gov/2026/Jun/02/2003943289/-1/-1/0/CSI_MCP_SECURITY.PDF)** — the NSA's May 2026 hardening guidance. Pair with this spec's authorization changes.
