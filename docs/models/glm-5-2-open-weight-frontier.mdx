@@ -1,0 +1,289 @@
+---
+sidebar_position: 8.55
+title: "GLM-5.2: Open-Weight Frontier Coding Model"
+description: "Z.ai's 753B MoE (~40B active), 1M-token context, MIT-licensed — closes to within a point of Claude Opus 4.8 on long-horizon coding, at roughly one-sixth the API cost. What IndexShare actually does, how to run it locally, and where it beats Claude Code in the wild."
+keywords: [GLM-5.2, GLM 5.2, Zhipu AI, Z.ai, zai-org, open weight LLM, MoE, IndexShare, sparse attention, Terminal-Bench, SWE-bench Pro, Claude Opus alternative, self-host LLM, vLLM, Unsloth GGUF, agentic coding, MIT license LLM]
+---
+
+<LevelBadge level="intermediate" />
+
+On **June 13, 2026**, Z.ai (formerly Zhipu AI) released **GLM-5.2** — a **753-billion-parameter** Mixture-of-Experts model with a **1-million-token context**, published on Hugging Face under a plain **MIT license** with no regional restrictions. In the two weeks that followed, three things happened that were harder to ignore than the launch itself: it landed within **~1 point of Claude Opus 4.8** on long-horizon coding benchmarks, its API undercut frontier pricing by roughly **6×**, and Semgrep's security team quietly reported that GLM-5.2 with almost no scaffolding **outperformed Claude Code on a real IDOR vulnerability benchmark**.
+
+This page covers what's actually non-obvious about GLM-5.2 — the IndexShare architectural change that makes 1M-token inference tractable, the honest benchmark picture against Claude and GPT-5.5, what it costs to self-host today, and where it's genuinely a better tool than reaching for a closed frontier model.
+
+<Callout type="objectives" items={[
+  "Understand what IndexShare is and why it cuts long-context compute by ~2.9× — not a marketing number, an architectural one",
+  "Read the honest benchmark picture: where GLM-5.2 matches Claude Opus 4.8, where it doesn't, and what to trust in vendor scores",
+  "Know the effective cost math: ~$1.20–1.40 / $4.10–4.40 per M input/output vs Claude Opus at frontier prices",
+  "Get GLM-5.2 running via API in three lines, or self-hosted on vLLM 0.23+ (with the FP8 and 2-bit paths spelled out)",
+  "Decide when to reach for GLM-5.2 vs Claude — the two tasks where it clearly wins, and the two where it clearly doesn't"
+]} />
+
+## The one-sentence version
+
+GLM-5.2 is an **open-weight** (MIT), **753B-total / ~40B-active** sparse Mixture-of-Experts model from Z.ai with a **1M-token context** and **131,072-token max output**, built for long-horizon agentic coding — priced at roughly one-sixth of closed frontier APIs and, on independent evaluations, within one point of Claude Opus 4.8 on the coding benchmarks that matter for autonomous agent work.
+
+## Three things about GLM-5.2 that aren't obvious from the headlines
+
+### 1. IndexShare is the real architectural story
+
+The headline change in GLM-5.2 isn't "bigger MoE" — it's **IndexShare**. Sparse attention needs an *indexer* that decides which past tokens each query attends to. Running that indexer per layer is expensive at 1M-token context. Z.ai's IndexShare **reuses the same indexer across every four sparse attention layers**, cutting per-token FLOPs by **~2.9×** at the full 1M window.
+
+The practical consequence: GLM-5.2 can serve real long-context workloads at prices where doing the same job with a fully quadratic-attention model would be economically absurd. This is also why the FP8 checkpoint (published as `zai-org/GLM-5.2-FP8`) runs on **8× H200** with room for a 131K-token session; without IndexShare, that same hardware would choke on the KV cache long before you got there.
+
+GLM-5.2 also ships an improved **Multi-Token Prediction (MTP) layer** for speculative decoding, with Z.ai reporting a **~20% acceptance-length uplift** — that shows up as faster tokens/sec in real inference, not just a paper metric.
+
+<VerifyNote lastVerified="2026-07-29" source="https://huggingface.co/zai-org/GLM-5.2">
+Architecture details (IndexShare, MTP acceptance uplift, 753B/40B config) are from the official Hugging Face model card and Z.ai's launch materials. Compute-savings claims (2.9×) are vendor-reported; independent inference-cost measurements at 1M context are still sparse as of late July 2026.
+</VerifyNote>
+
+### 2. The benchmark story is stronger than "beats GPT-5.5" and weaker than "beats Opus"
+
+Vendor tables and news coverage compress this to soundbites. The honest reading:
+
+| Benchmark | GLM-5.2 | Claude Opus 4.8 | GPT-5.5 | Notes |
+|---|---|---|---|---|
+| **Terminal-Bench 2.1** | 81.0 | ~85.0 | — | Long-horizon shell/agent work; 4-point gap |
+| **SWE-bench Pro** | 62.1 | — | 58.6 | Autonomous repo-level fixes; ahead of GPT-5.5, ahead of GLM-5.1 (58.4) |
+| **GPQA Diamond** | 91.2 | — | — | Hard science QA; strong |
+| **AIME 2026** | 99.2 | — | — | Vendor-reported; extreme number, treat cautiously |
+| **Artificial Analysis Intelligence Index** | 51 | — | — | Highest score for any open-weight model at launch |
+| **Code Arena (global)** | #2 | — | — | Behind one closed model |
+
+Two things to internalize:
+
+- On the **coding benchmarks that map to agent work** (SWE-bench Pro, Terminal-Bench 2.1, Code Arena), GLM-5.2 is *closer to Claude Opus 4.8 than to GPT-5.5*. That's a first for any open-weight model.
+- On the **hardest reasoning tasks and open-ended knowledge**, closed frontier models still lead. The AIME 99.2 headline is vendor-reported and should be read alongside independent evals — Z.ai's Artificial Analysis Index score of 51 is a more calibrated summary.
+
+<Callout type="tip">
+When someone links "GLM-5.2 beats Claude Opus" or "GLM-5.2 beats GPT-5.5", check *which benchmark* and *whose measurement*. On long-horizon coding: within a point of Opus, clearly ahead of GPT-5.5. On general reasoning: still behind closed frontier. Both statements are true.
+</Callout>
+
+### 3. It was trained on Huawei Ascend NPUs, not Nvidia
+
+GLM-5.2 was reportedly trained on **Huawei Ascend accelerators** rather than Nvidia H100/H200s. That's not a benchmarking detail — it's a supply-chain fact. Combined with Z.ai being on the US Entity List and the hosted API routing through Chinese infrastructure, it shapes three real decisions:
+
+- **Regulated environments** should evaluate the hosted API against export-control policy before wiring it into production. The MIT weights are unrestricted; the API isn't a substitute for a compliance review.
+- **Data-sensitive workloads** should prefer the self-hosted path (see below) rather than sending prompts to Z.ai's API endpoints.
+- **Aggregators** (OpenRouter, NVIDIA Build, OpenRelay) offer GLM-5.2 through non-Z.ai infrastructure — if you want the model but not the origin routing, that's the route.
+
+## Effective cost math
+
+Z.ai's own API pricing sits at approximately **$1.20–$1.40 per million input tokens** and **$4.10–$4.40 per million output tokens** across providers. Compare that to Claude Opus 4.8 territory ($15/M input, $75/M output at frontier prices) and the ratio is roughly **1:6** on input and **1:15+ on output**. Semgrep's IDOR benchmark put the per-vulnerability cost at **~$0.17 for GLM-5.2** vs several dollars for frontier equivalents.
+
+The catch that's easy to miss: GLM-5.2 runs "high" or "max" thinking effort at the model level, so **output-token counts are higher than a non-thinking model** for the same task. Cost per task is still lower, but the ratio isn't as extreme as the per-token prices suggest — you're paying for more tokens per answer, at a lower price each.
+
+## Getting started via API
+
+GLM-5.2 speaks **OpenAI-compatible chat completions**. The endpoint URLs and model IDs vary by provider — pick one:
+
+| Provider | Base URL | Model ID | Env |
+|---|---|---|---|
+| Z.ai (direct) | `https://api.z.ai/api/paas/v4/` | `glm-5.2` | `ZAI_API_KEY` |
+| OpenRouter | `https://openrouter.ai/api/v1` | `z-ai/glm-5.2` | `OPENROUTER_API_KEY` |
+| NVIDIA Build | `https://integrate.api.nvidia.com/v1` | `z-ai/glm-5.2` | `NVIDIA_API_KEY` |
+| OpenRelay | `https://inference.openrelay.inc/v1` | `openrelay/glm-5.2` | `OPENRELAY_API_KEY` |
+
+<Steps items={[
+  {
+    title: "Get an API key",
+    body: "For direct access, sign up at z.ai and create a key. For aggregator access (recommended if you're on the US Entity List side of the fence), use OpenRouter or NVIDIA Build."
+  },
+  {
+    title: "Point an OpenAI client at the base URL",
+    body: "The official openai SDK works unmodified — change the base_url and the model name. Any framework built on OpenAI's API shape (LangChain, LlamaIndex, Vercel AI SDK) works the same way."
+  },
+  {
+    title: "Use tools and long context normally",
+    body: "Function calling, JSON mode, and 1M-token contexts all work through the standard chat.completions shape. There's no special parameter to 'enable' long context — it's always available."
+  }
+]} />
+
+<PromptCard title="GLM-5.2 via OpenAI SDK (Python), through OpenRouter">
+{`import openai
+
+client = openai.OpenAI(
+    api_key="YOUR_OPENROUTER_KEY",
+    base_url="https://openrouter.ai/api/v1",
+)
+
+response = client.chat.completions.create(
+    model="z-ai/glm-5.2",
+    messages=[
+        {"role": "user", "content": "Refactor this 800-line auth module for testability. Preserve behavior; return a unified diff."},
+    ],
+)
+print(response.choices[0].message.content)`}
+</PromptCard>
+
+<PromptCard title="GLM-5.2 via Z.ai direct endpoint (Python)">
+{`import openai
+
+client = openai.OpenAI(
+    api_key="YOUR_ZAI_API_KEY",
+    base_url="https://api.z.ai/api/paas/v4/",
+)
+
+response = client.chat.completions.create(
+    model="glm-5.2",
+    messages=[
+        {"role": "system", "content": "You are a careful staff engineer."},
+        {"role": "user", "content": "Review this repo and list the top 5 risks, with file:line references."},
+    ],
+)
+print(response.choices[0].message.content)`}
+</PromptCard>
+
+## Self-hosting: three realistic paths
+
+The MIT license and published FP8 weights make self-hosting the whole point for a lot of teams. There are three practical paths, from most-hardware to least:
+
+### Path A — FP8 on 8× H200 with vLLM (production-grade)
+
+The reference deployment. Download the official FP8 checkpoint and serve with vLLM 0.23.0+ (or SGLang 0.5.13.post1+). This is the config Z.ai's own inference is closest to; it gives you the full 131K-token max output and stable throughput.
+
+<PromptCard title="Deploy GLM-5.2 FP8 on 8× H200 with vLLM">
+{`# 1) Download the FP8 weights (~750 GB)
+huggingface-cli download zai-org/GLM-5.2-FP8 \\
+  --local-dir /models/glm-5.2-fp8
+
+# 2) Serve with vLLM 0.23.0+
+python -m vllm.entrypoints.openai.api_server \\
+  --model /models/glm-5.2-fp8 \\
+  --served-model-name glm-5.2-fp8 \\
+  --tensor-parallel-size 8 \\
+  --quantization fp8 \\
+  --enable-expert-parallel \\
+  --max-model-len 131072 \\
+  --kv-cache-dtype fp8_e5m2 \\
+  --gpu-memory-utilization 0.92 \\
+  --enable-chunked-prefill \\
+  --max-num-seqs 32 \\
+  --port 8000`}
+</PromptCard>
+
+### Path B — 2-bit GGUF on a Mac Studio or 24 GB GPU + 256 GB RAM
+
+Unsloth's dynamic 2-bit GGUF compresses GLM-5.2 from ~1.51 TB down to ~239 GB — small enough to fit a **256 GB Mac Studio (Ultra)** or a workstation with a **24 GB GPU plus 256 GB system RAM** (MoE routing keeps only a few experts hot at a time, so DRAM offload is workable). This is the "actually run it on hardware you can buy at a store" path. Expect slower tokens/sec than an H200 rack but usable for solo agent workloads.
+
+### Path C — AWQ/W4A16 quantizations from the community
+
+Third-party quantizations (e.g., `QuantTrio/GLM-5-AWQ`, `PhalaCloud/GLM-5.2-W4AFP8`) target 4-bit weight paths compatible with vLLM's AWQ kernel. These are useful when you want smaller memory footprints than FP8 but more headroom than the 2-bit GGUF. Z.ai has not published an official AWQ variant as of late July 2026 — verify the community version's calibration before using it in production.
+
+<Callout type="warning">
+Self-hosting GLM-5.2 at any tier still needs care with the tokenizer and the chat template. The Hugging Face model card ships both; use `apply_chat_template` with `add_generation_prompt=True` rather than hand-assembling the prompt. Mismatched templates are the single most common cause of "why is my open-weight model so much worse than the API?" reports.
+</Callout>
+
+## When to reach for GLM-5.2 vs Claude
+
+Two tasks where it's genuinely the better tool:
+
+- **Long-horizon autonomous coding on a private codebase.** Self-hosted FP8 gives you a frontier-adjacent SWE-bench Pro score with no code or context leaving your infrastructure. Claude Opus 4.8 is a hair sharper on Terminal-Bench 2.1, but the compliance win of on-prem inference often outweighs 4 percentage points.
+- **Security research on adversarial payloads.** Semgrep's IDOR experiment (F1 39% with a bare-prompt harness, ahead of Claude Code at 37%) suggests GLM-5.2 is meaningfully less refusal-prone on defensive security tasks where Claude's safety training triggers false positives.
+
+Two tasks where Claude is still the better tool:
+
+- **Open-ended reasoning and factual knowledge questions.** GLM-5.2 lags closed frontier models on general knowledge and open reasoning; Claude Opus/Sonnet 5 and Fable 5 stay ahead here.
+- **Anything where refusal-mode nuance matters.** Claude's harm-avoidance is more nuanced (fewer over-refusals on legitimate work, sharper stops on genuine harm). GLM-5.2's safety layer is thinner and less calibrated for edge cases.
+
+<Callout type="tip">
+Cross-link: for the wider open-weight landscape, see [DeepSeek, Qwen &amp; the Open-Weight Wave](/docs/models/deepseek-qwen-open-models) and [Kimi K3: World's Largest Open-Weight Model](/docs/models/kimi-k3-open-weight-frontier). For the "should this run locally at all?" decision, see [Local vs Claude agent](/docs/models/local-or-claude-agent).
+</Callout>
+
+## Semgrep's IDOR result in one paragraph
+
+Semgrep held the vulnerability dataset (real open-source IDOR flaws), the F1 scoring, and the system prompt constant, and varied the model + surrounding harness. Their custom **Semgrep Multimodal** rig with GPT-5.5 scored **61% F1**; the same rig with Opus 4.8 scored **53%**. When they tested GLM-5.2 with **nothing but the prompt** (a bare Pydantic AI harness, no endpoint enumeration, no guided navigation), it scored **39% F1** — beating Claude Code on the same task (37% F1) at about **$0.17 per vulnerability found**, roughly a sixth of the frontier cost. Their own headline: *"We have Mythos at home."* The important caveat: one task, one dataset, one run — the finding is directional, not a promise it generalizes to SSRF, XSS, or other classes.
+
+## Quiz
+
+<Quiz questions={[
+  {
+    q: "What does GLM-5.2's IndexShare mechanism actually do?",
+    options: [
+      "Compresses the model weights by sharing them across layers",
+      "Reuses the same sparse-attention indexer across every four sparse attention layers, cutting per-token compute by ~2.9× at 1M context",
+      "Shares the KV cache across different requests to save memory",
+      "Distributes inference across multiple GPUs via a shared index"
+    ],
+    answer: 1,
+    explain: "IndexShare is an architectural change in sparse attention: instead of running a separate indexer per layer, GLM-5.2 shares one indexer across every four sparse attention layers. That's the ~2.9× per-token FLOP reduction at 1M context, which is what makes serving long-context workloads economical."
+  },
+  {
+    q: "How does GLM-5.2 compare to Claude Opus 4.8 on Terminal-Bench 2.1?",
+    options: [
+      "It beats Claude Opus 4.8 by a wide margin",
+      "It scores within ~4 points (81.0 vs ~85.0) — close, but Claude Opus 4.8 still leads on this benchmark",
+      "Claude Opus 4.8 is more than double the score",
+      "They tie exactly"
+    ],
+    answer: 1,
+    explain: "GLM-5.2 scored 81.0 on Terminal-Bench 2.1 vs Claude Opus 4.8 at ~85.0. GLM-5.2 is the first open-weight model to close to within a few points of Claude on long-horizon coding, but 'within a few points' is not 'beats' — precision matters when someone quotes benchmark wins."
+  },
+  {
+    q: "You want to run GLM-5.2 privately on your own hardware but don't have an 8× H200 rack. What's a realistic path?",
+    options: [
+      "It's not possible without frontier data-center hardware",
+      "Run Unsloth's 2-bit dynamic GGUF (~239 GB) on a 256 GB Mac Studio Ultra, or a workstation with a 24 GB GPU plus 256 GB system RAM",
+      "Only the Z.ai hosted API can run at 1M context",
+      "You must use AWQ 4-bit; nothing else works"
+    ],
+    answer: 1,
+    explain: "The 2-bit dynamic GGUF from Unsloth compresses the model to ~239 GB, which fits a 256 GB Mac Studio Ultra or a 24 GB GPU + 256 GB RAM box (MoE routing keeps only a few experts hot at a time). Expect slower tokens/sec than an H200 rack but workable for solo agent workloads. AWQ 4-bit is another option; FP8 on 8× H200 is the production path."
+  },
+  {
+    q: "Which task did Semgrep's benchmark specifically find GLM-5.2 outperforming Claude Code on?",
+    options: [
+      "SSRF vulnerability detection at scale",
+      "IDOR (Insecure Direct Object Reference) detection — 39% F1 vs Claude Code's 37% F1, at ~$0.17 per vulnerability",
+      "Reverse-engineering compiled binaries",
+      "Static analysis of Rust codebases"
+    ],
+    answer: 1,
+    explain: "Semgrep's IDOR benchmark: GLM-5.2 with a bare-prompt Pydantic AI harness scored 39% F1, ahead of Claude Code (37% F1) on the same task, at about $0.17 per vulnerability found — roughly one-sixth the frontier cost. Semgrep explicitly noted this is one task, one dataset, one run; the result is directional, not a guarantee it generalizes to other vulnerability classes."
+  },
+  {
+    q: "GLM-5.2's API pricing is roughly $1.20–$1.40 per million input tokens. Why isn't the total cost saving exactly the ratio of per-token prices vs Claude Opus 4.8?",
+    options: [
+      "The API has hidden minimum charges",
+      "Because GLM-5.2 runs with high/max thinking effort at the model level, it produces more output tokens per task — cost per task is still lower, but not by the full per-token ratio",
+      "It only bills in Chinese yuan, so exchange rates apply",
+      "The pricing table is wrong"
+    ],
+    answer: 1,
+    explain: "GLM-5.2 runs 'high' or 'max' thinking effort at the model level, so output-token counts are higher for the same task. The per-task cost is still lower than frontier equivalents (Semgrep measured ~$0.17 per vulnerability vs several dollars), but the ratio is less extreme than the per-token prices alone suggest — you're paying for more tokens at a lower price each."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Who made GLM-5.2 and when?", back: "Z.ai (formerly Zhipu AI). Released June 13, 2026 on Hugging Face at zai-org/GLM-5.2 under an MIT license with no regional restrictions." },
+  { front: "How large is GLM-5.2, really?", back: "753 billion total parameters, roughly 40 billion active per token — sparse Mixture-of-Experts. The 'compute footprint' is much smaller than the storage footprint." },
+  { front: "What is IndexShare?", back: "GLM-5.2's key architectural change: the sparse-attention indexer is reused across every four sparse attention layers, cutting per-token FLOPs by ~2.9× at 1M-token context. Makes long-context serving economical." },
+  { front: "What's the context window and max output?", back: "1,000,000-token context. 131,072-token max output — 5× the max output of GLM-5.1." },
+  { front: "What license is GLM-5.2 released under?", back: "MIT. Weights on Hugging Face (zai-org/GLM-5.2) and ModelScope. No regional restrictions on the weights; the hosted API is a separate policy question." },
+  { front: "Roughly what does GLM-5.2 cost via API?", back: "About $1.20–$1.40 per million input tokens and $4.10–$4.40 per million output tokens across providers — roughly one-sixth of Claude Opus 4.8 per token on input." },
+  { front: "Which benchmark did GLM-5.2 close to within ~1 point of Claude Opus 4.8?", back: "Independent long-horizon coding evaluations — Z.ai reports 'trailing Claude Opus 4.8 by just one percentage point' on three of them. Terminal-Bench 2.1 specifically: 81.0 vs Claude's ~85.0." },
+  { front: "What inference stack do you need to self-host FP8?", back: "vLLM 0.23.0+ (or SGLang 0.5.13.post1+). Download zai-org/GLM-5.2-FP8, serve with --tensor-parallel-size 8 --quantization fp8 --enable-expert-parallel on 8× H200." },
+  { front: "What's the 'runs on a Mac Studio' path?", back: "Unsloth's 2-bit dynamic GGUF compresses GLM-5.2 from ~1.51 TB to ~239 GB, fitting a 256 GB Mac Studio Ultra or a 24 GB GPU + 256 GB RAM workstation (MoE keeps only a few experts hot at a time)." },
+  { front: "What hardware was GLM-5.2 trained on?", back: "Huawei Ascend NPUs, not Nvidia — a supply-chain detail worth knowing for teams evaluating the hosted API against export-control or data-sovereignty policy." }
+]} />
+
+<Callout type="takeaways" items={[
+  "GLM-5.2 (June 13, 2026) is the first MIT-licensed open-weight model to close to within a point of Claude Opus 4.8 on long-horizon coding — a real turning point for the open-weight tier.",
+  "IndexShare is the architectural story: sparse-attention indexer reused across every 4 layers, ~2.9× per-token compute reduction at 1M context — makes long-context serving economical.",
+  "Effective cost is ~1/6 of Claude Opus per input token, offset partly by higher output-token counts (high/max thinking on by default). Semgrep measured ~$0.17 per IDOR vulnerability found.",
+  "Three self-host paths: FP8 on 8× H200 with vLLM (production), 2-bit dynamic GGUF on a Mac Studio / 24 GB + 256 GB box (accessible), or community AWQ/W4 quantizations (middle ground).",
+  "Reach for GLM-5.2 on private long-horizon coding and defensive security research; keep Claude for open-ended reasoning, factual knowledge, and nuanced safety edges."
+]} />
+
+## Sources & further reading
+
+- [zai-org/GLM-5.2 — Hugging Face model card](https://huggingface.co/zai-org/GLM-5.2) — canonical spec: 753B params, MIT license, IndexShare description, inference-stack support matrix
+- [zai-org/GLM-5.2-FP8 — Hugging Face](https://huggingface.co/zai-org/GLM-5.2-FP8) — the FP8 checkpoint used for 8× H200 deployments
+- [zai-org/GLM-5.2 · vLLM Recipes](https://recipes.vllm.ai/zai-org/GLM-5.2) — reference vLLM serving configuration
+- [MorphLLM: GLM-5.2 — 753B Open-Weight Coding Model, Benchmarks, Pricing](https://www.morphllm.com/glm-5-2) — pricing and Terminal-Bench / SWE-bench Pro numbers
+- [DataNorth: Zhipu AI releases GLM-5.2 open-weight AI model](https://datanorth.ai/news/zhipu-ai-releases-glm-5-2) — launch context, IndexShare, agentic-environment support
+- [Semgrep: "We have Mythos at Home: GLM 5.2 beats Claude in our Cyber Benchmarks"](https://semgrep.dev/blog/2026/we-have-mythos-at-home-glm-52-beats-claude-in-our-cyber-benchmarks/) — the IDOR F1 experiment against Claude Code, with methodology and caveats
+- [MarkTechPost: GLM-5.2 OpenAI-Compatible API — hands-on guide](https://www.marktechpost.com/2026/06/22/glm-5-2-openai-compatible-api-a-hands-on-guide-to-reasoning-effort-function-calling-and-long-context-retrieval/) — reasoning effort, function calling, retrieval usage patterns
+- [The AI Rankings: GLM-5 pricing and benchmarks](https://theairankings.com/zhipu/glm-5/) — pricing, license, Ascend training detail
+- [ZCode configuration docs — Z.ai's official harness](https://zcode.z.ai/en/docs/configuration) — the direct-API base URL and coding-plan endpoint difference
+- Related on AILmanac: [Kimi K3: World's Largest Open-Weight Model](/docs/models/kimi-k3-open-weight-frontier), [DeepSeek, Qwen & the Open-Weight Wave](/docs/models/deepseek-qwen-open-models), [Local vs Claude agent](/docs/models/local-or-claude-agent), [What AI costs across providers](/docs/models/what-ai-costs-across-providers).
