@@ -1,0 +1,289 @@
+---
+sidebar_position: 9.6
+title: "Modifiche ai Tool a Metà Conversazione"
+description: "Aggiungi e ritira tool tra un turno e l'altro senza invalidare la prompt cache — la beta di Opus 5 che chiude la tassa nascosta più pesante delle sessioni agent lunghe."
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-07-28" source="https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages#mid-conversation-tool-changes">
+Nome dello header beta e supporto modelli (Fable 5, Mythos 5, Opus 4.8, Opus 5) possono cambiare mentre la feature si avvicina alla GA — riconferma prima di andare in produzione. La disponibilità su Bedrock e Vertex è indicata qui; la parità su Microsoft Foundry non era dichiarata al momento della scrittura di questa pagina.
+</VerifyNote>
+
+Da quando Claude supporta i tool, l'array `tools` è **congelato per tutta la durata di una conversazione** — o, più precisamente, congelato per tutta la durata di una entry di cache. Cambialo e la prompt cache si scioglie.
+
+Questo perché la prompt cache calcola l'hash del prefisso della richiesta in un ordine fisso: **`tools` → `system` → `messages`**. La lista dei tool sta prima di *tutto* il resto che invii. Aggiungi un tool, rinomina una description, e ogni turno cachato dopo quel punto va a vuoto. Su una sessione agent lunga con centinaia di migliaia di token di input cachati, quella "piccola modifica" può costarti soldi veri e un cold-start di diversi secondi.
+
+Le **modifiche ai tool a metà conversazione** sono la controparte lato tool-array dei [messaggi system a metà conversazione](/docs/api/mid-conversation-system-messages). Dichiari ancora l'universo completo dei tool in `tools` una volta sola, all'inizio. Ma ora decidi **quale sottoinsieme viene effettivamente offerto al modello** su un dato turno aggiungendo blocchi `tool_addition` e `tool_removal` dentro un messaggio con `role: "system"`. L'array `tools` in sé non cambia mai, quindi il prefisso cachato resta byte-identico.
+
+<Callout type="objectives" items={["Perché modificare tools[] faceva saltare tutta la cache, non solo la sezione tool","Come defer_loading, tool_addition e tool_removal separano dichiarazione da disponibilità","Le regole esatte di posizionamento del messaggio system che trasporta questi blocchi (ereditano le regole dei messaggi system a metà conversazione)","Come referenziare tool MCP singolarmente (mcp_tool_reference) o come server intero (mcp_toolset_reference)","Quando questa beta batte le alternative — sub-agent con il proprio tool_choice, resend per-turno, o un router esterno"]} />
+
+`★ Insight ─────────────────────────────────────`
+Due cose rendono questa feature silenziosamente importante. **Primo**, su Opus 5 il minimo di prompt cacheabile è sceso da 1.024 a 512 token, quindi anche le sessioni piccole beneficiano della cache — il che significa che anche le sessioni piccole *ora* soffrono quando la invalidi. **Secondo**, il fatto che `tools` stia *prima* di `system` nell'hash significa che oggi, quando usi `mid-conversation-system-messages` per infilare una nuova istruzione, paghi comunque prezzo pieno il giorno in cui devi introdurre un nuovo tool. Questa beta chiude l'ultimo buco.
+`─────────────────────────────────────────────────`
+
+## Il problema del cache-hash in un'immagine
+
+La chiave della cache di una richiesta è un hash rolling del prefisso, in questo ordine:
+
+```text
+[ tools ][ system ][ messages…, fino al breakpoint ]
+```
+
+Un **hit** in cache richiede che ogni byte prima del breakpoint corrisponda a una richiesta recente. Quindi:
+
+| Cosa cambi | Cosa resta in cache | Cosa ri-paghi |
+|---|---|---|
+| Aggiungi un nuovo turno `user` in fondo | Tutto il prefisso fino a quel turno | Solo il nuovo turno |
+| Aggiungi un nuovo messaggio `system` a metà conversazione | Tutto ciò che sta prima | Il nuovo messaggio system |
+| Modifichi il campo `system` top-level | Solo `tools` | `system` + **ogni messaggio** |
+| **Aggiungi un tool a `tools`** | **Niente** | **`system` + ogni messaggio** |
+
+Quell'ultima riga è quella che le Modifiche ai Tool a Metà Conversazione riscrivono.
+
+## I tre pezzi mobili
+
+**1. `defer_loading: true`** — su una dichiarazione tool in `tools`, mantiene il tool dichiarato ma *nascosto* al modello. Viene comunque hashato nel prefisso della cache (è tutto il punto), ma Claude non lo vede come chiamabile finché non lo affiori.
+
+**2. `tool_addition`** — un content block dentro un messaggio con `role: "system"`. Affiora un tool `defer_loading` da quel turno in poi. Anche ri-offre un tool che un precedente `tool_removal` aveva ritirato.
+
+**3. `tool_removal`** — lo specchio. Ritira un tool attualmente offerto da quel turno in poi. Ogni turno successivo colpisce la cache, ma il tool non è più nel choice set di Claude.
+
+Sia `tool_addition` sia `tool_removal` referenziano un tool tramite un campo `tool`. Sono legali tre forme di riferimento:
+
+- `{"type": "tool_reference", "name": "get_forecast"}` — un normale tool dichiarato in `tools`.
+- `{"type": "mcp_tool_reference", "server_name": "linear", "name": "create_issue"}` — un singolo tool [MCP connector](/docs/api/mcp).
+- `{"type": "mcp_toolset_reference", "server_name": "linear"}` — ogni tool esposto da un server MCP, in un solo blocco.
+
+Referenziare un name non dichiarato in `tools` restituisce un `400`.
+
+## Esempio minimo funzionante
+
+La beta richiede l'header `mid-conversation-tool-changes-2026-07-01` e uno tra Fable 5, Mythos 5, Opus 4.8 o Opus 5. Sotto: dichiara sia un tool "read" sia un tool "write" all'inizio, tieni nascosto `delete_file`, e affioralo solo dopo che l'utente ha confermato un intento distruttivo.
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()
+
+TOOLS = [
+    {
+        "name": "read_file",
+        "description": "Read a file from disk.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+    {
+        # Declared but withheld. Hashed into the cache prefix so we can
+        # surface it later without invalidating anything.
+        "name": "delete_file",
+        "description": "Permanently delete a file from disk.",
+        "defer_loading": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+]
+
+messages = [
+    {"role": "user", "content": "Read notes.md and summarize it."},
+    # ...several tool_use / tool_result turns...
+    {"role": "user", "content": "OK, I confirm: delete notes.md."},
+    # Surface delete_file from this point onward. The cached prefix
+    # (tools + all earlier turns) still matches byte-for-byte.
+    {
+        "role": "system",
+        "content": [
+            {
+                "type": "tool_addition",
+                "tool": {"type": "tool_reference", "name": "delete_file"},
+            }
+        ],
+    },
+]
+
+response = client.beta.messages.create(
+    model="claude-opus-5",
+    max_tokens=1024,
+    betas=["mid-conversation-tool-changes-2026-07-01"],
+    cache_control={"type": "ephemeral"},
+    tools=TOOLS,
+    messages=messages,
+)
+```
+
+La prossima richiesta farà:
+
+1. Hash di `tools` (invariato) → **cache hit**.
+2. Hash di ogni turno precedente (invariato) → **cache hit**.
+3. Solo il nuovo turno user + il blocco tool_addition in ruolo system sono input nuovo.
+
+Confronta con il "vecchio modo" — infilare `delete_file` in `tools` solo in quel momento. Quella singola mutazione avrebbe invalidato l'intero prefisso.
+
+## Adottarlo in un loop agent
+
+<Steps items={[
+  {"title": "Dichiara ogni tool che la sessione potrebbe mai servire in tools[] alla prima richiesta", "body": "Includi i tool che pensi di affiorare più tardi, ma impostaci defer_loading: true. Il punto è congelare la sezione tool del prefisso di cache ora."},
+  {"title": "Attiva la prompt cache esplicitamente", "body": "Le modifiche ai tool a metà conversazione ti fanno risparmiare soldi solo se il prefisso è effettivamente cachato. Usa cache_control: {type: ephemeral} al livello top, o un breakpoint esplicito sull'ultimo blocco stabile. Senza un breakpoint, nulla viene cachato e non c'è nulla da preservare."},
+  {"title": "Instrada i tuoi eventi 'aggiungi tool' attraverso un messaggio system", "body": "Quando la tua applicazione decide che una nuova capability dovrebbe diventare disponibile — dopo login, dopo che un piano è approvato, dopo un cambio di modalità — aggiungi un messaggio role: system con blocchi tool_addition. Piazzalo subito dopo il turno user o dopo il turno tool_result, non tra un tool_use e il suo tool_result."},
+  {"title": "Ritira i tool con tool_removal, non togliendoli da tools[]", "body": "Stesso motivo: toglierli muta il prefisso. tool_removal è un blocco in ruolo system che si limita ad accodare. Trigger comuni: entrare in modalità read-only, chiudere una fase del task, o dopo che un rate limit blocca una specifica integrazione."},
+  {"title": "Sposta il cache breakpoint oltre il messaggio system al turno successivo", "body": "Una volta che un messaggio system a metà conversazione è nella storia, è a sua volta cacheabile. Alla richiesta successiva, usa il caching automatico o sposta un breakpoint esplicito oltre di esso, così la capability aggiunta/rimossa viene cotta nella cache da quel momento in poi."},
+  {"title": "Non modificare né cancellare un blocco system già inviato", "body": "Quella è una mutazione del prefisso e invalida tutto ciò che c'è dopo. Se devi cambiare idea, aggiungi un nuovo messaggio system (tool_removal per ritirare ciò che hai appena aggiunto, o un nuovo tool_addition per ri-offrirlo)."}
+]} />
+
+## Pattern di riferimento
+
+<PromptCard title="Trattieni i tool distruttivi finché l'utente non conferma">
+{`system:
+  <tool_addition tool={type: "tool_reference", name: "delete_project"}>
+
+Only append this after a user turn where the user explicitly confirmed destruction.
+Never place before a "clarify what you want to delete?" turn.`}
+</PromptCard>
+
+<PromptCard title="Toolset a fasi per un loop plan → execute → review">
+{`Phase 1 (plan): tools[] visible = { read_repo, search_web } — everything else defer_loading: true.
+Phase 2 (execute): append system-role tool_addition for { edit_file, run_tests }.
+Phase 3 (review): append system-role tool_removal for { edit_file }, tool_addition for { post_review_comment }.
+
+The tools[] array never changes; only the offered set does. Cache is preserved across all three phases.`}
+</PromptCard>
+
+<PromptCard title="Ritira un server MCP dopo un rate limit">
+{`On 429 from the Linear MCP connector, append:
+
+system:
+  <tool_removal tool={type: "mcp_toolset_reference", server_name: "linear"}>
+
+One block retires every tool that server exposed. Re-offer with a matching tool_addition once your backoff window expires.`}
+</PromptCard>
+
+<PromptCard title="Sandbox: dai a un subagent un sottoinsieme stretto">
+{`When you dispatch a subagent, do NOT create a new conversation with a smaller tools[]. Instead reuse the same tools[] (cache hit!) and open the subagent turn with a system-role tool_removal for every capability that subagent should not touch. The parent conversation can restore them on return with a matching tool_addition.`}
+</PromptCard>
+
+## Regole di posizionamento (contano — molto)
+
+Il messaggio con `role: "system"` che trasporta i blocchi `tool_addition` / `tool_removal` è un normale messaggio system a metà conversazione ed eredita le sue regole di posizionamento:
+
+- **Mai primo.** Un messaggio `system` non può essere la prima entry in `messages`; dichiara il toolset iniziale nel campo `system` top-level e in `tools`.
+- **Deve seguire un turno user o un turno assistant di server-tool.** Un messaggio `user` che porta blocchi `tool_result` conta — è esattamente lo slot per reagire a ciò che un tool ha appena restituito.
+- **Deve precedere un turno assistant o essere l'ultima entry.**
+- **Mai tra un `tool_use` e il suo `tool_result` corrispondente.** Quello è un `400`.
+
+Messaggi `system` consecutivi sono legali e vengono trattati come una sola sezione. Puoi mischiare blocchi `tool_addition`, `tool_removal` e semplici `text` nello stesso array `content`.
+
+## Come interagisce con la prompt cache
+
+- Attiva la cache **esplicitamente**. Un campo `cache_control` da qualche parte è richiesto; il caching automatico al livello top è il più semplice.
+- Cacha il prefisso stabile come al solito — attraverso l'ultimo blocco che non cambia tra le richieste.
+- Poiché il messaggio system accodato viene **dopo** il prefisso cachato, non cambia l'hash del prefisso.
+- Una volta che il messaggio system è nella conversazione, diventa storia stabile ed è cacheabile al turno successivo.
+- Ogni tool in `tools`, inclusi quelli con `defer_loading: true`, conta verso la [lunghezza minima di prompt cacheabile](/docs/api/prompt-caching) — 512 token su Opus 5, 1.024 sulla maggior parte degli altri modelli.
+
+`★ Insight ─────────────────────────────────────`
+Questo design spinge gli autori di agent verso una disciplina specifica: **dichiara l'ambizione della sessione all'inizio, e usa segnali di runtime per modulare l'accesso.** È più vicino a come vengono modellate le capability di processo di un OS (capability che hai vs. capability che puoi esercitare al momento) che a come sono conformate le classiche API di function-calling. Se architetti un agent attorno a questo, "quali tool ha questo agent?" diventa una domanda con due risposte — l'universo dichiarato e il sottoinsieme offerto — e la cache resta calda.
+`─────────────────────────────────────────────────`
+
+## Cosa non fa
+
+- **Non** ti permette di introdurre un tool che non era in `tools` per niente. Ogni tool che il modello potrà mai vedersi offrire deve esistere in `tools` dalla prima richiesta. È una feature, non un limite — è esattamente ciò che tiene stabile l'hash.
+- **Non** ti permette di cambiare l'`input_schema` o la `description` di un tool a metà conversazione. Uno qualsiasi dei due è una mutazione di `tools` e fa scattare un cache miss. Se lo schema di un tool deve evolvere, dichiara due tool con nomi diversi.
+- **Non** si applica a Claude Sonnet 5 oggi. Sonnet 5 non supporta affatto i messaggi system a metà conversazione, quindi questa beta non può viverci sopra. Instrada i turni di livello Sonnet attraverso un router esterno se ti servono toolset dinamici lì.
+
+## Come altri provider gestiscono lo stesso problema
+
+| Provider | Toolset dinamico senza riprocessare tutto il prefisso? |
+|---|---|
+| **Anthropic Claude Opus/Fable/Mythos** | Sì, tramite questa beta. |
+| **Anthropic Claude Sonnet 5** | No — reinvia `tools` (cache miss) o instrada tramite un supervisor esterno. |
+| **OpenAI GPT-5/6** | In pratica no. Cambiare l'array `tools` nella Responses/Chat Completions API è un cambio di prefisso; ti affidi al match automatico del prefisso di cache che si rompe alla lista tool. Workaround comune: agent parent/child dove il child ha un array tools scoped. |
+| **Google Gemini 3** | Simile a OpenAI. La config `tools` fa parte della richiesta; il pattern pragmatico è avere set di Function Declaration per-fase, accettando il costo di ri-dichiarare. |
+| **Server MCP in generale** | Alcuni host (Claude Code, Cursor) implementano "caricamento tool on-demand" *dentro l'host*, ma è a livello di trasporto: il modello sottostante riceve comunque una lista tool re-inviata finché questa beta non arriva provider-side. |
+
+Se stai costruendo un harness cross-model, struttura il tuo codice così che il comportamento "tool dinamico" sia una capability che feature-detect per modello anziché qualcosa che presumi ovunque.
+
+## Modi di fallimento comuni
+
+- **Hai dimenticato l'header beta.** La richiesta è accettata, i blocchi `tool_addition` / `tool_removal` sono trattati come contenuto sconosciuto in un messaggio system, e il comportamento è indefinito — spesso il blocco viene silenziosamente ignorato e Claude non vede mai il nuovo tool.
+- **Hai messo il messaggio system tra `tool_use` e `tool_result`.** `400 invalid_request_error`. Spostalo dopo il turno user successivo che porta il tool_result.
+- **Hai referenziato un tool non dichiarato in `tools`.** `400`. Dichiaralo con `defer_loading: true` e riprova.
+- **Hai modificato la description del tool "solo per aggiungere un chiarimento".** Cache miss per l'intera conversazione. Per evolvere un tool a metà sessione, aggiungi un tool v2 sotto un nuovo nome e usa `tool_removal` su v1 e `tool_addition` su v2.
+- **Sei su Sonnet 5 e ti chiedi perché non funziona.** Non funziona, su Sonnet 5. Usa un tier diverso o un router esterno.
+
+<Flashcards />
+
+<Quiz questions={[
+  {
+    "q": "Perché aggiungere un nuovo tool a tools[] a metà conversazione invalida ogni turno cachato?",
+    "options": [
+      "Perché il modello deve rileggere ogni tool a ogni turno comunque",
+      "Perché l'ordine di hash del prefisso è tools → system → messages, quindi ogni cambio a tools invalida tutto ciò che sta dopo",
+      "Perché il caching dei tool è opt-in per-tool e off di default",
+      "Perché i messaggi system dipendono dalla lista tool e vengono ri-hashati insieme"
+    ],
+    "answer": 1,
+    "explain": "La cache è un hash rolling del prefisso. tools sta per primo, quindi mutarlo cambia l'hash per ogni sezione a valle — system e ogni messaggio cachato."
+  },
+  {
+    "q": "Cosa fa davvero defer_loading: true?",
+    "options": [
+      "Carica il tool in modo lazy alla prima chiamata per risparmiare memoria",
+      "Marca il tool come deprecato ma ancora chiamabile",
+      "Dichiara il tool (così viene hashato nel prefisso di cache) ma lo trattiene dal modello finché un blocco tool_addition lo affiora",
+      "Registra il tool solo con il server MCP, non con il modello"
+    ],
+    "answer": 2,
+    "explain": "La dichiarazione è ciò che congela il prefisso di cache. defer_loading ti permette di dichiarare-senza-offrire, così un successivo tool_addition può affiorarlo senza mutazioni del prefisso."
+  },
+  {
+    "q": "Dove va posizionato il messaggio con role: system che trasporta i blocchi tool_addition?",
+    "options": [
+      "Ovunque — Claude riordina come serve",
+      "Come primissimo messaggio della conversazione",
+      "Tra un blocco tool_use e il suo tool_result, per gattare il tool",
+      "Subito dopo un turno user (o un turno user che porta tool_results), e o ultimo nell'array o immediatamente prima di un turno assistant"
+    ],
+    "answer": 3,
+    "explain": "Stessa regola di posizionamento di qualsiasi messaggio system a metà conversazione. Tra tool_use e tool_result è un 400."
+  },
+  {
+    "q": "Qual è il modo corretto per far evolvere l'input_schema di un tool a metà conversazione senza un cache miss completo?",
+    "options": [
+      "Modifica lo schema in-place — mid-conversation-tool-changes se ne occupa",
+      "Invia un blocco tool_update con il nuovo schema",
+      "Dichiara un tool v2 sotto un nuovo nome, rimuovi v1 con tool_removal, aggiungi v2 con tool_addition",
+      "Non puoi — far evolvere uno schema richiede sempre un cache miss completo"
+    ],
+    "answer": 2,
+    "explain": "L'array tools[] in sé deve restare byte-identico. Introdurre un nuovo tool con nome diverso e fare lo swap via tool_removal + tool_addition tiene la cache calda."
+  },
+  {
+    "q": "Quale modello Claude NON supporta questa feature oggi?",
+    "options": [
+      "Claude Opus 5",
+      "Claude Opus 4.8",
+      "Claude Sonnet 5",
+      "Claude Fable 5"
+    ],
+    "answer": 2,
+    "explain": "Sonnet 5 non supporta affatto i messaggi system a metà conversazione, quindi questa beta non può viverci sopra. Fable 5, Mythos 5, Opus 4.8 e Opus 5 sì."
+  }
+]} />
+
+## Fonti e approfondimenti
+
+- [Mid-conversation system messages and tool changes — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages) (riferimento definitivo, con esempi di codice completi in 8 SDK)
+- [What's new in Claude Opus 5](https://platform.claude.com/docs/en/about-claude/models/whats-new-opus-5) (annuncio della beta, più il minimo di cache a 512 token)
+- [Prompt caching — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) (come è costruito l'hash `tools → system → messages` e dove piazzare i breakpoint)
+- [Claude Platform release notes — July 24, 2026](https://platform.claude.com/docs/en/release-notes/overview) (rilascio iniziale dell'header beta `mid-conversation-tool-changes-2026-07-01`)
+- [MCP connector docs](https://platform.claude.com/docs/en/agents-and-tools/mcp-connector) (forme dei blocchi `mcp_tool_reference` e `mcp_toolset_reference`)
+- [Cache diagnostics — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/cache-diagnostics) (scopri dove due richieste hanno divergato quando un cache hit che ti aspettavi non è avvenuto)
