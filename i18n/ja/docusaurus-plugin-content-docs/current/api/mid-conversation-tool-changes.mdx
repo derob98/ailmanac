@@ -1,0 +1,289 @@
+---
+sidebar_position: 9.6
+title: "会話途中のツール変更"
+description: "プロンプトキャッシュを無効化せずに、ターン間でツールを追加・引退させる — 長時間のエージェントセッションにおける最大の隠れた税を修正する Opus 5 ベータ。"
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-07-28" source="https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages#mid-conversation-tool-changes">
+機能が GA に近づくにつれ、ベータヘッダ名とモデルサポート(Fable 5、Mythos 5、Opus 4.8、Opus 5)は変わる可能性があります — 出荷前に再確認を。Bedrock と Vertex での可用性はここで言及されていますが、Microsoft Foundry のパリティはこのページ執筆時点では明言されていません。
+</VerifyNote>
+
+Claude がツール使用を持って以来ずっと、`tools`配列は**会話の寿命の間凍結されて**きた — 正確には、キャッシュエントリの寿命の間凍結されてきた。それを変えれば、プロンプトキャッシュは溶ける。
+
+これは、プロンプトキャッシングがリクエストプレフィックスを固定された順序でハッシュ化するためだ:**`tools` → `system` → `messages`**。ツール一覧は送信する*他のあらゆるもの*より先に置かれる。ツールを一つ追加したり、説明を一つ書き換えたりしただけで、そのポイント以降のキャッシュされたすべてのターンがミスする。数十万トークンのキャッシュ入力を持つ長時間のエージェンティックセッションでは、その「小さな編集」が実際のお金と数秒の新しいコールドスタートを要求する。
+
+**会話途中のツール変更**は、[会話途中のシステムメッセージ](/docs/api/mid-conversation-system-messages)のツール配列版だ。ツールの全宇宙は依然として`tools`で一度、事前に宣言する。しかし今後は、`role: "system"`メッセージ内に`tool_addition`と`tool_removal`ブロックを追加することで、**任意のターンでモデルに実際にどのサブセットが提供されるか**を決められる。`tools`配列そのものは変わらないので、キャッシュされたプレフィックスはバイト単位で同一のままだ。
+
+<Callout type="objectives" items={["なぜ tools[] を編集すると、ツールセクションだけでなくキャッシュ全体が吹き飛んでいたのか","defer_loading、tool_addition、tool_removal がどのように宣言と可用性を分割するか","これらのブロックを運ぶシステムメッセージの正確な配置ルール(会話途中のシステムメッセージからルールを継承)","MCP ツールを個別(mcp_tool_reference)またはサーバー全体(mcp_toolset_reference)で参照する方法","このベータが代替手段(独自の tool_choice を持つサブエージェント、ターンごとの再送、外側のルータ)に勝つ場面"]} />
+
+`★ Insight ─────────────────────────────────────`
+2つの点がこの機能を静かに重要にしている。**第一に**、Opus 5 ではキャッシュ可能な最小プロンプトが1,024から512トークンに下がったので、小規模なセッションでもキャッシュの恩恵を受ける — これは小規模なセッションでも今後、無効化*したときの*痛みを受けることを意味する。**第二に**、`tools`が`system`より*先に*ハッシュされることは、今日、`mid-conversation-system-messages`を使って新しい指示を差し込むとき、新しいツールを導入する必要が生じた日にはやはり全額を支払うことを意味する。このベータが最後の穴を塞ぐ。
+`─────────────────────────────────────────────────`
+
+## キャッシュハッシュ問題を一枚の絵で
+
+リクエストのキャッシュキーはプレフィックスのローリングハッシュで、この順序だ:
+
+```text
+[ tools ][ system ][ messages…, up to the breakpoint ]
+```
+
+キャッシュ**ヒット**には、ブレークポイント前のすべてのバイトが最近のリクエストとマッチする必要がある。だから:
+
+| 何を変えるか | 何がキャッシュヒットするか | 何を再支払いするか |
+|---|---|---|
+| 末尾に新しい`user`ターンを追加 | そのターンまでのプレフィックス全体 | 新しいターンだけ |
+| 新しい会話途中`system`メッセージを追加 | その前のすべて | 新しいシステムメッセージ |
+| トップレベル`system`フィールドを編集 | `tools`だけ | `system` + **すべてのメッセージ** |
+| **`tools`に新しいツールを1つ追加** | **何もない** | **`system` + すべてのメッセージ** |
+
+その最後の行こそが、会話途中のツール変更が書き換える部分だ。
+
+## 3つの可動部品
+
+**1. `defer_loading: true`** — `tools`内のツール宣言に付けると、そのツールを宣言されたまま*保留*する。キャッシュプレフィックスにはハッシュされる(それが全ポイント)が、あなたが浮上させるまで Claude はそれを呼び出し可能とは見ない。
+
+**2. `tool_addition`** — `role: "system"`メッセージ内のコンテンツブロック。そのターン以降、`defer_loading`ツールを浮上させる。以前の`tool_removal`が撤回したツールを再提供することもできる。
+
+**3. `tool_removal`** — 鏡像。そのターン以降、現在提供中のツールを撤回する。以降のすべてのターンはキャッシュにヒットするが、そのツールは Claude の選択肢集合にもう存在しない。
+
+`tool_addition`と`tool_removal`の両方は、`tool`フィールドを介してツールを参照する。3つの参照形状が合法だ:
+
+- `{"type": "tool_reference", "name": "get_forecast"}` — `tools`で宣言された通常のツール。
+- `{"type": "mcp_tool_reference", "server_name": "linear", "name": "create_issue"}` — 単一の[MCPコネクタ](/docs/api/mcp)ツール。
+- `{"type": "mcp_toolset_reference", "server_name": "linear"}` — MCPサーバーが公開するすべてのツールを一つのブロックで。
+
+`tools`で宣言されていない名前を参照すると、`400`が返る。
+
+## 最小動作例
+
+このベータは`mid-conversation-tool-changes-2026-07-01`ヘッダと、Fable 5、Mythos 5、Opus 4.8、Opus 5 のいずれかを要求する。下記:「読み取り」ツールと「書き込み」ツールを事前に宣言し、`delete_file`を保留し、ユーザーが破壊的意図を確認した後にのみ浮上させる。
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()
+
+TOOLS = [
+    {
+        "name": "read_file",
+        "description": "Read a file from disk.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+    {
+        # Declared but withheld. Hashed into the cache prefix so we can
+        # surface it later without invalidating anything.
+        "name": "delete_file",
+        "description": "Permanently delete a file from disk.",
+        "defer_loading": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+]
+
+messages = [
+    {"role": "user", "content": "Read notes.md and summarize it."},
+    # ...several tool_use / tool_result turns...
+    {"role": "user", "content": "OK, I confirm: delete notes.md."},
+    # Surface delete_file from this point onward. The cached prefix
+    # (tools + all earlier turns) still matches byte-for-byte.
+    {
+        "role": "system",
+        "content": [
+            {
+                "type": "tool_addition",
+                "tool": {"type": "tool_reference", "name": "delete_file"},
+            }
+        ],
+    },
+]
+
+response = client.beta.messages.create(
+    model="claude-opus-5",
+    max_tokens=1024,
+    betas=["mid-conversation-tool-changes-2026-07-01"],
+    cache_control={"type": "ephemeral"},
+    tools=TOOLS,
+    messages=messages,
+)
+```
+
+次のリクエストは:
+
+1. `tools`(変わらず)をハッシュ → **キャッシュヒット**。
+2. 以前のすべてのターン(変わらず)をハッシュ → **キャッシュヒット**。
+3. 新しいユーザーターン + システムロールの tool_addition ブロックだけが新規入力。
+
+これを「旧来のやり方」と対比せよ — その瞬間だけ`tools`に`delete_file`を落とす。その単一の変異はプレフィックス全体を無効化したはずだ。
+
+## エージェンティックループでの採用
+
+<Steps items={[
+  {"title": "最初のリクエストで、セッションが将来必要とする可能性のあるすべてのツールを tools[] で宣言する", "body": "後で浮上させる予定のツールも含めよ。ただし defer_loading: true をつけること。要点は、キャッシュプレフィックスのツールセクションを今凍結することだ。"},
+  {"title": "プロンプトキャッシングを明示的にオンにする", "body": "会話途中のツール変更は、プレフィックスが実際にキャッシュされている場合にのみお金を節約する。トップレベルで cache_control: {type: ephemeral} を使うか、最後の安定ブロックで明示的なブレークポイントを使え。ブレークポイントがなければ何もキャッシュされず、保存すべきものがない。"},
+  {"title": "「ツール追加」イベントをシステムメッセージ経由でルーティングする", "body": "アプリケーションが新しい機能を利用可能にすべきと決めたとき — ログイン後、計画が承認された後、モード切り替え後 — role: system メッセージを tool_addition ブロックとともに追加する。ユーザーターンまたは tool_result ターンの直後に配置し、tool_use と対応する tool_result の間には配置しないこと。"},
+  {"title": "ツールを tools[] から落とすのではなく tool_removal で引退させる", "body": "同じ理由:落とすとプレフィックスが変異する。tool_removal は追加のみのシステムロールブロックだ。よくあるトリガー:読み取り専用モードへの移行、タスクフェーズの終了、レート制限が特定の統合をロックした後。"},
+  {"title": "次のターンでキャッシュブレークポイントをシステムメッセージの先に動かす", "body": "会話途中のシステムメッセージが履歴に入れば、それ自体がキャッシュ可能だ。次のリクエストで、自動キャッシングを使うか、明示的なブレークポイントをそれ以降に動かして、追加・削除された機能がそこからキャッシュに焼き付けられるようにせよ。"},
+  {"title": "既に送信したシステムブロックを編集または削除しない", "body": "それはプレフィックス変異であり、それ以降すべてを無効化する。心変わりする必要があれば、新しいシステムメッセージを追加せよ(直前に追加したものを撤回するには tool_removal、再提供するには新しい tool_addition)。"}
+]} />
+
+## リファレンスパターン
+
+<PromptCard title="ユーザーが確認するまで破壊的ツールを保留する">
+{`system:
+  <tool_addition tool={type: "tool_reference", name: "delete_project"}>
+
+Only append this after a user turn where the user explicitly confirmed destruction.
+Never place before a "clarify what you want to delete?" turn.`}
+</PromptCard>
+
+<PromptCard title="計画 → 実行 → レビューループのためにツールセットをフェーズ分けする">
+{`Phase 1 (plan): tools[] visible = { read_repo, search_web } — everything else defer_loading: true.
+Phase 2 (execute): append system-role tool_addition for { edit_file, run_tests }.
+Phase 3 (review): append system-role tool_removal for { edit_file }, tool_addition for { post_review_comment }.
+
+The tools[] array never changes; only the offered set does. Cache is preserved across all three phases.`}
+</PromptCard>
+
+<PromptCard title="レート制限後に MCP サーバーを引退させる">
+{`On 429 from the Linear MCP connector, append:
+
+system:
+  <tool_removal tool={type: "mcp_toolset_reference", server_name: "linear"}>
+
+One block retires every tool that server exposed. Re-offer with a matching tool_addition once your backoff window expires.`}
+</PromptCard>
+
+<PromptCard title="サンドボックス:サブエージェントに厳密なサブセットを与える">
+{`When you dispatch a subagent, do NOT create a new conversation with a smaller tools[]. Instead reuse the same tools[] (cache hit!) and open the subagent turn with a system-role tool_removal for every capability that subagent should not touch. The parent conversation can restore them on return with a matching tool_addition.`}
+</PromptCard>
+
+## 配置ルール(重要 — 非常に)
+
+`tool_addition` / `tool_removal`ブロックを運ぶ`role: "system"`メッセージは通常の会話途中システムメッセージであり、その配置ルールを継承する:
+
+- **決して最初ではない。** `system`メッセージは`messages`の最初のエントリになれない。初期ツールセットはトップレベルの`system`フィールドと`tools`で宣言せよ。
+- **ユーザーターンまたはサーバーツール・アシスタントターンの直後でなければならない。** `tool_result`ブロックを運ぶ`user`メッセージも該当する — これがまさにツールが返したものに反応するスロットだ。
+- **アシスタントターンの直前か、最後のエントリでなければならない。**
+- **`tool_use`と対応する`tool_result`の間には決して置かない。** それは`400`だ。
+
+連続する`system`メッセージは合法で、一つのセクションとして扱われる。同じ`content`配列内で`tool_addition`、`tool_removal`、通常の`text`ブロックを混在させられる。
+
+## これがプロンプトキャッシングとどう相互作用するか
+
+- キャッシングを**明示的に**有効化せよ。どこかに`cache_control`フィールドが必要だ。トップレベルでの自動キャッシングが最もシンプルだ。
+- いつものように安定プレフィックスをキャッシュせよ — リクエスト間で変わらない最後のブロックまで。
+- 追加されたシステムメッセージはキャッシュされたプレフィックスの**後**に来るため、プレフィックスハッシュを変えない。
+- システムメッセージが会話に入れば、それは安定履歴となり、次のターンでキャッシュ可能だ。
+- `tools`内のすべてのツールは、`defer_loading: true`のツールも含めて、[最小キャッシュ可能プロンプト長](/docs/api/prompt-caching)にカウントされる — Opus 5 では512トークン、ほとんどの他のモデルでは1,024トークン。
+
+`★ Insight ─────────────────────────────────────`
+この設計はエージェント作者を特定の規律に押しやる:**セッションの野望を事前に宣言し、ランタイム信号を使ってアクセスを調節せよ。** これは古典的な関数呼び出しAPIの形よりも、OSプロセスケイパビリティのモデル方式(あなたが持つケイパビリティ vs 今行使できるケイパビリティ)に近い。これを軸にエージェントを設計すると、「このエージェントはどんなツールを持つか?」は2つの答えを持つ質問になる — 宣言された宇宙と提供されるサブセット — そしてキャッシュは温かいままだ。
+`─────────────────────────────────────────────────`
+
+## これがしないこと
+
+- **`tools`に全く入っていなかったツールを導入することはできない。** モデルにいずれ提供される可能性のあるすべてのツールは、最初のリクエストから`tools`に存在しなければならない。それは制限ではなく機能だ — ハッシュを安定に保つのはまさにそれだ。
+- **ツールの`input_schema`や`description`を会話途中で変更することはできない。** どちらも`tools`の変異でありキャッシュミスを引き起こす。ツールのスキーマが進化する必要があれば、異なる名前で2つのツールを宣言せよ。
+- **今日、Claude Sonnet 5には適用されない。** Sonnet 5 は会話途中のシステムメッセージを一切サポートしないので、このベータはその上に乗れない。動的ツールセットが必要な Sonnet 層のターンは、外側のルータ経由でルーティングせよ。
+
+## 他のプロバイダは同じ問題をどう扱うか
+
+| プロバイダ | 全プレフィックス再処理なしの動的ツールセット? |
+|---|---|
+| **Anthropic Claude Opus/Fable/Mythos** | このベータ経由で可能。 |
+| **Anthropic Claude Sonnet 5** | 不可 — `tools`を再送(キャッシュミス)するか、外側スーパーバイザ経由でルーティング。 |
+| **OpenAI GPT-5/6** | 実質的に不可。Responses/Chat Completions API で`tools`配列を変更するのはプレフィックス変更だ。ツール一覧で切れる自動キャッシングのプレフィックスマッチに依存する。一般的な回避策は、子が範囲付きの tools 配列を持つ親/子エージェント。 |
+| **Google Gemini 3** | OpenAI と類似。`tools` config はリクエストの一部で、実用的パターンはフェーズごとの Function Declaration セットで、再宣言のコストを受け入れる。 |
+| **MCP サーバー一般** | 一部のホスト(Claude Code、Cursor)は*ホスト内で*「オンデマンドツールロード」を実装するが、それはトランスポートレベルだ:このベータがプロバイダ側に着地するまで、基盤モデルは再送されたツール一覧を受け取り続ける。 |
+
+クロスモデルハーネスを構築しているなら、「動的ツール」動作を、どこでも仮定するのではなく、モデルごとに特徴検出するケイパビリティとして構造化せよ。
+
+## よくある失敗モード
+
+- **ベータヘッダを忘れた。** リクエストは受け入れられ、`tool_addition` / `tool_removal`ブロックはシステムメッセージ内の未知のコンテンツとして扱われ、挙動は未定義 — しばしばブロックは静かに無視され、Claude は新しいツールを見ることがない。
+- **`tool_use`と`tool_result`の間にシステムメッセージを置いた。** `400 invalid_request_error`。tool_result を運ぶ次のユーザーターンの後に動かせ。
+- **`tools`で宣言されていないツールを参照した。** `400`。`defer_loading: true`で宣言してから再試行せよ。
+- **「明確化のためだけに」ツール説明を編集した。** 会話全体のキャッシュミス。ツールをセッション途中で進化させるには、新しい名前で v2 ツールを追加し、v1 に`tool_removal`、v2 に`tool_addition`を使え。
+- **Sonnet 5 でなぜ動かないか困っている。** Sonnet 5 では動かない。別のティアか外側ルータを使え。
+
+<Flashcards />
+
+<Quiz questions={[
+  {
+    "q": "なぜ会話途中で tools[] に新しいツールを1つ追加すると、キャッシュされたすべてのターンが無効化されるのか?",
+    "options": [
+      "モデルがどのターンでもすべてのツールを再読する必要があるから",
+      "プレフィックスハッシュ順が tools → system → messages なので、tools を変えるとそれ以降すべてが無効化されるから",
+      "ツールキャッシングがツールごとにオプトインで、既定でオフだから",
+      "システムメッセージがツール一覧に依存し、一緒に再ハッシュされるから"
+    ],
+    "answer": 1,
+    "explain": "キャッシュはプレフィックスのローリングハッシュだ。tools が最初に位置するので、それを変異させれば下流のすべてのセクション — system と各キャッシュされたメッセージ — のハッシュが変わる。"
+  },
+  {
+    "q": "defer_loading: true は実際に何をするか?",
+    "options": [
+      "メモリ節約のためツールを最初の呼び出しで遅延ロードする",
+      "ツールを非推奨としてマークするが呼び出し可能のまま残す",
+      "ツールを宣言し(キャッシュプレフィックスにハッシュされる)、tool_addition ブロックが浮上させるまでモデルから保留する",
+      "MCP サーバーだけにツールを登録し、モデルには登録しない"
+    ],
+    "answer": 2,
+    "explain": "宣言こそがキャッシュプレフィックスを凍結する。defer_loading は宣言はするが提供はしない、を可能にし、後の tool_addition がプレフィックス変異なしで浮上させられる。"
+  },
+  {
+    "q": "tool_addition ブロックを運ぶ role: system メッセージはどこに配置しなければならないか?",
+    "options": [
+      "どこでも — Claude が必要に応じて再順序化する",
+      "会話の最初のメッセージとして",
+      "ツールをゲートするために tool_use ブロックとその tool_result ブロックの間に",
+      "ユーザーターン(または tool_results を運ぶユーザーターン)の直後で、配列の最後か、アシスタントターンの直前"
+    ],
+    "answer": 3,
+    "explain": "任意の会話途中システムメッセージと同じ配置ルール。tool_use と tool_result の間は 400 だ。"
+  },
+  {
+    "q": "全キャッシュミスなしで会話途中にツールの input_schema を進化させる正しい方法は?",
+    "options": [
+      "スキーマをその場で編集する — mid-conversation-tool-changes が扱う",
+      "新しいスキーマを持つ tool_update ブロックを送る",
+      "新しい名前で v2 ツールを宣言し、v1 を tool_removal で削除、v2 を tool_addition で追加",
+      "できない — スキーマ進化は常に全キャッシュミスを要する"
+    ],
+    "answer": 2,
+    "explain": "tools[] 配列そのものはバイト単位で同一のまま保たれなければならない。新しい名前のツールを導入し、tool_removal + tool_addition で入れ替えることでキャッシュは温かいままだ。"
+  },
+  {
+    "q": "この機能を今日サポートしていない Claude モデルはどれか?",
+    "options": [
+      "Claude Opus 5",
+      "Claude Opus 4.8",
+      "Claude Sonnet 5",
+      "Claude Fable 5"
+    ],
+    "answer": 2,
+    "explain": "Sonnet 5 は会話途中のシステムメッセージを一切サポートしないので、このベータはその上に乗れない。Fable 5、Mythos 5、Opus 4.8、Opus 5 はサポートする。"
+  }
+]} />
+
+## 出典と参考文献
+
+- [Mid-conversation system messages and tool changes — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages)(決定的リファレンス、8つのSDKで完全なコードサンプル付き)
+- [What's new in Claude Opus 5](https://platform.claude.com/docs/en/about-claude/models/whats-new-opus-5)(ベータの発表、および512トークンのキャッシュ最小値)
+- [Prompt caching — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)(`tools → system → messages`ハッシュの構築方法とブレークポイントの配置場所)
+- [Claude Platform release notes — July 24, 2026](https://platform.claude.com/docs/en/release-notes/overview)(`mid-conversation-tool-changes-2026-07-01`ベータヘッダの初回リリース)
+- [MCP connector docs](https://platform.claude.com/docs/en/agents-and-tools/mcp-connector)(`mcp_tool_reference`と`mcp_toolset_reference`ブロック形状)
+- [Cache diagnostics — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/cache-diagnostics)(期待したキャッシュヒットが起きなかったとき、二つのリクエストがどこで分岐したかを正確に見つける)

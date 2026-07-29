@@ -1,0 +1,251 @@
+---
+sidebar_position: 12.5
+title: "AIゲートウェイ:LiteLLM、OpenRouter、Portkey、Vercel"
+description: "本番のAIゲートウェイは、アプリと全モデルの間に欠けていたルータだ — Claude、GPT、Gemini、Llama を一つにまとめる。LiteLLM、OpenRouter、Portkey、Vercel AI Gateway を比較し、Claude Code を自前のプロキシ経由に配線する。"
+keywords: [AI gateway, LiteLLM, OpenRouter, Portkey, Vercel AI Gateway, LLM router, model fallback, Claude Code proxy, virtual keys, multi-provider LLM]
+---
+
+<LevelBadge level="intermediate" />
+
+製品が複数モデルと会話するようになった途端、直接SDKアプローチは崩壊する。各プロバイダには独自のキー、独自のレート制限、独自の停止スケジュール、独自の請求書がある。**AIゲートウェイ**は、コードとあらゆるモデル — Claude、GPT、Gemini、Llama、Kimi、DeepSeek、ローカルの Ollama — の間に位置する小さなインフラで、「N個の脆い統合」を「自分が制御する一つのエンドポイント」に変える小片だ。このページは、2026年に本番で実際にデプロイされている4つのゲートウェイ — **LiteLLM、OpenRouter、Portkey、Vercel AI Gateway** — を比較し、キラーワークフローを示す:**Claude Code**を自前のゲートウェイに向け、単一のプロキシがチーム全体のルーティング、予算、ロギング、フォールバックを扱えるようにする。
+
+<Callout type="objectives" items={[
+  "AIゲートウェイとは何か、それが解決する5つの問題(多くのプロバイダを一つのAPIに;フォールバック;仮想キー;支出上限;可観測性)を理解する",
+  "LiteLLM、OpenRouter、Portkey、Vercel AI Gateway をレイテンシ、価格、セルフホスト性、それぞれが輝く場面で比較する",
+  "ANTHROPIC_BASE_URL と仮想キーで Claude Code を自前の LiteLLM プロキシ経由に配線し、チームで共有制限とログを得る",
+  "OpenRouter のフォールバックを設定し、Claude の障害時に 5xx を表示する代わりに GPT や Gemini に静かに昇格させる",
+  "2026年3月の LiteLLM サプライチェーンインシデントを理解し、本番でバージョンを安全にピン留めする",
+]} />
+
+## 問題:プロバイダごとに直接SDK一つはスケールしない
+
+最初の Claude 統合は2行の変更で済む:`pip install anthropic`、`ANTHROPIC_API_KEY`を設定、完了。二つ目 — 例えば Anthropic がスロットルするとき GPT-5.4 にフォールバックしたい — で抽象化が壊れる。今、リクエスト形状が異なる2つのSDK、2つのダッシュボード、2つの請求書、APIキーの2つの回転ケイデンス、2セットのリトライロジックがある。3つ目に Gemini、4つ目にローカルの Ollama を加えれば、あらゆる製品判断(「このチームを月$500に制限」「レビュー用に全プロンプトをログ」「顧客に独自キー持ち込みを許可」)がプロバイダごとに N 実装になる。
+
+AIゲートウェイはその配管を単一の場所に集約する。具体的には、本番ゲートウェイは以下を提供する:
+
+- **全プロバイダに単一のリクエスト形状。** ほとんどのゲートウェイは OpenAI Chat Completions API(または Anthropic Messages、または両方)を話し、裏で実プロバイダに翻訳する。
+- **フォールバックとルーティング。** 最初に Claude を試す;429 や 5xx なら呼び出し元に知らせず GPT や Gemini に再試行する。レイテンシ上限やコンテンツモデレーション拒否についても同様。
+- **仮想キー。** ユーザーごと・サービスごとのキーを発行し、モデルのサブセット、独自予算、独自レート制限にマップする — 不正スクリプトがアカウント全体を排出できないように。
+- **支出上限とロギング。** 各リクエストがタグ付け、価格付け、保存される。Anthropic や OpenAI に触れずにキーを取り消せ、何がどこに送られたかをコンプライアンスに証明できる。
+- **キャッシング。** プロンプトキャッシング(完全一致)とセマンティックキャッシング(近似一致)が繰り返しトラフィックを無料ヒットに変える。
+
+すべてのチームがこの5つ全てを必要とするわけではない。しかしそのうち2つがロードマップに乗った瞬間、ゲートウェイを運用する方がプロバイダごとに再発明するより安い。
+
+---
+
+## 本番で出荷される4つのゲートウェイ
+
+「勝者」は一つではない — 4つのリーダーは設計空間の異なるコーナー(セルフホスト vs ホスト型、オープンソース vs プロプライエタリ、ミニマリスト vs コントロールパネル)を占めている。
+
+| ゲートウェイ | デプロイ | 価格モデル | 得意 | 不向き |
+|---|---|---|---|---|
+| **LiteLLM** | セルフホスト(Docker)またはSDK | 無料(OSS);Enterprise ティアで SSO/audit | 仮想キー、予算を持つチームプロキシ、トークンごとのマークアップなし、100+ プロバイダを一つの config で動作 | Postgres + Redis を運用する DevOps がないチーム |
+| **OpenRouter** | ホスト型のみ | プロバイダ価格 + 約 5.5% クレジット購入手数料、リクエストごとのマークアップなし | 300+ モデルへのゼロオプスアクセスを一つのキーで;ユーザーがモデルを選ぶ製品に理想的 | セルフホストやデータレジデンシーが必要なコンプライアンス志向 |
+| **Portkey** | OSS ゲートウェイ(npx)またはホスト型クラウド | OSS 無料;クラウドは使用量ティア | サブミリ秒のゲートウェイレイテンシ、セマンティックキャッシング、ガードレール、カナリーテスト — 「コントロールパネル」の角度 | 単に最もシンプルなキーアグリゲータを望むチーム |
+| **Vercel AI Gateway** | ホスト型のみ | プロバイダ価格、トークンマークアップなし;Vercel プランで無料 | AI SDK v5/v6 + Anthropic Messages + OpenAI Responses API 統合を望む、既に Vercel 上の開発者 | Vercel 外インフラまたはエアギャップ配備 |
+
+最初に選ぶ重要な軸:**セルフホスト vs ホスト型**。データが VPC を出られない(規制業界、EU レジデンシー、企業プライバシーレビュー)なら、セルフホスト可能なゲートウェイが必要 — LiteLLM または Portkey OSS。誰かに運用を任せたいなら、OpenRouter か Vercel AI Gateway がワンクリックだ。
+
+第二の軸:**実際にどれだけのコントロールプレーンが必要か**。Kimi K3 と Claude と Grok を3回のサインアップなしで並べて試したい一人製品なら、OpenRouter が全ストーリーだ。財務がチーム別月次支出、セキュリティが回転付き仮想キー、プラットフォームが Grafana メトリクスを望む20人の組織なら、LiteLLM または Portkey で構築することになる。
+
+<VerifyNote lastVerified="2026-07-27" source="https://docs.litellm.ai/docs/simple_proxy">
+ゲートウェイの機能セットと価格は素早く変化します。検証日で測定された2例:OpenRouter はクレジット購入で**5.5% のプラットフォーム手数料**を課し(リクエスト単位ではない)、Portkey の OSS ゲートウェイは**サブ1ms オーバーヘッド**を宣伝し、ホスト型 OpenRouter は通常 **100–150ms** を追加します。コミットする前に各ベンダーの現在の価格とステータスページで確認してください。上記のカテゴリー分け(セルフホスト vs ホスト型、ミニマリスト vs コントロールパネル)は安定;その背後の正確な数値はそうではありません。
+</VerifyNote>
+
+---
+
+## キラーワークフロー:Claude Code を自前の LiteLLM プロキシに向ける
+
+Claude Code の最大の秘密は、`ANTHROPIC_BASE_URL`と`ANTHROPIC_AUTH_TOKEN`を尊重することだ。それらをゲートウェイに設定すると、Claude Code は`api.anthropic.com`に直接話しかけるのをやめる — *あなたの*プロキシに話しかけ、それが*あなたが*制御する認証で Anthropic(または他のどこか)に転送する。チームにとって、これは3つを同時に変える:
+
+- **開発者ごとに共有仮想キー一つ。** プロキシ UI でキーを発行・取り消しできる。`.env` ファイルに共有ルート認証情報はない。
+- **開発者ごとの予算とログ。** プロキシがすべてのリクエストにタグ付けするので、「昨日誰が$300使ったか」はインシデントではなくデータベースクエリだ。
+- **モデルエイリアシング。** プロキシで`claude-sonnet-4-6`をピン留めできるので、モデル非推奨化は1行の config 変更で、リポジトリ全体の grep ではない。
+
+3ステップで最小プロキシを起動:
+
+<Steps items={[
+  {title: "LiteLLM を proxy extra とともにインストール", body: "新しい venv または uv 経由で: uv tool install 'litellm[proxy]'。これはクライアント SDK と並んでゲートウェイサーバー(FastAPI + admin UI)を引き入れる。"},
+  {title: "公開したい Claude モデルをリストする config.yaml を著述", body: "左のモデル ID は呼び出し元が見る ALIAS(なんでもよい);右の litellm_params.model は実際のプロバイダルートだ。ANTHROPIC_API_KEY はファイルではなく env に置け。"},
+  {title: "プロキシを起動し Claude Code をそれに向ける", body: "litellm --config config.yaml を実行(既定ポート 4000)。次に ANTHROPIC_BASE_URL をプロキシ URL に、ANTHROPIC_AUTH_TOKEN を仮想キーに設定する。Claude Code は知らずにあらゆる呼び出しをプロキシ経由でルーティングする。"},
+]} />
+
+これを動作させる config ファイル:
+
+<PromptCard title="config.yaml — LiteLLM 背後の Claude Sonnet/Opus/Haiku">
+{`model_list:
+  - model_name: claude-opus-4-7
+    litellm_params:
+      model: anthropic/claude-opus-4-7
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: claude-haiku-4-5-20251001
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+litellm_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Optional: enable exact-match prompt caching
+  cache: true
+  cache_params:
+    type: redis
+    host: os.environ/REDIS_HOST`}
+</PromptCard>
+
+そして、任意の開発者のシェルから:
+
+<PromptCard title="Claude Code をプロキシに向ける(開発者ごとの .env)">
+{`export ANTHROPIC_BASE_URL="https://llm.internal.example.com"
+export ANTHROPIC_AUTH_TOKEN="sk-team-alice-9f4c..."   # a VIRTUAL key issued by the proxy
+
+# now every Claude Code call goes through YOUR gateway
+claude --model claude-sonnet-4-6`}
+</PromptCard>
+
+非自明な勝ち筋は**仮想キー**だ。マスターキーは管理者専用で、決してノートPCに出荷されない。各開発者は仮想キーを得る — *許可されたモデルだけ*にマップされ、*独自の月次予算*を持ち、基盤 Anthropic キーを回転させずに*数秒で取り消せる*。ノートPCが失われれば、Postgres の1行を殺す — チーム全体のアクセスではない。
+
+> **注意:** 同じ env vars は Anthropic の Bedrock と Vertex 統合でも動作するが、実験的ベータ機能にはエッジケースがある。Bedrock 配備では、LiteLLM ドキュメントは`~/.claude/settings.json`で`CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`を設定してヘッダ互換性の問題を避けることを推奨している。
+
+---
+
+## キラーワークフロー#2:OpenRouter による静かなフォールバック
+
+何もホストしたくないなら、OpenRouter のフォールバック配列が「Claude が 429 を返したとき別のモデルに静かに再試行」への最短パスだ。順序付きリストを送れば、OpenRouter は上から下まで歩き、応答した最初のモデルを返す。
+
+<PromptCard title="Claude → GPT → Gemini フォールバックを一つのリクエストで(OpenRouter)">
+{`import openai
+
+client = openai.OpenAI(
+    api_key="YOUR_OPENROUTER_KEY",
+    base_url="https://openrouter.ai/api/v1",
+)
+
+response = client.chat.completions.create(
+    model="anthropic/claude-sonnet-4.5",
+    extra_body={
+        # Ordered fallback. If the first model 429s, is down, or is
+        # rejected by moderation, OpenRouter tries the next one.
+        "models": [
+            "anthropic/claude-sonnet-4.5",
+            "openai/gpt-5.4",
+            "google/gemini-2.5-pro",
+        ],
+    },
+    messages=[{"role": "user", "content": "Explain B-trees in one paragraph."}],
+)
+
+# 'model' in the response tells you which one actually answered.
+print(response.model, "->", response.choices[0].message.content)`}
+</PromptCard>
+
+初回の試みで人々が見逃す3点:
+
+- **請求は、頼んだモデルではなく応答したモデルに従う。** Claude が失敗し GPT-5.4 が応答したら、そのリクエストは OpenRouter の GPT-5.4 レートを支払う。
+- **フォールバックは 5xx 以上でトリガーする。** レート制限、プロバイダダウン、コンテキスト長検証エラー、コンテンツモデレーション拒否のすべてが次のモデルに昇格する。最後は最も鋭いエッジ — あるプロバイダからの「モデレーション」拒否が、より寛容な別のものに静かにルーティングされることがあり、それが望みかどうかは別問題。フォールバックリストは ACL と同じ注意深さでレビューせよ。
+- **`models`と`fallbacks`は混在できない。** Anthropic 形式の Messages エンドポイントは異なる`fallbacks`配列を使う。同じリクエストで両方のキーを送ると 400 が返る。クライアントが話す形式を選んで固執せよ。
+
+---
+
+## 2026年3月の LiteLLM サプライチェーンインシデント:実際に何をすべきか
+
+**2026年3月24日** 10:39 UTC、LiteLLM の2つの悪意ある PyPI リリース — **v1.82.7 と v1.82.8** — が攻撃者によって公開された。攻撃者は LiteLLM の CI/CD パイプラインで動作するセキュリティスキャナ**Trivy**の先行侵害を介してメンテナの PyPI 認証情報を盗んでいた。PyPI は 13:38 UTC(約3時間後)にパッケージを隔離した。露出ウィンドウ中、数万のダウンロードが発生した。ペイロードは永続化メカニズム(Python の呼び出しごとに実行され、認証情報を収穫し、systemd バックドアをインストールする`litellm_init.pth`ファイル)を持つ infostealer だった。帰属は**TeamPCP**として追跡されるグループで、Trivy と Checkmarx KICS も侵害した。
+
+任意の環境で LiteLLM を実行しているなら、これを一度適用し、プラットフォームプレイブックに保管せよ:
+
+<Steps items={[
+  {title: "既知の安全なバージョンにピン留めせよ", body: "v1.82.6 以前はクリーン。v1.83.0 以降(LiteLLM の再構築された CI/CD v2 パイプライン経由で公開)はクリーン。その間のものはアンインストールし、環境は汚染されたと見なせ。公式 Docker イメージ(ghcr.io/berriai/litellm)は侵害されていない — インシデントは PyPI のみ。"},
+  {title: "永続化ファイルをチェック", body: "site-packages で litellm_init.pth を grep せよ。存在するなら、そのマシンを侵害されたものとして扱え:env vars またはディスク上に存在したすべての認証情報(Anthropic、OpenAI、クラウド、DB、SSH、K8s トークン)を回転させ、systemd バックドアをフォレンジックスキャンせよ。"},
+  {title: "cosign で Docker イメージ署名を検証", body: "v1.83.0-nightly 以降、LiteLLM はイメージに署名する。ロールアウト前に cosign で検証することで、コンテナ層でのこのインシデントの繰り返しを捕まえられる。"},
+  {title: "本番では pip install よりコンテナイメージを優先", body: "Docker イメージは攻撃を逃れた;PyPI ホイールは逃れなかった。それは耐久性のあるシグナルだ:API キーを保持するネットワークサービスにとって、ピン留めされたコンテナを実行する方が共有ホスト上の pip インストール venv より安全だ。"},
+  {title: "アウトバウンド egress アラートを追加", body: "マルウェアは models.litellm[.]cloud と checkmarx[.]zone にフォンホームした — どちらも正当ではない。本番 LLM プロキシでの Egress 許可リストは、このクラスの攻撃を早期に捕まえる。"},
+]} />
+
+広い教訓は「LiteLLM を使うな」ではなく、「セキュリティスキャナを含むAIスタック内のあらゆる依存関係が配送ベクターになり得ると仮定せよ」だ。バージョンをピン留めし、イメージに署名し、ゲートウェイをモデルプロバイダのみに到達できるネットワークセグメントに配置せよ。
+
+<VerifyNote lastVerified="2026-07-27" source="https://docs.litellm.ai/blog/security-update-march-2026">
+安全バージョンガイダンスは、LiteLLM 公式インシデントポストと PyPI インシデントレポートに対して上記の日付で検証済み。本番で LiteLLM をインストールまたはアップグレードする前に、ベンダーのセキュリティページで現行の安全バージョンとフォローアップ CVE を再確認してください。
+</VerifyNote>
+
+---
+
+## 状況に応じた正しいゲートウェイを選ぶ
+
+<Steps items={[
+  {title: "プロバイダはいくつか、インフラは誰が運用するか?", body: "小規模チームで1〜2プロバイダ → ゲートウェイをスキップ;直接 SDK で十分。3+ プロバイダまたは「誰がキーを持つか」が重要なチーム → ゲートウェイ。DevOps とプライバシー要件があれば、LiteLLM または Portkey OSS をセルフホスト。他人に運用を任せたければ、OpenRouter(ホスト型のみ)または Vercel AI Gateway(そこにデプロイしていれば素晴らしい)。"},
+  {title: "仮想キー、予算、チームごとの支出が必要か?", body: "はい → LiteLLM(ネイティブ、成熟)または Portkey(ネイティブ、加えてセマンティックキャッシング)。いいえ → OpenRouter または Vercel AI Gateway が軽い。"},
+  {title: "一つのリクエスト内でプロバイダ間ルーティングが必要か?", body: "OpenRouter の models[] と Vercel AI Gateway の provider-options フォールバックが最短パス。LiteLLM も config 内 fallbacks: でそれを行うが、書き方は 1 行配列というよりルールエンジンに近い。"},
+  {title: "Claude Code が主要消費者か?", body: "なら LiteLLM が圧勝 — ANTHROPIC_BASE_URL + 仮想キーパターン向けの一級ドキュメントを持つ唯一のゲートウェイなので、一つのプロキシ背後の 10 人の Claude Code ユーザーチームがそのまま動く。"},
+  {title: "規制対象/エアギャップか?", body: "セルフホストのみ:LiteLLM プロキシコンテナまたは Portkey OSS を npx @portkey-ai/gateway 経由で。プロキシを認可されたプロバイダのみに Egress 許可リスト化せよ。"},
+]} />
+
+本番で出荷される一般的な組み合わせ:
+
+- **一人開発者/プロトタイプ:** OpenRouter 直接。一つのキー、300+ モデル、完了。
+- **小規模チーム、Claude ファースト:** LiteLLM プロキシに Anthropic + 一つのフォールバックプロバイダ、エンジニアごとの仮想キー、Redis プロンプトキャッシング。
+- **Vercel ネイティブ製品:** Vercel AI Gateway と AI SDK;エキゾチックなモデル用に OpenRouter を`provider-options`フォールバックとして追加。
+- **規制対象/EU:** VPC 内セルフホスト LiteLLM または Portkey OSS を、前面に Presidio PII マスキング付きで(リダクションパターンは[Claude + ローカルモデル](/docs/models/claude-plus-local-models)を参照)。
+- **繰り返しトラフィックが多い AI 製品:** Portkey(セマンティックキャッシングは Portkey 自身のケーススタディでチャット風ワークロードのコスト削減 30〜50% を一般的に駆動 — 見出し数値を信じる前に自分のトラフィックで検証せよ)。
+
+---
+
+## ゲートウェイが解決しないこと
+
+ゲートウェイはミドルウェアだ — モデルに到達する*方法*を変えるが、*どの*モデルが正しいかは変えない。2つのことがまだ本気の作業を必要とする:
+
+- **プロンプトポータビリティ。** Claude、GPT、Gemini は同じプロンプトに異なる答えを返し、システムプロンプト規約は変わる。ゲートウェイはフォールバックプロバイダ用にプロンプトを書き換えない — それが[モデル間のプロンプト移植](/docs/models/porting-prompts-across-models)と[Cross-AI translation](/docs/prompting/cross-ai-translation)の役目だ。
+- **評価。** ゲートウェイは同じリクエストで2つのモデルを A/B するのを容易にする。しかしどちらが実際にあなたのタスクで良かったかは教えられない。デフォルトを切り替える前に本物の評価を実行せよ([評価](/docs/power-user/evals)を参照)。
+
+よくある間違いは、ゲートウェイをインストールして「マルチモデル」完了と見なすことだ。ゲートウェイはトランスポート層だ;ポータビリティと評価はプロダクト層だ。
+
+---
+
+<Quiz title="自己チェック" questions={[
+  {q: "プロバイダを2つ超えて使うようになった時点で、アプリとモデルプロバイダの間にAIゲートウェイを置く主な理由は?", options: ["フロンティアモデルはゲートウェイ経由の方が直接より安い", "ゲートウェイは仮想キー、予算、フォールバック、統合ロギングをプロバイダごとにNではなく一つの実装にする", "ゲートウェイはトークン生成を20%以上高速化する"], answer: 1, explain: "ゲートウェイは横断的関心事(認証/仮想キー、予算、フォールバック、ロギング、キャッシング)を一箇所に集中し、SDKごとに再実装しなくて済むようにする。通常トークンあたりコストは変えず(OpenRouter は小さなクレジット購入手数料がある;他のほとんどはトークンマークアップゼロ)、モデル推論そのものを高速化もしない。"},
+  {q: "ANTHROPIC_BASE_URL で Claude Code を LiteLLM プロキシに向ける。ANTHROPIC_AUTH_TOKEN は何でなければならないか?", options: ["Anthropic ルート API キーをそのまま転送", "プロキシのマスターキー(管理者認証情報)", "プロキシが発行した仮想キー、許可モデルにスコープされ独自予算を持つ"], answer: 2, explain: "共有 Anthropic 認証情報に触れずにユーザーごとに取り消し、予算化、ロギングできる開発者ごとの仮想キーが欲しい。マスターキーは管理者専用でノートPCに出荷すべきではない;実際の Anthropic キーはプロキシ上に住み、開発者マシン上ではない。"},
+  {q: "OpenRouter のフォールバック配列は、最初のモデルが失敗すると次のモデルに昇格する。以下のどれでトリガーするか?", options: ["ネットワーク 5xx エラーのみ", "5xx エラー、レート制限、ダウンタイム、コンテキスト長エラー、AND コンテンツモデレーション拒否", "レート制限(429)のみ"], answer: 1, explain: "OpenRouter はモデレーション拒否もフォールバックトリガーとして扱う。これはしばしば驚きだ。より厳格なプロバイダがより寛容なものへ静かに昇格し得る。フォールバックリストを ACL と同じ注意深さでレビューせよ。"},
+  {q: "本番で LiteLLM をインストールする必要がある。2026年3月のインシデント後に安全なバージョンはどれか?", options: ["任意のバージョン、PyPI はすべて清掃済み", "v1.82.6 以前、または v1.83.0 以降(v1.82.7 と v1.82.8 は侵害されている)", "v2.0.0 以降のみ"], answer: 1, explain: "v1.82.7 と v1.82.8 のみ悪意あった(2026年3月24日の約3時間ウィンドウで PyPI が隔離する前にアップロード)。v1.82.6 以前はクリーン;v1.83.0+ は LiteLLM の再構築された CI/CD v2 パイプラインから出荷されクリーン。公式 Docker イメージは決して影響を受けなかった。"},
+  {q: "Vercel 上の一人開発者で、午後に Claude、GPT、Gemini を試したい。ベストフィットは?", options: ["Postgres と Redis を持つセルフホスト LiteLLM", "Vercel AI Gateway または OpenRouter — ホスト型、一つのキー、ゼロインフラ", "LangChain で独自アグリゲータを作る"], answer: 1, explain: "オプス負担のない一人開発者にとって、ホスト型ゲートウェイが全ストーリーだ。Vercel AI Gateway は既にそこにデプロイしていればネイティブ;OpenRouter はユニバーサルオプション(300+ モデルを一つのキーで)。LiteLLM セルフホストは仮想キーとチームごとの予算が必要になるまではやり過ぎ。"},
+]} />
+
+<Flashcards title="AIゲートウェイ一覧" cards={[
+  {front: "AI ゲートウェイ(定義)", back: "アプリとモデルプロバイダの間のミドルウェア。一つのリクエスト形状、背後に N プロバイダ、加えて仮想キー、予算、フォールバック、ロギング、キャッシング。"},
+  {front: "LiteLLM", back: "セルフホスト OSS プロキシ(または SDK)。無料、100+ プロバイダ、ネイティブ仮想キーと予算、ANTHROPIC_BASE_URL 経由の一級 Claude Code 統合。本番には Postgres + Redis が必要。"},
+  {front: "OpenRouter", back: "ホスト型のみアグリゲータ、300+ モデルへの一つのキー、約 5.5% クレジット購入手数料、models[] 配列経由の一級フォールバック。ユーザーがモデルを選ぶゼロオプス製品に最適。"},
+  {front: "Portkey", back: "OSS ゲートウェイ(npx)またはホスト型クラウド。サブ1ms オーバーヘッド、セマンティックキャッシング、ガードレール、カナリー。「コントロールパネル」の角度。"},
+  {front: "Vercel AI Gateway", back: "ホスト型のみ、トークンマークアップなし、Anthropic Messages + OpenAI Responses + OpenAI Chat Completions を統合。Vercel デプロイにネイティブ。"},
+  {front: "仮想キー", back: "許可モデル、ユーザーごとの予算にスコープされ、基盤プロバイダキーとは独立に取り消し可能な、ゲートウェイ発行キー。マスターまたはルート API キーを決してノートPCに発行してはならない。"},
+  {front: "OpenRouter models[] フォールバック", back: "extra_body 内の順序付き配列;OpenRouter はそれを歩いて応答した最初のモデルを返す。5xx、レート制限、ダウンタイム、コンテキストエラー、AND モデレーション拒否でトリガー。実際に応答したモデルを支払う。"},
+  {front: "LiteLLM v1.82.7/1.82.8(2026年3月)", back: "サプライチェーン攻撃(TeamPCP)からの侵害された PyPI リリース。安全バージョン:v1.82.6 以前、または v1.83.0+。Docker イメージ ghcr.io/berriai/litellm は影響を受けなかった。永続化ファイル検出には litellm_init.pth を grep せよ。"},
+  {front: "ゲートウェイが修正しないこと", back: "プロンプトポータビリティ(Claude / GPT / Gemini は異なるフレーミングを好む)と評価(ゲートウェイは A/B できるが、どのモデルがあなたのタスクに良いかは判断できない)。"},
+]} />
+
+<Callout type="takeaways" items={[
+  "AIゲートウェイはアプリと全モデルの間に欠けていたルータ — 仮想キー、予算、フォールバック、ロギング、キャッシングをプロバイダごとにNではなく単一の実装にするために存在する",
+  "まず 2 つの軸で選べ:セルフホスト vs ホスト型(LiteLLM/Portkey OSS vs OpenRouter/Vercel)、ミニマリスト vs コントロールパネル(OpenRouter/Vercel vs LiteLLM/Portkey)",
+  "Claude Code キラーワークフロー:ANTHROPIC_BASE_URL を自前の LiteLLM プロキシに向け、開発者ごとの仮想キーを発行 — チームはルート Anthropic キーに触れず共有制限、ログ、ワンクリック取り消しを得る",
+  "OpenRouter の models[] 配列は静かな Claude → GPT → Gemini フォールバックへの最短パスだが、モデレーション拒否もフォールバックトリガーであることに注意 — リストを ACL のようにレビューせよ",
+  "2026年3月の LiteLLM サプライチェーン攻撃後、v1.82.6 以前、または v1.83.0+ にピン留めせよ;pip より署名 Docker イメージを優先;プロキシを egress 許可リスト化せよ",
+  "ゲートウェイはトランスポートで製品ではない — 到達できるモデルの数にかかわらず、プロンプトポータビリティと評価はまだ本気の作業を要する",
+]} />
+
+## 出典と参考文献
+
+- [LiteLLM — GitHub (BerriAI/litellm)](https://github.com/BerriAI/litellm) — ソースリポとリリースノート
+- [LiteLLM Proxy — 公式ドキュメント](https://docs.litellm.ai/docs/simple_proxy) — インストール、config.yaml、仮想キー、予算
+- [Claude Code via LiteLLM — 公式クイックスタート](https://docs.litellm.ai/docs/tutorials/claude_responses_api) — ANTHROPIC_BASE_URL 設定、検証 curl、セキュリティノート
+- [LiteLLM Anthropic プロバイダドキュメント](https://docs.litellm.ai/docs/providers/anthropic) — サポートされる Claude モデルとオプション
+- [Security Update: Suspected Supply Chain Incident (March 2026) — LiteLLM ブログ](https://docs.litellm.ai/blog/security-update-march-2026) — 公式インシデントポスト、安全バージョンガイダンス、修復
+- [Incident Report: LiteLLM/Telnyx supply-chain attacks — PyPI ブログ](https://blog.pypi.org/posts/2026-04-02-incident-report-litellm-telnyx-supply-chain-attack/) — PyPI のタイムラインと緩和
+- [LiteLLM compromised on PyPI — Datadog Security Labs](https://securitylabs.datadoghq.com/articles/litellm-compromised-pypi-teampcp-supply-chain-campaign/) — マルウェア解析(litellm_init.pth、egress ドメイン)
+- [OpenRouter — model fallbacks documentation](https://openrouter.ai/docs/guides/routing/model-fallbacks) — models[] 配列、トリガー、請求ルール
+- [OpenRouter — provider preferences](https://openrouter.ai/docs/features/provider-routing) — 高度なルーティング制御
+- [Portkey AI Gateway — 公式ドキュメント](https://portkey.ai/docs/product/ai-gateway) — セマンティックキャッシング、ガードレール、カナリー
+- [Portkey Gateway — GitHub (OSS)](https://github.com/Portkey-AI/gateway) — セルフホスト可能オープンソースゲートウェイ
+- [Vercel AI Gateway — 公式ドキュメント](https://vercel.com/docs/ai-gateway) — モデル、プロバイダ、BYOK、可観測性
+- [Vercel AI Gateway — Anthropic Messages API compatibility](https://vercel.com/docs/ai-gateway/sdks-and-apis/anthropic-messages-api) — Vercel AI Gateway 経由の Anthropic SDK 使用
+
+このサイトの関連: [Claude + ローカルモデル:ハイブリッドパターン](/docs/models/claude-plus-local-models) · [モデル間のプロンプト移植](/docs/models/porting-prompts-across-models) · [Cross-AI translation](/docs/prompting/cross-ai-translation) · [評価](/docs/power-user/evals) · [プロバイダ間の AI コスト](/docs/models/what-ai-costs-across-providers)

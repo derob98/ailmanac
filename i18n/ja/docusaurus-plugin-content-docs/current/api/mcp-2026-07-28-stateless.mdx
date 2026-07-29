@@ -1,0 +1,229 @@
+---
+sidebar_position: 13.5
+title: "MCP 2026-07-28: ステートレス仕様"
+description: "MCPローンチ以降で最大の改訂。セッションが消え、あらゆるリクエストが自己記述型となり、ロードバランサ配下のどのサーバーインスタンスでも任意の呼び出しに応答できる。2026年7月28日に実際に何が変わったのか、既存のサーバーを壊さずに移行する方法。"
+keywords: [MCP, Model Context Protocol, 2026-07-28, stateless, Multi Round-Trip Requests, MRTR, server/discover, MCP Apps, Tasks, extensions, migration, Mcp-Session-Id]
+---
+
+<LevelBadge level="advanced" />
+
+**2026年7月28日**、Model Context Protocol はローンチ以降で最大の改訂を確定した。見出しは一つ、**MCPはステートレスになった**。`initialize`ハンドシェイクと`Mcp-Session-Id`ヘッダは消滅し、あらゆるリクエストが`_meta`の中で自身の識別情報を持ち運ぶ。ロードバランサ配下のどのサーバーインスタンスでも任意の呼び出しに応答できる。サーバーレスMCPはもはや回避策ではなく、プロトコルそのものの姿となった。
+
+<Callout type="objectives" items={[
+  "2026-07-28仕様で実際に何が変わったのか — 重要な4つの削除と4つの追加",
+  "Multi Round-Trip Requests(MRTR): ステートレスなサーバーがセッションなしでユーザーに追加質問を投げる方法",
+  "Extensions フレームワークと2つの公式拡張:MCP Apps と Tasks",
+  "認可の強化:OAuth 2.1、RFC 9207 の iss 検証、Dynamic Client Registration が今後求めるもの",
+  "既存の2025-11-25クライアントを壊さない具体的な移行パス — 今日インストールできるSDKベータ版付き",
+]} />
+
+<VerifyNote lastVerified="2026-07-28" source="https://modelcontextprotocol.io/specification/2026-07-28/">
+仕様は **2026年7月28日** に確定。SDKベータは配布中で、GAはこの後数週間のローリングウィンドウで続く。非推奨機能(Roots、Sampling、Logging、旧Tasks実験API)は**最低12ヶ月**は動作し続ける — 最短の削除は **2027年7月28日**。ハードカットオーバーを出荷する前に、SDKのバージョン番号とClaudeのロールアウト状況を必ず一次ソースで確認すること。
+</VerifyNote>
+
+## 一段落サマリー
+
+以前は、`initialize`ハンドシェイク → `Mcp-Session-Id`クッキー → セッションの寿命の間だけスティッキーなクライアント/サーバーペア。以後は、ハンドシェイクなし、セッションIDなし、スティッキネスなし。クライアントの識別と機能はあらゆるリクエストの`_meta`オブジェクトに乗る。新しい`server/discover`メソッドが初期の機能交換を置き換える。ショッピングカートや実行中のタスクといったアプリケーション状態は、ツールが返し、次の呼び出しで再び渡される**ハンドル**に宿る — RESTのリソースIDと同じだ。この一つの変更が、サーバーレスやエッジ配備、真の水平スケーリング、そして競合する二つの実装が同じURLの背後に同居できる可能性を解き放つ。
+
+## 削除されたもの
+
+<Callout type="warning" items={[
+  "Mcp-Session-Id ヘッダ — そして「プロトコルレベルのセッション」という概念そのもの",
+  "initialize / initialized ハンドシェイク — あらゆるリクエストに載る _meta と、必要時に呼ぶ server/discover に置換",
+  "Roots、Sampling、Logging — 非推奨。Roots: パスはツールパラメータとして渡す。Sampling: LLMは自分で呼ぶ。Logging: stderr か OpenTelemetry を使う。",
+  "tasks/list — 新しいTasks拡張の中でさえ削除された。セッションなしでのタスク一覧はテナント間漏洩になるためだ",
+]} />
+
+Roots/Sampling/Logging の非推奨化は、既存サーバーが実際に触れている部分だ。この三つはすべて、永続的な双方向のサーバー↔クライアントチャネルを前提としていた。ステートレスな世界では、LLM もパスもログシンクもクライアントの持ち物になる — サーバーはツール呼び出しに答えるだけだ。
+
+## 追加されたもの
+
+<Steps items={[
+  {title: "server/discover メソッド", body: "サーバーが何を提供しているかをクライアントが必要時に呼び出せる、ステートレスなRPC。旧ハンドシェイクが返していたケイパビリティを置き換える。レスポンスの新しい ttlMs / cacheScope フィールドでレスポンス自体をキャッシュせよ — 仕様は HTTP Cache-Control のセマンティクスを継承する。"},
+  {title: "Streamable-HTTP ルーティングヘッダ", body: "Mcp-Method と Mcp-Name(例: tools/call, search)により、ロードバランサはJSON-RPCを解析せずにルーティング可能。MCP-Protocol-Version がセッションに代わってバージョンネゴシエータとなる。"},
+  {title: "Multi Round-Trip Requests (SEP-2322)", body: "エリシテーションへのステートレスな回答。ツールが実行途中で入力を必要とする場合、サーバーは質問と不透明な requestState ブロブを含む InputRequiredResult を返す。クライアントは inputResponses と、エコーされた requestState を付けて呼び出しを再送する — そしてどのサーバーインスタンスでも続きを引き取れる。"},
+  {title: "Extensions フレームワーク (SEP-2133)", body: "逆DNSで名前空間化され、独立してバージョニングされ、extensions ケイパビリティマップ経由でネゴシエートされる。公式拡張が最初に配布される:MCP Apps(サンドボックス化されたHTML UI、SEP-1865)と Tasks(tasks/get, tasks/update, tasks/cancel を持つ長時間実行操作、SEP-2663)。以前はコア仕様変更を要求していた他のすべてが、今後は拡張として配布される。"},
+  {title: "ツールスキーマ用の完全な JSON Schema 2020-12", body: "ツールの inputSchema と outputSchema が oneOf / anyOf / allOf、conditionals、$ref を受け付ける。MCPの旧サブセットに合わせてスキーマを平坦化していたなら、もうやめてよい。"},
+  {title: "W3C Trace Context の伝播", body: "traceparent、tracestate、baggage が _meta に載って流れる。クライアント → コネクタ → サーバーの連鎖にまたがる分散トレーシングが、ようやく箱から出してすぐ機能する。"},
+  {title: "正式な非推奨ポリシー (SEP-2577)", body: "Active → Deprecated → Removed の間に最低12ヶ月。2026-07-28に非推奨となったものは少なくとも2027-07-28まで動き続け、削除には固有のSEPが必要となる。"},
+]} />
+
+## 全員がハマる JSON の変更
+
+リソース欠落のエラーコードが **`-32002`** から **`-32602` (Invalid Params)** に移った。クライアントのどこかに`if (err.code === -32002)`分岐があると、7月28日以降は静かに発火しなくなる。RC中で最も多い統合バグだ。
+
+## Before / After
+
+```jsonc
+// BEFORE (2025-11-25): stateful handshake
+POST /mcp     { "method": "initialize", "params": { "capabilities": {...} } }
+              → sets Mcp-Session-Id: abc123
+POST /mcp     Mcp-Session-Id: abc123
+              { "method": "tools/call", "params": { "name": "search", ... } }
+// server assumes it "knows" you because of the session cookie
+```
+
+```jsonc
+// AFTER (2026-07-28): self-describing request
+POST /mcp     Mcp-Method: tools/call
+              Mcp-Name: search
+              MCP-Protocol-Version: 2026-07-28
+              {
+                "method": "tools/call",
+                "params": { "name": "search", "arguments": {...} },
+                "_meta": {
+                  "clientInfo": { "name": "claude-code", "version": "..." },
+                  "capabilities": { "extensions": { "com.anthropic.apps": "1" } },
+                  "traceparent": "00-..."
+                }
+              }
+// any instance can serve it; no session, no stickiness
+```
+
+## Multi Round-Trip Requests の具体像
+
+仕様の中で最もエレガントな部分だ。「どのカレンダーですか?」を実行途中で尋ねる必要のあるサーバーは、ソケットを開いたまま保持する必要がない。こう返せばよい:
+
+```json
+{
+  "resultType": "input_required",
+  "inputRequests": {
+    "calendarId": { "type": "string", "prompt": "Which calendar?" }
+  },
+  "requestState": "base64(<opaque server-signed blob>)"
+}
+```
+
+クライアントはプロンプトを表示し、`inputResponses`を集め、両方のフィールドを付けて元のリクエストを再送する。サーバーは`requestState`を権威的なものとして扱い — 多くの場合それに署名する — 直前の試行を覚えておく必要すらない。ステートレスなエリシテーションの本質はこれに尽きる:**状態はサーバーではなく、線上を旅する**。
+
+## 2つの公式拡張
+
+<Callout type="info" items={[
+  "MCP Apps (SEP-1865): サーバーがHTML UIを提供し、クライアントがサンドボックス化されたiframeでレンダリングする。UI内の各アクションは通常のツール呼び出しと同じJSON-RPC監査パスを通過する — 裏口の書き込みはない。任意のWebページではなく、対話的レポート+実行前確認のようなものと考えよ。",
+  "Tasks (SEP-2663): 長時間実行操作のパターンを、セッションのない世界向けに再設計。tools/call はタスクハンドルを返し、クライアントはポーリング/ストリーミング用に tasks/get と tasks/update を、中断用に tasks/cancel を駆動する。tasks/list は意図的に削除された — セッションなしでタスクを列挙することはテナント間の漏洩である。",
+  "破壊的変更:2025-11-25 の実験的 Tasks API は新しい拡張と互換性がない。それに対して出荷したなら、移行はアップグレードではなく書き換えとして扱え。",
+]} />
+
+## 認可:OAuth の清掃
+
+旧仕様は「OAuthっぽい」ものだった。新仕様は OAuth 2.1 / OIDC 形状である:
+
+- クライアントは **RFC 9207** に従い、認可応答の `iss` パラメータを**必ず**検証しなければならない — 今年前半にMCPサーバーを直撃したmix-up攻撃への対策だ。
+- Dynamic Client Registration は今後、クライアントにOpenID Connectの`application_type`宣言を求める。これによりIDプロバイダはネイティブ/Web/マシンクライアントで異なるルールを適用できる。
+- リフレッシュトークンは標準のOIDCリフレッシュフローに従う — つまりエンタープライズSSO(Entra、Okta、PingID)がカスタムミドルウェアなしで初めて動作する。
+
+実務的に読めば、MCPをOktaに合わせるためにカスタムOAuth糊を作っていたなら、そのほとんどを削除できる。
+
+## 今日ベータをインストール
+
+<PromptCard title="Python — mcp v2.0.0b1(単一エンドポイントが両方の改訂に応答)">{`uv add "mcp[cli]==2.0.0b1"
+# or
+pip install "mcp[cli]==2.0.0b1"`}</PromptCard>
+
+<PromptCard title="TypeScript — パッケージ分割、ステートレスは明示的オプトイン">{`npm install @modelcontextprotocol/server@beta
+npm install @modelcontextprotocol/client@beta`}</PromptCard>
+
+<PromptCard title="Go — v1.7.0-pre.1">{`go get github.com/modelcontextprotocol/go-sdk@v1.7.0-pre.1`}</PromptCard>
+
+<PromptCard title="C# — v2.0.0-preview.1">{`dotnet add package ModelContextProtocol --prerelease`}</PromptCard>
+
+SDKチームからの互換性の約束:**「今日壊れるものはなく、7月28日にも何も壊れない。」** 新しいクライアントは2025-11-25サーバーに当たったとき自動的に旧ハンドシェイクにネゴシエートダウンし、Python v2 サーバーは既定で同じエンドポイントから両方の改訂に応答し、TypeScript と Go はステートレス版を公開するために明示的なオプトインを要求する。TypeScript v1.x は少なくとも6ヶ月間、バグ修正とセキュリティ更新を受ける。
+
+## 移行プレイブック
+
+<Steps items={[
+  {title: "1. Roots、Sampling、Logging での新規作業を凍結", body: "2027年7月28日までは動く。それらを土台にした新規サーバーは作らないこと。パスはツール引数として受け取る。LLM呼び出しは自分のクライアントで行う。ログは stderr に書き、ハーネスに集約させる。"},
+  {title: "2. すべての長寿命セッションをハンドルに変換", body: "サーバーが今日「ユーザーはチェックアウトの途中」と覚えているなら、ツール呼び出しから basket_id を返し、次回はそれを要求せよ。状態はメモリではなく線上に置く。"},
+  {title: "3. ケイパビリティマップの隣に server/discover を追加", body: "当面は旧ハンドシェイクを残すとしても、server/discover を公開することで 2026-07-28 クライアントは initialize を完全にスキップできる。サーバーレスを解錠するのはこの一つの変更だ。"},
+  {title: "4. クライアントの -32002 → -32602 エラーコードを修正", body: "所有するすべてのコードベースを 32002 で grep せよ。移行の静かな失敗の罠だ。"},
+  {title: "5. クライアント側で _meta ラウンドトリップを採用", body: "あらゆるリクエストで clientInfo と capabilities を _meta に載せる。ついでに traceparent も伝播せよ — 本番で何かが壊れた初回に、そのトレースが欲しくなる。"},
+  {title: "6. 拡張はサーバー単位で決める(全体でではない)", body: "MCP Apps はUIがチャットのターンを上回るとき(データグリッド確認、チャート駆動の承認)に価値がある。Tasks は操作がクライアントのHTTPアイドルタイムアウトを超える可能性があるとき常に価値がある。どちらも無料ではない — どちらもクライアントの表面積を増やす。"},
+  {title: "7. 実験的 Tasks (2025-11-25) を計画的に廃止", body: "アップグレードはされない。拡張に対して書き直し、ロールアウト中は古いエンドポイントを生かしておき、自分のスケジュールで削除せよ。"},
+]} />
+
+## RC で実際に人々がハマっているワナ
+
+<Callout type="warning" items={[
+  "スティッキーなロードバランサは今も「動く」— そうでなくなるまでは。ステートレスなサーバーの前にスティッキーなLBを置くと、devでは問題なく本番でキャッシュヒット率がズタボロになる。スティッキネスは明示的にオフにせよ。",
+  "requestState はクライアントには不透明だが、それは無料のストレージではない。500KB のコンテキストを詰め込むサーバーはクライアントのメモリを吹き飛ばす。小さなハンドルに署名し、残りはハンドルをキーにサーバー側で保存せよ。",
+  "MCP Apps の iframe はサンドボックス化はされているが、サニタイズはされていない。悪意あるサーバーは今もユーザーがUIに入力した内容を持ち去れる。MCP App は第三者コードとして扱い、UIをレンダリングしてよいサーバーを許可リストで制限せよ。",
+  "server/discover はベース仕様に認証要件がない。そこに露出させたものは、URLに到達できる任意のクライアントに発見される。内部ツールのメタデータを置いてはならない。",
+  "JSON Schema 2020-12 へのアップグレードは、旧サブセットに対して手書きのバリデータを書いたクライアントが静かに検証不足になり得ることを意味する。手作りではなく実物のJSON Schemaライブラリを使え。",
+]} />
+
+## AILmanac マップ上のどこに位置するか
+
+- **[MCP とツールへの接続](/docs/api/mcp)** — API側のコネクタ。今も現行の内容。コネクタがトランスポートを抽象化するため、線上の変化はそのリクエスト形状には見えない。移行するのはコネクタが会話する*サーバー*側のみだ。
+- **[Claude Code の中の MCP](/docs/claude-code/mcp)** — Claude Code がローカル+リモートサーバーとMCPを喋る方法。ステートレスモデルこそが、Claude Code をサーバーレス MCP エンドポイントに指すときに変なタイムアウトなしで動く理由だ。
+- **[MCP のトークン税](/docs/claude-code/mcp-token-cost)** — 遅延読み込みはトークン側のレバーであり、拡張フレームワークは同じ問題に対する*プロトコル*側のレバーだ。
+- **[MCPサーバーのセキュア化](/docs/security/securing-mcp-servers)** — NSA の 2026年5月MCPセキュリティガイダンスとRCの認可強化は互いを補強する。両方を読め。
+
+## クイックチェック
+
+<Quiz questions={[
+  {
+    q: "2026-07-28 仕様では、クライアントの識別情報とケイパビリティ一覧はどこを旅するか?",
+    options: [
+      "一度きりの initialize ハンドシェイクで、Mcp-Session-Id 下にサーバー側キャッシュされる",
+      "あらゆるリクエストに付随する _meta オブジェクトの中",
+      "TCP接続ごとに一回、専用の MCP-Client-Info HTTPヘッダの中",
+      "旅しない — ステートレスプロトコルではサーバーはもはやクライアント識別を見ることができない"
+    ],
+    answer: 1,
+    explain: "ハンドシェイクは消えた。clientInfo、capabilities、トレースコンテキストはあらゆるリクエストの _meta に載る — これこそが、どのサーバーインスタンスでも任意の呼び出しに応答できる理由だ。"
+  },
+  {
+    q: "実行途中のツールが、書き込み先のカレンダーをユーザーに尋ねる必要がある。ステートレス仕様では、セッションなしにどうやってそれを行うか?",
+    options: [
+      "クライアントへ WebSocket を開いてブロックする",
+      "inputRequests と不透明な requestState を持つ InputRequiredResult を返し、クライアントは inputResponses とエコーされた requestState を付けて呼び出しを再送する",
+      "部分呼び出しを共有 Redis に保存し、ポーリング URL を返す",
+      "できない — セッションなしでは実行中のエリシテーションは不可能"
+    ],
+    answer: 1,
+    explain: "これが Multi Round-Trip Requests (MRTR / SEP-2322) だ。サーバー署名された requestState は線上を旅するので、どのインスタンスでも再開できる — 共有サーバーメモリは不要だ。"
+  },
+  {
+    q: "スキップすると 7月28日に静かに壊れるクライアント側の変更はどれか?",
+    options: [
+      "server/discover サポートの追加",
+      "Mcp-Session-Id から _meta への更新",
+      "リソース欠落エラーマッチを -32002 から -32602 に変更",
+      "DCR 時に OpenID Connect application_type を登録"
+    ],
+    answer: 2,
+    explain: "-32002 → -32602 は典型的な静かな失敗の罠:コードが変わり、旧分岐がマッチしなくなり、エラー処理は静かに汎用フォールバックに退化する。"
+  },
+  {
+    q: "2026-07-28 仕様で非推奨になっていない機能はどれか?",
+    options: ["Roots", "Sampling", "Logging", "server/discover"],
+    answer: 3,
+    explain: "server/discover は全くの新規 — ハンドシェイクのケイパビリティ交換に対するステートレスな置き換えだ。Roots、Sampling、Logging はすべて非推奨(少なくとも2027年7月28日までは動作する)。"
+  }
+]} />
+
+## 今週GitHubで目にする語彙
+
+<Flashcards title="MCP 2026-07-28 用語" cards={[
+  {front: "Stateless core", back: "プロトコルはもはやセッションを保持しない。あらゆるリクエストが自己記述型で、どのサーバーインスタンスでも任意のリクエストに応答できる。"},
+  {front: "_meta", back: "clientInfo、capabilities、プロトコルバージョン、W3C Trace Context を保持し、あらゆる JSON-RPC リクエストで運ばれるオブジェクト。initialize ハンドシェイクを置き換える。"},
+  {front: "server/discover", back: "ケイパビリティ発見のための新しいステートレス RPC メソッド。レスポンスは ttlMs と cacheScope を運ぶ — 毎回呼ばずキャッシュせよ。"},
+  {front: "Multi Round-Trip Requests (MRTR)", back: "SEP-2322。サーバーは InputRequiredResult + requestState を返し、クライアントは inputResponses と同じ requestState で再送する。どのインスタンスもラウンドトリップを完遂できる。"},
+  {front: "requestState", back: "InputRequiredResult 内で返される、通常はサーバー署名された不透明なブロブ。サーバーが再開に必要とするコンテキストを符号化する — サーバーメモリではなく、線上を旅する。"},
+  {front: "Extensions framework (SEP-2133)", back: "MCP へのバージョン付き、逆DNS 名前空間のアドオン。extensions ケイパビリティマップ経由でネゴシエートされる。最初の公式拡張:MCP Apps と Tasks。"},
+  {front: "MCP Apps (SEP-1865)", back: "サーバー配布のHTML UI で、クライアントがサンドボックス化された iframe でレンダリングする。すべての UI アクションは標準の JSON-RPC 監査パスを通る。"},
+  {front: "Tasks extension (SEP-2663)", back: "長時間実行操作。tools/call はタスクハンドルを返し、クライアントは tasks/get、tasks/update、tasks/cancel を駆動する。tasks/list は意図的に削除された。"},
+  {front: "Mcp-Method / Mcp-Name ヘッダ", back: "Streamable-HTTP ルーティングヘッダ。ロードバランサが JSON-RPC ボディを解析せずに method (tools/call) とツール名 (search) でルーティングできる。"},
+  {front: "RFC 9207 iss 検証", back: "OAuth mix-up 攻撃への緩和が MCP クライアントに必須となった。認可応答の iss パラメータを検証し、認可サーバー混同攻撃を防ぐ。"},
+  {front: "非推奨ポリシー (SEP-2577)", back: "Active → Deprecated → Removed の間に最低12ヶ月。削除には固有の SEP が必要。2026-07-28 に非推奨となったものは少なくとも 2027-07-28 まで生きる。"}
+]} />
+
+## 出典と参考文献
+
+- **[The 2026-07-28 MCP Specification Release Candidate](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/)** — 一次発表。削除、追加、SEP リスト付き。
+- **[Beta SDKs for the 2026-07-28 MCP Spec RC](https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/)** — Python、TypeScript、Go、C# のベータバージョンと後方互換の約束。
+- **[Bringing MCP 2026-07-28 to Claude](https://claude.com/blog/bringing-mcp-2026-07-28-to-claude)** — Anthropic による Claude と Claude Code へのロールアウトノート。
+- **[MCP 2026-07-28: From Local Tool to Distributed Protocol](https://aaif.io/blog/mcp-2026-07-28-whats-changing-and-how-to-migrate)** — 第三者による最も鋭い移行ウォークスルー。
+- **[MCP Just Went Stateless — What the 2026 Spec Changes About Scaling](https://techcommunity.microsoft.com/blog/appsonazureblog/mcp-just-went-stateless-%E2%80%94-what-the-2026-spec-changes-about-scaling-on-app-servic/4530222)** — App Service 上のステートレス MCP に関する Microsoft の視点。
+- **[MCP Is Going Stateless. Here's What That Means](https://www.arcade.dev/blog/mcp-going-stateless/)** — Arcade.dev の実務者の見解。運用面の影響に有用。
+- **[NSA CSI: MCP Security Design Considerations (PDF)](https://media.defense.gov/2026/Jun/02/2003943289/-1/-1/0/CSI_MCP_SECURITY.PDF)** — NSA による 2026年5月のハードニングガイダンス。本仕様の認可変更と組み合わせて読め。
