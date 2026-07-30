@@ -1,0 +1,165 @@
+---
+sidebar_position: 13.3
+title: "Subagent Fleet Limits: Concurrency Caps & Nested Depth"
+description: "On July 21, 2026 Claude Code capped concurrent subagents at 20 and killed nested spawning. Three days later nesting came back at depth 3. Here are the four env vars, the error you'll hit, why the caps exist, and how to design fleets that survive them."
+keywords: [Claude Code, subagents, nested subagents, spawn depth, concurrency cap, CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH, fleet limits, v2.1.217, v2.1.219, ultracode]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-07-30" source="https://code.claude.com/docs/en/changelog">
+Version numbers, defaults, and env-var names for subagent limits shift with releases. Confirm the current values in the Claude Code changelog before shipping a fleet config.
+</VerifyNote>
+
+On **July 21, 2026** Claude Code shipped `v2.1.217` and put the first hard caps on subagent fleets: **20 concurrent subagents per session**, and **nested spawning disabled outright**. Three days later `v2.1.219` (July 24) reinstated nesting at a **default depth of 3**. The trigger was public and specific: a June 13 issue where a single research task spawned **48+ simultaneous background agents and burned ~1.5M tokens** on redundant work before the user could stop it (`anthropics/claude-code#68110`).
+
+If you orchestrate more than a handful of agents per turn, these caps now shape what a single message can do — and how you write your `.mcp.json`, `.env`, and orchestration prompts.
+
+<Callout type="objectives" items={[
+  "The four environment variables that govern fleets: concurrency, nesting depth, per-session total, and subagent model",
+  "The exact error Claude sees when it hits the cap, and why the runtime tells it NOT to retry",
+  "Why nesting was killed for 72 hours and what the restored default (depth 3) actually means for fan-out",
+  "When ultracode exempts you from the concurrency ceiling, and when workflow hard caps override everything",
+  "A parent-orchestrates pattern that stays inside the caps at any scale"
+]} />
+
+## The incident that shaped the caps
+
+Issue `#68110` (filed June 13, 2026) is the honest origin story. A user delegated a single research task to a general-purpose subagent. That subagent — because general-purpose subagents inherit the `Agent` tool — spawned its own children. Those children spawned more. Within a few turns, **48+ background agents** were running, with four separate agents independently researching the same third-party API (Wise), and the user couldn't kill them faster than they respawned. Total spend before intervention: **~1.5M tokens**.
+
+The response arrived five weeks later in two shipping events:
+
+| Date | Version | Change |
+|---|---|---|
+| 2026-07-21 | `v2.1.217` | Concurrent cap = 20; nested spawning **disabled** (depth = 1) |
+| 2026-07-24 | `v2.1.219` | Nesting **reinstated** at default depth = 3 |
+
+The three-day window with nesting off is the interesting bit — Anthropic clearly weighed "no fan-out" against "no orchestration" and picked a middle path.
+
+## The four environment variables
+
+Every knob is a `CLAUDE_CODE_` env var — set them in your shell, `.env`, or per-project via `settings.json`.
+
+| Env var | Default | What it does |
+|---|---|---|
+| `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` | `20` | Hard ceiling on subagents running at the same instant in one session. Hitting it fails the spawn with `"Concurrent subagent limit reached"`. |
+| `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` | `3` | How many levels deep a subagent can spawn its own children. `1` = disable nesting entirely (parent orchestrates only). |
+| `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` | `200` | Cumulative cap across the whole session — spawns beyond this fail even if concurrency is fine. |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | (inherits) | Force every subagent onto a specific model. Route bulk stages to Haiku/Sonnet to keep an Opus budget on the parent. |
+
+Two more numbers live inside the runtime, not env vars:
+
+- **Workflow hard caps** for [Dynamic Workflows & ultracode](/docs/claude-code/dynamic-workflows): **16 concurrent** and **1,000 total** agents per workflow run. These clamp anything a workflow launches, regardless of your session env.
+- **ultracode-active sessions** are **exempt** from `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`. The reasoning: ultracode's workflow layer already enforces its own 16/1,000 pair, so the session cap would double-book.
+
+## The error you'll actually see
+
+When your main agent tries to spawn the 21st concurrent subagent (or the 4th nested one at default depth), the tool call returns:
+
+<PromptCard title="Tool result — do not retry">{`Concurrent subagent limit reached`}</PromptCard>
+
+The runtime instructs the model **not to loop against the cap** — it should proceed with fewer agents or serialize. That's important for two reasons:
+
+1. Retrying is the exact behavior that made `#68110` catastrophic. Backing off is by design.
+2. If you see the same error in a hook or a log more than a few times in a row, you have a prompt problem, not a limits problem — your parent is fan-out-happy and needs to be told to batch.
+
+## How to configure a fleet
+
+<Steps items={[
+  { title: "Pick your concurrency budget", body: "Start at the default 20. Only raise it if you actually have independent work — a codebase-wide sweep across 60 packages, for example. Set `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=40` per project, not globally." },
+  { title: "Decide if you want nesting on", body: "Depth 3 (default) lets a parent → orchestrator → worker chain exist. Depth 1 forces you into a strict two-level topology: main session, and one layer of workers. Depth 1 is safer; depth 3 is more expressive." },
+  { title: "Pin bulk stages to a smaller model", body: "Set `CLAUDE_CODE_SUBAGENT_MODEL=claude-haiku-4-5` for a session where subagents do mechanical work. Your parent still runs on whatever `/model` you picked; only children downgrade." },
+  { title: "Watch the per-session total", body: "`CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION=200` is generous but real. A long day of `/agents` invocations can drain it. Restart the session to reset." },
+  { title: "For anything larger, move to ultracode", body: "The moment you catch yourself needing to raise the concurrency cap past ~40, you've outgrown one session. Delegate to a dynamic workflow — it gets the 16/1,000 workflow caps but also gets its own scheduler." }
+]} />
+
+## A parent-orchestrates pattern that survives the caps
+
+The safest fleet topology under the new defaults is **breadth-first from the parent** — the main session spawns workers, workers do not spawn workers. This uses depth = 1 semantics even when depth = 3 is available, and it makes the concurrency math trivial: at any instant you have ≤ N workers, never a tree of unknown size.
+
+Concrete shape for a 60-module codebase sweep:
+
+<PromptCard title="Batch-orchestrated sweep — main session prompt">{`Sweep the codebase for uses of the deprecated \`legacyClient()\` helper.
+
+Batch the 60 packages into 3 waves of 20. For each wave:
+  1. Spawn 20 read-only \`Explore\` subagents in parallel, one per package.
+  2. Wait for all 20 to return before spawning the next wave.
+  3. Do NOT let a subagent spawn its own children — pass every package
+     in the delegation prompt directly.
+
+Aggregate into a single \`REPORT.md\` after wave 3. Report the total
+count and any packages that failed with the exact error string.`}</PromptCard>
+
+Why this holds:
+
+- 20 concurrent workers hits the default ceiling exactly once per wave — no failed spawns.
+- Nesting is unused, so `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` doesn't matter — the config works on `v2.1.217` (nesting off) and `v2.1.219` (nesting on).
+- Cumulative spawns: 60, well below the 200 per-session default.
+
+## When to break the pattern (and use nesting)
+
+Depth = 3 exists for a reason: some problems really are hierarchical. Two shapes benefit from nesting:
+
+- **Deep research trees.** A top-level `research` subagent that itself needs to compare five sources — each one non-trivial — can spawn five sibling `researcher` children. Depth = 2 total.
+- **Map/reduce with per-shard finalize.** Parent spawns N shard-owners; each shard-owner spawns 1 finalizer once its shard finishes. Depth = 2 total, but structurally cleaner than the parent tracking every finalize itself.
+
+If either shape describes your work, leave the default alone. If your topology is flat, set `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` explicitly — it's a documentation and a safety net.
+
+## Interaction with `/agents` and background subagents
+
+Two subtleties that trip people up when they first hit the caps:
+
+- **Background subagents count.** Since Week 27 (June 29–July 3, 2026) subagents run in the background by default. A background agent still counts against your concurrency cap while it's running, even though the parent isn't blocked waiting for it.
+- **`background: true` in frontmatter doesn't waive the cap.** Pinning a subagent to background in its frontmatter changes when the parent resumes — not whether the runtime counts it.
+
+If you're seeing the cap error and your main session feels idle, run `/agents` (or check the status line — see [Statusline](/docs/claude-code/statusline)) to find what's still alive from earlier in the session.
+
+## Sonnet 5, Opus 5, and cost under the caps
+
+The default `CLAUDE_CODE_SUBAGENT_MODEL` behavior is **inherit** — a subagent runs on whatever model the parent is on. For Opus 5 sessions with 20 concurrent workers, that adds up fast. The recommended shape after the caps landed is:
+
+- Parent on Opus 5 for the orchestration and the final synthesis.
+- `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5` for the workers doing well-scoped IO-heavy tasks.
+- For anything mechanical (grep-shape work, format checks), Haiku 4.5.
+
+See [Choosing a Model](/docs/models/choosing-a-model) for the tier tradeoffs, and [MCP Token Cost](/docs/claude-code/mcp-token-cost) for how tool-heavy subagents inflate the bill regardless of model.
+
+<Quiz title="Check yourself" questions={[
+  { q: "You spawn 25 subagents at once from your main session. What happens on default settings?", options: ["All 25 run — the cap only applies to background agents", "20 run; the 21st through 25th fail with 'Concurrent subagent limit reached'", "All 25 queue and run sequentially in FIFO order"], answer: 1, explain: "The concurrency cap is a hard fail on spawn, not a queue. Attempts past 20 return the error string 'Concurrent subagent limit reached', and the runtime tells the model NOT to retry." },
+  { q: "Setting `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` produces what topology?", options: ["Only the main session can spawn subagents — subagents cannot spawn their own children", "Subagents can nest up to 1 additional level (so main → child → grandchild is allowed)", "Nesting is unlimited but capped at 1 subagent per parent"], answer: 0, explain: "Depth = 1 means only the main session spawns. Subagents receive tasks but cannot spawn their own children — the topology the runtime enforced by default for 3 days between v2.1.217 and v2.1.219." },
+  { q: "You run a workflow that needs 200 agents concurrently. Which route works?", options: ["Set `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=200` in your shell", "Delegate to a Dynamic Workflow — the workflow layer caps concurrency at 16 but manages the queue for you", "Both of the above give the same result"], answer: 1, explain: "Dynamic Workflows have their own 16 concurrent / 1,000 total caps regardless of session env vars, and their scheduler queues the rest. Trying to bypass with session env alone still runs into the 200 per-session cumulative cap." }
+]} />
+
+<Flashcards title="Fleet limits — flip each card" cards={[
+  { front: "Default concurrent subagent cap per session", back: "20 (v2.1.217+). Override with `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`. ultracode sessions are exempt." },
+  { front: "Default nested spawn depth", back: "3 (v2.1.219+). Was 1 (disabled) between v2.1.217 and v2.1.219. Override with `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`." },
+  { front: "Cumulative subagents per session cap", back: "200 by default. Overrides via `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`. Restart the session to reset the counter." },
+  { front: "Workflow hard caps", back: "16 concurrent and 1,000 total per workflow run. These clamp Dynamic Workflows regardless of session env vars." },
+  { front: "Error text on cap breach", back: "'Concurrent subagent limit reached' — the runtime tells the model NOT to retry. Treat repeated occurrences as a prompt problem, not a config problem." },
+  { front: "Cost-shaping env var", back: "`CLAUDE_CODE_SUBAGENT_MODEL` — pin workers to Sonnet 5 or Haiku 4.5 while the parent stays on Opus 5." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Default concurrent cap is 20; nesting depth default is 3 (was 1 for 72 hours in late July 2026).",
+  "The four knobs are all `CLAUDE_CODE_*` env vars — concurrency, spawn depth, per-session total, and subagent model.",
+  "'Concurrent subagent limit reached' is a fail-and-stop signal, not a retry signal. Repeated occurrences mean your parent prompt is fan-out-happy.",
+  "Parent-orchestrates-in-waves is the safest topology under the new caps and works identically on v2.1.217 and v2.1.219.",
+  "If you need more than ~40 concurrent, you've outgrown one session — move to Dynamic Workflows and its 16/1,000 workflow caps."
+]} />
+
+## Next
+
+- [Subagents & Parallel Agents](/docs/claude-code/subagents) — the primitive these caps constrain
+- [Dynamic Workflows & ultracode](/docs/claude-code/dynamic-workflows) — the fleet-scale escape hatch
+- [Choosing a Model](/docs/models/choosing-a-model) — pick a `CLAUDE_CODE_SUBAGENT_MODEL` that matches the work
+- [MCP Token Cost](/docs/claude-code/mcp-token-cost) — why tool-heavy fleets still burn tokens even at cap
+
+## Sources & further reading
+
+- [Claude Code changelog](https://code.claude.com/docs/en/changelog) — authoritative version history for `v2.1.217` (2026-07-21) and `v2.1.219` (2026-07-24).
+- [Create custom subagents](https://code.claude.com/docs/en/sub-agents) — official docs for the primitive being capped.
+- [Week 27 · June 29 – July 3, 2026](https://code.claude.com/docs/en/whats-new/2026-w27) — the "background by default" change that interacts with the concurrency cap.
+- [`anthropics/claude-code#68110`](https://github.com/anthropics/claude-code/issues/68110) — the exponential fan-out incident (48+ agents, ~1.5M tokens) that motivated the caps.
+- [`anthropics/claude-code#78406`](https://github.com/anthropics/claude-code/issues/78406) — the community-filed doc gap for the per-session cap env var.
+- [Claude Code v2.1.217 major updates — sub-agent limits and behavior](https://dev.classmethod.jp/en/articles/20260722-cc-updates-v2-1-217/) — third-party writeup with the exact env-var names, published the day after `v2.1.217`.
+- [Claude Code Put Guardrails on Its Own Agent Fleets](https://www.digitalapplied.com/blog/claude-code-subagent-depth-limits-budget-caps-2026) — practitioner analysis of the workflow 16/1,000 hard caps and the ultracode exemption.
