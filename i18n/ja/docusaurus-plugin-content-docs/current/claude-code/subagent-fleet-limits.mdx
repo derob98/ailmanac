@@ -1,0 +1,165 @@
+---
+sidebar_position: 13.3
+title: "サブエージェント・フリート制限:同時実行上限とネスト深度"
+description: "2026年7月21日、Claude Codeは同時サブエージェント数を20に制限し、ネスト生成を停止しました。3日後、深度3でネストが復活。4つの環境変数、遭遇するエラー、なぜ制限が存在するのか、そして制限内で生き残るフリートの設計方法を解説します。"
+keywords: [Claude Code, subagents, nested subagents, spawn depth, concurrency cap, CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH, fleet limits, v2.1.217, v2.1.219, ultracode]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-07-30" source="https://code.claude.com/docs/en/changelog">
+サブエージェント制限のバージョン番号、デフォルト値、環境変数名はリリースごとに変わります。フリート設定を出荷する前に、Claude Code のチェンジログで現在の値を確認してください。
+</VerifyNote>
+
+**2026年7月21日**、Claude Codeは `v2.1.217` をリリースし、サブエージェント・フリートに初の厳格な上限を設けました。**1セッションあたり同時20サブエージェント**、そして**ネスト生成は完全に無効化**。3日後の `v2.1.219`(7月24日)で、**デフォルト深度3** でネストが復活しました。きっかけは公開かつ具体的で、6月13日の事件——単一のリサーチタスクが**48以上の同時バックグラウンドエージェントを生成し、冗長な作業に約150万トークンを消費**した後、ユーザーが停止できないという事案でした(`anthropics/claude-code#68110`)。
+
+1ターンで少数を超えるエージェントを編成する場合、これらの上限は今や単一メッセージで可能なこと——そして `.mcp.json`、`.env`、オーケストレーション・プロンプトの書き方——を形作ります。
+
+<Callout type="objectives" items={[
+  "フリートを支配する4つの環境変数:同時実行数、ネスト深度、セッション累計、サブエージェント・モデル",
+  "上限に達したときClaudeが実際に見るエラー、そしてなぜランタイムが再試行しないよう指示するのか",
+  "なぜネストが72時間停止されたのか、復活したデフォルト(深度3)がファンアウトにとって実際に何を意味するか",
+  "ultracodeが同時実行上限を免除するのはいつか、ワークフローのハード上限がすべてを上書きするのはいつか",
+  "どんな規模でも上限内に留まる「親がオーケストレーションする」パターン"
+]} />
+
+## 上限を形作った事件
+
+Issue `#68110`(2026年6月13日提出)は率直な原点物語です。ユーザーが単一のリサーチタスクを general-purpose サブエージェントに委任しました。そのサブエージェントは——general-purpose サブエージェントは `Agent` ツールを継承するため——自身の子を生成しました。その子がさらに生成。数ターン以内に**48以上のバックグラウンド・エージェント**が実行され、4つの独立したエージェントが同じサードパーティAPI(Wise)を独自に調査しており、ユーザーは再生成より速く停止できませんでした。介入前の合計支出:**約150万トークン**。
+
+対応は5週間後、2つの出荷イベントで到着しました:
+
+| 日付 | バージョン | 変更 |
+|---|---|---|
+| 2026-07-21 | `v2.1.217` | 同時実行上限 = 20;ネスト生成**無効化**(深度 = 1) |
+| 2026-07-24 | `v2.1.219` | ネスト**復活**、デフォルト深度 = 3 |
+
+ネストがオフの3日間は興味深い部分です——Anthropicは明らかに「ファンアウトなし」と「オーケストレーションなし」を天秤にかけ、中間の道を選びました。
+
+## 4つの環境変数
+
+すべてのつまみは `CLAUDE_CODE_` 環境変数です——シェル、`.env`、あるいはプロジェクトごとの `settings.json` で設定します。
+
+| 環境変数 | デフォルト | 役割 |
+|---|---|---|
+| `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` | `20` | 1セッション内で同じ瞬間に実行されるサブエージェントの厳格な上限。達すると生成は `"Concurrent subagent limit reached"` で失敗します。 |
+| `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` | `3` | サブエージェントが自身の子を生成できる深さ。`1` = ネスト完全無効(親のみがオーケストレーション)。 |
+| `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` | `200` | セッション全体の累計上限——同時実行が問題なくてもこれを超える生成は失敗します。 |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | (継承) | すべてのサブエージェントを特定モデルに強制。バルク工程を Haiku/Sonnet に振り、Opus 予算を親に残します。 |
+
+もう2つの数字はランタイム内部にあり、環境変数ではありません:
+
+- [Dynamic Workflows と ultracode](/docs/claude-code/dynamic-workflows) のための**ワークフロー・ハード上限**:ワークフロー実行あたり**同時16**および**合計1,000**エージェント。これらはセッション環境に関わらず、ワークフローが起動するものすべてを制限します。
+- **ultracode がアクティブなセッション**は `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` から**免除**されます。理由:ultracode のワークフロー層がすでに独自の 16/1,000 のペアを強制しているため、セッション上限が二重予約になります。
+
+## 実際に見るエラー
+
+メインエージェントが21番目の同時サブエージェント(またはデフォルト深度で4番目のネスト)を生成しようとすると、ツール呼び出しは以下を返します:
+
+<PromptCard title="ツール結果 — 再試行しないこと">{`Concurrent subagent limit reached`}</PromptCard>
+
+ランタイムはモデルに**上限に対してループしない**よう指示します——より少ないエージェントで進めるか、直列化すべきです。これが重要な理由は2つ:
+
+1. 再試行こそが `#68110` を破滅的にしたまさにその振る舞いです。バックオフは設計上のものです。
+2. 同じエラーがフックやログで数回以上連続して見える場合、それは制限の問題ではなくプロンプトの問題です——親がファンアウト好きで、バッチ処理を指示する必要があります。
+
+## フリートの設定方法
+
+<Steps items={[
+  { title: "同時実行の予算を選ぶ", body: "デフォルトの20から始めます。実際に独立した作業がある場合のみ上げます——例えば60パッケージにまたがるコードベース全体のスイープ。`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=40` をプロジェクトごとに設定し、グローバルには設定しないこと。" },
+  { title: "ネストをオンにするか決める", body: "深度3(デフォルト)は親 → オーケストレーター → ワーカーの連鎖を可能にします。深度1は厳格な2階層トポロジーを強制します:メインセッションと1層のワーカー。深度1は安全、深度3はより表現力豊か。" },
+  { title: "バルク工程を小さいモデルに固定する", body: "サブエージェントが機械的な作業をするセッションでは `CLAUDE_CODE_SUBAGENT_MODEL=claude-haiku-4-5` を設定。親は `/model` で選んだモデルで走り続け、子だけがダウングレードします。" },
+  { title: "セッション累計を監視する", body: "`CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION=200` は寛大ですが実在します。長い一日の `/agents` 呼び出しは使い切ることができます。リセットするにはセッションを再起動。" },
+  { title: "それ以上大きいものは ultracode へ", body: "同時実行上限を約40以上に上げたいと自分で気づいた瞬間、1セッションを超えています。動的ワークフローに委任してください——ワークフローの 16/1,000 上限を受けますが、独自のスケジューラも得られます。" }
+]} />
+
+## 上限内で生き残る「親オーケストレーション」パターン
+
+新しいデフォルトの下で最も安全なフリート・トポロジーは、**親からの幅優先**です——メインセッションがワーカーを生成し、ワーカーはワーカーを生成しません。これは深度3が利用可能でも深度1のセマンティクスを使い、同時実行数の計算を自明にします:任意の瞬間にワーカーは N 以下であり、未知サイズのツリーにはなりません。
+
+60モジュールのコードベース・スイープの具体的な形:
+
+<PromptCard title="バッチ・オーケストレーション・スイープ — メインセッション・プロンプト">{`Sweep the codebase for uses of the deprecated \`legacyClient()\` helper.
+
+Batch the 60 packages into 3 waves of 20. For each wave:
+  1. Spawn 20 read-only \`Explore\` subagents in parallel, one per package.
+  2. Wait for all 20 to return before spawning the next wave.
+  3. Do NOT let a subagent spawn its own children — pass every package
+     in the delegation prompt directly.
+
+Aggregate into a single \`REPORT.md\` after wave 3. Report the total
+count and any packages that failed with the exact error string.`}</PromptCard>
+
+これが成立する理由:
+
+- 20の同時ワーカーは各ウェーブでデフォルト上限にちょうど1回到達します——失敗する生成はゼロ。
+- ネストは未使用のため `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` は関係ありません——設定は `v2.1.217`(ネスト・オフ)と `v2.1.219`(ネスト・オン)の両方で動作します。
+- 累計生成数:60、セッションごとのデフォルト200を大きく下回ります。
+
+## パターンを破るとき(ネストを使うとき)
+
+深度3が存在するのには理由があります——本当に階層的な問題もあります。ネストが役立つ2つの形:
+
+- **深いリサーチツリー。**それ自体が5つのソースを比較する必要があるトップレベルの `research` サブエージェント——それぞれが自明ではない——は、5つの兄弟 `researcher` の子を生成できます。合計深度 = 2。
+- **シャード単位の finalize を伴う Map/Reduce。**親が N 個のシャード所有者を生成;各シャード所有者は自分のシャードが終わったら1つの finalizer を生成。合計深度 = 2ですが、親が各 finalize を追跡するより構造的にきれいです。
+
+どちらかの形があなたの作業を表しているなら、デフォルトのままにしてください。トポロジーがフラットなら、明示的に `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` を設定してください——ドキュメントと安全網です。
+
+## `/agents` とバックグラウンド・サブエージェントとの相互作用
+
+初めて上限に達したときに人がつまずく2つの微妙な点:
+
+- **バックグラウンド・サブエージェントもカウントされる。**第27週(2026年6月29日–7月3日)以来、サブエージェントはデフォルトでバックグラウンド実行されます。バックグラウンド・エージェントは、親がそれを待ってブロックされていなくても、実行中は同時実行上限にカウントされます。
+- **フロントマターの `background: true` は上限を免除しない。**サブエージェントをフロントマターでバックグラウンドに固定しても、親が再開するタイミングが変わるだけで——ランタイムがそれをカウントするかどうかは変わりません。
+
+上限エラーが出ていてメインセッションがアイドルに感じるなら、`/agents` を実行(またはステータスラインを確認—— [Statusline](/docs/claude-code/statusline) 参照)して、セッション初期から生き残っているものを探してください。
+
+## Sonnet 5、Opus 5、上限下のコスト
+
+`CLAUDE_CODE_SUBAGENT_MODEL` のデフォルト動作は**継承**——サブエージェントは親のモデルで走ります。20の同時ワーカーを持つ Opus 5 セッションでは、これがすぐに積み上がります。上限が着地した後の推奨される形:
+
+- 親は Opus 5 で、オーケストレーションと最終合成のため。
+- `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5` で、スコープの明確なIO重視のタスクを行うワーカー。
+- 機械的なもの(grep 形の作業、フォーマット・チェック)には Haiku 4.5。
+
+階層のトレードオフについては [モデルの選び方](/docs/models/choosing-a-model)、ツール重視のサブエージェントがモデルに関わらず請求額を膨らませる理由については [MCP トークンコスト](/docs/claude-code/mcp-token-cost) を参照。
+
+<Quiz title="理解度チェック" questions={[
+  { q: "メインセッションから同時に25のサブエージェントを生成します。デフォルト設定で何が起きますか?", options: ["25すべてが実行される — 上限はバックグラウンド・エージェントにのみ適用される", "20が実行され、21番目から25番目は 'Concurrent subagent limit reached' で失敗する", "25すべてがキューされFIFOで順次実行される"], answer: 1, explain: "同時実行上限は生成時のハード失敗であり、キューではありません。20を超える試みはエラー文字列 'Concurrent subagent limit reached' を返し、ランタイムはモデルに再試行しないよう指示します。" },
+  { q: "`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` を設定するとどんなトポロジーになりますか?", options: ["メインセッションのみがサブエージェントを生成できる — サブエージェントは自身の子を生成できない", "サブエージェントは追加で1レベルまでネストできる(main → child → grandchild が可能)", "ネストは無制限だが親あたり1サブエージェントに制限される"], answer: 0, explain: "深度 = 1 はメインセッションのみが生成することを意味します。サブエージェントはタスクを受け取りますが、自身の子は生成できません——v2.1.217 と v2.1.219 の間の3日間、ランタイムがデフォルトで強制したトポロジーです。" },
+  { q: "同時に200のエージェントを必要とするワークフローを実行します。どのルートが動作しますか?", options: ["シェルで `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=200` を設定する", "動的ワークフローに委任する — ワークフロー層は同時実行を16に制限するがキューを管理してくれる", "上記の両方が同じ結果を与える"], answer: 1, explain: "動的ワークフローはセッション環境変数に関わらず独自の 16 同時 / 1,000 合計上限を持ち、そのスケジューラが残りをキューします。セッション環境だけで回避しようとしても、200のセッションごと累計上限に阻まれます。" }
+]} />
+
+<Flashcards title="フリート制限 — 各カードをめくる" cards={[
+  { front: "セッションあたりのデフォルト同時サブエージェント上限", back: "20(v2.1.217+)。`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` で上書き。ultracode セッションは免除。" },
+  { front: "デフォルトのネスト生成深度", back: "3(v2.1.219+)。v2.1.217 と v2.1.219 の間は 1(無効)だった。`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` で上書き。" },
+  { front: "セッションごとの累計サブエージェント上限", back: "デフォルトで 200。`CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` で上書き。カウンターをリセットするにはセッションを再起動。" },
+  { front: "ワークフローのハード上限", back: "ワークフロー実行あたり 16 同時、1,000 合計。セッション環境変数に関わらず動的ワークフローを制限。" },
+  { front: "上限違反時のエラー文言", back: "'Concurrent subagent limit reached' — ランタイムはモデルに再試行しないよう指示。繰り返しの発生は設定問題ではなくプロンプト問題として扱う。" },
+  { front: "コスト整形の環境変数", back: "`CLAUDE_CODE_SUBAGENT_MODEL` — 親を Opus 5 に保ちながら、ワーカーを Sonnet 5 または Haiku 4.5 に固定する。" }
+]} />
+
+<Callout type="takeaways" items={[
+  "デフォルトの同時実行上限は 20;ネスト深度のデフォルトは 3(2026年7月末の72時間は 1 だった)。",
+  "4つのつまみはすべて `CLAUDE_CODE_*` 環境変数 —— 同時実行、生成深度、セッションごと合計、サブエージェント・モデル。",
+  "'Concurrent subagent limit reached' は失敗して停止するシグナルであり、再試行シグナルではない。繰り返し発生するなら親プロンプトがファンアウト好き。",
+  "親がウェーブでオーケストレーションするのが新しい上限下で最も安全なトポロジーで、v2.1.217 と v2.1.219 で同一に動作する。",
+  "約40同時以上が必要なら1セッションを超えている —— 動的ワークフローとその 16/1,000 ワークフロー上限に移行する。"
+]} />
+
+## 次へ
+
+- [サブエージェントと並列エージェント](/docs/claude-code/subagents) — これらの上限が制約するプリミティブ
+- [Dynamic Workflows と ultracode](/docs/claude-code/dynamic-workflows) — フリートスケールの脱出口
+- [モデルの選び方](/docs/models/choosing-a-model) — 作業に合う `CLAUDE_CODE_SUBAGENT_MODEL` を選ぶ
+- [MCP トークンコスト](/docs/claude-code/mcp-token-cost) — ツール重視フリートが上限下でもトークンを燃やす理由
+
+## 情報源と参考文献
+
+- [Claude Code changelog](https://code.claude.com/docs/en/changelog) — `v2.1.217`(2026-07-21)と `v2.1.219`(2026-07-24)の権威あるバージョン履歴。
+- [Create custom subagents](https://code.claude.com/docs/en/sub-agents) — 制限されているプリミティブの公式ドキュメント。
+- [Week 27 · June 29 – July 3, 2026](https://code.claude.com/docs/en/whats-new/2026-w27) — 同時実行上限と相互作用する「デフォルトでバックグラウンド」変更。
+- [`anthropics/claude-code#68110`](https://github.com/anthropics/claude-code/issues/68110) — 上限を動機づけた指数関数的ファンアウト事件(48以上のエージェント、約150万トークン)。
+- [`anthropics/claude-code#78406`](https://github.com/anthropics/claude-code/issues/78406) — セッションごと上限の環境変数に対するコミュニティ提出のドキュメント欠落報告。
+- [Claude Code v2.1.217 major updates — sub-agent limits and behavior](https://dev.classmethod.jp/en/articles/20260722-cc-updates-v2-1-217/) — 正確な環境変数名を持つサードパーティ記事、`v2.1.217` の翌日に公開。
+- [Claude Code Put Guardrails on Its Own Agent Fleets](https://www.digitalapplied.com/blog/claude-code-subagent-depth-limits-budget-caps-2026) — ワークフロー 16/1,000 のハード上限と ultracode 免除に関する実践者の分析。
