@@ -1,0 +1,394 @@
+---
+sidebar_position: 14.5
+title: "Server-Side Fallbacks & Fallback Credit"
+description: "The Opus 5 beta that turns a Fable 5 / Opus 5 refusal into a normal answer inside one API call — plus the credit token that stops you from paying the prompt cache twice on the retry."
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-07-30" source="https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback">
+Beta header names (`server-side-fallback-2026-07-01`, `fallback-credit-2026-07-01`), the `"default"` mode, the 5-minute credit-token TTL, and the ~1-hour sticky-routing window are all in beta and may change before GA. The permitted fallback targets for each model live on `allowed_fallback_models` in the [Models API](https://platform.claude.com/docs/en/api/models/list) and are the authoritative source — re-read them before shipping.
+</VerifyNote>
+
+Before Opus 5, a Claude refusal was **your** problem. The classifier declined, you saw `stop_reason: "refusal"` come back on a happy HTTP 200, and now you owned the retry: pick another model, resend the full history, watch your prompt cache melt because the new model has a different cache namespace, and try to explain to your finance team why the same conversation billed twice.
+
+The Opus 5 launch (24 July 2026) shipped **two related betas** that collapse all of that into one API call:
+
+1. **Server-side fallback** (`server-side-fallback-2026-07-01`) — set `fallbacks: "default"` and the API retries the refused request on a model *Anthropic* picks for the refusal category, in the same round trip. You can also name up to three targets of your own.
+2. **Fallback credit** (`fallback-credit-2026-07-01`) — a one-time credit token attached to every refusal that, when echoed on a retry, reprices the retry as if the conversation had been on the fallback model all along. Cache writes on the new model become cache reads.
+
+The two betas are independent — you can use fallback credit alone if you already have client-side retry logic — but the point of the release is that you should almost never need to. This page walks you through both, from the copy-paste one-liner to the corner cases that bite prod (streaming mid-`tool_use`, sticky routing, `output_config.format` locking out the continuation shape).
+
+<Callout type="objectives" items={["What a refusal actually looks like on the wire (JSON, five stop categories, when tokens are billed)","The three ways to fall back (server-side / SDK middleware / manual raw HTTP) and when each is the right one","The one-liner: fallbacks: 'default' plus the beta header, and what the response shape adds","Explicit list vs default mode, allowed_fallback_models, and why order matters","How fallback credit stops you paying prompt-cache twice — the token, the two retry-body shapes, and what usage.iterations should show","The 3-rung rejection ladder every manual retry has to implement (continuation → unchanged body → forfeit token)","Where it does NOT work: Message Batches, Bedrock/GCP/Foundry gaps, Sonnet 5, streaming refusals mid tool_use, output_config.format + server tools"]} />
+
+`★ Insight ─────────────────────────────────────`
+There are two Anthropic-specific fingerprints worth internalizing here. **First**, a classifier refusal is a **200 with `stop_reason: "refusal"`** — not a `4xx`. If your error handler treats non-2xx as "retry" you will silently ignore refusals; if it treats 200 as "success" you will silently show empty content. Neither is what you want. **Second**, prompt caches are **per-model**, so a naive retry on a different Claude model always pays the cache-write cost from scratch even when the conversation prefix is byte-identical. The credit token is the piece that closes that hole — and the reason `fallback-credit` exists as a separate beta from server-side fallback.
+`─────────────────────────────────────────────────`
+
+## What a refusal actually looks like
+
+A classifier refusal is a normal message response with an empty `content` array and `stop_reason: "refusal"`:
+
+```json
+{
+  "id": "msg_01XFUDYJgAACzvnptvVoYEL",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-fable-5",
+  "content": [],
+  "stop_reason": "refusal",
+  "stop_details": {
+    "type": "refusal",
+    "category": "cyber",
+    "explanation": "This request was declined because it could enable cyber harm."
+  },
+  "usage": {
+    "input_tokens": 412,
+    "output_tokens": 0
+  }
+}
+```
+
+The `stop_details.category` is one of five values. Two are `null` when the refusal doesn't map to a named category (a permanent null, not a placeholder):
+
+| `category`               | What triggered it |
+|---|---|
+| `"cyber"`                | Request could enable cyber harm (malware, exploit dev). Benign cybersecurity work can also trigger it. |
+| `"bio"`                  | Request could enable biological harm. Beneficial life-sciences work can also trigger it. |
+| `"frontier_llm"`         | Request could assist competing-AI-model development, restricted by Anthropic's commercial terms. |
+| `"reasoning_extraction"` | Request asks the model to reproduce its internal reasoning in the response text. Use [adaptive thinking](/docs/api/thinking-and-effort) to get reasoning in a structured form. |
+| `"general_harms"`        | Miscellaneous harm areas; benign work occasionally trips this. |
+
+A refusal that arrives **before any output** is not billed (its tokens show in `usage` but aren't charged); it still counts against your rate limits. A **mid-stream refusal** bills the input and the output that already streamed at normal rates. Either way, treat any partial output as incomplete and discard it — the safety classifier fired on the model's own trajectory.
+
+The `explanation` string is not stable across versions. **Display it, do not parse it.**
+
+## Picking a fallback approach
+
+Three flavors exist. Pick the row that matches you:
+
+| Your situation | Use | Why |
+|---|---|---|
+| Claude API, want the simplest thing | **Server-side fallback** with `fallbacks: "default"` | One request, one response. The API picks the fallback and applies credit for you. |
+| Any platform (Bedrock, Vertex, Foundry), using an Anthropic SDK | **SDK middleware** (`BetaRefusalFallbackMiddleware`) | Configure once on the client. Retries + credit are automatic. This is the only path on Bedrock / Vertex / Foundry today. |
+| Raw HTTP, custom retry logic, or non-Anthropic SDK | **Manual retry** with the `fallback-credit-2026-07-01` header | Full control. You implement the 3-rung ladder yourself. |
+
+Server-side fallback and the SDK middleware apply fallback credit for you. You only need to think about the credit-token dance if you build the retry yourself.
+
+## The one-liner: `fallbacks: "default"`
+
+The whole feature, in one request:
+
+<PromptCard title="Server-side fallback in default mode">
+{`curl https://api.anthropic.com/v1/messages \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: server-side-fallback-2026-07-01" \\
+  -H "content-type: application/json" \\
+  -d '{
+    "model": "claude-fable-5",
+    "max_tokens": 1024,
+    "fallbacks": "default",
+    "messages": [{"role": "user", "content": "Hello, Claude"}]
+  }'`}
+</PromptCard>
+
+If Fable 5 declines and the refusal category has an Anthropic-recommended fallback, the API runs the same request on that model in the same call. You get back one response and the top-level `model` field names whichever model actually answered. If the category has *no* recommended fallback, the refusal stands and you get the refusal back exactly as if `fallbacks` were unset.
+
+**What "default" is really doing**: the API reads the requested model's server-defined routing table and picks a fallback from it based on the refusal category. As Anthropic updates that table (adding a new fallback for a category, promoting Opus 5 to be Fable 5's default target, etc.) you get the new routing for free. That is the pitch: **stop maintaining a fallback-model list that will be wrong in a month**.
+
+## The explicit list, for when you need to pin
+
+If you want to control the routing yourself, pass a list instead of `"default"`. Up to three entries, tried in order:
+
+```python
+response = client.beta.messages.create(
+    model="claude-fable-5",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello, Claude"}],
+    fallbacks=[
+        {"model": "claude-opus-5"},        # try Opus 5 first
+        {"model": "claude-opus-4-8"},      # then Opus 4.8
+    ],
+    betas=["server-side-fallback-2026-07-01"],
+)
+```
+
+The rules that will trip you if you don't read them:
+
+- **Every target must be a permitted fallback for the requested model.** The list of permitted targets is published as `allowed_fallback_models` on each model's entry in the [Models API](https://platform.claude.com/docs/en/api/models/list) when the `server-side-fallback-2026-07-01` beta header is set. (For Claude Fable 5, at the time of writing that list is `claude-opus-4-8` and `claude-opus-5`.)
+- **Entries must be distinct** from each other and from the requested model.
+- **Each entry can override** `max_tokens`, `thinking`, `output_config`, and `speed` for that attempt only. This is how you say "on the fallback, run at lower effort" without touching your main request.
+- **The request must be valid as a direct request to every model named.** If a fallback doesn't support a feature the request uses (e.g. a beta the fallback model doesn't accept), the API rejects the whole request up front, not just the fallback attempt.
+- **Only classifier refusals trigger the fallback.** Rate limits, overloads, and server errors on the requested model surface to you as-is.
+
+The `"default"` mode only works under `server-side-fallback-2026-07-01`. The explicit-list form also works under the older `server-side-fallback-2026-06-01` header.
+
+## What the response contains
+
+The response is a normal message with two additions:
+
+- The top-level `model` field names the model that produced the returned message (requested or fallback).
+- A `fallback` content block marks each point where one model's output gives way to the next: `{"type": "fallback", "from": {"model": ...}, "to": {"model": ...}}`. On a refusal-before-output, this block is the **first** content block; on a mid-stream fallback it appears at the handoff point.
+- `usage.iterations` records every attempt. A model that declined shows as a `message` entry (its tokens reported but not charged); the model that served the turn shows as a `fallback_message` entry.
+
+Example after a refusal before any output, when default routing selects Opus 4.8:
+
+```json
+{
+  "id": "msg_01XFUDYJgAACzvnptvVoYEL",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-8",
+  "content": [
+    { "type": "fallback", "from": { "model": "claude-fable-5" }, "to": { "model": "claude-opus-4-8" } },
+    { "type": "text", "text": "Hi! How can I help you today?" }
+  ],
+  "stop_reason": "end_turn",
+  "stop_details": null,
+  "usage": {
+    "input_tokens": 412,
+    "output_tokens": 264,
+    "iterations": [
+      { "type": "message",          "model": "claude-fable-5",  "input_tokens": 535, "output_tokens": 0   },
+      { "type": "fallback_message", "model": "claude-opus-4-8", "input_tokens": 412, "output_tokens": 264 }
+    ]
+  }
+}
+```
+
+If every model in the chain refuses, the response is the last model's refusal, with a `message` entry for each earlier hop and a `fallback_message` entry for the last one.
+
+## Continuing the conversation
+
+On the next turn, echo the assistant content **as you received it**. After a mid-output fallback, the `content` you got back can include blocks the declining model produced before the handoff. Which to keep and which to drop:
+
+| Block type | On the next turn |
+|---|---|
+| `fallback` | **Keep** it exactly where it appeared. Its position is used to validate the thinking blocks around it. Moving or dropping it → 400. |
+| `text` | Keep. |
+| Any block **after** the final `fallback` block | Keep. |
+| `thinking`, `redacted_thinking`, `connector_text` **before** the final `fallback` | Drop. |
+| Client-side `tool_use` **before** the final `fallback` | Drop. |
+| `server_tool_use` **before** the final `fallback` | Keep when paired with its result. Drop when it has no matching result. |
+
+The mental model: everything that ran on the fallback model stays; the declining model's uncorroborated intermediate work goes away.
+
+## Sticky routing
+
+Once a conversation has fallen back, the API remembers it. Later requests for that conversation that also include a `fallbacks` parameter go **directly** to the fallback model, skipping the requested model entirely. This stops you from paying a refusal-tax on every single follow-up in a session that was always going to refuse again.
+
+Properties worth knowing:
+
+- **Retained for ~1 hour**, scoped to your organization.
+- Stored as a **content hash of the conversation prefix + the model that served it**. The message content itself isn't stored server-side.
+- **Best effort** — your code must still handle the requested model being tried again at any time.
+- A sticky-served turn has **no `fallback` content block** (nothing declined that turn). Identify it by the presence of a `fallback_message` in `usage.iterations`, the absence of a `message` entry for the requested model, and the response `model` field.
+
+On streaming, the routing decision is made before the stream opens, so `message_start` already carries the fallback model's ID.
+
+## Streaming behavior
+
+The retry happens on the **same stream** — nothing you've already received is invalidated.
+
+**Refusal before any output**
+- `message_start` names the fallback model.
+- The `fallback` block is the first content block.
+- Time to first byte includes the declined attempt (because `message_start` waits for the fallback to start).
+
+**Refusal mid-output**
+- The currently open content block closes.
+- A `fallback` block (`content_block_start` + `content_block_stop`, no deltas) marks the boundary.
+- The fallback model continues from the partial output. **Only `text` blocks** from the partial output are passed as context to the fallback model; other block types remain in `content` but are not seen by the fallback.
+- `message_start` already named the requested model, so read the serving model from the `fallback` block's `to.model` and from the `fallback_message` entry in the final `message_delta`'s `usage.iterations`.
+
+**Non-streaming, mid-output refusal**: the response *omits* the declined model's partial output and the fallback answers from scratch. The result looks like a refusal-before-output — `fallback` block first — with the declined attempt's tokens still recorded in `usage.iterations`. This is a real behavior difference from streaming; sizing tests done on the stream can under-predict cost when you flip to non-streaming.
+
+## Fallback credit: the invisible repricing
+
+Prompt caches are per-model. If Fable 5 has cached 400k tokens of your conversation prefix and refuses, a naive retry on Opus 5 has to write all 400k into Opus 5's cache from scratch — and **cache writes cost more than cache reads**. Fallback credit removes that extra cost. The refusal carries a **one-time credit token**, you echo the token on the retry, and the retry is billed as though the conversation had been on the fallback model all along.
+
+Server-side fallback and the SDK middleware apply credit automatically. You only need to think about the token yourself if you're building the retry over raw HTTP.
+
+### The four-step manual flow
+
+<Steps items={[
+  {"title": "Opt in with the beta header", "body": "Send the first request with anthropic-beta: fallback-credit-2026-07-01. (server-side-fallback-2026-07-01 grants the same fields, and the older fallback-credit-2026-06-01 header is still accepted.)"},
+  {"title": "Read two fields from the refusal", "body": "On a refusal, stop_details includes fallback_credit_token (opaque string) and fallback_has_prefill_claim (boolean). Both are null when no credit is available for the refusal."},
+  {"title": "Build the retry with the right body shape", "body": "Start from the refused request body. Set model to the fallback model, add the token as top-level fallback_credit_token. If fallback_has_prefill_claim is not false, append one assistant message that echoes the refused response's content — the retry will continue from where the refused model stopped, and completed server tool calls will not re-execute. If it is false, resend the unchanged body."},
+  {"title": "Send with the same header", "body": "The retry must carry the fallback-credit-2026-07-01 header to redeem the token. Beta headers must match between the two requests (see the strict-match rules below)."}
+]} />
+
+### The rejection ladder every manual retry needs
+
+Most retries redeem on the first attempt. When one doesn't, the API returns a 400 that tells you what to try next. Implement all three rungs:
+
+<Steps items={[
+  {"title": "Continuation shape rejected → resend unchanged body, still with token", "body": "The most common cause is that output_config.format or a tool_choice that forces tool use rules out the continuation shape. Drop the appended assistant message; keep the token."},
+  {"title": "Unchanged body rejected with a message naming fallback_credit_token → drop the token", "body": "The token itself was rejected. Retry without it. The credit is forfeited; the retry itself goes through."},
+  {"title": "If the refused request executed server tools, do NOT silently drop the token — surface the 400", "body": "A tokenless retry re-runs and re-bills those tools. Surface the cost or the error to your caller."}
+]} />
+
+<Callout type="warning" items={["\"redemption temporarily unavailable\" is a transient error, NOT a verdict on your retry shape. Retry the SAME request with the SAME token, within the 5-minute window. Do not step down the ladder."]} />
+
+### Fields that must match exactly (the strict-match rules)
+
+Redemption compares your retry against the refused request. Every field that shapes the prompt must match:
+
+| Rule | Fields |
+|---|---|
+| **Must match exactly** | `system`, `messages`, `tools`, `tool_choice`, `thinking`, `cache_control`, and (when used) `output_config`, `mcp_servers`, `context_management`, `container` |
+| **May change on the retry** | `model`, `max_tokens`, `stop_sequences`, `temperature`, `top_p`, `top_k`, `stream`, `metadata`, `service_tier` |
+
+The continuation shape is the one exception to the `messages` match: it adds exactly one assistant message at the end of `messages`.
+
+**Two subtle traps:**
+
+1. **Beta headers must also match.** A beta header present on one of the two requests but not the other can fail the match even when the bodies are identical. The 400 says `request body ... does not match`, which reads like a body difference but is a header difference. Two families are exempt: `server-side-fallback-*` (drop it on retry along with the `fallbacks` param), and `fallback-credit-*` (keep it on both).
+2. **Do not strip `thinking` or `redacted_thinking` blocks from earlier turns on the retry**, even though a plain tokenless retry usually does. The body must match the refused request; the server handles those blocks itself.
+
+### Checking that the credit actually applied
+
+The refund is visible in the retry's `usage`. Compared with what the same request would report without the token, `cache_creation_input_tokens` is **lower**, and `cache_read_input_tokens` is **higher by the same amount**. A shift of zero means the token was honored but there was nothing to reprice (e.g. the retry model's cache was already warm).
+
+### Token scope and lifetime
+
+- **Redeems only from the organization and workspace that received the refusal** (on Foundry too). On Bedrock and Vertex, which have no workspaces, the token is bound to the platform's caller identity.
+- **Expires 5 minutes after the refusal.** After that, retry without it.
+- **Stateless** — the server stores nothing about it, and there's no endpoint to inspect or revoke it.
+
+## Where it does not work (or works differently)
+
+<Steps items={[
+  {"title": "Message Batches don't play", "body": "The fallbacks parameter isn't supported on the Message Batches API (a batch item that includes it comes back as an errored result). Refusals in Message Batches don't mint credit tokens either, and a token passed on a batch request is accepted but ignored. Fall back to client-side retry after the batch resolves."},
+  {"title": "Bedrock, Vertex, Foundry: fallback credit yes, server-side fallback no", "body": "The fallbacks parameter is not available on Amazon Bedrock, Google Cloud, or Microsoft Foundry — use the SDK middleware instead. Fallback credit itself works on all four platforms."},
+  {"title": "Sonnet 5 has no fallback plumbing", "body": "Only Fable 5 and Opus 5 currently include the classifier that produces classifier refusals. Sonnet 5 refusals arrive as normal end-turn responses without stop_reason: 'refusal', and there is nothing to fall back from."},
+  {"title": "Streaming refusal fired while a tool_use is still open", "body": "That one specific case (streaming, refusal during an unfinished client / server / MCP tool call) is NOT retried server-side. The refusal is returned directly. If fallback-credit-2026-07-01 is set, it still carries a credit token that's redeemable by continuing the partial response. Non-streaming requests are unaffected."},
+  {"title": "output_config.format or forced tool_choice + refusal after server tools ran", "body": "This is the one combo where the credit token cannot be redeemed by either body shape: the continuation shape is ruled out by the format/tool_choice, and the unchanged body is ruled out because completed server tools would run and bill again. Discard the token; retry without it AND surface the cost to your caller."},
+  {"title": "Rate-limited fallback = refusal wins", "body": "If the fallback model is rate limited or overloaded, the fallback attempt is not made and the preceding refusal is returned instead. stop_details.recommended_model names a model to retry directly (hint, not guarantee; null when unavailable). Size fallback rate limits for your expected refusal volume, or fallbacks degrade to refusals under load."}
+]} />
+
+## A pragmatic setup for a production Claude app
+
+<Steps items={[
+  {"title": "Start with fallbacks: 'default' + the beta header on every Fable 5 / Opus 5 request", "body": "Zero-effort protection against the categories Anthropic has recommended fallbacks for. It's a superset of the manual approach because the routing table updates automatically."},
+  {"title": "On Bedrock / Vertex / Foundry, use the SDK middleware", "body": "Set BetaRefusalFallbackMiddleware with your fallback list once on the client. Share one BetaFallbackState across requests of the same conversation so follow-ups stay pinned to the model that accepted. The middleware sends fallback-credit-2026-07-01 on every request it handles."},
+  {"title": "Log the model field, not just stop_reason, on every response", "body": "Sticky routing means turn N+1 in a session might silently run on a different model than turn N. If you attribute cost or quality to your requested model in analytics, you'll be wrong. Read response.model, and if usage.iterations includes a fallback_message entry, log that too."},
+  {"title": "Wire refusal categories into your product-side telemetry", "body": "The stop_details.category field is the closest thing you have to a signal that your users are hitting policy walls. A rising 'cyber' category doesn't necessarily mean malicious users — cybersecurity work legitimately trips it — but it does tell you where to put a UI note or a category-specific fallback."},
+  {"title": "Do NOT let a tokenless retry silently re-run server tools", "body": "The one 400 case that hits this: refusal after server tools already executed + output_config.format or forced tool_choice. The token is unredeemable and a naive retry re-runs (and re-bills) web_search / code_execution / MCP tool calls. Surface the error."}
+]} />
+
+## How this compares to what other providers do
+
+| Provider | Automatic refusal → fallback in one API call? |
+|---|---|
+| **Anthropic Claude Fable 5 / Opus 5** | Yes — `fallbacks: "default"` + credit token. Sticky routing carries follow-ups. |
+| **Anthropic Claude Opus 4.8** | Was the target model of the credit-token-only variant (June 2026 beta). Server-side default mode landed with Opus 5. |
+| **OpenAI GPT-5 / 6** | No first-party server-side fallback. You detect a `refusal` finish_reason yourself and retry on another model client-side; the Responses API doesn't publish an equivalent of `allowed_fallback_models`. |
+| **Google Gemini 3** | Refusals surface as `SAFETY` block reasons; retry is client-side against another model in the family. |
+| **AI gateways (LiteLLM, Portkey, OpenRouter)** | Provider-agnostic router-level fallback exists but is billed independently on each attempt — no per-provider cache-credit equivalent. See [AI gateways](/docs/models/ai-gateways-litellm-openrouter-portkey). |
+
+Cross-model harnesses can still use the credit token: it's model-specific but the *concept* (echo an opaque token on the retry, get repriced) can be feature-detected per provider.
+
+## Common failure modes and what they mean
+
+- **You get an empty `content` array back and your UI shows a blank message.** You forgot to check `stop_reason: "refusal"` before rendering. Detect it and either show a category-specific message or wire in fallbacks.
+- **Your retry keeps 400ing with `request body ... does not match`.** Header mismatch, most likely. Diff every `anthropic-beta` header between the two requests, not just the body.
+- **You use the SDK middleware and see the same model billed twice.** You forgot to share the `BetaFallbackState` across requests of the same conversation. Sticky routing needs the state to pin follow-ups.
+- **Your cost report shows a big jump on Opus 4.8** even though you thought you were on Fable 5. Sticky routing carried follow-ups after a refusal. Log `response.model` and `usage.iterations` to see the split.
+- **You forgot the beta header on the retry** and got a redemption failure. The retry needs `fallback-credit-2026-07-01` to redeem the token.
+- **Batch job silently drops your fallbacks.** Batches ignore `fallbacks` and credit tokens. Do the retry after batch completion.
+
+<Flashcards />
+
+<Quiz questions={[
+  {
+    "q": "A Claude Fable 5 request returns HTTP 200 with `stop_reason: 'refusal'` and an empty content array. How much are you billed?",
+    "options": [
+      "The full input and output tokens shown in usage — a 200 always bills",
+      "Nothing, because the response was empty",
+      "Nothing for a refusal that arrives before any output (tokens are reported but not charged). Rate limits still count.",
+      "Only the output tokens, because the input was already cached"
+    ],
+    "answer": 2,
+    "explain": "A refusal before any output has empty content and its tokens appear in usage but are not billed. Rate-limit counters still increment. A mid-stream refusal is billed for input and the output already streamed."
+  },
+  {
+    "q": "You send `fallbacks: 'default'` with the `server-side-fallback-2026-07-01` header on a Fable 5 request that gets refused with category `reasoning_extraction`. What happens?",
+    "options": [
+      "The API always picks Opus 4.8 as the fallback",
+      "The API applies the requested model's server-defined routing for that refusal category. If the category has a recommended fallback, that model answers in the same call; if it has none, the refusal stands.",
+      "The API returns a 400 because 'default' mode is not compatible with reasoning_extraction",
+      "The API waits for you to specify a fallback list"
+    ],
+    "answer": 1,
+    "explain": "\"default\" mode reads the server-defined routing table, which is per-model and per-category. Categories without a recommended fallback surface the refusal unchanged."
+  },
+  {
+    "q": "Which Claude API fields must match exactly between the refused request and the credit-token retry?",
+    "options": [
+      "Only `messages` — everything else can change",
+      "system, messages, tools, tool_choice, thinking, cache_control (plus output_config, mcp_servers, context_management, container when used). model, max_tokens, sampling params, stream, and metadata may change.",
+      "Every field except model — the whole point is to change the model",
+      "Only the beta headers; the body is free to change"
+    ],
+    "answer": 1,
+    "explain": "Redemption compares the retry against the refused request. Prompt-shaping fields must match; runtime-tuning fields can change. And beta headers must match too — a common cause of 'body does not match' 400s that are actually header differences."
+  },
+  {
+    "q": "You get `stop_details.fallback_has_prefill_claim: true` on a refusal that fired mid-output. What retry body should you build?",
+    "options": [
+      "Refused request body, unchanged, plus the token",
+      "Refused request body, unchanged, plus one appended assistant message whose content echoes the refused response's content (strip trailing whitespace on a final text block, drop client-side tool_use blocks with no matching tool_result)",
+      "A brand new request with only the last user turn — the assistant history is invalid",
+      "Refused request body but with all thinking blocks stripped from earlier turns"
+    ],
+    "answer": 1,
+    "explain": "prefill_claim: true means the fallback can continue from the partial output. You append one assistant turn echoing the refused response's content. Strip trailing whitespace on a final text block; drop tool_use blocks without matching tool_results. Never strip thinking blocks from earlier turns."
+  },
+  {
+    "q": "Your streaming Fable 5 request refuses while a `tool_use` block is still open on the stream. What does the API do?",
+    "options": [
+      "Retries on the fallback model as usual",
+      "Waits for the tool to complete, then retries",
+      "Returns the refusal directly without server-side retry — but if fallback-credit-2026-07-01 is set, the refusal still carries a credit token redeemable by continuing the partial response",
+      "Returns a 500 error"
+    ],
+    "answer": 2,
+    "explain": "The one case that isn't retried server-side: a streaming decline while any tool_use block (client, server, or MCP) is still open. Non-streaming requests clear partial work and retry; on streaming you handle the retry yourself using the credit token."
+  },
+  {
+    "q": "Your billing shows Opus 4.8 charges on turns you thought were going to Fable 5, days after a single refused turn. What is going on?",
+    "options": [
+      "A billing bug — file a support ticket",
+      "Sticky routing kicked in: after a refusal, later requests carrying `fallbacks` in the same conversation are routed directly to the model that served (~1 hour, best-effort, org-scoped). Read response.model / usage.iterations to see it in your logs.",
+      "The fallback list is permanent for the API key",
+      "Fable 5 has been silently deprecated"
+    ],
+    "answer": 1,
+    "explain": "Sticky routing avoids paying refusal tax on every follow-up in a session that would always refuse. It's retained ~1 hour, scoped to your org, and best-effort. If you don't log response.model your dashboards will misattribute."
+  },
+  {
+    "q": "You've built a strong client-side retry, so you'd rather NOT use server-side fallback. Can you still get the cache-credit savings?",
+    "options": [
+      "No — the credit token only works with fallbacks: 'default'",
+      "Yes — send anthropic-beta: fallback-credit-2026-07-01 on the initial request, read stop_details.fallback_credit_token off the refusal, and pass it as the top-level fallback_credit_token parameter on your retry",
+      "Yes — but only on Bedrock and Vertex",
+      "Only if you subscribe to the enterprise tier"
+    ],
+    "answer": 1,
+    "explain": "fallback-credit is a separate beta from server-side-fallback for exactly this reason. Opt in with the header on the initial request, echo the token on the retry, and the retry is repriced as if the conversation had always been on the fallback model."
+  }
+]} />
+
+## Sources & further reading
+
+- [Refusals and fallback — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback) (definitive reference for `fallbacks`, `"default"` mode, sticky routing, and streaming behavior; includes full 8-SDK code samples)
+- [Fallback credit — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/fallback-credit) (credit-token flow, the two body shapes, the rejection ladder, strict-match rules, 5-minute TTL)
+- [What's new in Claude Opus 5](https://platform.claude.com/docs/en/about-claude/models/whats-new-opus-5) (the July 24 2026 launch that shipped `"default"` mode and thinking-on-by-default)
+- [Claude Platform release notes](https://platform.claude.com/docs/en/release-notes/overview) (release history of the `server-side-fallback-*` and `fallback-credit-*` beta headers)
+- [Prompt caching — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) (why cache writes cost more than reads, and why per-model cache namespaces make the credit token necessary)
+- [Stop reasons and fallback — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons) (the full list of `stop_reason` values, of which `"refusal"` is one)
+- [Fallback and billing cookbook](https://platform.claude.com/cookbook/fable-5-fallback-billing-guide) (worked end-to-end example including cost accounting)
+- [Models API — `allowed_fallback_models`](https://platform.claude.com/docs/en/api/models/list) (canonical source of permitted fallback targets per model; set the beta header to see the field)
+- Related on this site: [Safety, refusals & fallbacks](/docs/api/refusals-and-safety), [Prompt caching](/docs/api/prompt-caching), [Errors and rate limits](/docs/api/errors-and-rate-limits), [AI gateways: LiteLLM, OpenRouter, Portkey](/docs/models/ai-gateways-litellm-openrouter-portkey)
