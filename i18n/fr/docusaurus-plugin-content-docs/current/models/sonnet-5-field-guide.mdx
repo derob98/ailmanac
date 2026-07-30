@@ -1,0 +1,287 @@
+---
+sidebar_position: 1.6
+title: "Claude Sonnet 5 : le guide de terrain"
+description: "Sonnet 5 est le nouveau modèle par défaut de Claude Code et le successeur direct de Sonnet 4.6 — mais trois contraintes API produiront des 400 lors de la migration et un nouveau tokenizer produit environ 30 % de tokens en plus pour le même texte. Le calcul de prix, la re-cartographie de l'effort (Sonnet 5 medium ≈ Sonnet 4.6 high), et les changements de prompt qui piègent les équipes."
+keywords: [Claude Sonnet 5, claude-sonnet-5, réflexion adaptative, tokenizer Sonnet 5, prix Sonnet 5, effort xhigh, Priority Tier, paramètres d'échantillonnage 400, extended thinking supprimé, modèle par défaut Claude Code, garde-fous cybersécurité]
+---
+
+<LevelBadge level="intermediate" />
+
+Le 30 juin 2026, Anthropic a livré **Claude Sonnet 5** (`claude-sonnet-5`) et, en toute discrétion, en a fait le **modèle par défaut de Claude Code**. Sur le papier, c'est un remplacement direct pour Sonnet 4.6 au même prix affiché. En pratique, trois contraintes API feront que les migrations naïves retourneront `400 Bad Request`, un nouveau tokenizer produit environ **30 % de tokens en plus pour le même texte** (ce qui change à la fois votre budget contexte et votre facture par requête), et l'échelle d'effort a suffisamment changé pour que "garder tout pareil" ne soit pas pareil. Si vous étiez sur Sonnet 4.6 à `high`, faire tourner Sonnet 5 à `high` est plus proche de Sonnet 4.6 à `max`.
+
+Cette page est le guide de terrain pratique : ce qui a changé, ce qui casse, la checklist exacte de migration, le calcul de prix sur le changement de tokenizer, et les patterns de prompting que la plupart des équipes retunent en premier.
+
+<Callout type="objectives" items={[
+  "Comprendre ce qu'est réellement Sonnet 5 — contexte 1M par défaut, réflexion adaptative activée par défaut, premier Sonnet avec de vrais garde-fous cybersécurité en temps réel",
+  "Connaître les trois contraintes API qui produiront un 400 sur votre code existant et la correction en une ligne pour chacune",
+  "Modéliser le calcul de prix du nouveau tokenizer : même $/token mais ~30 % de tokens en plus = une facture par requête différente",
+  "Recalibrer les niveaux d'effort : Sonnet 5 medium ≈ Sonnet 4.6 high, et Sonnet 5 high ≈ Sonnet 4.6 max",
+  "Ajuster les patterns de prompting qui bougent le plus : verbosité, déclenchement d'utilisation d'outils, rappel en revue de code, et défauts de design",
+]} />
+
+<VerifyNote lastVerified="2026-07-23" source="https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5">
+ID du modèle, fenêtre de contexte, cap de sortie, prix, comportement du tokenizer et contraintes API vérifiés contre la page officielle "What's new in Claude Sonnet 5" d'Anthropic et les notes de version de la plateforme le 23 juillet 2026. `claude-sonnet-5` livré le 30 juin 2026. Prix introductoire 2 $ in / 10 $ out par MTok jusqu'au 31 août 2026 ; prix standard 3 $ in / 15 $ out par MTok s'applique après. Contexte 1M tokens par défaut (pas de variante plus petite), sortie max 128k, réflexion adaptative toujours activée sauf désactivation explicite. Priority Tier **non** disponible. Vérifiez la table [Modèles actuels et prix](/docs/whats-new/models-and-pricing) avant d'épingler un modèle.
+</VerifyNote>
+
+## La version en un paragraphe
+
+Sonnet 5 est le niveau Sonnet équilibré "à démarrer ici", positionné au-dessus de Sonnet 4.6 au même prix affiché et maintenant le défaut Claude Code. Il supporte la fenêtre de contexte 1M tokens par défaut (il n'y a pas de variante à contexte plus petit), une sortie max de 128k, et la réflexion adaptative activée par défaut. Trois contrats API cassent à la migration : l'extended thinking manuel (`thinking: {type: "enabled", budget_tokens: N}`) est supprimé et retourne un 400, les paramètres d'échantillonnage non-défaut (`temperature`, `top_p`, `top_k`) retournent un 400, et le tokenizer a changé — le même texte d'entrée produit environ 30 % de tokens en plus qu'avec Sonnet 4.6. Priority Tier n'est pas disponible sur Sonnet 5. Voilà toute la forme de la sortie.
+
+## Pourquoi "drop-in" a besoin d'un astérisque
+
+Les docs d'Anthropic décrivent Sonnet 5 comme un "remplacement drop-in pour Claude Sonnet 4.6" — et pour le contenu des prompts, c'est vrai. Mais la surface API a suffisamment changé pour que "changer la chaîne du modèle et déployer" produise des erreurs sur des requêtes qui tournaient bien hier. Il y a quatre choses qui vont vous mordre, dans l'ordre de fréquence à laquelle on les voit casser des intégrations :
+
+- **`temperature`, `top_p` ou `top_k` réglés sur des valeurs non par défaut retournent maintenant `400`.** Pas ignorés silencieusement. Pas clippés. Une erreur dure. C'est nouveau pour les modèles de classe Sonnet ; Opus 4.7 a introduit la même contrainte. Si votre wrapper SDK envoie toujours `temperature: 0.7`, il va maintenant toujours échouer.
+- **L'extended thinking manuel est supprimé.** `thinking: {type: "enabled", budget_tokens: N}` a été déprécié sur 4.6 et retourne `400` sur Sonnet 5. Utilisez la réflexion adaptative avec le [paramètre effort](/docs/api/thinking-and-effort) à la place.
+- **La réflexion adaptative est activée par défaut.** Les requêtes sans champ `thinking` sur Sonnet 4.6 tournaient sans réflexion ; sur Sonnet 5, elles tournent avec réflexion adaptative. `max_tokens` est un cap dur sur la sortie totale — réflexion plus texte de réponse — donc une limite dimensionnée pour "juste la réponse" sur Sonnet 4.6 peut tronquer la réponse sur Sonnet 5.
+- **Le nouveau tokenizer produit environ 30 % de tokens en plus pour le même texte.** Pas un changement API — les formes de requête et de réponse sont identiques — mais tout ce que vous mesurez ou budgétisez en tokens mesure maintenant plus haut.
+
+## Les contraintes API qui vont vous produire un 400
+
+<Steps items={[
+  {title: "Les paramètres d'échantillonnage non par défaut retournent 400", body: "Supprimez tout temperature, top_p ou top_k qui n'est pas le défaut de l'API. Si votre app a besoin de variété stylistique, utilisez des instructions dans le prompt système à la place de temperature (c'est maintenant le seul levier). Si vous avez besoin de sorties de design diverses, demandez au modèle de proposer N directions distinctes et d'en choisir une — cela vous donne de la variété entre exécutions même avec un échantillonnage fixe."},
+  {title: "L'extended thinking manuel retourne 400", body: "Supprimez tout thinking: {type: \"enabled\", budget_tokens: N} dans votre constructeur de requête. Réglez effort à la place (low / medium / high / xhigh / max) et laissez la réflexion adaptative décider quand réfléchir. Si vous calculiez dynamiquement un budget de réflexion par requête, remplacez cette logique par un sélecteur d'effort — Anthropic recommande explicitement de ne pas essayer de reproduire l'ancien comportement."},
+  {title: "La réflexion adaptative par défaut mange votre budget max_tokens", body: "Sur Sonnet 4.6, un champ thinking omis signifiait pas de réflexion. Sur Sonnet 5, cela signifie réflexion adaptative. Puisque max_tokens est un cap dur sur la sortie totale (blocs de réflexion + texte de réponse), vous pouvez finir avec une réponse principalement de réflexion et une réponse tronquée avec stop_reason: \"max_tokens\". Soit augmentez max_tokens, soit descendez effort à medium, soit passez thinking: {type: \"disabled\"} si vous voulez vraiment pas de réflexion."},
+  {title: "Le prefilling de message assistant est toujours non supporté", body: "C'est hérité de Sonnet 4.6, pas nouveau — mais beaucoup d'équipes migrant de Sonnet 4.5 ou plus ancien le rencontrent pour la première fois quand elles touchent cette surface. Utilisez des sorties structurées, des instructions dans le prompt système, ou output_config.format à la place. Le prefilling retourne une erreur 400."}
+]} />
+
+<PromptCard title="Migration minimale sûre — un diff">
+{`# Before (Sonnet 4.6) — worked
+response = client.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=4096,
+    temperature=0.7,                          # 400 on Sonnet 5
+    thinking={"type": "enabled",
+              "budget_tokens": 8000},         # 400 on Sonnet 5
+    messages=[...],
+)
+
+# After (Sonnet 5) — one-liner replacements
+response = client.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=8192,                          # raise: thinking now shares the budget
+    # temperature removed — use system prompt instead
+    # thinking removed — adaptive is on by default
+    extra_body={"effort": "high"},            # was implicit in budget_tokens
+    messages=[...],
+)`}
+</PromptCard>
+
+## Le changement de tokenizer est une histoire de prix, pas d'API
+
+Le nouveau tokenizer est le changement le plus susceptible de surprendre votre équipe finance. Les requêtes et les réponses ont l'air identiques sur le fil, mais le même texte d'entrée produit environ **30 % de tokens en plus** qu'avec Sonnet 4.6. Le multiplicateur exact dépend du contenu — code, prose anglaise, texte non-anglais et données structurées bougent tous différemment — mais 30 % est le chiffre qu'Anthropic cite.
+
+Trois choses que cela change en même temps :
+
+- **Coût par requête.** Le prix par token est inchangé par rapport à Sonnet 4.6 à 3 $ / 15 $ par MTok standard (et 2 $ / 10 $ jusqu'au 31 août 2026). Mais si le même texte produit 30 % de tokens en plus, le même texte coûte environ 30 % de plus une fois le tarif standard entré en vigueur.
+- **Capacité de contexte en termes de texte.** La fenêtre de contexte est toujours 1M tokens, mais chaque token couvre maintenant moins de texte en moyenne. Le même document prend ~30 % de plus de votre fenêtre.
+- **Risque de troncature `max_tokens`.** Un cap de sortie ajusté pour "à peu près autant de texte" sur Sonnet 4.6 peut tronquer silencieusement une sortie équivalente sur Sonnet 5. Revisitez toute limite dimensionnée près de votre longueur de sortie attendue.
+
+Le calcul de prix, exposé honnêtement :
+
+| Période | Prix affiché | Même texte → coût vs Sonnet 4.6 |
+|---|---|---|
+| Maintenant → 31 août 2026 (introductoire) | 2 $ in / 10 $ out | Environ **13 % moins cher** (30 % de tokens en plus × 2 $ vs Sonnet 4.6 à 3 $) |
+| À partir du 1er sept. 2026 (standard) | 3 $ in / 15 $ out | Environ **30 % plus cher** pour un texte équivalent |
+
+Si vous fixez le prix d'une app sur les tokens introductoires et n'avez pas modélisé le basculement du 1er septembre, vous allez le remarquer.
+
+<PromptCard title="Recomptez vos prompts sous le nouveau tokenizer">
+{`# Recount before you migrate — don't trust old numbers
+count = client.messages.count_tokens(
+    model="claude-sonnet-5",     # count under the NEW tokenizer
+    messages=[{"role": "user", "content": your_prompt}],
+    system=your_system,
+)
+print(count.input_tokens)        # roughly 30% higher than on claude-sonnet-4-6`}
+</PromptCard>
+
+## L'échelle d'effort a changé — recalibrez avant de comparer
+
+Le [paramètre effort](/docs/api/effort-tuning) (`low` / `medium` / `high` / `xhigh` / `max`) a toujours les mêmes cinq valeurs, mais Anthropic donne une cartographie cross-modèle explicite lors de la migration que la plupart des équipes ratent à la première lecture :
+
+- **Sonnet 5 à `medium` ≈ Sonnet 4.6 à `high`.**
+- **Sonnet 5 à `high` ≈ Sonnet 4.6 à `max`.**
+- **`xhigh`** est recommandé pour les tâches de codage et agentiques les plus dures.
+- **`max`** supprime entièrement les contraintes de dépense de tokens.
+
+Deux implications :
+
+- Si vous faisiez tourner Sonnet 4.6 à `high` et changez le modèle sans changer l'effort, vous tournez maintenant avec plus de réflexion, plus de tokens, et probablement de meilleures sorties — mais une facture plus grosse. Envisagez de descendre à `medium`.
+- Si vous faisiez tourner Sonnet 4.6 à `max` et changez pour Sonnet 5 à `max`, vous payez peut-être pour de la marge dont vous n'avez pas besoin. Essayez `xhigh` d'abord.
+
+Anthropic prévient aussi que Sonnet 5 respecte l'effort **strictement**, surtout aux niveaux bas. `low` et `medium` limitent le travail à ce qui a été demandé ; ils ne "vont pas au-delà". C'est bon pour la latence et le coût, mais sur des tâches modérément complexes à `low` il y a un vrai risque de sous-réflexion. La solution recommandée est d'augmenter l'effort plutôt que de contourner par le prompt.
+
+## Sonnet 5 est maintenant le défaut de Claude Code — ce qui change
+
+À partir de Claude Code v2.1.197 (30 juin 2026), `claude-sonnet-5` est le modèle par défaut. Si vous ne réglez rien, vos sessions tournent sur Sonnet 5. Conséquences pratiques :
+
+- **Vous obtenez le contexte 1M, mais vos réglages `max_tokens` et effort sont hérités.** Les défauts de Claude Code sont ajustés pour le nouveau modèle ; les configs CLAUDE.md personnalisées qui épinglaient `max_tokens` ou réglaient un override d'effort devraient être re-vérifiées.
+- **Comportement par défaut plus rapide, plus agentique.** Sonnet 5 est plus agentique que Sonnet 4.6 dès la sortie de la boîte — il recourt aux outils et fait tourner des boucles d'auto-vérification plus volontiers. Si vous étiez habitué à ce que Claude Code soit conservateur sur l'exécution de commandes, attendez-vous à plus d'initiative.
+- **Mises à jour de progression régulières face à l'utilisateur.** Sonnet 5 fournit déjà des mises à jour intermédiaires de meilleure qualité sur les traces longues. Un échafaudage de prompt comme "après tous les 3 appels d'outils, résume la progression" peut généralement être supprimé.
+- **Sonnet 4.6 est maintenant un modèle legacy.** Toujours disponible (épinglez `claude-sonnet-4-6` si vous avez une raison), mais plus la rampe d'accès.
+
+## Les quatre patterns de prompting que la plupart des équipes retunent
+
+### 1. La verbosité se calibre à la complexité de la tâche
+
+Sonnet 5 choisit la longueur de réponse en fonction de la complexité de la tâche plutôt que de tomber sur une verbosité fixe par défaut. Les recherches simples reçoivent des réponses plus courtes ; l'analyse ouverte reçoit des plus longues. Si votre produit veut un style cohérent, ajustez le prompt — le snippet d'Anthropic marche :
+
+<PromptCard title="Domptez la verbosité quand vous avez besoin d'une voix fixe">
+{`Provide concise, focused responses. Skip non-essential context, and keep examples minimal.`}
+</PromptCard>
+
+Les exemples positifs ("voici comment formuler cela de façon concise") marchent mieux que les négatifs ("ne sur-explique pas").
+
+### 2. Le déclenchement d'outils est plus agentique — et peut être réglé
+
+Sonnet 5 recourt aux outils plus volontiers que 4.6. Deux leviers :
+
+- **Effort.** `high` ou `xhigh` montrent substantiellement plus d'usage d'outils dans les charges de travail de recherche agentique et de codage. `low` et `medium` limitent étroitement le travail.
+- **Thinking off.** Avec `thinking: {type: "disabled"}`, le modèle est *moins* susceptible de recourir aux outils. Si vous désactivez la réflexion mais dépendez toujours des appels d'outils, ajoutez un rappel explicite dans le prompt système.
+
+### 3. Les harnais de revue de code peuvent voir le rappel chuter — c'est le modèle qui est plus littéral
+
+Si votre prompt de revue dit "ne rapporte que les problèmes de haute sévérité" ou "ne fais pas de nitpick", Sonnet 5 peut le suivre fidèlement — enquêtant tout aussi minutieusement, trouvant les mêmes bugs, puis ne rapportant pas les découvertes qu'il juge sous votre barre déclarée. La précision augmente généralement, le rappel peut sembler baisser. La solution recommandée d'Anthropic sépare l'étape de découverte de l'étape de classement :
+
+<PromptCard title="Prompt de revue de code orienté rappel pour Sonnet 5">
+{`Report every issue you find, including ones you are uncertain about or consider low-severity.
+Do not filter for importance or confidence at this stage - a separate verification step will do that.
+Your goal here is coverage: it is better to surface a finding that later gets filtered out than to silently drop a real bug.
+For each finding, include your confidence level and an estimated severity so a downstream filter can rank them.`}
+</PromptCard>
+
+Vous n'avez pas besoin de construire réellement la deuxième étape pour que le prompt aide — déplacer le filtrage de confiance hors de l'étape de découverte est ce qui change le comportement.
+
+### 4. Les défauts de design s'installent en un "style maison" — écrasez-le explicitement
+
+Sur les briefings frontend et design ouverts, Sonnet 5 tend vers un style visuel par défaut cohérent. Cela se lit bien pour certains produits, mal pour les dashboards, dev tools, fintech, santé ou apps d'entreprise. Le pushback générique ("rends-le moins générique") tend à déplacer le modèle vers un *autre* style fixe plutôt que de produire de la variété. Deux patterns qui marchent :
+
+- **Spécifiez une alternative concrète** — codes hex, noms de polices, règles de mise en page. Sonnet 5 suit les specs explicites précisément.
+- **Demandez au modèle de proposer N options avant de construire.** Puisque `temperature` non par défaut retourne 400, c'est maintenant la façon recommandée de produire des directions de design significativement différentes entre exécutions.
+
+<PromptCard title="Forcez la variété de design sans temperature">
+{`Before building, propose 4 distinct visual directions tailored to this brief
+(each as: bg hex / accent hex / typeface, plus a one-line rationale).
+Ask the user to pick one, then implement only that direction.`}
+</PromptCard>
+
+## Garde-fous cybersécurité : les refus comme HTTP 200
+
+Sonnet 5 est le **premier modèle de classe Sonnet avec des garde-fous cybersécurité en temps réel**. Quand une requête est refusée, elle retourne comme un **HTTP 200 réussi** avec `stop_reason: "refusal"` — pas une erreur. Si vous n'avez pas construit de branche de gestion des refus, votre app traitera la réponse vide comme une réponse vide réussie et la livrera silencieusement à l'utilisateur.
+
+La correction est une branche sur la réponse :
+
+<PromptCard title="Gérez les refus proprement">
+{`resp = client.messages.create(model="claude-sonnet-5", messages=[...])
+if resp.stop_reason == "refusal":
+    # Show a graceful message. Optionally retry on a fallback model
+    # (Opus 4.8 is a common choice). You are NOT billed for a refusal
+    # returned before any output was generated.
+    return handle_refusal(resp)
+# Otherwise process resp.content as normal`}
+</PromptCard>
+
+C'est la même forme que les refus in-band de Fable 5 — si vous gérez déjà ceux-ci, vous êtes couvert. Si c'est nouveau pour vous, voir le [guide de terrain Fable 5](/docs/models/fable-5-mythos-5-flagship) pour le pattern plus complet incluant le paramètre `fallbacks`.
+
+## Priority Tier n'est pas disponible — planifiez autour
+
+Tous les autres modèles Anthropic actuels supportent Priority Tier pour la capacité réservée et la latence prévisible. **Sonnet 5 non.** Si vous avez une charge de travail d'entreprise qui dépend des engagements Priority Tier aujourd'hui, vos options sont :
+
+- Garder la charge sur **Sonnet 4.6** (toujours supporté, toujours sur Priority Tier).
+- Migrer la charge vers **Opus 4.8**, qui est sur Priority Tier et est le modèle contre lequel Sonnet 5 est comparé pour les tâches dures de toute façon.
+- Passer au tier standard sur Sonnet 5 et accepter une capacité non réservée.
+
+Il n'y a pas de contournement par header beta. Si Priority Tier est porteur pour vous, c'est le bloqueur de migration à planifier en premier.
+
+## Sonnet 5 vs Sonnet 4.6 vs Opus 4.8 — le choix
+
+| Choix | Choisissez-le quand |
+|---|---|
+| **Sonnet 5** | Défaut pour tout ce qui est nouveau. Codage, tâches agentiques, contexte 1M, et sensibilité aux prix pointent tous ici. |
+| **Sonnet 4.6** | Vous avez besoin de Priority Tier, vous avez des prompts qui dépendent de paramètres d'échantillonnage non par défaut que vous ne pouvez pas réécrire encore, ou vous êtes en pleine évaluation et voulez une baseline stable. |
+| **Opus 4.8** | Profondeur de raisonnement ou stabilité long-run que Sonnet 5 n'atteint pas, ou vous avez besoin de Priority Tier au niveau le plus haut. Associez avec un override d'effort — `xhigh` sur Opus 4.8 est un point idéal commun. |
+| **Fable 5 / Mythos 5** | Vous avez validé qu'Opus 4.8 ne suffit pas et vous êtes prêt à payer 5× le prix de sortie de Sonnet 5 pour des runs autonomes de plusieurs jours. Voir le [guide de terrain Fable 5](/docs/models/fable-5-mythos-5-flagship). |
+
+## Checklist de migration
+
+<Steps items={[
+  {title: "Recomptez vos prompts sous le nouveau tokenizer", body: "Utilisez l'API de comptage de tokens avec model=\"claude-sonnet-5\" pour chaque prompt dont la longueur compte. Partout où vous comparez à un budget fixe de 1M tokens, supposez ~30 % d'usage en plus. Partout où max_tokens est serré, augmentez-le."},
+  {title: "Supprimez les paramètres d'échantillonnage non par défaut", body: "Grep votre base de code pour temperature, top_p, top_k. Toute valeur non par défaut retourne maintenant 400 sur Sonnet 5. Supprimez ou réglez au défaut."},
+  {title: "Supprimez l'extended thinking manuel, réglez l'effort à la place", body: "Grep pour thinking={\"type\": \"enabled\" et supprimez. Ajoutez un sélecteur d'effort (démarrez à high). Si vous ne voulez pas de réflexion du tout, passez thinking: {type: \"disabled\"} explicitement."},
+  {title: "Ajoutez une branche stop_reason: \"refusal\"", body: "Les garde-fous cybersécurité sont nouveaux au niveau Sonnet. Les refus sont HTTP 200, pas des erreurs — si vous ne branchez pas, vous livrez silencieusement des réponses vides."},
+  {title: "Vérifiez vos engagements Priority Tier", body: "Si une charge dépend de Priority Tier, gardez-la sur Sonnet 4.6 ou migrez vers Opus 4.8 — Sonnet 5 n'offre pas Priority Tier."},
+  {title: "Modélisez le basculement de prix du 1er septembre", body: "Le prix introductoire court jusqu'au 31 août 2026. À partir du 1er septembre, le même texte coûte environ 30 % de plus que le même texte sur Sonnet 4.6. Si vous fixez le prix d'une app sur les tokens, mettez cela dans l'agenda."}
+]} />
+
+## Vérification rapide
+
+<Quiz questions={[
+  {
+    q: "Votre code existant Sonnet 4.6 règle temperature: 0.7 et thinking: {type: \"enabled\", budget_tokens: 8000}. Vous changez le modèle en claude-sonnet-5. Que se passe-t-il ?",
+    options: [
+      "Ça marche — Sonnet 5 est décrit comme un drop-in pour Sonnet 4.6.",
+      "Ça marche mais temperature et thinking sont ignorés silencieusement.",
+      "L'API retourne une erreur 400 : à la fois les paramètres d'échantillonnage non par défaut et l'extended thinking manuel ne sont pas supportés sur Sonnet 5.",
+      "Ça marche, mais la latence et le coût doublent à peu près."
+    ],
+    answer: 2,
+    explain: "Les deux sont des erreurs 400 dures sur Sonnet 5. Les paramètres d'échantillonnage doivent être par défaut (ou omis) et l'extended thinking manuel est supprimé — utilisez la réflexion adaptative avec le paramètre effort à la place."
+  },
+  {
+    q: "Vous avez mesuré un prompt système à 40 000 tokens sur Sonnet 4.6. Approximativement combien de tokens devriez-vous attendre que le même texte compte sur Sonnet 5 ?",
+    options: [
+      "À peu près pareil — les tokenizers sont stables à travers les familles de modèles.",
+      "Environ 52 000 tokens — le nouveau tokenizer de Sonnet 5 produit environ 30 % de tokens en plus pour le même texte.",
+      "Environ 28 000 tokens — Sonnet 5 utilise un tokenizer plus efficace.",
+      "Exactement 40 000 tokens — Anthropic garantit la stabilité du comptage de tokens."
+    ],
+    answer: 1,
+    explain: "Le nouveau tokenizer de Sonnet 5 produit environ 30 % de tokens en plus pour le même texte. Recomptez avec l'API de comptage de tokens avant de migrer."
+  },
+  {
+    q: "Vous avez une charge de travail d'entreprise sur Sonnet 4.6 avec un engagement Priority Tier. Vous voulez migrer vers Sonnet 5. Quel est le bloqueur ?",
+    options: [
+      "La fenêtre de contexte 1M n'est pas disponible sur Sonnet 5.",
+      "Priority Tier n'est pas disponible sur Sonnet 5 — vous devez garder la charge sur Sonnet 4.6 ou passer à Opus 4.8.",
+      "Sonnet 5 nécessite un nouveau header beta avant de pouvoir être épinglé.",
+      "Il n'y a pas de bloqueur — la disponibilité Priority Tier est inchangée."
+    ],
+    answer: 1,
+    explain: "Priority Tier n'est explicitement pas disponible sur Sonnet 5. Sonnet 4.6 (toujours supporté) et Opus 4.8 conservent tous deux Priority Tier."
+  },
+  {
+    q: "Selon la cartographie cross-modèle d'effort d'Anthropic, faire tourner Sonnet 5 à effort=medium est à peu près comparable en intelligence à faire tourner quel réglage Sonnet 4.6 ?",
+    options: [
+      "Sonnet 4.6 à low.",
+      "Sonnet 4.6 à medium.",
+      "Sonnet 4.6 à high.",
+      "Sonnet 4.6 à max."
+    ],
+    answer: 2,
+    explain: "Anthropic cartographie explicitement Sonnet 5 à medium ≈ Sonnet 4.6 à high, et Sonnet 5 à high ≈ Sonnet 4.6 à max. Si vous gardez l'effort constant à la migration, vous payez pour plus de réflexion qu'avant."
+  },
+  {
+    q: "Votre requête Sonnet 5 retourne une réponse HTTP 200 avec content: [] et stop_reason: \"refusal\". Que ne s'est-il PAS passé ?",
+    options: [
+      "Les garde-fous cybersécurité ont refusé la requête en temps réel.",
+      "Vous avez été facturé pour les tokens d'entrée même si aucune sortie n'a été générée.",
+      "La réponse est un message réussi normal sur lequel votre app doit brancher.",
+      "La requête n'a pas compté contre vos limites de taux de la façon dont le ferait une génération normale."
+    ],
+    answer: 1,
+    explain: "Pour un refus retourné avant qu'aucune sortie ne soit générée, vous n'êtes pas facturé. Les tokens d'entrée apparaissent dans l'usage mais ne sont pas facturés. Le refus est un HTTP 200 normal sur lequel votre app doit brancher explicitement — sinon vous livrez silencieusement une réponse vide."
+  }
+]} />
+
+## Sources et lectures complémentaires
+
+- [Nouveautés de Claude Sonnet 5 — docs officielles](https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5)
+- [Prompting Claude Sonnet 5 — docs officielles](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-sonnet-5)
+- [Guide de migration — Sonnet 4.6 → Sonnet 5](https://platform.claude.com/docs/en/about-claude/models/migration-guide)
+- [Notes de version de Claude Platform](https://platform.claude.com/docs/en/release-notes/overview) — voir l'entrée du 30 juin 2026
+- [Référence du paramètre effort](https://platform.claude.com/docs/en/build-with-claude/effort)
+- [Référence de la réflexion adaptative](https://platform.claude.com/docs/en/build-with-claude/thinking-steering-and-cost)
+- [API de comptage de tokens](https://platform.claude.com/docs/en/build-with-claude/token-counting) — utilisez `model="claude-sonnet-5"` pour mesurer sous le nouveau tokenizer
+- [Changelog de Claude Code](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md) — v2.1.197 a fait de Sonnet 5 le défaut
+- Connexes sur AILmanac : [Claude Opus 5 : le guide de terrain](/docs/models/opus-5-field-guide), [Claude Fable 5 et Mythos 5 : le guide de terrain flagship](/docs/models/fable-5-mythos-5-flagship), [Choisir un modèle](/docs/models/choosing-a-model), [Réflexion et effort](/docs/api/thinking-and-effort), [Modèles actuels et prix](/docs/whats-new/models-and-pricing)
