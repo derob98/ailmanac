@@ -1,0 +1,165 @@
+---
+sidebar_position: 13.3
+title: "Limiti delle flotte di subagenti: soglie di concorrenza e profondità di annidamento"
+description: "Il 21 luglio 2026 Claude Code ha imposto un limite di 20 subagenti concorrenti ed eliminato lo spawn annidato. Tre giorni dopo l'annidamento è tornato a profondità 3. Ecco le quattro variabili d'ambiente, l'errore che incontrerai, perché esistono questi limiti e come progettare flotte che ci sopravvivano."
+keywords: [Claude Code, subagents, nested subagents, spawn depth, concurrency cap, CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH, fleet limits, v2.1.217, v2.1.219, ultracode]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-07-30" source="https://code.claude.com/docs/en/changelog">
+I numeri di versione, i valori predefiniti e i nomi delle variabili d'ambiente per i limiti dei subagenti cambiano ad ogni rilascio. Verifica i valori attuali nel changelog di Claude Code prima di mettere in produzione una configurazione di flotta.
+</VerifyNote>
+
+Il **21 luglio 2026** Claude Code ha rilasciato `v2.1.217` e imposto i primi limiti rigidi sulle flotte di subagenti: **20 subagenti concorrenti per sessione**, e **spawn annidato disattivato del tutto**. Tre giorni dopo `v2.1.219` (24 luglio) ha reintrodotto l'annidamento con **profondità predefinita 3**. La causa era pubblica e specifica: un ticket del 13 giugno in cui una singola attività di ricerca aveva generato **48+ agenti in background simultanei bruciando ~1,5M di token** in lavoro ridondante prima che l'utente riuscisse a fermarli (`anthropics/claude-code#68110`).
+
+Se orchestri più di una manciata di agenti per turno, questi limiti ora definiscono cosa può fare un singolo messaggio — e come scrivi il tuo `.mcp.json`, `.env` e i prompt di orchestrazione.
+
+<Callout type="objectives" items={[
+  "Le quattro variabili d'ambiente che governano le flotte: concorrenza, profondità di annidamento, totale per sessione e modello del subagente",
+  "L'errore esatto che Claude vede quando raggiunge il limite, e perché il runtime gli dice di NON riprovare",
+  "Perché l'annidamento è stato eliminato per 72 ore e cosa significa davvero il valore predefinito ripristinato (profondità 3) per il fan-out",
+  "Quando ultracode ti esenta dal tetto di concorrenza, e quando i limiti rigidi dei workflow prevalgono su tutto",
+  "Un pattern con orchestrazione dal parent che resta nei limiti a qualunque scala"
+]} />
+
+## L'incidente che ha plasmato i limiti
+
+Il ticket `#68110` (aperto il 13 giugno 2026) è la storia d'origine onesta. Un utente ha delegato una singola attività di ricerca a un subagente general-purpose. Quel subagente — poiché i subagenti general-purpose ereditano il tool `Agent` — ha generato i propri figli. Quei figli ne hanno generati altri. In pochi turni, **48+ agenti in background** erano attivi, con quattro agenti separati che ricercavano indipendentemente la stessa API di terze parti (Wise), e l'utente non riusciva a ucciderli più in fretta di quanto rinascessero. Spesa totale prima dell'intervento: **~1,5M di token**.
+
+La risposta è arrivata cinque settimane dopo in due eventi di rilascio:
+
+| Data | Versione | Cambiamento |
+|---|---|---|
+| 2026-07-21 | `v2.1.217` | Limite concorrenti = 20; spawn annidato **disattivato** (profondità = 1) |
+| 2026-07-24 | `v2.1.219` | Annidamento **reintrodotto** con profondità predefinita = 3 |
+
+La finestra di tre giorni con l'annidamento spento è la parte interessante — chiaramente Anthropic ha pesato "niente fan-out" contro "niente orchestrazione" e ha scelto una via di mezzo.
+
+## Le quattro variabili d'ambiente
+
+Ogni manopola è una variabile d'ambiente `CLAUDE_CODE_` — impostale nella shell, in `.env`, o per progetto tramite `settings.json`.
+
+| Variabile | Predefinito | Cosa fa |
+|---|---|---|
+| `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` | `20` | Tetto rigido sui subagenti attivi nello stesso istante in una sessione. Superarlo fa fallire lo spawn con `"Concurrent subagent limit reached"`. |
+| `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` | `3` | Quanti livelli di profondità un subagente può generare i propri figli. `1` = disattiva l'annidamento del tutto (solo il parent orchestra). |
+| `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` | `200` | Limite cumulativo sull'intera sessione — gli spawn oltre questo valore falliscono anche se la concorrenza è a posto. |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | (eredita) | Forza ogni subagente su un modello specifico. Instrada le fasi di massa su Haiku/Sonnet per tenere un budget Opus sul parent. |
+
+Due altri numeri vivono dentro il runtime, non come variabili d'ambiente:
+
+- **Limiti rigidi dei workflow** per [Dynamic Workflows & ultracode](/docs/claude-code/dynamic-workflows): **16 concorrenti** e **1.000 totali** di agenti per esecuzione di workflow. Questi bloccano qualsiasi cosa un workflow lanci, indipendentemente dalle variabili d'ambiente della sessione.
+- Le sessioni con **ultracode attivo** sono **esenti** da `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`. La logica: il layer workflow di ultracode già impone la propria coppia 16/1.000, quindi il tetto di sessione sarebbe doppio.
+
+## L'errore che vedrai davvero
+
+Quando il tuo agente principale prova a generare il 21° subagente concorrente (o il 4° annidato alla profondità predefinita), la chiamata del tool restituisce:
+
+<PromptCard title="Risultato del tool — non riprovare">{`Concurrent subagent limit reached`}</PromptCard>
+
+Il runtime istruisce il modello a **non fare loop contro il limite** — deve procedere con meno agenti o serializzare. Questo è importante per due motivi:
+
+1. Riprovare è esattamente il comportamento che ha reso `#68110` catastrofico. Fare back-off è per design.
+2. Se vedi lo stesso errore in un hook o in un log più di qualche volta di seguito, hai un problema di prompt, non un problema di limiti — il tuo parent è propenso al fan-out e va istruito a fare batch.
+
+## Come configurare una flotta
+
+<Steps items={[
+  { title: "Scegli il tuo budget di concorrenza", body: "Parti dal predefinito 20. Alzalo solo se hai davvero lavoro indipendente — uno sweep su tutto il codice tra 60 package, ad esempio. Imposta `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=40` per progetto, non globalmente." },
+  { title: "Decidi se vuoi l'annidamento attivo", body: "Profondità 3 (predefinita) permette una catena parent → orchestratore → worker. Profondità 1 ti forza in una topologia rigida a due livelli: sessione principale e uno strato di worker. Profondità 1 è più sicura; profondità 3 è più espressiva." },
+  { title: "Fissa le fasi di massa su un modello più piccolo", body: "Imposta `CLAUDE_CODE_SUBAGENT_MODEL=claude-haiku-4-5` per una sessione in cui i subagenti fanno lavoro meccanico. Il tuo parent gira ancora su qualunque `/model` hai scelto; solo i figli scendono di livello." },
+  { title: "Tieni d'occhio il totale per sessione", body: "`CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION=200` è generoso ma reale. Una lunga giornata di invocazioni `/agents` può prosciugarlo. Riavvia la sessione per resettare." },
+  { title: "Per qualcosa di più grande, passa a ultracode", body: "Nel momento in cui ti sorprendi a voler alzare il tetto di concorrenza oltre ~40, hai superato la singola sessione. Delega a un dynamic workflow — ha i limiti workflow 16/1.000 ma anche il proprio scheduler." }
+]} />
+
+## Un pattern con orchestrazione dal parent che sopravvive ai limiti
+
+La topologia più sicura di flotta sotto i nuovi predefiniti è **breadth-first dal parent** — la sessione principale genera worker, i worker non generano worker. Usa la semantica profondità = 1 anche quando profondità = 3 è disponibile, e rende banale la matematica della concorrenza: in qualsiasi istante hai ≤ N worker, mai un albero di dimensione ignota.
+
+Forma concreta per uno sweep su una codebase di 60 moduli:
+
+<PromptCard title="Sweep con batch orchestrato — prompt della sessione principale">{`Sweep the codebase for uses of the deprecated \`legacyClient()\` helper.
+
+Batch the 60 packages into 3 waves of 20. For each wave:
+  1. Spawn 20 read-only \`Explore\` subagents in parallel, one per package.
+  2. Wait for all 20 to return before spawning the next wave.
+  3. Do NOT let a subagent spawn its own children — pass every package
+     in the delegation prompt directly.
+
+Aggregate into a single \`REPORT.md\` after wave 3. Report the total
+count and any packages that failed with the exact error string.`}</PromptCard>
+
+Perché regge:
+
+- 20 worker concorrenti raggiungono il tetto predefinito esattamente una volta per ondata — nessuno spawn fallito.
+- L'annidamento non viene usato, quindi `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` non conta — la configurazione funziona su `v2.1.217` (annidamento spento) e `v2.1.219` (annidamento acceso).
+- Spawn cumulativi: 60, ben sotto i 200 predefiniti per sessione.
+
+## Quando rompere il pattern (e usare l'annidamento)
+
+Profondità = 3 esiste per un motivo: alcuni problemi sono davvero gerarchici. Due forme beneficiano dell'annidamento:
+
+- **Alberi di ricerca profondi.** Un subagente `research` di primo livello che a sua volta deve confrontare cinque fonti — ognuna non triviale — può generare cinque figli `researcher` fratelli. Profondità = 2 totali.
+- **Map/reduce con finalize per shard.** Il parent genera N owner di shard; ogni owner genera 1 finalizer una volta terminato lo shard. Profondità = 2 totali, ma strutturalmente più pulito che se il parent tracciasse ogni finalize da solo.
+
+Se una di queste forme descrive il tuo lavoro, lascia stare il predefinito. Se la tua topologia è piatta, imposta `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` esplicitamente — vale come documentazione e come rete di sicurezza.
+
+## Interazione con `/agents` e i subagenti in background
+
+Due sottigliezze che inciampano chi incontra i limiti per la prima volta:
+
+- **I subagenti in background contano.** Dalla Week 27 (29 giugno – 3 luglio 2026) i subagenti girano in background di default. Un agente in background conta comunque contro il tuo tetto di concorrenza mentre è attivo, anche se il parent non è bloccato in attesa.
+- **`background: true` nel frontmatter non annulla il limite.** Fissare un subagente in background nel suo frontmatter cambia quando il parent riprende — non se il runtime lo conta.
+
+Se vedi l'errore di limite e la sessione principale sembra ferma, esegui `/agents` (o controlla la status line — vedi [Statusline](/docs/claude-code/statusline)) per scoprire cosa è ancora vivo da prima nella sessione.
+
+## Sonnet 5, Opus 5 e i costi sotto i limiti
+
+Il comportamento predefinito di `CLAUDE_CODE_SUBAGENT_MODEL` è **eredita** — un subagente gira sul modello del parent. Per sessioni Opus 5 con 20 worker concorrenti, il conto sale veloce. La forma consigliata dopo l'arrivo dei limiti è:
+
+- Parent su Opus 5 per l'orchestrazione e la sintesi finale.
+- `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5` per i worker che fanno task ben delimitati IO-heavy.
+- Per qualsiasi cosa meccanica (lavoro tipo grep, controlli di formato), Haiku 4.5.
+
+Vedi [Scegliere un modello](/docs/models/choosing-a-model) per i trade-off tra tier, e [MCP Token Cost](/docs/claude-code/mcp-token-cost) per come i subagenti tool-heavy gonfiano il conto indipendentemente dal modello.
+
+<Quiz title="Verifica te stesso" questions={[
+  { q: "Generi 25 subagenti tutti insieme dalla sessione principale. Cosa succede con le impostazioni predefinite?", options: ["Girano tutti e 25 — il limite si applica solo agli agenti in background", "20 girano; dal 21° al 25° falliscono con 'Concurrent subagent limit reached'", "Tutti e 25 vengono messi in coda e girano in sequenza in ordine FIFO"], answer: 1, explain: "Il tetto di concorrenza è un fallimento rigido allo spawn, non una coda. I tentativi oltre il 20° restituiscono la stringa d'errore 'Concurrent subagent limit reached', e il runtime dice al modello di NON riprovare." },
+  { q: "Impostare `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` produce quale topologia?", options: ["Solo la sessione principale può generare subagenti — i subagenti non possono generare figli propri", "I subagenti possono annidarsi fino a 1 livello aggiuntivo (quindi main → figlio → nipote è permesso)", "L'annidamento è illimitato ma limitato a 1 subagente per parent"], answer: 0, explain: "Profondità = 1 significa che solo la sessione principale genera. I subagenti ricevono task ma non possono generare figli propri — la topologia che il runtime ha imposto per 3 giorni tra v2.1.217 e v2.1.219." },
+  { q: "Esegui un workflow che richiede 200 agenti concorrenti. Quale strada funziona?", options: ["Imposta `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=200` nella tua shell", "Delega a un Dynamic Workflow — il layer workflow limita la concorrenza a 16 ma gestisce la coda al posto tuo", "Entrambe le opzioni sopra danno lo stesso risultato"], answer: 1, explain: "I Dynamic Workflow hanno i propri limiti 16 concorrenti / 1.000 totali indipendentemente dalle variabili d'ambiente di sessione, e il loro scheduler mette in coda il resto. Provare ad aggirare con la sola env di sessione incappa comunque nel tetto cumulativo di 200 per sessione." }
+]} />
+
+<Flashcards title="Limiti di flotta — gira ogni carta" cards={[
+  { front: "Tetto predefinito di subagenti concorrenti per sessione", back: "20 (v2.1.217+). Override con `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`. Le sessioni ultracode sono esenti." },
+  { front: "Profondità predefinita di spawn annidato", back: "3 (v2.1.219+). Era 1 (disattivato) tra v2.1.217 e v2.1.219. Override con `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`." },
+  { front: "Tetto cumulativo di subagenti per sessione", back: "200 di default. Override tramite `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`. Riavvia la sessione per resettare il contatore." },
+  { front: "Limiti rigidi dei workflow", back: "16 concorrenti e 1.000 totali per esecuzione di workflow. Questi bloccano i Dynamic Workflow indipendentemente dalle variabili d'ambiente di sessione." },
+  { front: "Testo di errore alla violazione del limite", back: "'Concurrent subagent limit reached' — il runtime dice al modello di NON riprovare. Tratta occorrenze ripetute come un problema di prompt, non di configurazione." },
+  { front: "Variabile d'ambiente per modellare i costi", back: "`CLAUDE_CODE_SUBAGENT_MODEL` — fissa i worker su Sonnet 5 o Haiku 4.5 mentre il parent resta su Opus 5." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Il tetto predefinito di concorrenza è 20; la profondità di annidamento predefinita è 3 (era 1 per 72 ore a fine luglio 2026).",
+  "Le quattro manopole sono tutte variabili d'ambiente `CLAUDE_CODE_*` — concorrenza, profondità di spawn, totale per sessione e modello del subagente.",
+  "'Concurrent subagent limit reached' è un segnale di fallimento-e-stop, non di retry. Occorrenze ripetute significano che il tuo prompt parent è propenso al fan-out.",
+  "L'orchestrazione dal parent a ondate è la topologia più sicura sotto i nuovi limiti e funziona identica su v2.1.217 e v2.1.219.",
+  "Se ti serve più di ~40 concorrenti, hai superato la singola sessione — passa ai Dynamic Workflow e ai suoi limiti workflow 16/1.000."
+]} />
+
+## Prossimi passi
+
+- [Subagenti e agenti paralleli](/docs/claude-code/subagents) — la primitiva che questi limiti vincolano
+- [Dynamic Workflows & ultracode](/docs/claude-code/dynamic-workflows) — la via di fuga a scala di flotta
+- [Scegliere un modello](/docs/models/choosing-a-model) — scegli un `CLAUDE_CODE_SUBAGENT_MODEL` adatto al lavoro
+- [MCP Token Cost](/docs/claude-code/mcp-token-cost) — perché flotte tool-heavy bruciano token anche al limite
+
+## Fonti e letture di approfondimento
+
+- [Changelog di Claude Code](https://code.claude.com/docs/en/changelog) — storia autoritativa delle versioni per `v2.1.217` (2026-07-21) e `v2.1.219` (2026-07-24).
+- [Create custom subagents](https://code.claude.com/docs/en/sub-agents) — documentazione ufficiale della primitiva che viene limitata.
+- [Week 27 · June 29 – July 3, 2026](https://code.claude.com/docs/en/whats-new/2026-w27) — il cambio "background di default" che interagisce con il tetto di concorrenza.
+- [`anthropics/claude-code#68110`](https://github.com/anthropics/claude-code/issues/68110) — l'incidente di fan-out esponenziale (48+ agenti, ~1,5M token) che ha motivato i limiti.
+- [`anthropics/claude-code#78406`](https://github.com/anthropics/claude-code/issues/78406) — la lacuna nei doc segnalata dalla community per la variabile d'ambiente del tetto per sessione.
+- [Claude Code v2.1.217 major updates — sub-agent limits and behavior](https://dev.classmethod.jp/en/articles/20260722-cc-updates-v2-1-217/) — writeup di terze parti con i nomi esatti delle variabili d'ambiente, pubblicato il giorno dopo `v2.1.217`.
+- [Claude Code Put Guardrails on Its Own Agent Fleets](https://www.digitalapplied.com/blog/claude-code-subagent-depth-limits-budget-caps-2026) — analisi da professionisti dei limiti rigidi workflow 16/1.000 e dell'esenzione ultracode.
