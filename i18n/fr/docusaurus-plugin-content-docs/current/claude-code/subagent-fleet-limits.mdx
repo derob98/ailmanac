@@ -1,0 +1,165 @@
+---
+sidebar_position: 13.3
+title: "Limites de flotte de sous-agents : plafonds de concurrence et profondeur imbriquée"
+description: "Le 21 juillet 2026, Claude Code a plafonné les sous-agents concurrents à 20 et tué le spawn imbriqué. Trois jours plus tard, l'imbrication est revenue à profondeur 3. Voici les quatre variables d'env, l'erreur que vous rencontrerez, pourquoi les plafonds existent, et comment concevoir des flottes qui y survivent."
+keywords: [Claude Code, subagents, nested subagents, spawn depth, concurrency cap, CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH, fleet limits, v2.1.217, v2.1.219, ultracode]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-07-30" source="https://code.claude.com/docs/en/changelog">
+Les numéros de version, valeurs par défaut et noms de variables d'env pour les limites de sous-agents bougent avec les releases. Confirmez les valeurs actuelles dans le changelog Claude Code avant de livrer une config de flotte.
+</VerifyNote>
+
+Le **21 juillet 2026**, Claude Code a livré `v2.1.217` et posé les premiers plafonds durs sur les flottes de sous-agents : **20 sous-agents concurrents par session**, et **spawn imbriqué désactivé purement**. Trois jours plus tard, `v2.1.219` (24 juillet) a réintégré l'imbrication à une **profondeur par défaut de 3**. Le déclencheur était public et spécifique : un ticket du 13 juin où une seule tâche de recherche a spawné **48+ agents d'arrière-plan simultanés et brûlé ~1,5 M de tokens** sur du travail redondant avant que l'utilisateur puisse l'arrêter (`anthropics/claude-code#68110`).
+
+Si vous orchestrez plus d'une poignée d'agents par tour, ces plafonds façonnent maintenant ce qu'un seul message peut faire — et comment vous écrivez vos `.mcp.json`, `.env` et prompts d'orchestration.
+
+<Callout type="objectives" items={[
+  "Les quatre variables d'environnement qui gouvernent les flottes : concurrence, profondeur d'imbrication, total par session, et modèle du sous-agent",
+  "L'erreur exacte que Claude voit quand il touche le plafond, et pourquoi le runtime lui dit de NE PAS réessayer",
+  "Pourquoi l'imbrication a été tuée pendant 72 heures et ce que la valeur par défaut restaurée (profondeur 3) signifie vraiment pour le fan-out",
+  "Quand ultracode vous exempte du plafond de concurrence, et quand les plafonds durs de workflow écrasent tout",
+  "Un pattern parent-orchestre qui reste dans les plafonds à toute échelle"
+]} />
+
+## L'incident qui a façonné les plafonds
+
+Le ticket `#68110` (déposé le 13 juin 2026) est l'histoire d'origine honnête. Un utilisateur a délégué une seule tâche de recherche à un sous-agent general-purpose. Ce sous-agent — parce que les sous-agents general-purpose héritent de l'outil `Agent` — a spawné ses propres enfants. Ces enfants en ont spawné plus. En quelques tours, **48+ agents d'arrière-plan** tournaient, avec quatre agents séparés recherchant indépendamment la même API tierce (Wise), et l'utilisateur ne pouvait pas les tuer plus vite qu'ils ne respawnaient. Dépense totale avant intervention : **~1,5 M de tokens**.
+
+La réponse est arrivée cinq semaines plus tard en deux événements de shipping :
+
+| Date | Version | Changement |
+|---|---|---|
+| 2026-07-21 | `v2.1.217` | Plafond concurrent = 20 ; spawn imbriqué **désactivé** (profondeur = 1) |
+| 2026-07-24 | `v2.1.219` | Imbrication **réintégrée** à profondeur par défaut = 3 |
+
+La fenêtre de trois jours avec l'imbrication off est le bit intéressant — Anthropic a clairement pesé « pas de fan-out » contre « pas d'orchestration » et pris une voie médiane.
+
+## Les quatre variables d'environnement
+
+Chaque bouton est une variable d'env `CLAUDE_CODE_` — définissez-la dans votre shell, `.env`, ou par projet via `settings.json`.
+
+| Variable d'env | Défaut | Ce qu'elle fait |
+|---|---|---|
+| `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` | `20` | Plafond dur sur les sous-agents tournant au même instant dans une session. L'atteindre fait échouer le spawn avec `"Concurrent subagent limit reached"`. |
+| `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` | `3` | À combien de niveaux de profondeur un sous-agent peut spawner ses propres enfants. `1` = désactiver l'imbrication entièrement (le parent orchestre seulement). |
+| `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` | `200` | Plafond cumulatif sur toute la session — les spawns au-delà échouent même si la concurrence est OK. |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | (hérite) | Force chaque sous-agent sur un modèle spécifique. Route les étapes en masse vers Haiku/Sonnet pour garder un budget Opus sur le parent. |
+
+Deux autres nombres vivent dans le runtime, pas des variables d'env :
+
+- **Plafonds durs de workflow** pour [Dynamic Workflows & ultracode](/docs/claude-code/dynamic-workflows) : **16 concurrents** et **1 000 total** agents par run de workflow. Ceux-ci clampent tout ce qu'un workflow lance, quel que soit votre env de session.
+- Les **sessions actives ultracode** sont **exemptes** de `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`. Le raisonnement : la couche workflow d'ultracode impose déjà sa propre paire 16/1 000, donc le plafond de session ferait double emploi.
+
+## L'erreur que vous verrez vraiment
+
+Quand votre agent principal essaie de spawner le 21e sous-agent concurrent (ou le 4e imbriqué à profondeur par défaut), l'appel d'outil retourne :
+
+<PromptCard title="Résultat d'outil — ne pas réessayer">{`Concurrent subagent limit reached`}</PromptCard>
+
+Le runtime instruit le modèle à **ne pas boucler contre le plafond** — il devrait continuer avec moins d'agents ou sérialiser. C'est important pour deux raisons :
+
+1. Réessayer est le comportement exact qui a rendu `#68110` catastrophique. Reculer est par conception.
+2. Si vous voyez la même erreur dans un hook ou un log plus de quelques fois de suite, vous avez un problème de prompt, pas de limites — votre parent est fan-out-heureux et a besoin qu'on lui dise de batcher.
+
+## Comment configurer une flotte
+
+<Steps items={[
+  { title: "Choisissez votre budget de concurrence", body: "Commencez au défaut de 20. Ne le montez que si vous avez vraiment du travail indépendant — un balayage codebase-wide sur 60 packages, par exemple. Mettez `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=40` par projet, pas globalement." },
+  { title: "Décidez si vous voulez l'imbrication on", body: "Profondeur 3 (défaut) laisse une chaîne parent → orchestrateur → worker exister. Profondeur 1 vous force dans une topologie stricte à deux niveaux : session principale, et une couche de workers. Profondeur 1 est plus sûre ; profondeur 3 est plus expressive." },
+  { title: "Épinglez les étapes en masse à un modèle plus petit", body: "Mettez `CLAUDE_CODE_SUBAGENT_MODEL=claude-haiku-4-5` pour une session où les sous-agents font du travail mécanique. Votre parent tourne toujours sur le `/model` que vous avez choisi ; seuls les enfants sont downgradés." },
+  { title: "Surveillez le total par session", body: "`CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION=200` est généreux mais réel. Une longue journée d'invocations `/agents` peut le drainer. Redémarrez la session pour réinitialiser." },
+  { title: "Pour quelque chose de plus gros, passez à ultracode", body: "Le moment où vous vous surprenez à devoir monter le plafond de concurrence au-delà de ~40, vous avez dépassé une session. Déléguez à un workflow dynamique — il obtient les plafonds workflow 16/1 000 mais aussi son propre scheduler." }
+]} />
+
+## Un pattern parent-orchestre qui survit aux plafonds
+
+La topologie de flotte la plus sûre sous les nouveaux défauts est **breadth-first depuis le parent** — la session principale spawne des workers, les workers ne spawnent pas de workers. Cela utilise la sémantique profondeur = 1 même quand profondeur = 3 est disponible, et rend le calcul de concurrence trivial : à tout instant vous avez ≤ N workers, jamais un arbre de taille inconnue.
+
+Forme concrète pour un balayage codebase de 60 modules :
+
+<PromptCard title="Balayage batch-orchestré — prompt session principale">{`Sweep the codebase for uses of the deprecated \`legacyClient()\` helper.
+
+Batch the 60 packages into 3 waves of 20. For each wave:
+  1. Spawn 20 read-only \`Explore\` subagents in parallel, one per package.
+  2. Wait for all 20 to return before spawning the next wave.
+  3. Do NOT let a subagent spawn its own children — pass every package
+     in the delegation prompt directly.
+
+Aggregate into a single \`REPORT.md\` after wave 3. Report the total
+count and any packages that failed with the exact error string.`}</PromptCard>
+
+Pourquoi ça tient :
+
+- 20 workers concurrents touche le plafond par défaut exactement une fois par vague — pas de spawns échoués.
+- L'imbrication est inutilisée, donc `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` n'a pas d'importance — la config marche sur `v2.1.217` (imbrication off) et `v2.1.219` (imbrication on).
+- Spawns cumulés : 60, bien en-dessous du défaut 200 par session.
+
+## Quand casser le pattern (et utiliser l'imbrication)
+
+Profondeur = 3 existe pour une raison : certains problèmes sont vraiment hiérarchiques. Deux formes bénéficient de l'imbrication :
+
+- **Arbres de recherche profonds.** Un sous-agent de recherche top-level qui a lui-même besoin de comparer cinq sources — chacune non triviale — peut spawner cinq enfants `researcher` frères. Profondeur = 2 total.
+- **Map/reduce avec finalize par shard.** Le parent spawne N shard-owners ; chaque shard-owner spawne 1 finalizer une fois son shard fini. Profondeur = 2 total, mais structurellement plus propre que le parent qui trackerait chaque finalize lui-même.
+
+Si l'une de ces formes décrit votre travail, laissez le défaut tranquille. Si votre topologie est plate, mettez `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` explicitement — c'est une documentation et un filet de sécurité.
+
+## Interaction avec `/agents` et les sous-agents d'arrière-plan
+
+Deux subtilités qui font trébucher les gens quand ils touchent les plafonds pour la première fois :
+
+- **Les sous-agents d'arrière-plan comptent.** Depuis la Semaine 27 (29 juin – 3 juillet 2026) les sous-agents tournent en arrière-plan par défaut. Un agent d'arrière-plan compte encore contre votre plafond de concurrence pendant qu'il tourne, même si le parent n'est pas bloqué à l'attendre.
+- **`background: true` dans le frontmatter ne fait pas sauter le plafond.** Épingler un sous-agent en arrière-plan dans son frontmatter change quand le parent reprend — pas si le runtime le compte.
+
+Si vous voyez l'erreur de plafond et que votre session principale semble oisive, lancez `/agents` (ou vérifiez la statusline — voir [Statusline](/docs/claude-code/statusline)) pour trouver ce qui est encore vivant d'antérieur dans la session.
+
+## Sonnet 5, Opus 5 et coût sous les plafonds
+
+Le comportement par défaut de `CLAUDE_CODE_SUBAGENT_MODEL` est **hériter** — un sous-agent tourne sur le modèle sur lequel le parent est. Pour des sessions Opus 5 avec 20 workers concurrents, ça monte vite. La forme recommandée après l'atterrissage des plafonds est :
+
+- Parent sur Opus 5 pour l'orchestration et la synthèse finale.
+- `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5` pour les workers faisant des tâches IO-heavy bien cadrées.
+- Pour tout ce qui est mécanique (travail forme-grep, vérifications de format), Haiku 4.5.
+
+Voir [Choisir un modèle](/docs/models/choosing-a-model) pour les compromis de tier, et [MCP Token Cost](/docs/claude-code/mcp-token-cost) pour comment les sous-agents tool-heavy gonflent la facture peu importe le modèle.
+
+<Quiz title="Vérifiez-vous" questions={[
+  { q: "Vous spawnez 25 sous-agents d'un coup depuis votre session principale. Que se passe-t-il sous les paramètres par défaut ?", options: ["Les 25 tournent — le plafond ne s'applique qu'aux agents d'arrière-plan", "20 tournent ; le 21e au 25e échouent avec 'Concurrent subagent limit reached'", "Les 25 se mettent en file et tournent séquentiellement en FIFO"], answer: 1, explain: "Le plafond de concurrence est un échec dur au spawn, pas une file. Les tentatives au-delà de 20 retournent la chaîne d'erreur 'Concurrent subagent limit reached', et le runtime dit au modèle de NE PAS réessayer." },
+  { q: "Mettre `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` produit quelle topologie ?", options: ["Seule la session principale peut spawner des sous-agents — les sous-agents ne peuvent pas spawner leurs propres enfants", "Les sous-agents peuvent s'imbriquer jusqu'à 1 niveau additionnel (donc main → enfant → petit-enfant est permis)", "L'imbrication est illimitée mais plafonnée à 1 sous-agent par parent"], answer: 0, explain: "Profondeur = 1 signifie que seule la session principale spawne. Les sous-agents reçoivent des tâches mais ne peuvent pas spawner leurs propres enfants — la topologie que le runtime imposait par défaut pendant 3 jours entre v2.1.217 et v2.1.219." },
+  { q: "Vous lancez un workflow qui a besoin de 200 agents concurrents. Quelle route marche ?", options: ["Mettre `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=200` dans votre shell", "Déléguer à un Dynamic Workflow — la couche workflow plafonne la concurrence à 16 mais gère la file pour vous", "Les deux ci-dessus donnent le même résultat"], answer: 1, explain: "Les Dynamic Workflows ont leurs propres plafonds 16 concurrents / 1 000 total peu importe les variables d'env de session, et leur scheduler met le reste en file. Essayer de contourner avec l'env de session seul heurte encore le plafond cumulatif 200 par session." }
+]} />
+
+<Flashcards title="Limites de flotte — retournez chaque carte" cards={[
+  { front: "Plafond concurrent de sous-agents par défaut par session", back: "20 (v2.1.217+). Surchargez avec `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`. Les sessions ultracode sont exemptes." },
+  { front: "Profondeur de spawn imbriqué par défaut", back: "3 (v2.1.219+). Était 1 (désactivé) entre v2.1.217 et v2.1.219. Surchargez avec `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`." },
+  { front: "Plafond cumulatif de sous-agents par session", back: "200 par défaut. Surcharges via `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`. Redémarrez la session pour réinitialiser le compteur." },
+  { front: "Plafonds durs de workflow", back: "16 concurrents et 1 000 total par run de workflow. Ceux-ci clampent les Dynamic Workflows peu importe les variables d'env de session." },
+  { front: "Texte d'erreur au dépassement de plafond", back: "'Concurrent subagent limit reached' — le runtime dit au modèle de NE PAS réessayer. Traitez les occurrences répétées comme un problème de prompt, pas de config." },
+  { front: "Variable d'env qui façonne le coût", back: "`CLAUDE_CODE_SUBAGENT_MODEL` — épinglez les workers sur Sonnet 5 ou Haiku 4.5 pendant que le parent reste sur Opus 5." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Le plafond concurrent par défaut est 20 ; le défaut de profondeur d'imbrication est 3 (était 1 pendant 72 heures fin juillet 2026).",
+  "Les quatre boutons sont tous des variables d'env `CLAUDE_CODE_*` — concurrence, profondeur de spawn, total par session et modèle du sous-agent.",
+  "'Concurrent subagent limit reached' est un signal échec-et-stop, pas un signal de retry. Les occurrences répétées veulent dire que votre prompt parent est fan-out-heureux.",
+  "Parent-orchestre-en-vagues est la topologie la plus sûre sous les nouveaux plafonds et marche identiquement sur v2.1.217 et v2.1.219.",
+  "Si vous avez besoin de plus de ~40 concurrents, vous avez dépassé une session — passez aux Dynamic Workflows et ses plafonds workflow 16/1 000."
+]} />
+
+## Suite
+
+- [Sous-agents & agents parallèles](/docs/claude-code/subagents) — la primitive que ces plafonds contraignent
+- [Dynamic Workflows & ultracode](/docs/claude-code/dynamic-workflows) — l'échappatoire à l'échelle de flotte
+- [Choisir un modèle](/docs/models/choosing-a-model) — choisissez un `CLAUDE_CODE_SUBAGENT_MODEL` qui matche le travail
+- [MCP Token Cost](/docs/claude-code/mcp-token-cost) — pourquoi les flottes tool-heavy brûlent encore des tokens même au plafond
+
+## Sources & lectures complémentaires
+
+- [Changelog Claude Code](https://code.claude.com/docs/en/changelog) — historique de versions faisant autorité pour `v2.1.217` (2026-07-21) et `v2.1.219` (2026-07-24).
+- [Create custom subagents](https://code.claude.com/docs/en/sub-agents) — docs officielles pour la primitive plafonnée.
+- [Semaine 27 · 29 juin – 3 juillet 2026](https://code.claude.com/docs/en/whats-new/2026-w27) — le changement « arrière-plan par défaut » qui interagit avec le plafond de concurrence.
+- [`anthropics/claude-code#68110`](https://github.com/anthropics/claude-code/issues/68110) — l'incident de fan-out exponentiel (48+ agents, ~1,5 M tokens) qui a motivé les plafonds.
+- [`anthropics/claude-code#78406`](https://github.com/anthropics/claude-code/issues/78406) — le trou doc community-filed pour la variable d'env de plafond par session.
+- [Mises à jour majeures Claude Code v2.1.217 — limites et comportement des sous-agents](https://dev.classmethod.jp/en/articles/20260722-cc-updates-v2-1-217/) — writeup tiers avec les noms exacts de variables d'env, publié le jour après `v2.1.217`.
+- [Claude Code Put Guardrails on Its Own Agent Fleets](https://www.digitalapplied.com/blog/claude-code-subagent-depth-limits-budget-caps-2026) — analyse pratique des plafonds durs workflow 16/1 000 et de l'exemption ultracode.
