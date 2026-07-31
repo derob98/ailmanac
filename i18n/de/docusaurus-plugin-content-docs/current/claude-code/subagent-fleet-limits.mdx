@@ -1,0 +1,165 @@
+---
+sidebar_position: 13.3
+title: "Subagent-Flotten-Limits: Concurrency-Obergrenzen & Verschachtelungstiefe"
+description: "Am 21. Juli 2026 hat Claude Code gleichzeitige Subagenten auf 20 begrenzt und verschachteltes Spawning abgeschaltet. Drei Tage später kam das Nesting mit Tiefe 3 zurück. Hier sind die vier Env-Variablen, der Fehler, den du siehst, warum die Limits existieren und wie du Flotten baust, die damit leben."
+keywords: [Claude Code, subagents, nested subagents, spawn depth, concurrency cap, CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH, fleet limits, v2.1.217, v2.1.219, ultracode]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-07-30" source="https://code.claude.com/docs/en/changelog">
+Versionsnummern, Standardwerte und Namen der Env-Variablen für Subagent-Limits ändern sich mit jedem Release. Prüfe die aktuellen Werte im Claude-Code-Changelog, bevor du eine Flotten-Konfiguration ausrollst.
+</VerifyNote>
+
+Am **21. Juli 2026** hat Claude Code `v2.1.217` ausgeliefert und die ersten harten Obergrenzen für Subagent-Flotten gesetzt: **20 gleichzeitige Subagenten pro Session** und **verschachteltes Spawning komplett deaktiviert**. Drei Tage später hat `v2.1.219` (24. Juli) das Nesting mit einer **Default-Tiefe von 3** wieder eingeführt. Der Auslöser war öffentlich und konkret: Am 13. Juni hat eine einzelne Research-Task **48+ gleichzeitige Background-Agenten gespawnt und ~1,5 Mio. Tokens** an redundanter Arbeit verbrannt, bevor der Nutzer sie stoppen konnte (`anthropics/claude-code#68110`).
+
+Wenn du mehr als eine Handvoll Agenten pro Turn orchestrierst, prägen diese Obergrenzen jetzt, was eine einzelne Nachricht tun kann — und wie du deine `.mcp.json`, `.env` und Orchestrierungs-Prompts schreibst.
+
+<Callout type="objectives" items={[
+  "Die vier Umgebungsvariablen, die Flotten steuern: Concurrency, Nesting-Tiefe, Session-Gesamtsumme und Subagent-Modell",
+  "Der exakte Fehler, den Claude beim Erreichen der Obergrenze sieht, und warum die Runtime ihm sagt, NICHT zu wiederholen",
+  "Warum Nesting für 72 Stunden abgeschaltet war und was der wiederhergestellte Default (Tiefe 3) für Fan-out wirklich bedeutet",
+  "Wann ultracode dich von der Concurrency-Obergrenze befreit und wann Workflow-Hard-Caps alles überschreiben",
+  "Ein Parent-orchestriert-Muster, das bei jeder Skala innerhalb der Obergrenzen bleibt"
+]} />
+
+## Der Vorfall, der die Obergrenzen geformt hat
+
+Issue `#68110` (eingereicht am 13. Juni 2026) ist die ehrliche Entstehungsgeschichte. Ein Nutzer hat eine einzelne Research-Task an einen General-Purpose-Subagenten delegiert. Dieser Subagent — weil General-Purpose-Subagenten das `Agent`-Tool erben — hat eigene Kinder gespawnt. Diese Kinder haben weitere gespawnt. Innerhalb weniger Turns liefen **48+ Background-Agenten**, wobei vier separate Agenten unabhängig voneinander dieselbe Drittanbieter-API (Wise) recherchierten, und der Nutzer konnte sie nicht schneller killen, als sie respawnten. Verbrauch vor dem Eingreifen: **~1,5 Mio. Tokens**.
+
+Die Reaktion kam fünf Wochen später in zwei Auslieferungen:
+
+| Datum | Version | Änderung |
+|---|---|---|
+| 2026-07-21 | `v2.1.217` | Concurrency-Cap = 20; verschachteltes Spawning **deaktiviert** (Tiefe = 1) |
+| 2026-07-24 | `v2.1.219` | Nesting **wiederhergestellt** mit Default-Tiefe = 3 |
+
+Das Drei-Tage-Fenster mit abgeschaltetem Nesting ist der spannende Teil — Anthropic hat offensichtlich "kein Fan-out" gegen "keine Orchestrierung" abgewogen und den Mittelweg gewählt.
+
+## Die vier Umgebungsvariablen
+
+Jeder Regler ist eine `CLAUDE_CODE_`-Env-Variable — setze sie in deiner Shell, `.env` oder pro Projekt via `settings.json`.
+
+| Env-Variable | Default | Was sie tut |
+|---|---|---|
+| `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` | `20` | Harte Obergrenze für Subagenten, die im selben Moment in einer Session laufen. Erreicht sie das Limit, schlägt der Spawn mit `"Concurrent subagent limit reached"` fehl. |
+| `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` | `3` | Wie tief ein Subagent eigene Kinder spawnen darf. `1` = Nesting komplett deaktivieren (nur der Parent orchestriert). |
+| `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` | `200` | Kumulative Obergrenze über die gesamte Session — Spawns darüber hinaus schlagen fehl, auch wenn die Concurrency in Ordnung ist. |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | (erbt) | Erzwingt für jeden Subagenten ein bestimmtes Modell. Route Bulk-Stages auf Haiku/Sonnet, um ein Opus-Budget beim Parent zu halten. |
+
+Zwei weitere Zahlen leben in der Runtime, nicht als Env-Variablen:
+
+- **Workflow-Hard-Caps** für [Dynamic Workflows & ultracode](/docs/claude-code/dynamic-workflows): **16 gleichzeitig** und **1.000 gesamt** Agenten pro Workflow-Lauf. Diese klemmen alles ab, was ein Workflow startet, unabhängig von deiner Session-Env.
+- **Sessions mit aktivem ultracode** sind **ausgenommen** von `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`. Die Begründung: Die Workflow-Schicht von ultracode erzwingt bereits ihr eigenes 16/1.000-Paar, die Session-Obergrenze würde also doppelt zählen.
+
+## Der Fehler, den du tatsächlich siehst
+
+Wenn dein Haupt-Agent versucht, den 21. gleichzeitigen Subagenten zu spawnen (oder den 4. verschachtelten bei Default-Tiefe), gibt der Tool-Aufruf zurück:
+
+<PromptCard title="Tool-Ergebnis — nicht wiederholen">{`Concurrent subagent limit reached`}</PromptCard>
+
+Die Runtime weist das Modell an, **nicht gegen die Obergrenze zu loopen** — es soll mit weniger Agenten weitermachen oder serialisieren. Das ist aus zwei Gründen wichtig:
+
+1. Wiederholen ist genau das Verhalten, das `#68110` katastrophal gemacht hat. Zurückweichen ist Absicht.
+2. Wenn du denselben Fehler in einem Hook oder Log mehr als ein paar Mal hintereinander siehst, hast du ein Prompt-Problem, kein Limit-Problem — dein Parent ist Fan-out-verliebt und muss angewiesen werden, zu batchen.
+
+## Wie du eine Flotte konfigurierst
+
+<Steps items={[
+  { title: "Wähle dein Concurrency-Budget", body: "Beginne beim Default 20. Erhöhe nur, wenn du tatsächlich unabhängige Arbeit hast — z. B. ein codebase-weites Sweep über 60 Pakete. Setze `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=40` pro Projekt, nicht global." },
+  { title: "Entscheide, ob du Nesting willst", body: "Tiefe 3 (Default) erlaubt eine Kette Parent → Orchestrator → Worker. Tiefe 1 zwingt dich in eine strikte Zwei-Ebenen-Topologie: Haupt-Session und eine Worker-Schicht. Tiefe 1 ist sicherer, Tiefe 3 ausdrucksstärker." },
+  { title: "Pinne Bulk-Stages auf ein kleineres Modell", body: "Setze `CLAUDE_CODE_SUBAGENT_MODEL=claude-haiku-4-5` für eine Session, in der Subagenten mechanische Arbeit erledigen. Dein Parent läuft weiter auf dem `/model`, das du gewählt hast; nur die Kinder werden heruntergestuft." },
+  { title: "Behalte die Session-Gesamtsumme im Auge", body: "`CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION=200` ist großzügig, aber real. Ein langer Tag mit `/agents`-Aufrufen kann es leeren. Session neu starten, um zurückzusetzen." },
+  { title: "Für alles Größere geh auf ultracode", body: "Sobald du dich dabei ertappst, die Concurrency-Obergrenze über ~40 heben zu wollen, bist du aus einer Session herausgewachsen. Delegiere an einen Dynamic Workflow — er bekommt die 16/1.000-Workflow-Obergrenzen, aber auch seinen eigenen Scheduler." }
+]} />
+
+## Ein Parent-orchestriert-Muster, das die Obergrenzen überlebt
+
+Die sicherste Flotten-Topologie unter den neuen Defaults ist **breitensuche vom Parent aus** — die Haupt-Session spawnt Worker, Worker spawnen keine Worker. Das nutzt Tiefe-1-Semantik, auch wenn Tiefe 3 verfügbar ist, und macht die Concurrency-Mathematik trivial: In jedem Moment hast du ≤ N Worker, nie einen Baum unbekannter Größe.
+
+Konkrete Form für einen 60-Modul-Codebase-Sweep:
+
+<PromptCard title="Batch-orchestrierter Sweep — Haupt-Session-Prompt">{`Sweep the codebase for uses of the deprecated \`legacyClient()\` helper.
+
+Batch the 60 packages into 3 waves of 20. For each wave:
+  1. Spawn 20 read-only \`Explore\` subagents in parallel, one per package.
+  2. Wait for all 20 to return before spawning the next wave.
+  3. Do NOT let a subagent spawn its own children — pass every package
+     in the delegation prompt directly.
+
+Aggregate into a single \`REPORT.md\` after wave 3. Report the total
+count and any packages that failed with the exact error string.`}</PromptCard>
+
+Warum das hält:
+
+- 20 gleichzeitige Worker treffen die Default-Obergrenze exakt einmal pro Welle — keine fehlgeschlagenen Spawns.
+- Nesting wird nicht genutzt, also spielt `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` keine Rolle — die Konfiguration funktioniert auf `v2.1.217` (Nesting aus) und `v2.1.219` (Nesting an).
+- Kumulative Spawns: 60, weit unter dem Default von 200 pro Session.
+
+## Wann du das Muster brechen darfst (und Nesting nutzt)
+
+Tiefe = 3 existiert aus einem Grund: Manche Probleme sind wirklich hierarchisch. Zwei Formen profitieren von Nesting:
+
+- **Tiefe Research-Bäume.** Ein Top-Level-`research`-Subagent, der selbst fünf Quellen vergleichen muss — jede nicht-trivial —, kann fünf Geschwister-`researcher`-Kinder spawnen. Insgesamt Tiefe = 2.
+- **Map/Reduce mit Finalize pro Shard.** Parent spawnt N Shard-Owner; jeder Shard-Owner spawnt 1 Finalizer, sobald sein Shard fertig ist. Insgesamt Tiefe = 2, aber strukturell sauberer, als wenn der Parent jedes Finalize selbst verfolgt.
+
+Wenn eine dieser Formen deine Arbeit beschreibt, lass den Default in Ruhe. Wenn deine Topologie flach ist, setze `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` explizit — das ist gleichzeitig Dokumentation und Sicherheitsnetz.
+
+## Zusammenspiel mit `/agents` und Background-Subagenten
+
+Zwei Feinheiten, die Leute beim ersten Treffen der Obergrenze stolpern lassen:
+
+- **Background-Subagenten zählen mit.** Seit Woche 27 (29. Juni – 3. Juli 2026) laufen Subagenten standardmäßig im Background. Ein Background-Agent zählt weiterhin gegen deine Concurrency-Obergrenze, während er läuft, auch wenn der Parent nicht auf ihn wartet.
+- **`background: true` im Frontmatter befreit nicht von der Obergrenze.** Einen Subagenten im Frontmatter auf Background zu pinnen, ändert, wann der Parent weiterläuft — nicht, ob die Runtime ihn zählt.
+
+Wenn du den Cap-Fehler siehst und deine Haupt-Session sich leer anfühlt, führe `/agents` aus (oder prüfe die Statusleiste — siehe [Statusline](/docs/claude-code/statusline)), um zu finden, was aus früheren Session-Phasen noch lebt.
+
+## Sonnet 5, Opus 5 und Kosten unter den Obergrenzen
+
+Das Default-Verhalten von `CLAUDE_CODE_SUBAGENT_MODEL` ist **erben** — ein Subagent läuft auf dem Modell, auf dem der Parent läuft. Für Opus-5-Sessions mit 20 gleichzeitigen Workern summiert sich das schnell. Die empfohlene Form, seit die Obergrenzen kamen, ist:
+
+- Parent auf Opus 5 für Orchestrierung und finale Synthese.
+- `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5` für Worker, die eng gefasste IO-lastige Tasks erledigen.
+- Für alles Mechanische (Grep-artige Arbeit, Format-Checks) Haiku 4.5.
+
+Siehe [Modellauswahl](/docs/models/choosing-a-model) für die Tier-Tradeoffs und [MCP-Token-Kosten](/docs/claude-code/mcp-token-cost), warum Tool-lastige Subagenten die Rechnung unabhängig vom Modell aufblähen.
+
+<Quiz title="Selbsttest" questions={[
+  { q: "Du spawnst 25 Subagenten gleichzeitig aus deiner Haupt-Session. Was passiert bei Default-Einstellungen?", options: ["Alle 25 laufen — die Obergrenze gilt nur für Background-Agenten", "20 laufen; die 21. bis 25. schlagen mit 'Concurrent subagent limit reached' fehl", "Alle 25 werden in eine Queue gestellt und laufen sequentiell in FIFO-Reihenfolge"], answer: 1, explain: "Die Concurrency-Obergrenze ist ein harter Fail beim Spawn, keine Queue. Versuche jenseits von 20 liefern den Fehler-String 'Concurrent subagent limit reached', und die Runtime sagt dem Modell, NICHT zu wiederholen." },
+  { q: "`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` zu setzen erzeugt welche Topologie?", options: ["Nur die Haupt-Session kann Subagenten spawnen — Subagenten können keine eigenen Kinder spawnen", "Subagenten können bis zu 1 weitere Ebene verschachteln (also Main → Kind → Enkelkind ist erlaubt)", "Nesting ist unbegrenzt, aber auf 1 Subagenten pro Parent begrenzt"], answer: 0, explain: "Tiefe = 1 bedeutet: Nur die Haupt-Session spawnt. Subagenten erhalten Tasks, können aber keine eigenen Kinder spawnen — die Topologie, die die Runtime für 3 Tage zwischen v2.1.217 und v2.1.219 als Default erzwungen hat." },
+  { q: "Du fährst einen Workflow, der 200 Agenten gleichzeitig braucht. Welcher Weg funktioniert?", options: ["`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=200` in deiner Shell setzen", "An einen Dynamic Workflow delegieren — die Workflow-Schicht begrenzt Concurrency auf 16, verwaltet aber die Queue für dich", "Beide obigen liefern dasselbe Ergebnis"], answer: 1, explain: "Dynamic Workflows haben ihre eigenen 16 gleichzeitig / 1.000 gesamt Obergrenzen, unabhängig von Session-Env-Variablen, und ihr Scheduler queuet den Rest. Ein Bypass allein über Session-Env läuft weiterhin in die kumulative Obergrenze von 200 pro Session." }
+]} />
+
+<Flashcards title="Flotten-Limits — jede Karte umdrehen" cards={[
+  { front: "Default-Obergrenze für gleichzeitige Subagenten pro Session", back: "20 (v2.1.217+). Override via `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`. ultracode-Sessions sind ausgenommen." },
+  { front: "Default-Tiefe für verschachteltes Spawning", back: "3 (v2.1.219+). War 1 (deaktiviert) zwischen v2.1.217 und v2.1.219. Override via `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`." },
+  { front: "Kumulative Obergrenze für Subagenten pro Session", back: "200 als Default. Overrides via `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`. Session neu starten, um den Zähler zurückzusetzen." },
+  { front: "Workflow-Hard-Caps", back: "16 gleichzeitig und 1.000 gesamt pro Workflow-Lauf. Diese klemmen Dynamic Workflows unabhängig von Session-Env-Variablen ab." },
+  { front: "Fehlertext beim Cap-Bruch", back: "'Concurrent subagent limit reached' — die Runtime sagt dem Modell, NICHT zu wiederholen. Behandle wiederholtes Auftreten als Prompt-Problem, nicht als Konfigurationsproblem." },
+  { front: "Kosten-steuernde Env-Variable", back: "`CLAUDE_CODE_SUBAGENT_MODEL` — pinne Worker auf Sonnet 5 oder Haiku 4.5, während der Parent auf Opus 5 bleibt." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Default-Concurrency-Cap ist 20; Default-Nesting-Tiefe ist 3 (war 1 für 72 Stunden Ende Juli 2026).",
+  "Die vier Regler sind alle `CLAUDE_CODE_*`-Env-Variablen — Concurrency, Spawn-Tiefe, Session-Gesamtsumme und Subagent-Modell.",
+  "'Concurrent subagent limit reached' ist ein Fail-und-Stop-Signal, kein Retry-Signal. Wiederholtes Auftreten bedeutet, dass dein Parent-Prompt Fan-out-verliebt ist.",
+  "Parent-orchestriert-in-Wellen ist die sicherste Topologie unter den neuen Obergrenzen und funktioniert identisch auf v2.1.217 und v2.1.219.",
+  "Wenn du mehr als ~40 gleichzeitig brauchst, bist du aus einer Session herausgewachsen — geh auf Dynamic Workflows und ihre 16/1.000-Workflow-Obergrenzen."
+]} />
+
+## Weiter
+
+- [Subagenten & Parallele Agenten](/docs/claude-code/subagents) — das Primitive, das diese Obergrenzen einschränken
+- [Dynamic Workflows & ultracode](/docs/claude-code/dynamic-workflows) — der Fluchtweg auf Flotten-Skala
+- [Modellauswahl](/docs/models/choosing-a-model) — wähle ein `CLAUDE_CODE_SUBAGENT_MODEL`, das zur Arbeit passt
+- [MCP-Token-Kosten](/docs/claude-code/mcp-token-cost) — warum Tool-lastige Flotten selbst am Cap noch Tokens verbrennen
+
+## Quellen & weiterführende Lektüre
+
+- [Claude-Code-Changelog](https://code.claude.com/docs/en/changelog) — autoritative Versionsgeschichte für `v2.1.217` (2026-07-21) und `v2.1.219` (2026-07-24).
+- [Create custom subagents](https://code.claude.com/docs/en/sub-agents) — offizielle Docs für das Primitive, das begrenzt wird.
+- [Woche 27 · 29. Juni – 3. Juli 2026](https://code.claude.com/docs/en/whats-new/2026-w27) — die "Background by default"-Änderung, die mit der Concurrency-Obergrenze zusammenspielt.
+- [`anthropics/claude-code#68110`](https://github.com/anthropics/claude-code/issues/68110) — der exponentielle Fan-out-Vorfall (48+ Agenten, ~1,5 Mio. Tokens), der die Obergrenzen motiviert hat.
+- [`anthropics/claude-code#78406`](https://github.com/anthropics/claude-code/issues/78406) — die von der Community gemeldete Doku-Lücke für die Env-Variable der Session-Obergrenze.
+- [Claude Code v2.1.217 major updates — sub-agent limits and behavior](https://dev.classmethod.jp/en/articles/20260722-cc-updates-v2-1-217/) — Drittanbieter-Analyse mit den exakten Env-Variablen-Namen, veröffentlicht am Tag nach `v2.1.217`.
+- [Claude Code Put Guardrails on Its Own Agent Fleets](https://www.digitalapplied.com/blog/claude-code-subagent-depth-limits-budget-caps-2026) — Praktiker-Analyse der 16/1.000-Workflow-Hard-Caps und der ultracode-Ausnahme.
