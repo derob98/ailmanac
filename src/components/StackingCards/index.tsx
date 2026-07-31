@@ -53,7 +53,7 @@ function StackCard({card, index, total}: {card: Card; index: number; total: numb
         onBlur={() => setFocused(false)}>
         <Link to={card.to} className={styles.card}>
           <span className={styles.cardGlow} aria-hidden="true" />
-          <span className={styles.cardEmoji} aria-hidden="true">{card.emoji}</span>
+          <card.Icon className={styles.cardIcon} />
           <Heading as="h3" className={styles.cardTitle}>{card.title}</Heading>
           <p className={styles.cardBlurb}>{card.blurb}</p>
           <span className={styles.cardCta}>{card.cta ?? 'Open'} →</span>

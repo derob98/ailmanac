@@ -281,3 +281,110 @@ export function CircleIcon({className}: IconProps): ReactNode {
     </svg>
   );
 }
+
+/* ── Category marks (homepage cards) ─────────────────────────────────────── */
+
+/**
+ * Briefcase — the "Knowledge Worker" track.
+ * Body plus a separate handle arc; the lid line across the body is what makes
+ * it read as a case rather than a plain box at 16px.
+ */
+export function BriefcaseIcon({className}: IconProps): ReactNode {
+  return (
+    <svg {...base} className={className}>
+      <rect x="2.8" y="7.4" width="18.4" height="12.4" rx="2.2" {...stroke} />
+      <path d="M9 7.4V5.8a1.8 1.8 0 0 1 1.8-1.8h2.4A1.8 1.8 0 0 1 15 5.8v1.6" {...stroke} />
+      <path d="M2.8 12.6h18.4" {...stroke} />
+    </svg>
+  );
+}
+
+/**
+ * Wrench — the "Builder / Developer" track and the Claude Code outcome.
+ * An open-jaw head on a diagonal shaft: the notch has to stay ≥1.5 units wide
+ * or it fills in and the mark turns into a lollipop at small sizes.
+ */
+export function WrenchIcon({className}: IconProps): ReactNode {
+  return (
+    <svg {...base} className={className}>
+      <path
+        d="M15.4 3.4a5.2 5.2 0 0 0-4.6 7.7L4 17.9a2 2 0 1 0 2.8 2.8l6.8-6.8a5.2 5.2 0 0 0 6.5-6.9l-3 3-2.6-.7-.7-2.6 3-3a5.2 5.2 0 0 0-1.4-.3z"
+        {...stroke}
+      />
+    </svg>
+  );
+}
+
+/**
+ * Two people — the "Team Lead" track.
+ * The second figure is drawn as a partial arc behind the first, which reads as
+ * depth without needing a full second body outline.
+ */
+export function UsersIcon({className}: IconProps): ReactNode {
+  return (
+    <svg {...base} className={className}>
+      <circle cx="9.4" cy="8.2" r="3.4" {...stroke} />
+      <path d="M3.4 19.6a6 6 0 0 1 12 0" {...stroke} />
+      <path d="M16.2 5.2a3.4 3.4 0 0 1 0 6" {...stroke} />
+      <path d="M18 14.4a6 6 0 0 1 2.6 5.2" {...stroke} />
+    </svg>
+  );
+}
+
+/** Pen nib — the "Write & create" outcome. Barrel, nib and a filled tip. */
+export function PenIcon({className}: IconProps): ReactNode {
+  return (
+    <svg {...base} className={className}>
+      <path d="M17.4 3.6a2.4 2.4 0 0 1 3.4 3.4l-9.6 9.6-4.4 1 1-4.4z" {...stroke} />
+      <path d="M15.6 5.4l3 3" {...stroke} />
+      <path d="M4.6 20.4h6.6" {...stroke} />
+    </svg>
+  );
+}
+
+/**
+ * Plug — the "Ship on the API" outcome.
+ * Two prongs over a body and a lead. The prong gap is the whole read, so it
+ * stays generous rather than anatomically correct.
+ */
+export function PlugIcon({className}: IconProps): ReactNode {
+  return (
+    <svg {...base} className={className}>
+      <path d="M9.4 2.8v4.4M14.6 2.8v4.4" {...stroke} />
+      <path d="M6.6 7.2h10.8v3a5.4 5.4 0 0 1-10.8 0z" {...stroke} />
+      <path d="M12 15.6v5.6" {...stroke} />
+    </svg>
+  );
+}
+
+/**
+ * Tag — the "Level-tagged" value prop.
+ * The eyelet is a filled dot rather than a ring: at 16px a 1.8-stroke ring of
+ * this radius closes up into a blob.
+ */
+export function TagIcon({className}: IconProps): ReactNode {
+  return (
+    <svg {...base} className={className}>
+      <path
+        d="M11.2 3.2H19a1.8 1.8 0 0 1 1.8 1.8v7.8a1.8 1.8 0 0 1-.53 1.27l-6.2 6.2a1.8 1.8 0 0 1-2.54 0l-7.8-7.8a1.8 1.8 0 0 1 0-2.54l6.2-6.2A1.8 1.8 0 0 1 11.2 3.2z"
+        {...stroke}
+      />
+      <circle cx="16.4" cy="7.6" r="1.5" fill="currentColor" />
+    </svg>
+  );
+}
+
+/**
+ * Clipboard — the "Copy-paste ready" value prop.
+ * Board, clip, and two content lines. Reads as "a thing you take away", which
+ * is closer to the meaning than a literal copy-pages glyph.
+ */
+export function ClipboardIcon({className}: IconProps): ReactNode {
+  return (
+    <svg {...base} className={className}>
+      <path d="M9 4.6H7a1.8 1.8 0 0 0-1.8 1.8v12.6A1.8 1.8 0 0 0 7 20.8h10a1.8 1.8 0 0 0 1.8-1.8V6.4A1.8 1.8 0 0 0 17 4.6h-2" {...stroke} />
+      <rect x="9" y="2.8" width="6" height="3.6" rx="1.2" {...stroke} />
+      <path d="M8.8 11.6h6.4M8.8 15.4h4.4" {...stroke} />
+    </svg>
+  );
+}
