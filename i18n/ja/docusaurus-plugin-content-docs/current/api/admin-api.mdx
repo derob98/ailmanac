@@ -1,0 +1,278 @@
+---
+sidebar_position: 18
+title: "Admin API：Claude 組織を自動化する"
+description: "Anthropic Admin API のオペレーターガイド — メンバー一覧、ユーザー招待、RBAC グループ運用、クリーンなオフボーディング。Console と Claude Enterprise、実チームがハマるシートプールと SSO の落とし穴付き。"
+keywords: [claude admin api, anthropic admin api, org:admin, sk-ant-admin, ce-user-management-2026-07-13, rbac_groups, workspace members, claude enterprise scim, claude offboarding, claude workspace api]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Admin API が受け入れる 2 種類の資格情報(Admin API キー vs org:admin OAuth トークン)、そして OAuth 経路が必須のエンドポイント", "自組織タイプで実際に呼び出せるエンドポイント — Claude Console(Platform)vs Claude Enterprise(claude.ai)", "ロールモデルをやさしく解説:user、claude_code_user、developer、billing、admin(Console) — そして user、managed、membership_admin、owner、primary_owner(Enterprise)", "実装をぶち壊す 3 つの落とし穴:シートプールの 400、SCIM の 400、ce-user-management-2026-07-13 ベータヘッダ", "コピペで使える 2 つのプレイブック:クリーンな社員オフボーディングと、四半期グループ監査"]} />
+
+<VerifyNote lastVerified="2026-07-31" source="https://platform.claude.com/docs/en/manage-claude/admin-api">
+一次情報源。Claude Enterprise のユーザー管理エンドポイントは 2026 年 7 月 13 日時点でベータ(ヘッダ `ce-user-management-2026-07-13`)。それ以外は一般提供です。エンドポイントの形はベータ期間中に固まっていくため、出荷前に必ず [Admin API リファレンス](https://platform.claude.com/docs/en/api/admin) を確認してください。
+</VerifyNote>
+
+Console で人間がクリックできる操作は、たいてい Admin API でスクリプト化できます。そして Claude で本気のチームを回すなら、いずれ必要になります。これは、最初の統合でよくハマる 3 つの落とし穴を踏まずに進めるためのガイドです。
+
+## Admin API とは何か(そして何でないか)
+
+**ベース:**すべてのエンドポイントは `https://api.anthropic.com/v1/organizations/` 配下にあります。専用ホストも専用 SDK もありません — `curl`、`requests`、いつも使っている HTTP クライアントで素の HTTPS を呼び出すだけです。
+
+**できること:**組織メンバー、ロール、招待、ワークスペースとそのメンバー、既存の API キー、サービスアカウント、フェデレーション issuer/rules の一覧と管理。そして Claude Enterprise では RBAC グループと(読み取り専用の)カスタムロール。
+
+**できないこと:**
+
+- **新しい API キーの作成。**セキュリティ上、新規キーは Console でしか作成できません。API は既存キーの一覧・改名・無効化のみ可能です。
+- **admin メンバーの変更。**`admin`、`owner`、`primary_owner` を持つメンバーは、API 経由でロール変更や削除ができません — Console で行います。
+- **アイデンティティプロバイダの回避。**ある領域を SSO/SCIM が管理しているなら、API は IdP と戦うのではなく 400 を返します。[SSO + Admin API](#sso--admin-api) を参照。
+
+## 2 種類の資格情報
+
+すべてのリクエストにはどちらか一方が必要 — 呼び出しごとではなく環境ごとに選びます。
+
+<Callout type="tip" items={["人間には専用の OAuth プロファイルの方が安全な既定(短命トークン、監査ログに実ユーザーが残る)。", "長命な Admin API キーは CI にはシンプル、ただし本番シークレット扱いにして定期的にローテートすること。", "サービスアカウント、フェデレーション issuer、フェデレーション rule のエンドポイントは org:admin OAuth トークンのみを受け入れます — これらのルートでは Admin API キーは拒否されます。"]} />
+
+| 資格情報 | 送り方 | 発行できる人 | 備考 |
+|---|---|---|---|
+| **Admin API キー**(`sk-ant-admin…`) | `x-api-key: $ANTHROPIC_ADMIN_KEY` | `admin` ロールを持つメンバー | 長命。ほとんどのエンドポイントをカバー。 |
+| **OAuth ベアラトークン**(`org:admin` スコープ) | `authorization: Bearer $ANTHROPIC_OAUTH_TOKEN` | `admin`、`owner`、`primary_owner` を持つメンバー | 短命。`ant` CLI で更新。サービスアカウント/フェデレーションのエンドポイントには必須。 |
+
+どちらも、すべてのリクエストで `anthropic-version: 2023-06-01` を送る必要があります(Claude Enterprise のグループとカスタムロールへのリクエストは唯一の例外 — 後述の「ベータヘッダのルール」を参照)。
+
+<PromptCard title="最初の呼び出し:私は誰?">{`# With an Admin API key
+curl -sS "https://api.anthropic.com/v1/organizations/me" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "x-api-key: $ANTHROPIC_ADMIN_KEY"
+
+# With an OAuth bearer token (org:admin scope)
+curl -sS "https://api.anthropic.com/v1/organizations/me" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "authorization: Bearer $ANTHROPIC_OAUTH_TOKEN"`}</PromptCard>
+
+レスポンスは組織の `id`、`type`、`name`。401 なら資格情報が不正、403 ならロールが足りません。
+
+## Console vs Claude Enterprise:呼び出せるもの
+
+2 つの組織タイプは URL 空間を共有していますが、公開されるサブセットは異なります。これが Admin API で最も混乱する点です。
+
+| エンドポイント | Claude Console(Platform) | Claude Enterprise(claude.ai) |
+|---|---|---|
+| メンバーと招待 | ✅ GA | ✅ **ベータ**(追加ヘッダ不要) |
+| ワークスペース + ワークスペースメンバー | ✅ GA | ❌ 利用不可 |
+| API キー(一覧/改名/無効化) | ✅ GA | ❌ 利用不可 |
+| 使用量・コストレポート、レート制限 | ✅ GA | ❌ 利用不可 |
+| サービスアカウント、フェデレーション issuer/rule | ✅ GA(OAuth のみ) | ❌ 利用不可 |
+| RBAC グループ + グループメンバー | ❌ 利用不可 | ✅ **ベータ**(ヘッダ必須) |
+| カスタムロール(読み取り専用カタログ) | ❌ 利用不可 | ✅ **ベータ**(ヘッダ必須) |
+| [Spend Limits API](https://platform.claude.com/docs/en/manage-claude/spend-limits-api) | ❌ 利用不可 | ✅ GA |
+
+**Claude Platform on AWS** は第 3 のケースで、ワークスペースエンドポイント(`/v1/organizations/workspaces`)のみが動作します。他はすべて 404。
+
+## ロールモデル
+
+ロール名は組織タイプごとに異なります。耳で照合しないこと。
+
+### Claude Console のロール
+
+| ロール | できること |
+|---|---|
+| `user` | Workbench を使う |
+| `claude_code_user` | Workbench + [Claude Code](/docs/claude-code/what-is-claude-code) |
+| `developer` | Workbench + API キー管理 |
+| `billing` | Workbench + 請求管理 |
+| `admin` | 上記すべて + ユーザー管理 |
+
+`admin` の上に `owner` と `primary_owner` があります — Console にも存在しますが、API 上はスーパー管理者として扱われます。
+
+### Claude Enterprise のロール
+
+5 種類ですが、API で*割り当てられる*のは 2 つだけ(`user` と `managed`)。残りは `claude.ai` の組織設定で決まり、API では変更・削除できません。
+
+| ロール | 意味 |
+|---|---|
+| `user` | 標準メンバー — 権限はプランのデフォルト。 |
+| `managed` | 権限は**所属グループに紐づくカスタムロール**から来る(これが RBAC の経路)。 |
+| `owner` | 組織のオーナー。 |
+| `membership_admin` | メンバー管理可能だが、請求/設定は不可。 |
+| `primary_owner` | 常に 1 人。削除不可。 |
+
+Enterprise できめ細かい権限が欲しいなら、レシピは:対象者を `managed` にしてから、望むロールを持つグループに追加する。
+
+## ベータヘッダのルール
+
+Enterprise で最も多い統合バグ。
+
+<Callout type="warning" items={["メンバーと招待:追加のベータヘッダは NG — anthropic-version: 2023-06-01 のみ。", "グループとカスタムロール:anthropic-beta: ce-user-management-2026-07-13 を送信すること。付けないと 404。", "グループとカスタムロールへのリクエストは anthropic-version を要求しない — 公式サンプルも省いています。ベータ卒業時の予期せぬドリフトを避けるため公式パターンに合わせましょう。"]} />
+
+すべてを 1 つの HTTP クライアントで扱うなら、URL でゲートします:
+
+```python
+BETA_ROUTES = ("/v1/organizations/rbac_groups", "/v1/organizations/rbac_roles")
+
+def headers(path: str, key: str) -> dict:
+    h = {"x-api-key": key}
+    if path.startswith(BETA_ROUTES):
+        h["anthropic-beta"] = "ce-user-management-2026-07-13"
+    else:
+        h["anthropic-version"] = "2023-06-01"
+    return h
+```
+
+## Enterprise Admin キーのスコープ
+
+Claude Enterprise の Admin API キーは**スコープ付き** — プライマリオーナーが作成時に各キーの権限を選びます。動く最小セットを選ぶこと。
+
+| スコープ | 付与範囲 |
+|---|---|
+| `read:members` | メンバー・招待・**すべてのカスタムロールエンドポイント**への GET(ロール専用スコープは存在しない) |
+| `write:members` | メンバー・招待への POST/DELETE |
+| `read:rbac_groups` | グループとグループメンバーへの GET |
+| `write:rbac_groups` | グループとグループメンバーへの POST/DELETE。**招待作成時に `rbac_group_ids` を渡すためにも必須** — 権限を付与できるため。 |
+| `read:org_audit` | 読み取り専用の「監査統合」スコープ — この API のすべての GET と [Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api) の読み取りをカバー。セキュリティチームの監視ボットに最適。 |
+
+## ページネーション — 2 つの異なるスタイル
+
+小さな面倒、しかし「なぜリストが空?」の大きな原因:
+
+- **メンバーと招待**は **ID ベースのページネーション**:`limit`(デフォルト 20、最大 1000)に加え、`before_id` または `after_id` のどちらかひとつ。`first_id` / `last_id` でページングし、`has_more` が `false` になったら停止。
+- **グループ、グループメンバー、カスタムロール**は**不透明カーソル**:各レスポンスから `next_page` を読み、そのまま `page` として送り返す。`next_page` が `null` になったら停止。
+
+すべての Admin API エンドポイントのレート制限は**組織あたり 1 分間 100 リクエスト**を共有します。ただし招待作成だけは**1 時間 1,200 リクエスト**の独自枠。いずれも超過で 429。
+
+## よくあるレシピ
+
+### 全メンバーの一覧(ページング)
+
+```python
+import os, requests
+
+API = "https://api.anthropic.com/v1/organizations/users"
+H = {"anthropic-version": "2023-06-01", "x-api-key": os.environ["ANTHROPIC_ADMIN_KEY"]}
+
+after = None
+while True:
+    params = {"limit": 1000}
+    if after:
+        params["after_id"] = after
+    page = requests.get(API, headers=H, params=params).json()
+    for m in page["data"]:
+        print(m["email"], m["role"])
+    if not page["has_more"]:
+        break
+    after = page["last_id"]
+```
+
+### メールでメンバー検索(大文字小文字を無視、`+tags` にも対応)
+
+```bash
+curl "https://api.anthropic.com/v1/organizations/users?email=jane%2Bhiring@example.com" \
+  -H "x-api-key: $ANTHROPIC_ADMIN_KEY" \
+  -H "anthropic-version: 2023-06-01"
+```
+
+`jane@example.com` でも同じヒット — サーバー側で両辺を正規化します。
+
+### メンバーのロール変更
+
+Enterprise では `user` または `managed` のみ、Console では `user`、`claude_code_user`、`developer`、`billing` のみ割り当て可能。admin ロールを割り当てようとした場合、またはすでに admin を持つメンバーを変更しようとした場合は 400 を返します。
+
+<PromptCard title="メンバーを developer に昇格(Console)">{`curl -sS "https://api.anthropic.com/v1/organizations/users/$USER_ID" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "content-type: application/json" \\
+  -H "x-api-key: $ANTHROPIC_ADMIN_KEY" \\
+  -d '{"role": "developer"}'`}</PromptCard>
+
+### 新入社員を招待し、事前にグループへ割り当て(Enterprise)
+
+`rbac_group_ids` を渡すにはキーに `write:rbac_groups` スコープが必要 — グループが権限を付与するため。
+
+<PromptCard title="招待 + Engineering への自動追加">{`curl -sS -X POST "https://api.anthropic.com/v1/organizations/invites" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "content-type: application/json" \\
+  -H "x-api-key: $ANTHROPIC_ADMIN_KEY" \\
+  -d '{
+    "email": "newhire@example.com",
+    "role": "managed",
+    "rbac_group_ids": ["rbac_group_01UvWxYzAbCdEfGhIjKlMn"]
+  }'`}</PromptCard>
+
+### クリーンな社員オフボーディング(両組織タイプで動作)
+
+<Steps items={[{title: "1. メールで対象者を検索", body: "GET /v1/organizations/users?email=<address>。配列が空なら参加履歴なし — ステップ 3 へ。"}, {title: "2. 削除", body: "DELETE /v1/organizations/users/{user_id}。シート(あれば)はプールに戻ります。本人が作成した API キーは動き続けます — ステップ 4 を参照。"}, {title: "3. 保留中の招待を撤回", body: "/v1/organizations/invites を一覧し、対象の保留中招待を DELETE。承諾済みや期限切れの招待は撤回できません。"}, {title: "4. 本人が作成した API キーをローテート", body: "Admin API キーはユーザースコープではなく組織スコープなので、作成者を削除してもキーは無効化されません。claude.ai → 組織設定 → API で該当キーを一覧し、無効化/削除して、サービスアイデンティティ所有の代替キーを作成します。"}, {title: "5. ログに残す", body: "削除レスポンス({\"type\":\"user_deleted\",\"id\":\"user_...\"})をオフボーディング監査記録として保存。"}]} />
+
+### 四半期グループ監査(Enterprise)
+
+Console を凝視することなく、機密グループにいるべきでないメンバーを見つけます。
+
+```python
+import os, requests
+
+H_BETA = {"x-api-key": os.environ["ANTHROPIC_ADMIN_KEY"],
+          "anthropic-beta": "ce-user-management-2026-07-13"}
+
+groups = requests.get("https://api.anthropic.com/v1/organizations/rbac_groups?limit=1000",
+                     headers=H_BETA).json()["data"]
+
+for g in groups:
+    if "prod" not in g["name"].lower():
+        continue
+    members = requests.get(
+        f"https://api.anthropic.com/v1/organizations/rbac_groups/{g['id']}/members?limit=1000",
+        headers=H_BETA).json()["data"]
+    print(f"{g['name']} ({len(members)} members)")
+    for m in members:
+        print(f"  {m['email']}")
+```
+
+出力を IdP のロスターと差分比較し、古いメンバーは `DELETE /rbac_groups/{group_id}/members/{user_id}` で削除します。SCIM でプロビジョニングされたグループ(`source_type: "scim"`)は変更で 400 が返るので、IdP 側で対応します。
+
+## SSO + Admin API
+
+領域を IdP が管理していれば、API は IdP に譲ります:
+
+| IdP がやること | ブロックされる API 操作 | HTTP |
+|---|---|---|
+| JIT または SCIM ユーザープロビジョニング | 招待作成 | 400 |
+| Advanced SSO / SCIM ロールプロビジョニング | メンバーロール更新 | 400 |
+| SCIM メンバーシッププロビジョニング | 組織からメンバー削除 | 400 |
+| SCIM グループプロビジョニング(`source_type: "scim"`) | グループ改名、削除、メンバー追加/削除 | 400 |
+
+読み取りは常に可能。設計上そうなっています:IdP が所有するものについては IdP が信頼できる唯一の情報源であり、Admin API はスクリプトが黙って IdP から乖離することを拒否します。
+
+## シート、招待、そして一度はハマる 400
+
+有限シートプランでは:
+
+- **保留中の招待はシートを消費します。**撤回するか期限切れを待てばプールに戻ります。
+- **招待作成に tier パラメータはありません。**サーバーが空きのある最も低いティアを選びます。
+- 空きシートがない場合、招待作成は **400** を返します — 購入ではありません。プラン設定でシートを購入してからリトライ。
+- 招待は **21 日**で期限切れ、延長不可。保留中招待のメールやロールを変更するには撤回して作り直します。
+
+## 注意点
+
+<Callout type="warning" items={["Admin API キーは作成者が退職しても失効しません。手動でローテートする必要があります — オフボーディングプレイブックのステップ 4 参照。", "Enterprise の 'managed' ロールは単体では無力。グループ未所属の managed メンバーは事実上プロダクトアクセスがありません。ロール変更は常にグループ割り当てとセットで。", "グループの roles フィールドは、ロールデータが一時的に取得できないとき [] ではなく null で返ることがあります。ゼロロールと結論付ける前にリトライ。", "ロール権限の capability_access_all および capability_access_all_ga は包括的な付与 — 他の行と合算すると二重計上になります。これらはモデルアクセスと permission_ プレフィックスの admin 権限を除く、そのバリアント全体をカバーします。"]} />
+
+## Admin API vs Compliance API
+
+関連していて混同されがち:
+
+- **Admin API**(このページ)は**組織に誰がいるか**と**その人が何をできるか**を管理します。
+- **[Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api)** は**その人が何をしたか**を公開:監査イベント、アクティビティフィード、そして(Enterprise で)リーガルホールド向けのコンテンツ取得と削除。
+
+セキュリティツールでは、`read:org_audit` を持つ 1 本のキーで両 API の読み取りをカバーできます。
+
+## クイズ
+
+<Quiz questions={[
+  {q: "anthropic-beta: ce-user-management-2026-07-13 ヘッダなしで /v1/organizations/rbac_groups に POST しました。何が起きる?", options: ["グループが作成される", "404 Not Found", "400 Bad Request", "401 Unauthorized"], answer: 1, explain: "RBAC グループエンドポイントには anthropic-beta: ce-user-management-2026-07-13 ヘッダが必須です。付けないとエンドポイントが見えず、サーバーは 404 を返します。"},
+  {q: "退職する社員が CI で使う Admin API キーを 3 本作っていました。そのユーザーを DELETE しました。キーはどうなる?", options: ["3 本すべて自動で無効化される", "動き続ける — Admin API キーはユーザースコープではなく組織スコープ", "30 日で停止する", "読み取り専用になる"], answer: 1, explain: "Admin API キーは組織にスコープされます。作成者を削除するとその人自身のアクセスは終わりますが、キーは終わりません。Console で手動ローテートします。"},
+  {q: "Claude Enterprise で、Admin API が割り当てられるロールは 2 つ。どれ?", options: ["admin と user", "user と managed", "owner と membership_admin", "developer と billing"], answer: 1, explain: "API が割り当てられるのは `user` と `managed` のみ。管理ロール(owner、membership_admin、primary_owner)は claude.ai 組織設定で設定され、API では変更できません。"}
+]} />
+
+## 次に
+
+- [最初の API 呼び出し](/docs/api/first-call) — ここに未経験で来た方の開発者基礎
+- [エラーとレート制限](/docs/api/errors-and-rate-limits) — 最初の 429 の前に読むこと
+- [Managed Agents](/docs/api/managed-agents) — もうひとつの大きな Anthropic ホスト型プリミティブ
+- [今月の新着](/docs/whats-new/this-month) — ベータヘッダが変わるタイミングを追跡
