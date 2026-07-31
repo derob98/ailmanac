@@ -20,11 +20,33 @@ import {Reveal, CountUp} from '@site/src/components/Reveal';
 import {Scramble} from '@site/src/components/Scramble';
 import {StackingCards} from '@site/src/components/StackingCards';
 import FreshnessPulse from '@site/src/components/FreshnessPulse';
+import {
+  SeedlingIcon,
+  BriefcaseIcon,
+  WrenchIcon,
+  UsersIcon,
+  PenIcon,
+  PlugIcon,
+  BrainIcon,
+  TargetIcon,
+  TagIcon,
+  ClipboardIcon,
+  CheckCircleIcon,
+} from '@site/src/components/icons';
 
 import styles from './index.module.css';
 
 // Exported so StackingCards (and any future deck) can share the card shape.
-export type Card = {emoji: string; title: string; blurb: string; to: string; cta?: string};
+// `Icon` is a component, not a glyph string: the cards used to carry colour
+// emoji, which clashed with the hand-authored monochrome set the rest of the
+// site moved to, and which no amount of CSS could tint or align.
+export type Card = {
+  Icon: (props: {className?: string}) => ReactNode;
+  title: string;
+  blurb: string;
+  to: string;
+  cta?: string;
+};
 
 // Feature-flag the live freshness section so a launch is never blocked on it.
 const FEATURE_FRESHNESS = true;
@@ -41,28 +63,28 @@ function useLocalePrefix(): string {
 function useTracks(lp: string): Card[] {
   return [
     {
-      emoji: '🌱',
+      Icon: SeedlingIcon,
       title: translate({id: 'home.track.newcomer.title', message: 'Curious Newcomer'}),
       blurb: translate({id: 'home.track.newcomer.blurb', message: 'Never used AI seriously? Get a guaranteed first win in 5 minutes.'}),
       to: `${lp}/docs/start-here/your-first-5-minutes`,
       cta: translate({id: 'home.track.newcomer.cta', message: 'Your first 5 minutes'}),
     },
     {
-      emoji: '💼',
+      Icon: BriefcaseIcon,
       title: translate({id: 'home.track.worker.title', message: 'Knowledge Worker'}),
       blurb: translate({id: 'home.track.worker.blurb', message: 'Write, research, analyse and plan faster — without fabricated facts.'}),
       to: `${lp}/docs/playbooks/productivity`,
       cta: translate({id: 'home.track.worker.cta', message: 'Everyday productivity'}),
     },
     {
-      emoji: '🛠️',
+      Icon: WrenchIcon,
       title: translate({id: 'home.track.builder.title', message: 'Builder / Developer'}),
       blurb: translate({id: 'home.track.builder.blurb', message: 'Customise Claude Code and build on the API, from CLAUDE.md to agents.'}),
       to: `${lp}/docs/claude-code/what-is-claude-code`,
       cta: translate({id: 'home.track.builder.cta', message: 'Dive into Claude Code'}),
     },
     {
-      emoji: '👥',
+      Icon: UsersIcon,
       title: translate({id: 'home.track.lead.title', message: 'Team Lead'}),
       blurb: translate({id: 'home.track.lead.blurb', message: 'Roll AI out to a team safely: conventions, security, a shared toolkit.'}),
       to: `${lp}/docs/start-here/learning-paths`,
@@ -74,25 +96,25 @@ function useTracks(lp: string): Card[] {
 function useOutcomes(lp: string): Card[] {
   return [
     {
-      emoji: '✍️',
+      Icon: PenIcon,
       title: translate({id: 'home.outcome.write.title', message: 'Write & create'}),
       blurb: translate({id: 'home.outcome.write.blurb', message: 'Draft in your voice, edit in passes, repurpose one idea into many.'}),
       to: `${lp}/docs/playbooks/writing`,
     },
     {
-      emoji: '🛠️',
+      Icon: WrenchIcon,
       title: translate({id: 'home.outcome.build.title', message: 'Build with Claude Code'}),
       blurb: translate({id: 'home.outcome.build.blurb', message: 'CLAUDE.md, skills, MCP, subagents — make the agent yours.'}),
       to: `${lp}/docs/claude-code/what-is-claude-code`,
     },
     {
-      emoji: '🔌',
+      Icon: PlugIcon,
       title: translate({id: 'home.outcome.ship.title', message: 'Ship on the API'}),
       blurb: translate({id: 'home.outcome.ship.blurb', message: 'From your first call to streamed, tool-using production agents.'}),
       to: `${lp}/docs/api/first-call`,
     },
     {
-      emoji: '🧠',
+      Icon: BrainIcon,
       title: translate({id: 'home.outcome.understand.title', message: 'Understand AI'}),
       blurb: translate({id: 'home.outcome.understand.blurb', message: 'Mental models that make every tool click — and transfer anywhere.'}),
       to: `${lp}/docs/foundations/what-is-an-llm`,
@@ -103,22 +125,22 @@ function useOutcomes(lp: string): Card[] {
 function useWhy() {
   return [
     {
-      emoji: '🎯',
+      Icon: TargetIcon,
       title: translate({id: 'home.why.opinionated.title', message: 'Opinionated'}),
       blurb: translate({id: 'home.why.opinionated.blurb', message: 'The one recommended way first — then the alternatives.'}),
     },
     {
-      emoji: '🏷️',
+      Icon: TagIcon,
       title: translate({id: 'home.why.leveled.title', message: 'Level-tagged'}),
       blurb: translate({id: 'home.why.leveled.blurb', message: 'Every page badged, so you read what fits you.'}),
     },
     {
-      emoji: '📋',
+      Icon: ClipboardIcon,
       title: translate({id: 'home.why.copy.title', message: 'Copy-paste ready'}),
       blurb: translate({id: 'home.why.copy.blurb', message: 'Templates, prompts & 7 skill packs you can use in 30s.'}),
     },
     {
-      emoji: '✅',
+      Icon: CheckCircleIcon,
       title: translate({id: 'home.why.fresh.title', message: 'Always verified'}),
       blurb: translate({id: 'home.why.fresh.blurb', message: 'Volatile facts carry a date and a source. No stale guesses.'}),
     },
@@ -375,7 +397,7 @@ function CardGrid({title, lead, cards, big}: {title: string; lead?: string; card
             <Reveal key={c.title} delay={i * 0.07}>
               <Link to={c.to} className={styles.card}>
                 <span className={styles.cardGlow} aria-hidden="true" />
-                <span className={styles.cardEmoji} aria-hidden="true">{c.emoji}</span>
+                <c.Icon className={styles.cardIcon} />
                 <Heading as="h3" className={styles.cardTitle}>{c.title}</Heading>
                 <p className={styles.cardBlurb}>{c.blurb}</p>
                 <span className={styles.cardCta}>{c.cta ?? 'Open'} →</span>
@@ -417,7 +439,7 @@ function OutcomePanel({
         transition={{duration: 0.7, ease: [0.22, 1, 0.36, 1]}}>
         {verb}
       </motion.span>
-      <span className={styles.cardEmoji} aria-hidden="true">{card.emoji}</span>
+      <card.Icon className={styles.cardIcon} />
       <Heading as="h3" className={styles.cardTitle}>{card.title}</Heading>
       <p className={styles.cardBlurb}>{card.blurb}</p>
       <span className={styles.cardCta}>{card.cta ?? 'Open'} →</span>
@@ -527,7 +549,7 @@ function Why() {
         <div className={styles.whyGrid}>
           {useWhy().map((w, i) => (
             <Reveal key={w.title} delay={i * 0.07} className={styles.why}>
-              <span className={styles.whyEmoji} aria-hidden="true">{w.emoji}</span>
+              <w.Icon className={styles.whyIcon} />
               <div>
                 <strong>{w.title}</strong>
                 <p>{w.blurb}</p>
