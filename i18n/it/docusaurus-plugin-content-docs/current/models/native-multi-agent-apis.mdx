@@ -1,0 +1,201 @@
+---
+sidebar_position: 6.55
+title: "API Multi-Agente Native: Responses Multi-Agent Beta di OpenAI vs Costruirtelo da Solo"
+description: "Il 9 luglio 2026 OpenAI ha rilasciato la beta multi-agente della Responses API e la Sol Ultra Mode — il primo vendor frontier a rendere 'il modello spawna e sintetizza N sub-agenti in una sola richiesta HTTP' una primitiva di prima classe. Cosa esce davvero, la forma dell'API, la matematica dei costi, cosa fa Anthropic al suo posto, e quando la primitiva nativa batte un fan-out DIY."
+keywords: [multi-agent API, OpenAI Responses API, multi_agent beta, GPT-5.6 Ultra Mode, Sol Ultra, subagents, parallel agents, Anthropic Cowork, Managed Agents, Claude subagents, agent orchestration, native multi-agent, max_concurrent_subagents]
+---
+
+<LevelBadge level="advanced" />
+
+Per diciotto mesi, "multi-agente" ha significato che *tu* scrivevi il fan-out. Scrivevi il prompt del coordinatore, spawnavi N chiamate in parallelo, fondevi il loro JSON, gestivi i retry. Il **9 luglio 2026** OpenAI ha collassato tutto questo in un parametro di richiesta: **`multi_agent.enabled: true`** sulla Responses API, avvolto in una feature consumer chiamata **Sol Ultra Mode**. È il modello stesso a decidere quanti sub-agenti spawnare, li esegue in parallelo, e sintetizza il risultato — tutto dentro una singola chiamata HTTP. Nessun altro vendor frontier ha rilasciato una primitiva simmetrica. Questa pagina mappa cosa è uscito davvero, i numeri dietro, cosa offre Anthropic al suo posto, e — la parte che conta — i tre carichi di lavoro dove la primitiva nativa si guadagna il costo e i due dove un fan-out DIY vince ancora.
+
+<Callout type="objectives" items={[
+  "Leggere il corpo esatto della richiesta multi-agente sulla Responses API e sapere cosa capa davvero max_concurrent_subagents",
+  "Fare la matematica dei costi: quanto ti addebita davvero 'il modello spawna 4 sub-agenti' ai prezzi di Sol",
+  "Mappare lo stesso territorio dal lato Anthropic — Cowork, Managed Agents, e i sub-agenti di Claude Code — e vedere il gap di primitive",
+  "Scegliere la primitiva giusta per carico di lavoro: multi-agente nativo, fan-out DIY, A2A, o un singolo turno lungo",
+  "Evitare i quattro failure mode che trasformano una chiamata Ultra a 4 agenti in una bolletta 4x senza guadagno di accuratezza"
+]} />
+
+<VerifyNote lastVerified="2026-08-01" source="https://developers.openai.com/api/docs/guides/responses-multi-agent">
+La superficie multi-agente della Responses API è ancora beta (header <code>OpenAI-Beta: responses_multi_agent=v1</code>). I nomi dei campi, il valore di default di <code>max_concurrent_subagents</code>, e quali parametri sono mutuamente esclusivi con la modalità multi-agente sono tutti cambiati dal lancio del 9 luglio 2026. Ri-verifica la forma della richiesta e la lista delle incompatibilità contro il documento linkato prima di andare in produzione.
+</VerifyNote>
+
+## La versione in una frase
+
+**Ultra Mode è una skin consumer sopra `multi_agent.enabled: true` della Responses API** — una primitiva nativa che permette al modello di spawnare sub-agenti in parallelo dentro una richiesta, sintetizzare i loro output, e restituire una singola risposta. Ti compra un bump di accuratezza piccolo-ma-reale sui task parallelizzabili (Terminal-Bench 2.1: **88.8% → 91.9%**), a una bolletta di token che scala grosso modo linearmente con il numero di sub-agenti che il modello sceglie di spawnare.
+
+## Cosa è uscito davvero il 9 luglio 2026
+
+Nello stesso lancio sono atterrate due cose, e vale la pena separarle:
+
+- **Ultra Mode** — un toggle di *prodotto* dentro ChatGPT e Codex. Disponibile sul tier flagship (Sol). Quando abilitato, i task difficili vengono decomposti in run di sub-agenti paralleli prima della sintesi. Marketizzato come "spawna 4+ agenti"; alcune delle stesse grafiche benchmark GA di OpenAI mostrano anche configurazioni a 16 agenti su BrowseComp e SEC-Bench Pro, ma quattro è il default operativo.
+- **Responses API multi-agent beta** — una primitiva per *sviluppatori*. La stessa capability sottostante, esposta come `multi_agent.enabled: true` su `client.beta.responses.create()`. È questa che useresti per costruire la tua esperienza in stile Ultra.
+
+La confusione lasciata dal marketing è reale: i builder continuano a chiedere "come chiamo Ultra Mode dall'API?" La risposta è che non lo fai — abiliti la beta multi-agente, che è la primitiva sotto la feature di prodotto.
+
+## La richiesta multi-agente della Responses API
+
+Concretamente, questa è la forma (Python SDK):
+
+<PromptCard title="Chiamata Responses API multi-agente minima">
+{`from openai import OpenAI
+
+client = OpenAI()
+
+resp = client.beta.responses.create(
+    model="gpt-5.6-sol",
+    input="Audit this repo for auth-bypass patterns and write a report.",
+    multi_agent={
+        "enabled": True,
+        "max_concurrent_subagents": 3,
+    },
+    tools=[...],  # your MCP tools, function tools, etc.
+    extra_headers={"OpenAI-Beta": "responses_multi_agent=v1"},
+)`}
+</PromptCard>
+
+Quattro cose non ovvie su questa forma:
+
+- **`max_concurrent_subagents` non è un budget totale.** Capa i turni di sub-agente *attivi* attraverso l'intero albero in un dato momento — root più discendenti. Il modello può spawnare un numero *totale* molto maggiore di sub-agenti nell'arco di vita della richiesta; semplicemente non può averne più di N attivi contemporaneamente.
+- **La profondità è illimitata.** Un sub-agente può a sua volta spawnare sub-agenti. Non c'è un cap fisso sulla profondità dell'albero o sul conteggio totale di sub-agenti per run. La tua superficie di costo non è "N chiamate" — è un albero che il modello modella a runtime.
+- **La root sintetizza.** L'agente root è responsabile della fusione delle risposte dei sub-agenti nella risposta finale. Non ricevi indietro un oggetto strutturato `{subagents: [...]}`; ricevi una risposta, e i turni intermedi degli agenti sono opachi al tuo codice.
+- **Alcuni parametri vengono disabilitati silenziosamente.** `reasoning.summary` e `max_tool_calls` non sono supportati con multi-agent abilitato, e l'endpoint di compaction non è supportato per risposte multi-agente. Se ti affidi ai reasoning summary per l'osservabilità, li perdi nell'istante in cui accendi questa modalità.
+
+## La matematica dei costi che nessuno stampa sulla pagina marketing
+
+Al prezzo GA di Sol di **$5 input / $30 output per milione di token**, l'aritmetica è impietosa. Dai writeup dei builder che hanno fatto reverse-engineering di run Ultra reali:
+
+- **Un task che Ultra decompone in 2 sub-agenti** ≈ 2x il costo dei token output di una singola chiamata Sol — perché entrambi i sub-agenti generano output, e poi la root genera la sintesi sopra.
+- **Un task in cui Ultra spawna 5 sub-agenti** ≈ 5x — stesso ragionamento, più un replay di token input proporzionalmente maggiore attraverso l'albero.
+- **Le grafiche BrowseComp / SEC-Bench che mostrano configurazioni a 16 agenti** non sono un pasto gratis: sono una dimostrazione di grado ricerca, non un default. A 16 sub-agenti concorrenti su Sol, sei di fronte a una cifra a due cifre medie di dollari per query difficile nei soli token output.
+
+Il modo di pensarci: **stai pagando una Monte Carlo di chiamate Sol più un passaggio di sintesi sopra.** A volte questo ti compra abbastanza accuratezza da contare. A volte è solo una bolletta 4x per un task che una singola chiamata avrebbe risolto.
+
+## Cosa compra davvero l'accuratezza
+
+I delta pubblicati sulle eval parallelizzabili — i carichi di lavoro per cui Ultra Mode è progettata — sono reali ma modesti:
+
+| Benchmark | Sol (singolo) | Sol Ultra | Delta | Cosa misura l'eval |
+| --- | --- | --- | --- | --- |
+| Terminal-Bench 2.1 | 88.8% | 91.9% | +3.1 | Pianificazione multi-step da riga di comando, coordinamento di tool |
+| BrowseComp | 87.5% | 92.2% | +4.7 | Ricerca web multi-fonte e sintesi |
+| SEC-Bench Pro | — | 74.3% | (numero single-mode non pubblicato) | Ragionamento su documenti regolatori attraverso corpora grandi |
+
+Tre punti su questa tabella:
+
+- La banda di +3–5 punti è consistente con quello che il sampling parallelo ha storicamente comprato su altre frontiere (best-of-N, self-consistency). La primitiva è genuinamente utile; il delta non è un cambio di scalino.
+- Questi sono il *best case* — valutazioni scelte per mostrare bene la modalità. Sui task sequenziali (una modifica di codice lineare, la riscrittura di un singolo file, una chat breve), Ultra aggiunge latenza di sintesi e costo senza muovere l'accuratezza.
+- Sulla stessa grafica Terminal-Bench 2.1, Opus 4.8 di Anthropic ha segnato 78.9% — significa che il vantaggio di Sol Ultra viene da *entrambi* il modello base migliore *e* il boost multi-agente impilato sopra. Se migri a Sol Ultra da Opus, non attribuire tutto il gap alla primitiva multi-agente.
+
+## Cosa fa Anthropic al suo posto
+
+Anthropic non ha rilasciato una primitiva API simmetrica. Gli analoghi più vicini risolvono ciascuno una fetta diversa dello stesso problema:
+
+- **[Cowork](/docs/api/cowork-and-agent-teams)** — una superficie di *prodotto*. Uno spazio di lavoro desktop agentico dove un agente svolge lavoro sostenuto multi-step accanto all'utente. Paragonabile a Ultra Mode come *feature*, ma non come primitiva API.
+- **[Managed Agents](/docs/api/managed-agents) e i [managed-agents memory stores](/docs/api/managed-agents-memory-stores)** — un loop di agente hostato con stato persistente e scheduling. Riempie lo slot "agente background long-running", non lo slot "spawna 4 in parallelo e fondi".
+- **[Sub-agenti di Claude Code](/docs/claude-code/subagents) e i [limiti della flotta di sub-agenti](/docs/claude-code/subagent-fleet-limits)** — una primitiva di sub-agente di prima classe, ma scoped alla CLI Claude Code. Documentata, spawnabile in parallelo, e l'analogo *più vicino* a `multi_agent.enabled` — con la differenza importante che il prompt del coordinatore lo scrivi tu.
+- **[Building Agents](/docs/api/building-agents) sulla Messages API** — il percorso DIY. Fai fan-out di N chiamate `messages.create` in parallelo, scrivi il prompt di sintesi, gestisci i retry. Stesso risultato, più codice.
+
+Il gap: **nessuna superficie API di Anthropic al momento ti permette di flippare un singolo booleano e avere il modello stesso a decidere quanti sub-agenti spawnare e fondere il loro lavoro.** Se vuoi quel comportamento contro Claude, te lo costruisci — vedi [Cowork & Agent Teams](/docs/api/cowork-and-agent-teams) per la storia lato prodotto e [Managed Agents](/docs/api/managed-agents) per la primitiva del loop hostato.
+
+## Scegliere la primitiva giusta per carico di lavoro
+
+<Steps items={[
+  {title: "Il task è genuinamente parallelizzabile?", body: "Se i sotto-task possono girare senza aspettare i risultati l'uno dell'altro — auditare un repo, ricercare un tema attraverso molte fonti, refactorare N file indipendentemente — una forma fan-out si guadagna il costo. Se il task è sequenziale (modifica A, poi leggi il risultato di A, poi modifica B), qualsiasi primitiva multi-agente aggiunge overhead di sintesi per zero guadagno."},
+  {title: "Devi ispezionare i turni intermedi?", body: "Il multi-agente nativo (Ultra, Responses multi-agent beta) nasconde i turni dei sub-agenti al tuo codice. Se ti servono audit trail, attribuzione di costo per sub-agente, o la capacità di iniettare mid-run — costruisciti il fan-out da solo. I sub-agenti di Claude Code ti danno visibilità; la beta multi-agente della Responses API no."},
+  {title: "I sub-agenti attraversano un confine di trust?", body: "Se i sotto-task appartengono a org, cloud, o vendor diversi, sei fuori dallo scope di qualsiasi primitiva di singolo vendor. Usa A2A — vedi /docs/models/a2a-protocol-agent-to-agent. Il multi-agente nativo è intra-model; A2A è inter-agent."},
+  {title: "Il costo è limitato o open-ended?", body: "Gli alberi multi-agente nativi sono runtime-shaped: non puoi prevedere la bolletta di token dalla richiesta. Se la tua app ha un SLA di costo per richiesta, preferisci il fan-out DIY dove controlli la larghezza del fan-out — o imposta un cap hard di max_output_tokens sulla root."},
+  {title: "Ti servono i +3–5 punti di accuratezza?", body: "Se la tua eval dice che il task è risolvibile all'85% con una singola chiamata e il 90% è la differenza tra spedire e no, il multi-agente nativo è un modo low-friction per comprarli. Se una singola chiamata Sol o Opus risolve già il task, Ultra è una bolletta 4x per un guadagno di 0 punti."}
+]} />
+
+## Quattro failure mode che trasformano Ultra in una bolletta 4x per nulla
+
+- **Accenderlo su task sequenziali.** Il modello decompone e sintetizza anche quando il task non parallelizza. Paghi l'overhead di coordinamento su lavoro che non ne aveva bisogno. Regola pratica: se non riesci ad articolare cosa starebbe facendo il secondo sub-agente mentre gira il primo, non abilitare il multi-agent.
+- **Lasciare l'osservabilità del reasoning-summary sulla tua dashboard.** `reasoning.summary` è silenziosamente non supportato con multi-agent. Se il tuo monitoring dipende da questo, otterrai campi vuoti e penserai che il modello non stia pensando. Spedisci un cambio di schema *prima* di flippare il flag.
+- **Usare `max_tool_calls` come limite di sicurezza.** Anche questo silenziosamente disabilitato con multi-agent. La storia di sicurezza che pensavi di avere — "al massimo 20 chiamate tool per richiesta" — è sparita. Enforcia i tetti di chiamate tool al livello dell'adapter tool, non via parametro di richiesta.
+- **Assumere che `max_concurrent_subagents` sia un cap di costo.** Capa i sub-agenti *attivi* in un momento, non il totale spawnato durante la richiesta. Una singola chiamata Ultra può spawnare dozzine di sub-agenti in sequenza e rispettare comunque un limite `max_concurrent_subagents: 3`. Se il costo è il tuo tetto, aggiungi un max_output_tokens a livello di richiesta.
+
+## Cosa "multi-agente nativo" non è
+
+Due primitive adiacenti vengono spesso confuse con esso:
+
+- **Non è il sampling `n > 1`.** Il vecchio parametro `n` di OpenAI campiona molteplici completion e le restituisce tutte; tu ne scegli una. Il multi-agente esegue sub-agenti diversi *che fanno lavori diversi* e ne sintetizza gli output. Il primo è sampling di temperatura; il secondo è decomposizione di task.
+- **Non è la batch inference.** La [batch API](/docs/api/admin-api) processa molte richieste indipendenti in background. Il multi-agent è molti sub-agenti *coordinati* dentro *una* richiesta interattiva. Il batch è orientato al throughput, il multi-agent è orientato al risultato.
+
+## Dove sta andando
+
+Il protocollo A2A (vedi [A2A: Il Protocollo Agent-to-Agent](/docs/models/a2a-protocol-agent-to-agent)) copre il multi-agente *inter-vendor*. `multi_agent.enabled: true` copre il multi-agente *intra-model*. Lo slot non riempito è una primitiva **cross-vendor** — il modello sul vendor A spawna un sub-agente sul vendor B e ne fonde il risultato — e non c'è ancora una spec pubblica per questo. Quando atterrerà, atterrerà come A2A + un verbo di handoff nativo, non come una nuova API su nessuno dei due lati. Tieni d'occhio quello spazio.
+
+<Quiz questions={[
+  {
+    q: "Cosa capa max_concurrent_subagents nella beta multi-agente della Responses?",
+    options: [
+      "Il numero totale di sub-agenti che la richiesta può mai spawnare",
+      "Il numero di turni di sub-agente attivi in qualsiasi momento attraverso l'intero albero, escludendo la root",
+      "La profondità dell'albero (quanto profondamente i sub-agenti possono spawnare i propri sub-agenti)",
+      "Il numero di chiamate tool che ogni sub-agente può fare"
+    ],
+    answer: 1,
+    explain: "È un cap di concorrenza sui turni di sub-agente attivi attraverso l'intero albero in un dato momento, e esclude la root. Non c'è un cap fisso sul totale dei sub-agenti per richiesta né sulla profondità dell'albero — il modello modella l'albero a runtime."
+  },
+  {
+    q: "Abiliti multi-agent e la tua dashboard di monitoring mostra improvvisamente campi reasoning-summary vuoti. Cos'è successo?",
+    options: [
+      "Il modello ha fallito silenziosamente — ripeti la richiesta",
+      "reasoning.summary non è supportato quando multi_agent è abilitato; l'API lo droppa silenziosamente",
+      "I sub-agenti hanno girato ma il passaggio di sintesi è andato in timeout",
+      "Il tuo header beta è sbagliato"
+    ],
+    answer: 1,
+    explain: "reasoning.summary e max_tool_calls sono silenziosamente disabilitati con multi-agent abilitato, e la compaction non è supportata. Se osservabilità o sicurezza dipendono da quei parametri, spedisci un cambio di schema prima di flippare il flag."
+  },
+  {
+    q: "Ti servono sub-agenti paralleli che girano in account cliente diversi attraverso due vendor. Quale primitiva è quella corretta?",
+    options: [
+      "OpenAI Responses API multi-agent beta con max_concurrent_subagents: 2",
+      "Sub-agenti di Claude Code",
+      "Il protocollo A2A, con ciascun vendor che espone un Agent Card",
+      "GPT-5.6 Ultra Mode via ChatGPT"
+    ],
+    answer: 2,
+    explain: "Il multi-agente nativo (Ultra, Responses beta, sub-agenti di Claude Code) è intra-model o intra-runtime. Quando i sub-agenti attraversano un confine di org, cloud, o vendor, ti serve A2A — vedi /docs/models/a2a-protocol-agent-to-agent."
+  },
+  {
+    q: "Quale di questi è un candidato scarso per Ultra Mode / multi_agent.enabled?",
+    options: [
+      "Auditare una grande codebase per una classe di vulnerabilità attraverso molti file",
+      "Ricerca web multi-fonte dove ciascuna fonte può essere letta indipendentemente",
+      "Una riscrittura di codice in un singolo file dove ogni modifica dipende dalla precedente",
+      "Confrontare filing regolatori attraverso molte aziende"
+    ],
+    answer: 2,
+    explain: "I task sequenziali — dove lo step B ha bisogno dell'output dello step A — non parallelizzano. Il multi-agent decompone e sintetizza comunque, aggiungendo latenza e 2x+ token per zero guadagno di accuratezza. Regola pratica: se non riesci a dire cosa starebbe facendo il secondo sub-agente mentre gira il primo, non abilitarlo."
+  }
+]} />
+
+<Flashcards items={[
+  {front: "Multi-agente nativo (definizione di questa pagina)", back: "Una primitiva API di prima classe dove il modello stesso spawna e sintetizza N sub-agenti in parallelo dentro una richiesta HTTP. Ad agosto 2026, OpenAI è l'unico vendor frontier a rilasciarne una — via multi_agent.enabled sulla beta della Responses API."},
+  {front: "Ultra Mode vs multi_agent beta", back: "Stessa primitiva sottostante, due superfici. Ultra Mode è il toggle consumer in ChatGPT/Codex; la beta multi-agent è l'API sviluppatori. Non chiami 'Ultra' da codice — abiliti multi-agent."},
+  {front: "max_concurrent_subagents", back: "Capa quanti turni di sub-agente possono essere attivi contemporaneamente attraverso l'intero albero, escludendo la root. Non è un cap totale, non è un cap di profondità. Il modello può spawnare molti più sub-agenti nell'arco della vita della richiesta."},
+  {front: "Incompatibilità silenziose dei parametri", back: "Con multi_agent.enabled: reasoning.summary non è supportato, max_tool_calls non è supportato, e l'endpoint di compaction non è supportato. Tutti e tre sono silenziosi — l'API accetta la richiesta e droppa il vincolo."},
+  {front: "Delta Sol Ultra Terminal-Bench 2.1", back: "88.8% (singolo) → 91.9% (Ultra), un guadagno di +3.1 punti. Consistente con i guadagni best-of-N che il sampling parallelo ha storicamente comprato. Reale ma modesto."},
+  {front: "Regola di scaling del costo", back: "Il multi-agente nativo fattura grosso modo linearmente con il numero di sub-agenti che il modello spawna, più un passaggio di sintesi. Due sub-agenti ≈ 2x token output; cinque sub-agenti ≈ 5x. Abilitalo quando il delta di accuratezza giustifica il moltiplicatore, non di default."},
+  {front: "La risposta di Anthropic sullo stesso territorio", back: "Nessuna singola API simmetrica. Cowork è la superficie di prodotto, Managed Agents è il loop hostato, i sub-agenti di Claude Code sono la primitiva di prima classe in-CLI, e il fan-out DIY sulla Messages API è il fallback flessibile. Tutti richiedono che tu scriva il prompt del coordinatore."},
+  {front: "Quando usare A2A invece", back: "Quando i sub-agenti attraversano un confine di vendor, cloud, o org. Il multi-agente nativo è intra-model; A2A è inter-agent. Componibili — puoi avere un endpoint A2A la cui implementazione internamente usa multi-agent per rispondere al task delegato."}
+]} />
+
+## Fonti e approfondimenti
+
+- [Multi-agent — guida OpenAI API](https://developers.openai.com/api/docs/guides/responses-multi-agent) — il riferimento ufficiale della beta Responses multi-agent: forma della richiesta, semantica di `max_concurrent_subagents`, lista dei parametri non supportati, e l'header beta.
+- [GPT-5.6: Frontier intelligence that scales with your ambition — OpenAI](https://openai.com/index/gpt-5-6/) — post di lancio per Sol, Terra, Luna e Ultra Mode, con il posizionamento della famiglia.
+- [Previewing GPT-5.6 Sol — OpenAI](https://openai.com/index/previewing-gpt-5-6-sol/) — la pagina di preview precedente, utile per la metodologia dei benchmark.
+- [GPT-5.6 Sol Ultra Mode: subagents, parallel architecture, builder guide — ChatForest](https://chatforest.com/builders-log/openai-gpt-5-6-sol-ultra-mode-subagents-parallel-architecture-builder-guide/) — la matematica dei costi reverse-engineered (2 sub-agenti ≈ 2x, 5 sub-agenti ≈ 5x), e l'osservazione degli "interni di sub-agente opachi".
+- [How to Use GPT-5.6 Ultra Mode: Multi-Agent Coordination for Complex Tasks — MindStudio](https://www.mindstudio.ai/blog/gpt-5-6-ultra-mode-multi-agent-coordination) — il default operativo di 4 agenti e il dettaglio delle 16-agent-in-alcune-grafiche.
+- [OpenAI Releases GPT-5.6 (Sol, Terra, Luna) — MarkTechPost](https://www.marktechpost.com/2026/07/09/openai-releases-gpt-5-6-a-three-tier-model-family-with-programmatic-tool-calling/) — copertura del lancio e la primitiva Programmatic Tool Calling rilasciata insieme al multi-agent.
+- [GPT-5.6 & ChatGPT per Utenti Claude](/docs/models/gpt-5-6-sol-terra-luna) — la pagina AILmanac gemella per la famiglia di modelli stessa.
+- [Cowork & Agent Teams](/docs/api/cowork-and-agent-teams) — l'analogo lato prodotto di Anthropic.
+- [Managed Agents](/docs/api/managed-agents) — la primitiva di loop hostato su Claude.
+- [Sub-agenti di Claude Code](/docs/claude-code/subagents) e [Limiti della Flotta di Sub-agenti](/docs/claude-code/subagent-fleet-limits) — la primitiva di sub-agente di prima classe in-CLI.
+- [A2A: Il Protocollo Agent-to-Agent](/docs/models/a2a-protocol-agent-to-agent) — il gemello cross-vendor; usalo quando i sub-agenti attraversano un confine di trust.
+- [Programmatic Tool Calling](/docs/api/programmatic-tool-calling) — una primitiva diversa rilasciata nello stesso lancio OpenAI (la loro versione JS-based) e la versione Python-sandbox di Claude.
