@@ -1,0 +1,245 @@
+---
+sidebar_position: 4.6
+title: "Supabase Evals — 実バックエンドのエージェントベンチマーク"
+description: "Supabase は、Claude Code、Codex、OpenCode を実際のコンテナ化された Supabase スタックに対して実行するベンチマークをオープンソース化した — モックではない。何を測るのか、モデルが実際にドキュメントとスキルをどう使うかについて何を見出したのか、そして一晩でローカル実行する方法。"
+keywords: [supabase evals, coding agent benchmark, claude code vs codex, opencode benchmark, real backend benchmark, agent skills, llm as judge, evals apache 2.0, opus 5 sonnet 5 kimi k3, agent evaluation]
+---
+
+<LevelBadge level="intermediate" />
+
+コーディングエージェントのリーダーボードはたいてい*プルリクエストの差分をテストスイートに対して*測ります — SWE-Bench とその親戚です。それは有用ですが、Supabase ユーザーが実際に行うことではありません: スキーマを構築し、壊れた RLS ポリシーを修正し、失敗した Edge Function をデバッグし、認証を配線する。**2026年8月1日**、Supabase はコーディングエージェントを*実際の*タスクで、実際の MCP サーバーと実際の CLI で、実際のコンテナ化された Supabase スタックに対してグレードするベンチマークをオープンソース化しました。Apache-2.0 で、ラップトップ上でローカル実行でき、初期スコアはすでに異なるエージェントがドキュメントを*どう使うか*について驚くべきことを言っています。このページはそれの実践的なフィールドガイドです。
+
+<Callout type="objectives" items={[
+  "Supabase Evals が SWE-Bench 型ベンチマークとどう構造的に異なるかを理解する",
+  "クロスエージェントの発見を正直に読む — Opus 5、Sonnet 5、Kimi K3、GPT-5 ラインが実際にどこで分岐するか",
+  "同じモデルでスキルをロードした効果を見る(前 vs 後)",
+  "自分のエージェントとモデルに対してベンチマークを1時間未満で自分で実行する",
+]} />
+
+<VerifyNote lastVerified="2026-08-03" source="https://github.com/supabase/evals">
+このページのスコア表、eval 数、スキル効果は **2026年8月1日リリース時点** のリーダーボードと README を反映しています。[supabase.com/evals](https://supabase.com/evals) のライブスコアは、新しいモデルと実験が投入されると更新されます。ベンチマークの*形*(実スタック、決定論的 + LLM ジャッジのスコアリング、1回のリトライ)は永続的ですが、具体的なパーセンテージはそうではありません。
+</VerifyNote>
+
+## Supabase Evals が実際に何であるか
+
+Supabase Evals は、ベンチマーク、評価ハーネス、公開リーダーボードを1つの Apache-2.0 リポジトリ [github.com/supabase/evals](https://github.com/supabase/evals) にまとめたものです。存在する理由は、SWE-Bench 型のテストがバックエンド作業に対して間違った質問に答えているためです — それらは「このエージェントは Python テストスイートに対する GitHub イシューをクローズできるか」を測る — 一方でほとんどの実際の Supabase 作業は*稼働中システムに対する ops* に近い: RLS ポリシーが有効なリクエストを拒否し始めた、Edge Function が本番で 500 を返している、マイグレーションが適用されなかった。
+
+以前のものと3つの点で異なります:
+
+- **モックではなく、実スタック。** すべてのシナリオはホストの Docker ソケットをマウントする新鮮な Docker サンドボックスを起動するため、`supabase start` はローカルスタックを兄弟コンテナとして起動します。エージェントは Management-API 互換のサーフェス(`@supabase/lite`)*および* 実際の MCP サーバーと実際の Supabase CLI と対話します。何もスタブされていません。
+- **決定論的チェック優先、必要な場合のみ LLM-as-judge。** スコアラーは結果のデータベースをクエリしたり、デプロイされた Edge Function にヒットしたり、生成されたファイルに対してリポジトリルート `vitest` を実行できます。LLM ジャッジは自由形式回答(「エージェントの説明は実際の根本原因と一致したか?」)のバックストップであり、主要なグレードではありません。
+- **1回のリトライで最終。** ベスト・オブ・N をチェリーピックしません。これだけで、数値はほとんどのエージェント PR ベンチマークよりも綺麗ではなくなります。
+
+## シナリオグリッド
+
+2026年8月のリリースは `evals/<id>/` の下に **38 の eval シナリオ** を出荷します。それらは結果が意味的にスライスできるよう3軸で組織化されています:
+
+- **9つのプロダクト** — database、auth、storage、edge functions、realtime、cron、queues、vectors、data-api
+- **9つのトピック** — RLS、security、migrations、SQL、SDK、observability、self-hosting、tests、declarative-schema
+- **4つのステージ** — `build`(新しいものを作る)、`deploy`(出荷)、`investigate`(何が悪いかを調べる)、`resolve`(修正)
+
+各 eval は `PROMPT.md`(エージェントが見るタスク、frontmatter メタデータ付き)、`EVAL.ts` スコアラー、オプションの `remote/`(シードされたホストプロジェクト状態 — SQL、ログ、すでにデプロイされた関数)、`local/`(エージェントのサンドボックスワークスペースにコピーされる開始ファイル)を含むディレクトリです。シナリオは合成プロンプトではなく、実際のサポートチケットと GitHub イシューから来ています。
+
+## 2つのランタイム、eval ごとに選択
+
+すべての eval は2つのモードのいずれかで実行され、その形によって自動的に決定されます:
+
+- **Tools モード。** サンドボックスなし。エージェントは MCP/ツールサーフェス(Management API、SQL、storage など)を得て、結果のプロジェクト状態を検査してその回答がスコアリングされます。プラットフォーム内で完結する eval(`local/` ディレクトリなし、`interface: cli` なし)に使われます。
+- **Local-stack モード。** 実際の Supabase CLI がインストールされた新鮮な Docker サンドボックス。エージェントは `bash` ツールとファイルツールを得て、兄弟コンテナとして生成される実際のローカルスタックに対して `supabase init/start/db/test` を実行できます。エージェントが停止した後、ハーネスは `docker cp` でワークスペースを取り出し、ホストから `vite`/`vitest` を実行してスコアリングします。`local/` ワークスペースが存在するか `interface: cli` が宣言されている場合に使われます。
+
+賢い部分: **ホストのツールチェーンがサンドボックスが生成したものをスコアリングします。** スコアラーはサンドボックスイメージの中に住む必要がありません。
+
+## クロスエージェントの発見 (2026年8月)
+
+初期のリーダーボード実行は、**ファーストパーティエージェント**(Claude Code、Codex、Claude API executor 実験)を、Claude Opus 5、Claude Sonnet 5、Kimi K3、GPT-5.4/5.6 ラインアップにわたる**モデル非依存の OpenCode** と対戦させます。以下の数値は初期投稿が最も鋭い結果を報告している **`build` ステージ**のものです。
+
+| Agent + model | Build (no skills) | Build (with skills) |
+|---|---|---|
+| Claude Code + Opus 5 | 100% | 100% |
+| OpenCode + Kimi K3 | 100% | 100% |
+| Claude Code + Sonnet 5 | 78% | 100% |
+| Codex + GPT-5.6 (Sol) | 89% | 100% |
+| Codex + GPT-5.4 mini | 78% | 89% |
+
+2つ際立っています:
+
+- **Opus 5 と Kimi K3 は `build` を助けなしで最大化します。** OpenCode 経由の Kimi K3 が Claude Code 経由の Opus 5 に匹敵するのは、オープンウェイトモデルがバックエンド型の作業で追いついていることについての本物のシグナルです — 一般的な SOTA の主張ではなく、具体的で再現可能なもの。
+- **スキルは小/中モデルで大きな乗数です。** Supabase スキルをロードすると Sonnet 5 は `build` で 78% から 100% になり、Postgres ベストプラクティスのスキルのヒット率はより広いスイートで ~10% から 60% になります。Sonnet 5(または任意の中モデル)を使っているなら、関連スキルをロード*しない*ことは 20+ ポイントを床に残すことです。
+
+## 誰も予期しなかった発見: モデルはドキュメントを非常に異なる方法で使う
+
+リリースで最も興味深い数値はスコアではなく、行動です:
+
+> **Codex / GPT-5.6 はシナリオあたり約8ページのドキュメントを読みます。Claude Code は約2ページ — そしてスキルがロードされていてもシナリオの40%未満でドキュメントを参照します。**
+
+2つのエージェントは同じタスク、同じ MCP ツール、同じスキルを見ていました。Codex は行動する前に反射的にドキュメントを引き出しますが、Claude Code はより頻繁に記憶から試み、壁にぶつかったときにのみドキュメントを読みます。どちらも「正しい」ではありません — Claude Code 経由の Opus 5 は依然として `build` で 100% を記録しました。しかし非常に異なる*動作モード*であり、2つのエージェントが違和感を持って感じられるという逸話的報告の多くを説明します。
+
+`★ Insight ─────────────────────────────────────`
+- ベンチマークレポートは通常エージェントを1つの数値に潰します。Supabase Evals は珍しく貴重で — エージェントの振る舞いを*計装します* — 何回ドキュメントを読むか、どのスキルをロードしたか、いくつのツールを呼んだか — そしてその振る舞いはスコアではなくストーリーであることが多い。
+- ここでのギャップはモデルギャップではなく、**ハーネスポリシー**ギャップです。同じベースモデルが異なるハーネスなら異なる振る舞いをする可能性が高い。ハーネスがモデルと少なくとも同じくらい重要である理由は [Coding Agent CLIs Compared](/docs/models/coding-agent-clis-compared) を参照。
+- 決定論的スコアラー + 1回のリトライ(ベスト・オブ・N なし)が、ここでの数値をエージェント*間で*比較可能にするものです。ほとんどの公開エージェントリーダーボードは静かにリトライや自己一貫性を許可しており、それは遅い/弱いモデルを美化します。
+`─────────────────────────────────────────────────`
+
+## すべてのエージェントで一貫する3つのつまずき
+
+モデルに関わらず、テストされたすべてのエージェントは同じ3つのパターンでつまずきました:
+
+- **宣言的スキーマの代わりに手書きのマイグレーション。** 宣言的スキーマワークフローは新しく、学習データは古いスタイルの `create table` マイグレーションで重いため、プロジェクトが宣言的用にセットアップされていてもエージェントはそれらにデフォルトします。
+- **`@supabase/server` を使う代わりに手動での認証検証。** エージェントは、まさにこのために存在する新しいサーバーサイドヘルパーを使わず、Cookie 解析とセッションチェックを手で配線します。
+- **一貫性のないドキュメント参照。** 上記の通り — 同じエージェントは1つのシナリオでドキュメントを見て、次のシナリオでは記憶から試み、どちらのケースかについて明らかなルールはありません。
+
+これらは、合成ベンチマークの `pass@1` には現れない類の失敗です。「間違っているが動作する」回答がグレードされないからです — コードはコンパイルされ、単に時代遅れのパターンを使うだけです。実コンテナ eval はそれらを捕まえます、なぜならスコアラーが*生成されたプロジェクトを検査*して「宣言的スキーマを使ったか、yes/no」をチェックできるからです。
+
+## ローカル実行
+
+Docker、`pnpm`、グレードするプロバイダーの API キーが必要です。ポート 54321〜54329 が空いている必要があります(まずローカルの `supabase start` スタックを停止してください)。全体はラップトップで実行され、小さな実行は数分で終わります。
+
+<Steps items={[
+  { title: "サブモジュール付きでクローン", body: "スキルはサブモジュールに住んでいます — プレーンクローンでは Supabase エージェントスキルが欠けます。初回は --recurse-submodules を使ってください。" },
+  { title: "インストールと設定", body: "`pnpm install`、次に `.env.example` を `.env` にコピーし、必要なプロバイダーキー(`OPENAI_API_KEY`、`ANTHROPIC_API_KEY` など)を貼り付けてください。" },
+  { title: "1つの実験に対して1つの eval を実行", body: "狭く始めます。単一のシナリオと単一のエージェント/モデル構成を選び、フルスイープにトークンや時間を費やす前にエージェントのターンを見てセットアップが機能することを確認してください。" },
+  { title: "実験をヘッド・ツー・ヘッドで比較", body: "1つの実行が機能したら、`--experiment` フラグを拡張して例えば Sonnet 5 のスキルあり vs なし、または同じシナリオでの Claude Code vs Codex を比較してください。" },
+  { title: "結果をエクスポートして検査", body: "`pnpm export-results` は `eval-results.json` を書き、`pnpm web` はターン単位のトレース付きのローカルビューアーを開いて、エージェントが*実際に何をしたか*を読めます — ここが本物の学びのある場所です。" },
+]} />
+
+<PromptCard title="Clone the repo with submodules">
+{`git clone --recurse-submodules https://github.com/supabase/evals.git
+cd evals
+pnpm install
+cp .env.example .env`}
+</PromptCard>
+
+<PromptCard title="Run a single eval against a single experiment">
+{`pnpm eval -- \\
+  --eval resolve-dataapi-001-empty-results \\
+  --experiment claude-code-sonnet-5`}
+</PromptCard>
+
+<PromptCard title="Head-to-head: same model, skills on vs off">
+{`pnpm eval -- \\
+  --experiment claude-code-sonnet-5 \\
+  --experiment claude-code-sonnet-5-no-skills \\
+  --suite benchmark`}
+</PromptCard>
+
+<PromptCard title="Full benchmark sweep across all shipped experiments">
+{`pnpm eval -- \\
+  --suite benchmark \\
+  --experiment-suite benchmark,no-skills
+
+pnpm export-results
+pnpm web`}
+</PromptCard>
+
+## 実験の構造(自分のものを追加できるように)
+
+`experiments/<name>.ts` の下の実験ファイルは、**エージェント、ランタイム、モデル**を1つの比較可能な構成に配線する場所です。この分離は意図的です: 「Claude Code + Sonnet 5 + スキルなし」は「Claude Code + Sonnet 5 + スキルロード」とは*異なる実験*であり、両方とも「OpenCode + Kimi K3」とは異なります。3軸のうち2つを一定に保ち、3つ目を変化させられます。
+
+リポジトリで出荷される `-no-skills` バリエーション(例: `claude-code-sonnet-5-no-skills.ts` vs `claude-code-sonnet-5.ts`)は、「スキルが 78% から 100% に引き上げた」の主張を雰囲気ではなく測定可能にするものです。
+
+カスタムエージェント — 自作ループ、内部フォーク、実験的ハーネス — を実行しているなら、パターンは: 自分のエージェントを宣言する実験ファイルを書き、サンドボックス eval もほしいなら `localStack: localStackRuntime()` をオプトインし、`benchmark` スイートに対して実行する。あなたの数値は他の誰もと同じ表に着地します。
+
+## 遅延ロードされるスキル
+
+両方のランタイムはスキルに**プログレッシブディスクロージャ**を使用します: 各スキルの名前と説明だけが常にシステムプロンプトに座り、エージェントは要求に応じて完全な指示を引き出します。だから「スキルオン」はターンあたり数個の追加トークンしかかからず、スコアを 20+ ポイント引き上げられます — エージェントは、スキルが関連すると判断したときにのみそのスキルの本体を支払います。
+
+2つのランタイムは本体のフェッチ方法においてのみ*異なります*:
+
+- **Local-stack (サンドボックス) モード。** スキルは Vercel の `skills` CLI(サンドボックスイメージに焼き込まれ、ローカルの `skills/` ディレクトリから取得 — ネットワークからではない)で `.claude/skills/` の下にサンドボックスにインストールされます。タスクがマッチすると、エージェントは `.claude/skills/<name>/SKILL.md` とそれが参照するファイルをファイルツールで読みます。
+- **Tools モード。** ファイルシステムなし、なので `load_skill` ツールが名前で呼ばれるとスキルの完全な指示を返します。
+
+これが使用する新興のクロスエージェントスキル標準についてのコンテキストは、[SKILL.md as an Open Standard](/docs/models/skill-md-open-standard) を参照してください。
+
+## AILmanac マップでのこのページの位置付け
+
+- **ベンチマーク自体 → このページ。** Supabase Evals が何を、どう測るか、そして何を見出したか。
+- **[Evaluating Agents](/docs/playbooks/evaluating-agents)** — 自分のスタックで任意のコーディングエージェントを測るための一般的なプレイブック。
+- **[Coding Agent CLIs Compared](/docs/models/coding-agent-clis-compared)** — ストーリーの*ハーネス*半分(Claude Code vs Codex vs OpenCode をプログラムとして、任意のベンチマークとは独立)。
+- **[Claude vs GPT vs Gemini for Coding](/docs/models/claude-gpt-gemini-for-coding)** — *モデル*半分。
+
+`★ Insight ─────────────────────────────────────`
+- このようなベンチマークは*方向的*にこそ最も有用で、絶対的にはそうではありません。「Sonnet 5 は Supabase スキルをロードすると 22 ポイント増えた」はあなた自身のプロジェクトに転移しますが、「Sonnet 5 は `build` で 100% をスコアする」は必ずしもそうではありません。
+- リーダーボードを読んだ後の正しい質問は「どのエージェントが勝ったか」ではなく、**「このベンチマークは私の作業に似た何をテストしているか」** — そしてそれらのスライスの下位スコアだけが重要です。
+`─────────────────────────────────────────────────`
+
+## クイック自己チェック
+
+<Quiz questions={[
+  {
+    q: "Supabase Evals を SWE-Bench 型ベンチマークと構造的に異なるものにするのは何か?",
+    options: [
+      "固定テストスイートの代わりに、実際のコンテナ化された Supabase スタック(実 CLI、実 MCP サーバー)に対してエージェントをグレードする",
+      "決定論的チェックなしで LLM-as-a-judge スコアリングのみを使用する",
+      "無制限のリトライを許可しベスト・オブ・N を報告する",
+      "クローズドソースエージェントのみをグレードする",
+    ],
+    answer: 0,
+    explain: "すべてのシナリオは実 Docker サンドボックスを起動し、エージェントが実際の Supabase ツーリングと対話できるようにします。スコアリングは決定論的優先(DB をクエリ、Edge Function にヒット、vitest 実行)で、LLM-as-a-judge がバックストップとして、そしてリトライは1回のみです。",
+  },
+  {
+    q: "2026年8月のリリースは、同じシナリオで Codex/GPT-5.6 と Claude Code が1つの*振る舞い*で鋭く異なると報告している。どれか?",
+    options: [
+      "彼らがどのくらい互いに助けを求めるか",
+      "彼らがシナリオあたり何ページのドキュメントを読むか(Codex ~8、Claude Code ~2、そして Claude Code はシナリオの 40% 未満でドキュメントを確認)",
+      "回答する前に何回リトライを消費するか",
+      "コードを生成する言語",
+    ],
+    answer: 1,
+    explain: "行動ギャップはドキュメント参照ポリシーであり、生の能力ではありません — Claude Code の Opus 5 は依然として build で 100% を記録します。Codex は反射的にドキュメントを引き出しますが、Claude Code はしばしば最初に記憶から試みます。",
+  },
+  {
+    q: "Supabase スキルをロードすると Sonnet 5 の `build` スコアは 78% から 100% になる。これは何を最も強く示唆するか?",
+    options: [
+      "Sonnet 5 は全体的に弱いモデルである",
+      "スキルはドメイン特化作業で中/小モデルの大きな乗数である; ロードしないと床にポイントを残す",
+      "スキルはクローズドソースエージェントのみを助ける",
+      "78% の数値はハーネスのバグである",
+    ],
+    answer: 1,
+    explain: "Opus 5 のようなフロンティアモデルはスキルなしですでに最大化します; スキルはドメイン特化タスクで中モデルのギャップを閉じます。同じパターンは Postgres ベストプラクティスがスイート全体で ~10% から 60% のヒット率に増えたことにも現れます。",
+  },
+  {
+    q: "同じモデルで「スキルオン」対「スキルオフ」を公平に比較したい。Supabase Evals での正しいプリミティブは?",
+    options: [
+      "同じ実験を2回実行してランダム性を期待する",
+      "2つの異なる実験ファイル(例: `claude-code-sonnet-5.ts` と `claude-code-sonnet-5-no-skills.ts`)を同じ eval スイートに対して使用する",
+      "実行間でモデルの temperature を変える",
+      "LLM ジャッジスコアのみを見て決定論的チェックを無視する",
+    ],
+    answer: 1,
+    explain: "各実験ファイルはエージェント + ランタイム + モデル + スキルセットを1つの比較可能なユニットに配線します。出荷される `-no-skills` バリエーションは、「スキルオン vs オフ」が雰囲気の呼び出しではなく管理された比較であるために正確に存在します。",
+  },
+  {
+    q: "テストされたすべてのエージェントで報告された3つの一貫失敗のうち、そうでは*ない*ものはどれか?",
+    options: [
+      "宣言的スキーマの代わりに手書きのマイグレーション",
+      "`@supabase/server` を使う代わりに手動での認証検証",
+      "シナリオを通じた一貫性のないドキュメント参照",
+      "最初の試行でコンパイルに失敗するコードを生成",
+    ],
+    answer: 3,
+    explain: "報告された3つのつまずきはすべて*コードは動作するが間違ったパターンを使う*失敗です — 合成 pass@1 ベンチマークが見落とす種類のものです。ここでのコンパイル失敗は共有パターンではありません。",
+  },
+]} />
+
+## フラッシュカード
+
+<Flashcards cards={[
+  { front: "Supabase Evals はどのライセンスでリリースされているか?", back: "Apache-2.0。github.com/supabase/evals で公開 — フォーク、実験の追加、商業制限なしでのローカル実行が可能。" },
+  { front: "初期リリースには何個の eval シナリオが出荷されているか?", back: "38、9つのプロダクト、9つのトピック、4つのステージ(build / deploy / investigate / resolve)にスライスされる。シナリオは実際のサポートチケットと GitHub イシューから来る。" },
+  { front: "2つのランタイムは何か、ハーネスはどう選ぶか?", back: "Tools モード(MCP サーフェス、サンドボックスなし)と Local-stack モード(実 Supabase CLI 付き Docker サンドボックス)。Local-stack は、eval が `local/` ワークスペースを出荷するか `interface: cli` を宣言するときに自動的に選ばれる。" },
+  { front: "スコアリングのルールは?", back: "決定論的チェック優先(DB をクエリ、Edge Function にヒット、vitest 実行)、LLM-as-judge は自由形式回答のみ、そしてグレードが最終になる前に1回のリトライが許可される。ベスト・オブ・N なし。" },
+  { front: "Supabase Evals の「実験」とは何か?", back: "`experiments/<name>.ts` の下のファイルで、エージェント + ランタイム + モデル + スキルセットを1つの比較可能な構成に結び付ける。`claude-code-sonnet-5.ts` と `claude-code-sonnet-5-no-skills.ts` は2つの異なる実験。" },
+  { front: "なぜ「スキルオン」実行はターンあたり数個の追加トークンしかかからないか?", back: "プログレッシブディスクロージャ — 各スキルの名前 + 説明だけがシステムプロンプトに座る。エージェントはスキルの完全な本体を要求に応じて引き出す(サンドボックスモードではファイル読み込み経由、tools モードでは `load_skill` ツール経由)。" },
+  { front: "リリースは Codex vs Claude Code がドキュメントをどう使うかについて何を見出したか?", back: "Codex / GPT-5.6 はシナリオあたり ~8 ページのドキュメントを読む; Claude Code は ~2 でスキルがロードされていてもシナリオの 40% 未満でドキュメントを参照する。同じタスク、同じツール — 異なるエージェントポリシー。" },
+]} />
+
+## ソース & さらなる読み物
+
+- [github.com/supabase/evals](https://github.com/supabase/evals) — リポジトリ(Apache-2.0)、このページが引用した完全な README を含む。
+- [Introducing Supabase Evals](https://supabase.com/blog/introducing-supabase-evals) — 初期クロスエージェントリーダーボード付きの発表投稿。
+- [supabase.com/evals](https://supabase.com/evals) — ライブ公開リーダーボード。
+- [github.com/supabase/agent-skills](https://github.com/supabase/agent-skills) — ベンチマークが固定するスキルサブモジュール。
+- [github.com/supabase/supabase-lite](https://github.com/supabase/supabase-lite) — `@supabase/lite`、ハーネスが対して実行する Management-API 互換サーフェス。
+- [MarkTechPost — Supabase Releases Evals](https://www.marktechpost.com/2026/08/01/supabase-releases-evals-an-open-source-benchmark-that-scores-claude-code-codex-and-opencode-on-real-supabase-tasks/) — 発表時の発見のサードパーティサマリー。
+- AILmanac 内の関連: [Evaluating Agents](/docs/playbooks/evaluating-agents) · [Coding Agent CLIs Compared](/docs/models/coding-agent-clis-compared) · [SKILL.md as an Open Standard](/docs/models/skill-md-open-standard)。
