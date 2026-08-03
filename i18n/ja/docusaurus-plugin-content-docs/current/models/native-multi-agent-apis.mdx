@@ -1,0 +1,201 @@
+---
+sidebar_position: 6.55
+title: "ネイティブなマルチエージェントAPI:OpenAIのResponsesマルチエージェントベータ vs 自作"
+description: "2026年7月9日、OpenAIはResponses APIのマルチエージェントベータとSol Ultra Modeを出荷した — フロンティアベンダーで初めて『モデルが1回のHTTPリクエスト内でN個のサブエージェントを生成・統合する』ことをファーストクラスのプリミティブにした。実際に何が出荷されたか、APIの形、コスト計算、Anthropicが代わりに提供するもの、そしてネイティブプリミティブがDIYのファンアウトに勝つ場面。"
+keywords: [multi-agent API, OpenAI Responses API, multi_agent beta, GPT-5.6 Ultra Mode, Sol Ultra, subagents, parallel agents, Anthropic Cowork, Managed Agents, Claude subagents, agent orchestration, native multi-agent, max_concurrent_subagents]
+---
+
+<LevelBadge level="advanced" />
+
+18か月間、「マルチエージェント」とは*あなたが*ファンアウトを書くことを意味した。コーディネータープロンプトを書き、N個の呼び出しを並列で発火させ、JSONをマージし、リトライを処理した。**2026年7月9日**、OpenAIはそれをリクエストパラメータに畳み込んだ:**`multi_agent.enabled: true`** をResponses APIに、そして**Sol Ultra Mode**という消費者向け機能でラップした。モデル自身がいくつのサブエージェントを生成するかを決め、並列で実行し、結果を統合する — すべて1回のHTTP呼び出しの中で。他のフロンティアベンダーはまだ対称的なプリミティブを出荷していない。このページでは、実際に出荷されたもの、その背後の数字、Anthropicが代わりに提供するもの、そして — 本当に重要な部分 — ネイティブプリミティブがコストに見合う3つのワークロードと、DIYファンアウトが依然として勝つ2つのワークロードを整理する。
+
+<Callout type="objectives" items={[
+  "Responses APIのマルチエージェントリクエストボディの正確な形を読み、max_concurrent_subagentsが実際に何を上限にしているかを知る",
+  "コスト計算を行う:『モデルが4つのサブエージェントを生成する』とSol価格で実際にいくらかかるか",
+  "Anthropic側の同じ領域 — Cowork、Managed Agents、Claude Codeサブエージェント — をマッピングし、プリミティブのギャップを見る",
+  "ワークロードごとに正しいプリミティブを選ぶ:ネイティブマルチエージェント、DIYファンアウト、A2A、または単一の長いターン",
+  "4エージェントのUltra呼び出しを、精度向上ゼロの4倍請求に変える4つの失敗モードを避ける"
+]} />
+
+<VerifyNote lastVerified="2026-08-01" source="https://developers.openai.com/api/docs/guides/responses-multi-agent">
+Responses APIのマルチエージェント面はまだベータである(ヘッダー <code>OpenAI-Beta: responses_multi_agent=v1</code>)。フィールド名、<code>max_concurrent_subagents</code>のデフォルト値、そしてマルチエージェントモードと相互に排他的なパラメータは、2026年7月9日のローンチ以降すべて変動している。出荷前にリンク先ドキュメントに照らしてリクエスト形と非互換リストを再検証すること。
+</VerifyNote>
+
+## 一文で言うと
+
+**Ultra ModeはResponses API上の `multi_agent.enabled: true` の消費者向けスキンである** — モデルが1リクエスト内でサブエージェントを並列生成し、出力を統合して、単一のレスポンスを返すネイティブプリミティブ。並列化可能なタスクで小さいが実質的な精度向上を買える(Terminal-Bench 2.1: **88.8% → 91.9%**)。トークン請求はモデルが生成することを選ぶサブエージェントの数にほぼ比例してスケールする。
+
+## 2026年7月9日に実際に出荷されたもの
+
+同じローンチで2つのものが登場した。分けて考える価値がある:
+
+- **Ultra Mode** — ChatGPTとCodex内の*プロダクト*トグル。フラッグシップティア(Sol)で利用可能。有効にすると、難しいタスクは統合前に並列サブエージェント実行に分解される。「4+エージェントを生成」と宣伝されるが、OpenAI自身のGAベンチマークチャートのいくつかはBrowseCompとSEC-Bench Proで16エージェント構成も示している。ただし4が既定の作業値。
+- **Responses APIマルチエージェントベータ** — *開発者*向けプリミティブ。同じ基盤能力が `client.beta.responses.create()` の `multi_agent.enabled: true` として公開されている。Ultraライクな体験を自分で作りたいならこれを使う。
+
+マーケティングが残した混乱は本物:ビルダーが「Ultra ModeをAPIからどう呼ぶのか?」と繰り返し訊く。答えは、呼ばない — プロダクト機能の背後にあるプリミティブであるマルチエージェントベータを有効にするだけ。
+
+## Responses APIマルチエージェントリクエスト
+
+具体的にはこの形(Python SDK):
+
+<PromptCard title="最小限のマルチエージェントResponses API呼び出し">
+{`from openai import OpenAI
+
+client = OpenAI()
+
+resp = client.beta.responses.create(
+    model="gpt-5.6-sol",
+    input="Audit this repo for auth-bypass patterns and write a report.",
+    multi_agent={
+        "enabled": True,
+        "max_concurrent_subagents": 3,
+    },
+    tools=[...],  # your MCP tools, function tools, etc.
+    extra_headers={"OpenAI-Beta": "responses_multi_agent=v1"},
+)`}
+</PromptCard>
+
+この形について自明でない点が4つ:
+
+- **`max_concurrent_subagents` は総予算ではない。** これは任意の瞬間にツリー全体(ルート+子孫)で*アクティブ*なサブエージェントターン数を上限にする。モデルはリクエストの生存期間にわたってはるかに多い*総数*のサブエージェントを生成できる;単に一度にNを超えるアクティブ状態にできないだけ。
+- **深さは無制限。** サブエージェント自身がサブエージェントを生成できる。ツリー深さや実行あたりの総サブエージェント数に固定の上限はない。コスト面は「N呼び出し」ではなく — 実行時にモデルが形作るツリーである。
+- **ルートが統合する。** ルートエージェントがサブエージェントの応答を最終回答にマージする責任を持つ。構造化された `{subagents: [...]}` オブジェクトは返ってこない;1つのレスポンスが返り、中間のエージェントターンはコードから不透明。
+- **一部のパラメータは黙って無効化される。** `reasoning.summary` と `max_tool_calls` はマルチエージェント有効時にサポートされず、コンパクションエンドポイントはマルチエージェント応答に対してサポートされない。可観測性のために推論サマリーに依存しているなら、これをオンにした瞬間に失う。
+
+## マーケティングページに載っていないコスト計算
+
+SolのGA価格 **入力$5 / 出力$30 / 100万トークン** で、算術は容赦ない。実際のUltra実行をリバースエンジニアリングしたビルダーの記録から:
+
+- **Ultraが2サブエージェントに分解するタスク** ≈ 単一Sol呼び出しの出力トークンコストの2倍 — 両サブエージェントが出力を生成し、ルートがその上に統合を生成するため。
+- **Ultraが5サブエージェントを生成するタスク** ≈ 5倍 — 同じ推論、加えてツリー全体で比例して多くの入力トークンリプレイ。
+- **BrowseComp / SEC-Benchチャートが示す16エージェント構成**は無料の昼食ではない:研究グレードのデモであり、既定値ではない。Solで16並列サブエージェントなら、難しいクエリごとに出力トークンだけで2桁ドル台中盤の請求を見ることになる。
+
+考え方:**Sol呼び出しのモンテカルロ + その上の1回の統合パスに払っている。** 時にそれは意味のある精度を買う。時にそれは、単一の呼び出しで解けたタスクへの4倍請求にすぎない。
+
+## 精度が実際に買うもの
+
+並列化可能な評価 — Ultra Modeが設計対象とするワークロード — で公表されたデルタは本物だが控えめ:
+
+| ベンチマーク | Sol(単一) | Sol Ultra | デルタ | 評価が測るもの |
+| --- | --- | --- | --- | --- |
+| Terminal-Bench 2.1 | 88.8% | 91.9% | +3.1 | マルチステップのコマンドライン計画、ツール調整 |
+| BrowseComp | 87.5% | 92.2% | +4.7 | 複数ソースのウェブリサーチと統合 |
+| SEC-Bench Pro | — | 74.3% | (単一モード数値は非公表) | 大規模コーパスにわたる規制文書推論 |
+
+この表について3点:
+
+- +3〜5点の帯は、並列サンプリング(best-of-N、自己一貫性)が他のフロンティアで歴史的に買ってきたものと一致する。プリミティブは真に有用だが、デルタはステップチェンジではない。
+- これらは*ベストケース* — モードを見せるために選ばれた評価。順次タスク(線形なコード編集、単一ファイル書き換え、短いチャット)では、Ultraは統合レイテンシとコストを追加するが精度は動かない。
+- 同じTerminal-Bench 2.1チャートで、AnthropicのOpus 4.8は78.9%を記録した — つまりSol Ultraのリードは*より良いベースモデル*と*その上に積まれたマルチエージェント上昇*の両方から来ている。OpusからSol Ultraに移行するなら、ギャップ全体をマルチエージェントプリミティブに帰属させないこと。
+
+## Anthropicは代わりに何をしているか
+
+Anthropicは対称的なAPIプリミティブを出荷していない。最も近い類似物はそれぞれ同じ問題の異なる断面を解く:
+
+- **[Cowork](/docs/api/cowork-and-agent-teams)** — *プロダクト*面。エージェントがユーザーと並んで持続的なマルチステップ作業を行うエージェンティックなデスクトップワークスペース。Ultra Modeと*機能として*は比較可能だが、APIプリミティブとしてではない。
+- **[Managed Agents](/docs/api/managed-agents) と [managed-agentsメモリストア](/docs/api/managed-agents-memory-stores)** — 永続状態とスケジューリングを備えたホスト型エージェントループ。「長時間実行のバックグラウンドエージェント」枠を埋めるものであり、「4つを並列に生成してマージ」枠ではない。
+- **[Claude Codeサブエージェント](/docs/claude-code/subagents) と [サブエージェントフリート制限](/docs/claude-code/subagent-fleet-limits)** — ファーストクラスのサブエージェントプリミティブだが、Claude Code CLIにスコープされる。文書化されており、並列で生成可能で、`multi_agent.enabled` に*最も近い*類似物 — 重要な違いは、コーディネータープロンプトを自分で書くこと。
+- **Messages APIでの [エージェント構築](/docs/api/building-agents)** — DIY経路。N個の `messages.create` 呼び出しを並列でファンアウトし、統合プロンプトを書き、リトライを処理する。同じ結果、より多くのコード。
+
+ギャップ:**現在、単一のブール値を反転させるだけでモデル自身がいくつのサブエージェントを生成しどうマージするかを決めるAnthropic API面は存在しない。** Claudeに対してその動作が欲しいなら、自分で作る — プロダクト側のストーリーは [Cowork & Agent Teams](/docs/api/cowork-and-agent-teams)、ホストループのプリミティブは [Managed Agents](/docs/api/managed-agents) を参照。
+
+## ワークロードごとに正しいプリミティブを選ぶ
+
+<Steps items={[
+  {title: "タスクは本当に並列化可能か?", body: "サブタスクが互いの結果を待たずに実行できるなら — リポジトリ監査、多数のソースにわたるトピック調査、N個のファイルを独立にリファクタ — ファンアウト形はコストに見合う。タスクが順次(Aを編集、次にAの結果を読み、次にBを編集)なら、どのマルチエージェントプリミティブも利得なしに統合オーバーヘッドを追加する。"},
+  {title: "中間ターンを検査する必要があるか?", body: "ネイティブマルチエージェント(Ultra、Responsesマルチエージェントベータ)はサブエージェントターンをコードから隠す。監査証跡、サブエージェントごとのコスト帰属、実行中の注入能力が必要なら — ファンアウトを自分で作る。Claude Codeのサブエージェントは可視性を与える;Responses APIマルチエージェントベータは与えない。"},
+  {title: "サブエージェントは信頼境界を越えるか?", body: "サブタスクが異なる組織、クラウド、ベンダーに属するなら、どの単一ベンダープリミティブのスコープも外れる。A2Aを使う — /docs/models/a2a-protocol-agent-to-agent 参照。ネイティブマルチエージェントはモデル内;A2Aはエージェント間。"},
+  {title: "コストは有界かオープンエンドか?", body: "ネイティブマルチエージェントのツリーは実行時に形作られる:リクエストからトークン請求を予測できない。アプリにリクエストごとのコストSLAがあるなら、ファンアウト幅を制御できるDIYファンアウトを優先する — またはルートに厳格な max_output_tokens 上限を設定する。"},
+  {title: "+3〜5精度点が必要か?", body: "評価がタスクは単一呼び出しで85%解決可能、90%が出荷と非出荷の差だと言うなら、ネイティブマルチエージェントはそれを買う低摩擦の方法。単一のSolまたはOpus呼び出しでタスクをすでに解けているなら、Ultraは0点利得への4倍請求。"}
+]} />
+
+## Ultraを何もない4倍請求に変える4つの失敗モード
+
+- **順次タスクでオンにする。** タスクが並列化しないときでもモデルは分解して統合する。並列化が不要だった作業への調整オーバーヘッドを払う。経験則:最初のサブエージェントが走っている間に2番目のサブエージェントが何をしているか説明できないなら、マルチエージェントを有効にしない。
+- **推論サマリー可観測性をダッシュボードに残す。** `reasoning.summary` はマルチエージェントで黙ってサポートされない。監視がそれに依存していると、空フィールドを取得してモデルが考えていないと思う。フラグを反転させる*前に*スキーマ変更を出荷する。
+- **`max_tool_calls` を安全リミットとして使う。** マルチエージェントで同じく黙って無効化される。持っていたと思っていた安全ストーリー — 「リクエストあたり最大20ツール呼び出し」 — は消える。ツール呼び出し上限はリクエストパラメータ経由ではなく、ツールアダプター層で強制する。
+- **`max_concurrent_subagents` をコスト上限と仮定する。** リクエスト全体で生成された総数ではなく、瞬間のアクティブサブエージェントを上限にする。単一のUltra呼び出しは順次に数十のサブエージェントを生成しても `max_concurrent_subagents: 3` 制限を尊重できる。コストが天井なら、リクエストレベルで max_output_tokens を追加する。
+
+## 「ネイティブマルチエージェント」*ではない*もの
+
+隣接する2つのプリミティブがしばしば混同される:
+
+- **`n > 1` サンプリングではない。** OpenAIの古い `n` パラメータは複数の補完をサンプルして全部返す;あなたが1つを選ぶ。マルチエージェントは異なるサブエージェントが*異なる作業を行い*、その出力を統合する。前者は温度サンプリング;後者はタスク分解。
+- **バッチ推論ではない。** [バッチAPI](/docs/api/admin-api) は多数の独立リクエストをバックグラウンドで処理する。マルチエージェントは*1つ*のインタラクティブリクエスト内の多数の*協調された*サブエージェント。バッチはスループット指向、マルチエージェントは結果指向。
+
+## これがどこに向かっているか
+
+A2Aプロトコル([A2A: The Agent-to-Agent Protocol](/docs/models/a2a-protocol-agent-to-agent) 参照)は*ベンダー間*マルチエージェントをカバーする。`multi_agent.enabled: true` は*モデル内*マルチエージェントをカバーする。埋まっていないスロットは**クロスベンダー**プリミティブ — ベンダーA上のモデルがベンダーB上のサブエージェントを生成し結果をマージ — で、まだそれの公開仕様はない。到着するときは、どちらか側の新しいAPIとしてではなく、A2A + ネイティブなハンドオフ動詞として着地する。その空間を注視すること。
+
+<Quiz questions={[
+  {
+    q: "Responses マルチエージェントベータで max_concurrent_subagents は何を上限にするか?",
+    options: [
+      "リクエストが生成できるサブエージェントの総数",
+      "ルートを除く、ツリー全体で任意の瞬間にアクティブなサブエージェントターンの数",
+      "ツリー深さ(サブエージェントが自身のサブエージェントをどれだけ深く生成できるか)",
+      "各サブエージェントが行えるツール呼び出しの数"
+    ],
+    answer: 1,
+    explain: "これは任意の瞬間にツリー全体でのアクティブなサブエージェントターンに対する並行性上限で、ルートを除く。リクエストあたりの総サブエージェント数やツリー深さに固定上限はない — モデルが実行時にツリーを形作る。"
+  },
+  {
+    q: "マルチエージェントを有効にしたら、監視ダッシュボードで推論サマリーフィールドが突然空になった。何が起きた?",
+    options: [
+      "モデルが黙って失敗した — リクエストをリトライする",
+      "reasoning.summary は multi_agent 有効時にサポートされず、APIが黙って捨てる",
+      "サブエージェントは走ったが統合パスがタイムアウトした",
+      "ベータヘッダーが間違っている"
+    ],
+    answer: 1,
+    explain: "reasoning.summary と max_tool_calls はマルチエージェント有効時に黙って無効化され、コンパクションもサポートされない。可観測性や安全性がそれらのパラメータに依存しているなら、フラグを反転させる前にスキーマ変更を出荷すること。"
+  },
+  {
+    q: "2つのベンダーにまたがる異なる顧客アカウントで実行される並列サブエージェントが必要。どのプリミティブが正しい?",
+    options: [
+      "max_concurrent_subagents: 2 を持つOpenAI Responses APIマルチエージェントベータ",
+      "Claude Codeサブエージェント",
+      "各ベンダーがAgent Cardを公開するA2Aプロトコル",
+      "ChatGPT経由のGPT-5.6 Ultra Mode"
+    ],
+    answer: 2,
+    explain: "ネイティブマルチエージェント(Ultra、Responsesベータ、Claude Codeサブエージェント)はモデル内またはランタイム内。サブエージェントが組織、クラウド、ベンダー境界を越えるとき、A2Aが必要 — /docs/models/a2a-protocol-agent-to-agent 参照。"
+  },
+  {
+    q: "以下のうち、Ultra Mode / multi_agent.enabled の候補として悪いのはどれ?",
+    options: [
+      "多数のファイルにわたって脆弱性クラスを求めて大規模なコードベースを監査する",
+      "各ソースが独立に読める複数ソースのウェブリサーチ",
+      "各編集が前のものに依存する単一ファイルのコード書き換え",
+      "多数の企業にわたる規制届出の比較"
+    ],
+    answer: 2,
+    explain: "順次タスク — ステップBがステップAの出力を必要とする — は並列化しない。マルチエージェントは依然として分解して統合し、レイテンシと2倍以上のトークンを精度向上ゼロで追加する。経験則:最初のサブエージェントが走っている間に2番目のサブエージェントが何をするか言えないなら、有効にしない。"
+  }
+]} />
+
+<Flashcards items={[
+  {front: "ネイティブマルチエージェント(このページの定義)", back: "モデル自身が1回のHTTPリクエスト内でN個のサブエージェントを並列生成して統合するファーストクラスのAPIプリミティブ。2026年8月時点で、フロンティアベンダーで出荷しているのはOpenAIのみ — Responses APIベータの multi_agent.enabled 経由。"},
+  {front: "Ultra Mode vs multi_agent ベータ", back: "同じ基盤プリミティブ、2つの面。Ultra ModeはChatGPT/Codexの消費者トグル;マルチエージェントベータは開発者API。コードから『Ultra』を呼ぶのではない — マルチエージェントを有効にする。"},
+  {front: "max_concurrent_subagents", back: "ルートを除く、ツリー全体で一度にアクティブになれるサブエージェントターン数を上限にする。総数上限ではなく、深さ上限でもない。モデルはリクエストの生存期間にわたってはるかに多くのサブエージェントを生成できる。"},
+  {front: "サイレントなパラメータ非互換", back: "multi_agent.enabled で:reasoning.summary はサポートされず、max_tool_calls はサポートされず、コンパクションエンドポイントはサポートされない。3つすべてサイレント — APIはリクエストを受け入れて制約を捨てる。"},
+  {front: "Sol Ultra Terminal-Bench 2.1 デルタ", back: "88.8%(単一) → 91.9%(Ultra)、+3.1点の利得。並列サンプリングが歴史的に買ってきた best-of-N 利得と一致。本物だが控えめ。"},
+  {front: "コストスケーリングルール", back: "ネイティブマルチエージェントはモデルが生成するサブエージェント数にほぼ比例して、加えて統合パス分を請求する。2サブエージェント ≈ 出力トークン2倍;5サブエージェント ≈ 5倍。精度デルタが乗算子を正当化するときに有効にする、既定でオンにしない。"},
+  {front: "同じ領域へのAnthropicの答え", back: "単一の対称的なAPIはない。Coworkはプロダクト面、Managed Agentsはホストループ、Claude CodeサブエージェントはCLI内のファーストクラスプリミティブ、Messages APIでのDIYファンアウトは柔軟なフォールバック。すべてコーディネータープロンプトを書く必要がある。"},
+  {front: "代わりにA2Aを使うタイミング", back: "サブエージェントがベンダー、クラウド、組織境界を越えるとき。ネイティブマルチエージェントはモデル内;A2Aはエージェント間。合成可能 — 委譲されたタスクに答えるために内部でマルチエージェントを使うA2Aエンドポイントを持てる。"}
+]} />
+
+## 情報源と追加読解
+
+- [Multi-agent — OpenAI API guide](https://developers.openai.com/api/docs/guides/responses-multi-agent) — 公式Responsesマルチエージェントベータリファレンス:リクエスト形、`max_concurrent_subagents` セマンティクス、非サポートパラメータリスト、ベータヘッダー。
+- [GPT-5.6: Frontier intelligence that scales with your ambition — OpenAI](https://openai.com/index/gpt-5-6/) — Sol、Terra、LunaとUltra Modeのローンチポスト、ファミリーのポジショニング。
+- [Previewing GPT-5.6 Sol — OpenAI](https://openai.com/index/previewing-gpt-5-6-sol/) — 以前のプレビューページ、ベンチマーク方法論に有用。
+- [GPT-5.6 Sol Ultra Mode: subagents, parallel architecture, builder guide — ChatForest](https://chatforest.com/builders-log/openai-gpt-5-6-sol-ultra-mode-subagents-parallel-architecture-builder-guide/) — リバースエンジニアリングされたコスト計算(2サブエージェント ≈ 2倍、5サブエージェント ≈ 5倍)、および「不透明なサブエージェント内部」の観察。
+- [How to Use GPT-5.6 Ultra Mode: Multi-Agent Coordination for Complex Tasks — MindStudio](https://www.mindstudio.ai/blog/gpt-5-6-ultra-mode-multi-agent-coordination) — 既定4エージェントと一部チャートの16エージェント詳細。
+- [OpenAI Releases GPT-5.6 (Sol, Terra, Luna) — MarkTechPost](https://www.marktechpost.com/2026/07/09/openai-releases-gpt-5-6-a-three-tier-model-family-with-programmatic-tool-calling/) — ローンチと、マルチエージェントと並んで出荷されたProgrammatic Tool Callingプリミティブの報道。
+- [GPT-5.6 & ChatGPT Work for Claude Users](/docs/models/gpt-5-6-sol-terra-luna) — モデルファミリー自体の姉妹AILmanacページ。
+- [Cowork & Agent Teams](/docs/api/cowork-and-agent-teams) — Anthropicのプロダクト面の類似物。
+- [Managed Agents](/docs/api/managed-agents) — Claude上のホストループプリミティブ。
+- [Claude Codeサブエージェント](/docs/claude-code/subagents) と [サブエージェントフリート制限](/docs/claude-code/subagent-fleet-limits) — CLI内ファーストクラスサブエージェントプリミティブ。
+- [A2A: The Agent-to-Agent Protocol](/docs/models/a2a-protocol-agent-to-agent) — クロスベンダーの兄弟;サブエージェントが信頼境界を越えるときに使う。
+- [Programmatic Tool Calling](/docs/api/programmatic-tool-calling) — 同じOpenAIローンチで出荷された別のプリミティブ(彼らのJSベース版)、ClaudeのPythonサンドボックス版。
