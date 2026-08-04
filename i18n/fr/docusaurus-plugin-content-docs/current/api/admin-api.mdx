@@ -1,0 +1,278 @@
+---
+sidebar_position: 18
+title: "L'Admin API : automatisez votre org Claude"
+description: "Le guide de l'opérateur pour l'Admin API d'Anthropic — lister les membres, inviter des utilisateurs, gérer les groupes RBAC, offboarder proprement. Console + Claude Enterprise, avec les pièges seat-pool et SSO qui font trébucher les vraies équipes."
+keywords: [claude admin api, anthropic admin api, org:admin, sk-ant-admin, ce-user-management-2026-07-13, rbac_groups, workspace members, claude enterprise scim, claude offboarding, claude workspace api]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Les deux credentials que l'Admin API accepte (clé API Admin vs token OAuth org:admin) et quels endpoints EXIGENT la voie OAuth", "Quels endpoints votre type d'org peut réellement appeler — Claude Console (Platform) vs Claude Enterprise (claude.ai)", "Le modèle de rôles, en français simple : user, claude_code_user, developer, billing, admin (Console) — et user, managed, membership_admin, owner, primary_owner (Enterprise)", "Les trois pièges qui cassent les vraies intégrations : le 400 du seat-pool, le 400 SCIM et le header beta ce-user-management-2026-07-13", "Deux playbooks copier-coller : offboarding propre d'un salarié et audit trimestriel des groupes"]} />
+
+<VerifyNote lastVerified="2026-07-31" source="https://platform.claude.com/docs/en/manage-claude/admin-api">
+Source faisant autorité. Les endpoints de gestion des utilisateurs Claude Enterprise sont en beta au 13 juillet 2026 (header `ce-user-management-2026-07-13`) ; tout le reste sur cette page est en disponibilité générale. Les formes d'endpoint se stabilisent pendant la beta — vérifiez toujours la [référence Admin API](https://platform.claude.com/docs/en/api/admin) avant de livrer.
+</VerifyNote>
+
+Si un humain peut cliquer dessus dans la Console, vous pouvez généralement le scripter avec l'Admin API — et si vous faites tourner une vraie équipe sur Claude, il faudra bien y passer un jour. Voici le guide pour le faire sans marcher sur les trois pièges qui cassent la plupart des premières intégrations.
+
+## Ce que l'Admin API est (et n'est pas)
+
+**Base :** chaque endpoint vit sous `https://api.anthropic.com/v1/organizations/`. Pas d'hôte séparé, pas de SDK séparé — vous faites des appels HTTPS ordinaires avec `curl`, `requests`, ou le même client HTTP que vous utilisez déjà.
+
+**Ce qu'elle peut faire :** lister et gérer les membres de l'organisation, les rôles, les invitations, les workspaces et leurs membres, les clés API existantes, les comptes de service, les issuers/règles de fédération, et — pour Claude Enterprise — les groupes RBAC et (en lecture seule) les rôles personnalisés.
+
+**Ce qu'elle ne peut PAS faire :**
+
+- **Créer de nouvelles clés API.** Pour des raisons de sécurité, les nouvelles clés ne sont créées que dans la Console. L'API peut lister, renommer et désactiver celles qui existent déjà.
+- **Modifier les membres admin.** Les membres avec `admin`, `owner` ou `primary_owner` ne peuvent pas voir leur rôle modifié ou être retirés via l'API — vous le faites dans la Console.
+- **Contourner votre fournisseur d'identité.** Si SSO/SCIM contrôle une facette, l'API renvoie 400 plutôt que de se battre avec votre IdP. Voir [SSO + Admin API](#sso--admin-api).
+
+## Les deux credentials
+
+Chaque requête a besoin de l'un des deux — choisissez par environnement, pas par appel.
+
+<Callout type="tip" items={["Un profil OAuth dédié est le défaut le plus sûr pour les humains (tokens à courte durée de vie, vrai utilisateur dans le journal d'audit).", "Les clés API Admin à longue durée de vie sont plus simples pour la CI, mais traitez-les comme des secrets de production et faites-les tourner selon un planning.", "Les endpoints service-account, federation-issuer et federation-rule N'ACCEPTENT QU'un token OAuth org:admin — les clés API Admin sont rejetées sur ces routes."]} />
+
+| Credential | Comment l'envoyer | Qui peut la créer | Notes |
+|---|---|---|---|
+| **Clé API Admin** (`sk-ant-admin…`) | `x-api-key: $ANTHROPIC_ADMIN_KEY` | Membres avec le rôle `admin` | Longue durée de vie. Couvre la plupart des endpoints. |
+| **Token OAuth bearer** (scope `org:admin`) | `authorization: Bearer $ANTHROPIC_OAUTH_TOKEN` | Membres avec `admin`, `owner` ou `primary_owner` | Courte durée de vie ; rafraîchir avec la CLI `ant`. REQUIS pour les endpoints service-account / federation. |
+
+Les deux doivent aussi envoyer `anthropic-version: 2023-06-01` sur chaque requête (les requêtes de groupes et rôles personnalisés Claude Enterprise sont la seule exception — voir la [règle du header beta](#the-beta-header-rule) ci-dessous).
+
+<PromptCard title="Premier appel : qui suis-je ?">{`# With an Admin API key
+curl -sS "https://api.anthropic.com/v1/organizations/me" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "x-api-key: $ANTHROPIC_ADMIN_KEY"
+
+# With an OAuth bearer token (org:admin scope)
+curl -sS "https://api.anthropic.com/v1/organizations/me" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "authorization: Bearer $ANTHROPIC_OAUTH_TOKEN"`}</PromptCard>
+
+La réponse contient l'`id`, le `type` et le `name` de votre org. Si ça échoue en 401, votre credential est mauvais ; si ça échoue en 403, votre rôle est trop bas.
+
+## Console vs Claude Enterprise : ce que vous pouvez appeler
+
+Deux types d'organisation partagent un espace d'URL mais exposent des sous-ensembles différents. C'est la chose la plus déroutante de l'Admin API.
+
+| Endpoints | Claude Console (Platform) | Claude Enterprise (claude.ai) |
+|---|---|---|
+| Membres & invitations | ✅ GA | ✅ **Beta** (aucun header supplémentaire) |
+| Workspaces + membres de workspace | ✅ GA | ❌ Indisponible |
+| Clés API (list / rename / deactivate) | ✅ GA | ❌ Indisponible |
+| Rapports d'usage & de coût, rate limits | ✅ GA | ❌ Indisponible |
+| Comptes de service, issuers de fédération, règles de fédération | ✅ GA (OAuth uniquement) | ❌ Indisponible |
+| Groupes RBAC + membres de groupe | ❌ Indisponible | ✅ **Beta** (header requis) |
+| Rôles personnalisés (catalogue en lecture seule) | ❌ Indisponible | ✅ **Beta** (header requis) |
+| [Spend Limits API](https://platform.claude.com/docs/en/manage-claude/spend-limits-api) | ❌ Indisponible | ✅ GA |
+
+**Claude Platform sur AWS** est un troisième cas : seuls les endpoints workspace (`/v1/organizations/workspaces`) fonctionnent. Tout le reste renvoie 404.
+
+## Le modèle de rôles
+
+Les rôles portent des noms différents dans chaque type d'org. Ne les mappez pas à l'oreille.
+
+### Rôles Claude Console
+
+| Rôle | Peut |
+|---|---|
+| `user` | Utiliser Workbench |
+| `claude_code_user` | Workbench + [Claude Code](/docs/claude-code/what-is-claude-code) |
+| `developer` | Workbench + gérer les clés API |
+| `billing` | Workbench + gérer la facturation |
+| `admin` | Tout ce qui précède + gérer les utilisateurs |
+
+Au-dessus d'`admin` se trouvent `owner` et `primary_owner` — la Console les possède mais les traite comme des super-admins pour les besoins de l'API.
+
+### Rôles Claude Enterprise
+
+Cinq valeurs, mais l'API ne peut en *assigner* que deux (`user` et `managed`). Le reste est défini dans les paramètres d'org de `claude.ai` et ne peut être modifié ou retiré via l'API.
+
+| Rôle | Signification |
+|---|---|
+| `user` | Membre standard — les permissions viennent des défauts du plan. |
+| `managed` | Les permissions viennent des **rôles personnalisés attachés à leurs groupes** (c'est la voie RBAC). |
+| `owner` | Propriétaire de l'organisation. |
+| `membership_admin` | Peut gérer les membres mais pas la facturation/les paramètres. |
+| `primary_owner` | Il en existe exactement un. Ne peut être retiré. |
+
+Si vous voulez des permissions fines dans Enterprise, la recette est : mettez la personne sur le rôle `managed`, puis ajoutez-la aux groupes qui portent les rôles voulus.
+
+## La règle du header beta
+
+Le bug d'intégration le plus fréquent sur Enterprise.
+
+<Callout type="warning" items={["Membres et invitations : PAS de header beta supplémentaire — juste anthropic-version: 2023-06-01.", "Groupes et rôles personnalisés : ENVOYEZ anthropic-beta: ce-user-management-2026-07-13. Les requêtes sans lui renvoient 404.", "Les requêtes groupes et rôles personnalisés N'EXIGENT PAS anthropic-version — les exemples officiels l'omettent. Suivez le pattern officiel pour éviter les dérives imprévues quand la beta passe en GA."]} />
+
+Si vous utilisez un seul client HTTP pour tout, conditionnez selon l'URL :
+
+```python
+BETA_ROUTES = ("/v1/organizations/rbac_groups", "/v1/organizations/rbac_roles")
+
+def headers(path: str, key: str) -> dict:
+    h = {"x-api-key": key}
+    if path.startswith(BETA_ROUTES):
+        h["anthropic-beta"] = "ce-user-management-2026-07-13"
+    else:
+        h["anthropic-version"] = "2023-06-01"
+    return h
+```
+
+## Scopes pour les clés Admin Enterprise
+
+Les clés API Admin de Claude Enterprise sont **scopées** — le primary owner choisit ce que chaque clé peut faire à la création. Prenez le plus petit ensemble qui fonctionne.
+
+| Scope | Accorde |
+|---|---|
+| `read:members` | GET sur les membres, invitations et **tous les endpoints de rôles personnalisés** (pas de scope role séparé) |
+| `write:members` | POST/DELETE sur les membres et invitations |
+| `read:rbac_groups` | GET sur les groupes + membres de groupe |
+| `write:rbac_groups` | POST/DELETE sur les groupes + membres de groupe. **Aussi requis pour passer `rbac_group_ids` lors de la création d'une invitation**, car cela peut accorder des permissions. |
+| `read:org_audit` | Scope "audit integrations" en lecture seule — couvre chaque GET de cette API plus les lectures de la [Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api). Parfait pour le bot de monitoring de votre équipe sécurité. |
+
+## Pagination — deux styles différents
+
+Petite gêne, grande cause de « pourquoi ma liste est vide » :
+
+- **Membres et invitations** utilisent la **pagination par ID** : passez `limit` (défaut 20, max 1000) plus au plus un de `before_id` ou `after_id`. Paginez avec `first_id` / `last_id` et arrêtez quand `has_more` est `false`.
+- **Groupes, membres de groupe et rôles personnalisés** utilisent un **curseur opaque** : lisez `next_page` de chaque réponse et repassez-le inchangé comme `page`. Arrêtez quand `next_page` est `null`.
+
+Les rate limits sur tous les endpoints Admin API partagent **100 requêtes par minute par organisation**, sauf la création d'invitation qui a son propre budget de **1 200 requêtes par heure**. Au-delà, c'est 429.
+
+## Recettes courantes
+
+### Lister tous les membres (paginé)
+
+```python
+import os, requests
+
+API = "https://api.anthropic.com/v1/organizations/users"
+H = {"anthropic-version": "2023-06-01", "x-api-key": os.environ["ANTHROPIC_ADMIN_KEY"]}
+
+after = None
+while True:
+    params = {"limit": 1000}
+    if after:
+        params["after_id"] = after
+    page = requests.get(API, headers=H, params=params).json()
+    for m in page["data"]:
+        print(m["email"], m["role"])
+    if not page["has_more"]:
+        break
+    after = page["last_id"]
+```
+
+### Trouver un membre par email (insensible à la casse, gère les `+tags`)
+
+```bash
+curl "https://api.anthropic.com/v1/organizations/users?email=jane%2Bhiring@example.com" \
+  -H "x-api-key: $ANTHROPIC_ADMIN_KEY" \
+  -H "anthropic-version: 2023-06-01"
+```
+
+Même correspondance sur `jane@example.com` — le serveur normalise les deux côtés.
+
+### Changer le rôle d'un membre
+
+Assignable uniquement à `user` ou `managed` sur Enterprise ; `user`, `claude_code_user`, `developer` ou `billing` sur Console. Tenter d'assigner un rôle admin, ou de modifier un membre qui en détient déjà un, renvoie 400.
+
+<PromptCard title="Promouvoir un membre en developer (Console)">{`curl -sS "https://api.anthropic.com/v1/organizations/users/$USER_ID" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "content-type: application/json" \\
+  -H "x-api-key: $ANTHROPIC_ADMIN_KEY" \\
+  -d '{"role": "developer"}'`}</PromptCard>
+
+### Inviter une nouvelle recrue, pré-assignée à un groupe (Enterprise)
+
+Passer `rbac_group_ids` exige le scope `write:rbac_groups` sur la clé, car le groupe accorde des permissions.
+
+<PromptCard title="Inviter + auto-ajouter à Engineering">{`curl -sS -X POST "https://api.anthropic.com/v1/organizations/invites" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "content-type: application/json" \\
+  -H "x-api-key: $ANTHROPIC_ADMIN_KEY" \\
+  -d '{
+    "email": "newhire@example.com",
+    "role": "managed",
+    "rbac_group_ids": ["rbac_group_01UvWxYzAbCdEfGhIjKlMn"]
+  }'`}</PromptCard>
+
+### Offboarding propre d'un salarié (marche pour les deux types d'org)
+
+<Steps items={[{title: "1. Trouver la personne par email", body: "GET /v1/organizations/users?email=<adresse>. Si le tableau est vide, elle n'a jamais rejoint — passez à l'étape 3."}, {title: "2. La retirer", body: "DELETE /v1/organizations/users/{user_id}. Son siège (s'il existe) retourne au pool. Les clés API QU'ELLE a créées continuent de fonctionner — voir étape 4."}, {title: "3. Retirer toute invitation en attente", body: "Listez /v1/organizations/invites, trouvez son invitation en attente et DELETE-la. Les invitations acceptées ou expirées ne peuvent être retirées."}, {title: "4. Faire tourner les clés API qu'elle a créées", body: "Les clés API Admin sont scopées à l'org, pas à l'utilisateur, donc supprimer le créateur ne désactive PAS les clés. Dans claude.ai → Paramètres org → API, listez les clés qu'elle possède, désactivez/supprimez chacune et créez des remplaçantes possédées par une identité de service."}, {title: "5. Journaliser", body: "Stockez la réponse de suppression ({\"type\":\"user_deleted\",\"id\":\"user_...\"}) comme trace d'audit d'offboarding."}]} />
+
+### Audit trimestriel des groupes (Enterprise)
+
+Trouvez les membres dans des groupes sensibles qui ne devraient pas y être, sans fixer la Console.
+
+```python
+import os, requests
+
+H_BETA = {"x-api-key": os.environ["ANTHROPIC_ADMIN_KEY"],
+          "anthropic-beta": "ce-user-management-2026-07-13"}
+
+groups = requests.get("https://api.anthropic.com/v1/organizations/rbac_groups?limit=1000",
+                     headers=H_BETA).json()["data"]
+
+for g in groups:
+    if "prod" not in g["name"].lower():
+        continue
+    members = requests.get(
+        f"https://api.anthropic.com/v1/organizations/rbac_groups/{g['id']}/members?limit=1000",
+        headers=H_BETA).json()["data"]
+    print(f"{g['name']} ({len(members)} members)")
+    for m in members:
+        print(f"  {m['email']}")
+```
+
+Diffez ce résultat avec votre roster IdP et retirez les périmés avec `DELETE /rbac_groups/{group_id}/members/{user_id}`. Les groupes provisionnés par SCIM (`source_type: "scim"`) renverront 400 sur modification — faites-les dans votre IdP.
+
+## SSO + Admin API
+
+Si votre fournisseur d'identité contrôle une facette, l'API lui laisse la main :
+
+| Ce que fait votre IdP | Opération API bloquée | HTTP |
+|---|---|---|
+| Provisioning utilisateur JIT ou SCIM | Créer une invitation | 400 |
+| Provisioning de rôle SSO/SCIM avancé | Mettre à jour le rôle d'un membre | 400 |
+| Provisioning d'appartenance SCIM | Retirer un membre de l'org | 400 |
+| Provisioning de groupe SCIM (`source_type: "scim"`) | Renommer un groupe, supprimer un groupe, ajouter/retirer un membre de groupe | 400 |
+
+Les lectures marchent toujours. C'est un choix de conception : votre IdP est la source de vérité pour ce qu'il possède, et l'Admin API refuse qu'un script dérive silencieusement.
+
+## Sièges, invitations et le 400 que vous rencontrerez une fois
+
+Sur les plans avec un pool de sièges fini :
+
+- Une **invitation en attente consomme un siège**. Retirez-la ou laissez-la expirer pour rendre le siège.
+- La création d'invitation **ne prend pas de paramètre tier**. Le serveur pique le tier le plus bas avec disponibilité.
+- Si aucun siège n'est libre, la création d'invitation renvoie **400** — pas un achat. Achetez des sièges dans vos paramètres de plan, puis retentez.
+- Les invitations expirent après **21 jours** et il n'y a pas moyen de les prolonger. Pour changer l'email ou le rôle d'une invitation en attente, retirez-la et recréez.
+
+## Attention à
+
+<Callout type="warning" items={["Les clés API Admin n'expirent pas quand leur créateur part. Vous devez les faire tourner manuellement — voir l'étape 4 du playbook d'offboarding.", "Le rôle 'managed' sur Enterprise est inerte tout seul. Un membre managed sans appartenance à un groupe n'a essentiellement aucun accès au produit. Toujours accompagner le changement de rôle des assignations de groupe.", "Le champ roles d'un groupe peut revenir null (pas []) si les données de rôle étaient temporairement indisponibles. Retentez avant de conclure qu'un groupe n'a aucun rôle.", "capability_access_all et capability_access_all_ga sur une permission de rôle sont des grants globaux — ne les additionnez pas avec d'autres lignes ou vous double-comptez. Ils couvrent toute leur variante sauf l'accès aux modèles et les permissions admin préfixées permission_."]} />
+
+## L'Admin API vs la Compliance API
+
+Liées, souvent confondues :
+
+- **L'Admin API** (cette page) gère **qui est dans l'org** et **ce qu'ils peuvent faire**.
+- **La [Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api)** expose **ce qu'ils ont fait** : événements d'audit, feed d'activité, et (sur Enterprise) récupération et suppression de contenu pour les legal holds.
+
+Pour l'outillage sécurité, une seule clé avec `read:org_audit` couvre les lectures des deux APIs.
+
+## Quiz
+
+<Quiz questions={[
+  {q: "Vous POST à /v1/organizations/rbac_groups sans le header anthropic-beta: ce-user-management-2026-07-13. Que se passe-t-il ?", options: ["Le groupe est créé", "404 Not Found", "400 Bad Request", "401 Unauthorized"], answer: 1, explain: "Les endpoints de groupes RBAC exigent le header anthropic-beta: ce-user-management-2026-07-13. Sans lui, l'endpoint est invisible — le serveur renvoie 404."},
+  {q: "Un salarié qui part a créé trois clés API Admin utilisées par la CI. Vous DELETE l'utilisateur. Que deviennent les clés ?", options: ["Les trois sont désactivées automatiquement", "Elles continuent de marcher — les clés API Admin sont scopées à l'org, pas à l'utilisateur", "Elles cessent de marcher dans 30 jours", "Elles sont marquées en lecture seule"], answer: 1, explain: "Les clés API Admin sont scopées à l'organisation. Retirer le créateur met fin à son propre accès mais pas aux clés. Faites-les tourner manuellement dans la Console."},
+  {q: "Sur Claude Enterprise, quels deux rôles l'Admin API PEUT-ELLE assigner ?", options: ["admin et user", "user et managed", "owner et membership_admin", "developer et billing"], answer: 1, explain: "L'API ne peut assigner que `user` et `managed`. Les rôles administratifs (owner, membership_admin, primary_owner) sont définis dans les paramètres d'org claude.ai et ne peuvent être modifiés via API."}
+]} />
+
+## Suite
+
+- [Premier appel API](/docs/api/first-call) — les bases développeur si vous êtes arrivé ici sans en avoir fait
+- [Erreurs et rate limits](/docs/api/errors-and-rate-limits) — à lire avant votre premier 429
+- [Managed Agents](/docs/api/managed-agents) — l'autre grosse primitive hébergée par Anthropic
+- [Quoi de neuf ce mois-ci](/docs/whats-new/this-month) — suivre les changements de headers beta
