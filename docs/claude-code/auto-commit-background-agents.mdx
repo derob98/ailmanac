@@ -1,0 +1,191 @@
+---
+sidebar_position: 15.5
+title: "Auto-Commit Background Agents: Draft-PR Handoff"
+description: "On July 1, 2026 Claude Code v2.1.198 let background agents commit, push, and open a draft PR on their own. Five weeks later v2.1.221 tuned the default. Here is what the flow actually does, the notification hook it fires, why the community wanted an off switch, and the propose-only pattern that still works."
+keywords: [Claude Code, background agents, /background, /fork, /resume, /subtask, auto-commit, draft PR, worktree, propose-only, v2.1.198, v2.1.221, Notification hook, agent_completed]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-08-04" source="https://code.claude.com/docs/en/changelog">
+Background-agent defaults changed twice in five weeks (v2.1.198 → v2.1.221) and are still being tuned. Confirm the current commit/push/PR behavior in the Claude Code changelog before wiring a policy around it.
+</VerifyNote>
+
+On **July 1, 2026** Claude Code shipped `v2.1.198` and quietly closed the last manual step in the agent loop: **background agents launched from `claude agents` began auto-committing, auto-pushing, and auto-opening a draft PR** when they finished code work in a worktree. You went from "here's a task" straight to "here's a reviewable draft" — no keystrokes in the middle.
+
+The reaction was immediate and split. Some users loved it; others filed `anthropics/claude-code#73197` the next day asking for an off switch so their **propose-only workflows** (agent proposes, human commits) still worked. Five weeks later, on **August 4, 2026**, `v2.1.221` walked the default back: background sessions now **always commit and push to preserve work, but only open a draft PR when the task calls for one**. Same primitive, softer default.
+
+If you run agents unattended — nightly triage, a `/loop` on `/code-review`, a fleet of `/fork`ed sessions — this is the workflow you're already inside. Here is what it does end-to-end, what fires when, and how to shape it for your team's trust bar.
+
+<Callout type="objectives" items={[
+  "The exact end-to-end flow from `claude agents` launch to draft PR — commit, push, notification, all of it",
+  "What v2.1.198 shipped, what v2.1.221 tuned, and why the default softened",
+  "How `/fork`, `/resume`, `/background`, and (new in v2.1.221) `/subtask` fit around the auto-PR flow",
+  "The Notification hook payload — `agent_needs_input` vs `agent_completed` — and how to page yourself instead of Claude",
+  "A propose-only pattern that survives every release by using permissions, not settings, as the enforcement point"
+]} />
+
+## The four shipping events, in order
+
+The auto-PR flow did not arrive fully-formed — it landed across five releases in six weeks. Reading them in order tells you what each layer of the current behavior is actually for.
+
+| Date | Version | Change |
+|---|---|---|
+| 2026-07-01 | `v2.1.198` | Subagents run in the background **by default**. Background agents launched from `claude agents` **auto-commit, auto-push, and auto-open a draft PR** on completion. `Notification` hook fires `agent_needs_input` and `agent_completed` for background sessions. |
+| 2026-07-15 (approx.) | `v2.1.212` | `/fork` copies your conversation into a new **background** session (its own row in `claude agents`) while you keep working. `/resume` opens a picker of past sessions, including deleted ones. |
+| 2026-07-20 (approx.) | `v2.1.216` | Fix: resumed background sessions **restore the agent's prompt and tool restrictions** instead of dropping to the default agent. |
+| 2026-07-22 (approx.) | `v2.1.218` | `/code-review` runs as a **background subagent** by default — review no longer fills the conversation. |
+| 2026-08-04 | `v2.1.221` | Default tuned: background sessions **always commit and push** to preserve work, but **open a draft PR only when the task calls for one**. In-session subagent that `/fork` used to launch is now `/subtask`. |
+
+Two things worth noticing about that arc:
+
+1. **Every step is more autonomy, not less.** v2.1.221 did not disable auto-commit or auto-push — it just made the draft PR opt-in-per-task instead of always-on. The runtime still wants your work out of an ephemeral worktree and onto a branch before it forgets.
+2. **`/fork` and the auto-PR flow compose.** Once a fork is its own row in `claude agents`, it is a background session — which means when it finishes, the same commit → push → maybe-PR sequence fires. A single `/fork` launched at lunch can come back as a branch on `origin` by afternoon.
+
+## What actually happens when a background agent finishes
+
+The end-to-end sequence for a `claude agents` background session on `v2.1.221`, once its final tool call returns:
+
+<Steps items={[
+  { title: "Worktree stays if there are changes", body: "The runtime keeps the isolated worktree (default location under `~/.claude/worktrees/`) alive as long as the working tree is dirty. If the agent made zero changes, the worktree is pruned automatically — no ghost branches." },
+  { title: "Commit — always, with the agent's message", body: "The agent writes a commit message summarizing the task and commits every file it touched. This is not a fixup — it is the finished state of the work." },
+  { title: "Push — always, to a fresh branch", body: "The runtime pushes to a branch (created from the parent HEAD when the worktree was made). This is the step v2.1.221 kept even after tuning: the point is to preserve work off the local machine, not to publish a proposal." },
+  { title: "Draft PR — only when the task calls for one", body: "Before v2.1.221 the PR always opened. Now the runtime opens a draft PR only if the task itself framed a reviewable change (fix, feature, refactor). Exploratory work or research spawned by `/subtask` pushes but doesn't PR." },
+  { title: "Notification hook fires", body: "`agent_completed` fires through the `Notification` hook — same channel as `agent_needs_input`, distinguishable by the payload. That's your webhook, your Slack ping, your desk-buzzer moment." },
+  { title: "Session row updates in `claude agents`", body: "The session moves from Running to Complete in the `claude agents` list, carrying the branch name and (if opened) the PR link. `/resume` can pick it up later with its prompt and tool restrictions intact — the v2.1.216 fix." }
+]} />
+
+The sequence never rolls back. If the push fails (auth, protected branch), the runtime keeps the local commit and surfaces the failure through the same notification — but it will not delete your work.
+
+## The Notification hook — page yourself, not Claude
+
+The two events `v2.1.198` added to the `Notification` hook are the seam where you keep humans in the loop without ever attending the session.
+
+<PromptCard title="Two payload shapes on the same hook">{`# agent_needs_input — session paused waiting for approval or clarification
+{ "event": "agent_needs_input", "session_id": "...", "agent": "code-review", "reason": "..." }
+
+# agent_completed — session finished; branch pushed, PR maybe opened
+{ "event": "agent_completed", "session_id": "...", "agent": "feature-x",
+  "branch": "claude/feature-x-2026-08-04", "pr_url": "https://github.com/..." /* or null */ }`}</PromptCard>
+
+The `pr_url` field is the single most useful bit: it is `null` when the runtime pushed-but-did-not-PR (the v2.1.221 default for exploratory work), and populated when it did. Routing on that field is how you build "only ping me for reviewable work" without a second config layer.
+
+A minimal hook that pings a Slack channel only for completions that produced a PR:
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "agent_completed",
+        "hooks": [
+          { "type": "command", "command": "jq -e '.pr_url' >/dev/null && jq -r '\"<\" + .pr_url + \"|Draft PR ready> — \" + .agent' | curl -X POST -H 'content-type: application/json' -d @- $SLACK_WEBHOOK_URL" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The `jq -e '.pr_url'` gate is the whole trick: `-e` exits non-zero when the field is missing or `null`, short-circuiting the rest of the pipeline. Sessions that only committed-and-pushed don't page. Sessions that opened a PR do.
+
+## Why `#73197` mattered — and why the fix wasn't a settings key
+
+Issue [`anthropics/claude-code#73197`](https://github.com/anthropics/claude-code/issues/73197), filed **July 2, 2026** — one day after `v2.1.198` — asked for a `backgroundAgents.autoCreatePr: false` in `settings.json`, or at least separate knobs for commit / push / PR. The reasoning was reasonable: in a "propose-only" workflow the human is the only one allowed to push to `origin` or open PRs, and a default-on publish step needs an off switch.
+
+Anthropic's answer was different in shape. Instead of a new setting, `v2.1.221` **tuned the default itself** (PR only when the task calls for one) and pointed at the existing permission system: a `Bash(git push:*)` deny rule blocks the push, and a `Bash(gh pr create:*)` deny rule blocks the PR. The permission layer is authoritative for both interactive and background sessions — it's how the runtime enforces the ban regardless of what the agent decides to do at the end.
+
+<Callout type="warning" items={[
+  "There is still no `backgroundAgents.autoCreatePr` key in `settings.json` — 'disable the feature' is spelled with permissions, not settings.",
+  "A permission deny on `Bash(git push:*)` also blocks the final auto-push, not just interactive pushes. If your only concern is the PR, deny `Bash(gh pr create:*)` instead and let the push through so `/resume` can pick up the branch cleanly.",
+  "v2.1.221 is the default *today*. If you pin an older Claude Code (2.1.198 – 2.1.220), you get the always-PR behavior — and the permission gate is your only real defense."
+]} />
+
+## The propose-only pattern that survives every release
+
+Build the policy at the permission layer, not the settings layer. Then it applies to every session (foreground, background, `/fork`, `/subtask`, `/loop`) and does not care which version of `v2.1.x` you're on.
+
+<PromptCard title="settings.json — propose-only project policy">{`{
+  "permissions": {
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr edit:*)"
+    ],
+    "allow": [
+      "Bash(git commit:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}`}</PromptCard>
+
+Under this policy:
+
+- The background agent still commits inside its worktree — your review has the diff exactly as the agent produced it.
+- The push at end-of-session fails. The runtime surfaces the failure through `agent_completed` with `pr_url: null`.
+- Nothing reaches `origin` until you `git push` the branch yourself from the worktree path the notification handed you.
+
+This is the pattern the community asked for in `#73197`, expressed in tools that already exist. It also happens to be the shape the v2.1.221 default is converging on — the runtime just accepts you as the source of authority on which agents can publish.
+
+## `/fork`, `/subtask`, `/resume` — where they fit
+
+`v2.1.212` and `v2.1.221` reshuffled what these three commands do around the auto-PR flow. Read them together:
+
+| Command | What it starts | Runs where | Auto-PR flow applies? |
+|---|---|---|---|
+| `/background` | New background session | Its own row in `claude agents` | Yes |
+| `/fork` (v2.1.212+) | Copy of the current conversation into a new background session | Its own row in `claude agents` | Yes |
+| `/subtask` (v2.1.221+, was `/fork` in-session) | Ephemeral subagent inside the current session | In-conversation | No — the parent owns the outcome |
+| `/resume` | Reattach to any prior session in `claude agents` | Wherever it was | Whatever that session's config was |
+| `/code-review` (v2.1.218+) | Review as a background subagent | Its own row | Yes — but reviews rarely produce PRs, so v2.1.221 usually pushes-without-PR |
+
+The rename in v2.1.221 (`/fork` → `/subtask` for the in-session case) is the important cleanup: `/fork` now means "hand this conversation to a new background worker and get out of my way," which is the shape the auto-PR flow was designed around. `/subtask` is what you use when you want a scoped helper in your existing session and don't want the finish-and-publish sequence to fire.
+
+## Cost, race conditions, and the two gotchas nobody documents
+
+Three real-world details that don't show up in release notes:
+
+- **Background agents count against the concurrency cap.** Since `v2.1.198`, subagents default to background — which means a `claude agents` list of 25 running sessions will start refusing new spawns with `Concurrent subagent limit reached`. See [Subagent Fleet Limits](/docs/claude-code/subagent-fleet-limits) for the four env vars.
+- **The auto-commit is not amend-safe.** If two `/fork`s off the same conversation both finish and both push to their own branches, you get two branches, two commits, and (on v2.1.198 – v2.1.220) two PRs. Fine when you meant it as a race; not fine when you thought only one would win. Put a plan step in your agent prompt if you need serialization.
+- **A watcher that auto-commits can double-commit.** If you also run a repo watcher (a common script that auto-commits changes it sees on disk), it can race the agent's own end-of-session commit — you end up with an empty commit or a merge conflict on push. The safe topology is: the agent owns the worktree, the watcher owns the main clone, and never the twain.
+
+<Quiz title="Check yourself" questions={[
+  { q: "On v2.1.221 defaults, a background agent finishes a research task with `/subtask`. What happens on completion?", options: ["Nothing — `/subtask` runs in-conversation, so the parent owns the outcome and no separate commit/push fires", "Auto-commit, auto-push, auto-draft-PR — same as any background session", "Auto-commit and auto-push, but no PR because research is exploratory"], answer: 0, explain: "`/subtask` (new in v2.1.221, the rename of the in-session `/fork`) is an ephemeral subagent inside the current session. The finish-and-publish sequence only fires for standalone background sessions — the ones with their own row in `claude agents`." },
+  { q: "You want to block draft-PR creation but keep the push so `/resume` can pick up the branch. What do you configure?", options: ["Set `backgroundAgents.autoCreatePr: false` in `settings.json`", "Deny `Bash(gh pr create:*)` in `settings.json` permissions", "Deny `Bash(git push:*)` in `settings.json` permissions"], answer: 1, explain: "There is no `backgroundAgents.autoCreatePr` key. Denying `git push` also blocks the useful branch preservation. Denying `gh pr create` blocks just the PR — the push and commit still run, so `/resume` finds the branch." },
+  { q: "The `Notification` hook fires `agent_completed` with `pr_url: null`. What does that mean on v2.1.221?", options: ["The push failed and no branch exists on `origin`", "The runtime committed and pushed, but decided the task did not call for a draft PR", "The agent hit the concurrency cap before finishing"], answer: 1, explain: "`pr_url: null` in the completion payload is the v2.1.221 signal for 'pushed but did not PR' — exploratory work, research, or anything the runtime doesn't judge as a reviewable change. Push failures surface differently in the payload." }
+]} />
+
+<Flashcards title="Auto-PR flow — flip each card" cards={[
+  { front: "Version that introduced auto-commit + auto-push + auto-draft-PR", back: "v2.1.198, July 1, 2026. Applied to background agents launched via `claude agents`." },
+  { front: "Version that tuned the default", back: "v2.1.221, August 4, 2026. Now: always commit + push, draft PR only when the task calls for one." },
+  { front: "Notification hook events for background sessions", back: "`agent_needs_input` (paused, wants approval) and `agent_completed` (finished, branch pushed, `pr_url` maybe populated). Both flow through the existing `Notification` hook." },
+  { front: "How to disable draft PRs without breaking `/resume`", back: "Deny `Bash(gh pr create:*)` in `settings.json` permissions. Push still runs, so the branch is available on `origin` and `/resume` finds it clean." },
+  { front: "In-session subagent command on v2.1.221", back: "`/subtask`. The prior name `/fork` was reassigned to mean 'copy this conversation into a new background session' — the version that triggers the auto-PR flow." },
+  { front: "Where worktrees live by default", back: "`~/.claude/worktrees/`. Worktrees with zero changes are pruned automatically at session end; dirty worktrees stay so `/resume` can find them." }
+]} />
+
+<Callout type="takeaways" items={[
+  "The auto-PR flow lives at the runtime layer, not the settings layer — there is no `backgroundAgents.autoCreatePr` key, and there won't be. Use permissions.",
+  "v2.1.221 (today's default) always commits and pushes; it opens a draft PR only when the task frames a reviewable change. Read the notification's `pr_url` field to tell which happened.",
+  "`/fork` now means 'hand this conversation to a background worker'; `/subtask` is what you reach for when you want an in-conversation helper without the finish-and-publish sequence.",
+  "The propose-only pattern is a permission deny on `Bash(gh pr create:*)`. It survives every version of v2.1.x and every command that produces a background session.",
+  "Background agents still count against `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`. A fleet of 25 half-finished sessions in `claude agents` will start refusing new spawns."
+]} />
+
+## Next
+
+- [Background Tasks, /loop & Scheduling](/docs/claude-code/background-tasks) — the primitives underneath these background sessions
+- [Subagent Fleet Limits](/docs/claude-code/subagent-fleet-limits) — why 25 open sessions in `claude agents` will start failing spawns
+- [Hooks: Deterministic Automation](/docs/claude-code/hooks) — the `Notification` hook payload and how to route on it
+- [Permissions & Modes](/docs/claude-code/permissions) — the actual layer where "propose-only" is enforced
+- [Hardening Autonomous Runs](/docs/security/hardening-autonomous-runs) — the security posture for anything that publishes without a human
+
+## Sources & further reading
+
+- [Claude Code changelog](https://code.claude.com/docs/en/changelog) — authoritative version history for v2.1.198 (2026-07-01) through v2.1.221 (2026-08-04).
+- [`anthropics/claude-code#73197`](https://github.com/anthropics/claude-code/issues/73197) — the July 2, 2026 issue asking for `backgroundAgents.autoCreatePr: false`. Motivated the v2.1.221 default tuning.
+- [Claude Code v2.1.198: Background Agents Now Commit, Push, and Open Draft PRs](https://aiagentsfirst.com/claude-code-v2-1-198-background-agents) — third-party writeup with the full v2.1.198 release breakdown, published July 1.
+- [Claude Code v2.1.198 Release Notes — 33 Changes](https://www.claudeupdates.dev/version/2.1.198) — enumerates the Notification hook payloads and the flag-conflict fix.
+- [Claude Code Updates by Anthropic — August 2026](https://releasebot.io/updates/anthropic/claude-code) — cross-release view including v2.1.212 (`/fork`, `/resume`), v2.1.216 (resumed-session restore), v2.1.218 (`/code-review` background), v2.1.221 (default tuning, `/subtask` rename).
+- [Claude Code v2.1.220 to v2.1.221 Major Updates](https://dev.classmethod.jp/en/articles/20260804-cc-updates-v2-1-221/) — day-of publication with the exact wording of the default change.
+- [Hooks reference — Claude Code Docs](https://code.claude.com/docs/en/hooks) — the `Notification` hook contract and the stdin payload shape.
