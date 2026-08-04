@@ -1,0 +1,191 @@
+---
+sidebar_position: 15.5
+title: "自動コミット・バックグラウンドエージェント: ドラフトPR引き渡し"
+description: "2026年7月1日、Claude Code v2.1.198 はバックグラウンドエージェントに自律的なコミット、プッシュ、ドラフトPRのオープンを解禁した。5週間後の v2.1.221 でデフォルトが調整された。実際のフローの中身、発火する Notification フック、コミュニティがオフスイッチを求めた理由、そして今も機能する propose-only パターンを解説する。"
+keywords: [Claude Code, background agents, /background, /fork, /resume, /subtask, auto-commit, draft PR, worktree, propose-only, v2.1.198, v2.1.221, Notification hook, agent_completed]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-08-04" source="https://code.claude.com/docs/en/changelog">
+バックグラウンドエージェントのデフォルトは 5 週間で 2 回変わり(v2.1.198 → v2.1.221)、今も調整中。ポリシーを組み立てる前に、現在のコミット/プッシュ/PR 挙動を Claude Code の changelog で必ず確認すること。
+</VerifyNote>
+
+**2026 年 7 月 1 日**、Claude Code は `v2.1.198` を出荷し、エージェントループの最後の手動ステップを静かに閉じた。**`claude agents` から起動したバックグラウンドエージェントが、ワークツリーでコード作業を完了した際に、自動でコミット、プッシュ、ドラフト PR のオープンを行う**ようになった。「タスクだ」から「レビュー可能なドラフトだ」まで、途中のキー入力はゼロになった。
+
+反応は即座に、そして真っ二つに分かれた。喜んだユーザーもいれば、翌日には `anthropics/claude-code#73197` を起票し、**propose-only ワークフロー**(エージェントが提案し、人間がコミットする)を維持するためのオフスイッチを求めた者もいた。5 週間後の **2026 年 8 月 4 日**、`v2.1.221` はデフォルトを一歩戻した。バックグラウンドセッションは**作業を保全するために常にコミットしてプッシュするが、ドラフト PR を開くのはタスクがそれを求めるときだけ**。同じプリミティブ、柔らかいデフォルト。
+
+エージェントを無人運転させているなら — 夜間のトリアージ、`/code-review` を回す `/loop`、`/fork` されたセッションの艦隊 — あなたはすでにこのワークフローの中にいる。以下は、エンドツーエンドで何が起きるか、何がいつ発火するか、そしてチームの信頼水準に合わせてどう形作るか、である。
+
+<Callout type="objectives" items={[
+  "`claude agents` の起動からドラフト PR までのエンドツーエンドの正確なフロー — コミット、プッシュ、通知、すべて",
+  "v2.1.198 が出荷したもの、v2.1.221 が調整したもの、そしてデフォルトが柔らかくなった理由",
+  "`/fork`、`/resume`、`/background`、そして(v2.1.221 の新機能)`/subtask` が自動 PR フローの周りでどう位置づけられるか",
+  "Notification フックのペイロード — `agent_needs_input` と `agent_completed` — と、Claude ではなく自分に通知を送る方法",
+  "設定ではなく権限を強制ポイントに使うことで、どのリリースでも生き残る propose-only パターン"
+]} />
+
+## 出荷イベント4つ、順に
+
+自動 PR フローは一度に完成形で登場したわけではない — 6 週間で 5 リリースにわたって着地した。順に読むと、現在の挙動の各層が何のためのものかが分かる。
+
+| 日付 | バージョン | 変更 |
+|---|---|---|
+| 2026-07-01 | `v2.1.198` | サブエージェントが**デフォルトで**バックグラウンド実行に。`claude agents` から起動したバックグラウンドエージェントは完了時に**自動コミット、自動プッシュ、ドラフト PR の自動オープン**。`Notification` フックはバックグラウンドセッションで `agent_needs_input` と `agent_completed` を発火。 |
+| 2026-07-15 頃 | `v2.1.212` | `/fork` は現在の会話を新しい**バックグラウンド**セッション(`claude agents` に独自の行を持つ)にコピーしつつ、作業を継続できる。`/resume` は削除済みも含む過去セッションのピッカーを開く。 |
+| 2026-07-20 頃 | `v2.1.216` | 修正: 再開されたバックグラウンドセッションで**エージェントのプロンプトとツール制限が復元される**ようになった(以前はデフォルトエージェントに落ちていた)。 |
+| 2026-07-22 頃 | `v2.1.218` | `/code-review` はデフォルトで**バックグラウンドサブエージェント**として実行 — レビューが会話を埋めなくなった。 |
+| 2026-08-04 | `v2.1.221` | デフォルト調整: バックグラウンドセッションは**常にコミットしてプッシュ**して作業を保全するが、**ドラフト PR はタスクが要求するときだけ**開く。`/fork` が起動していたセッション内サブエージェントは `/subtask` に改名。 |
+
+この推移で注目すべき点は 2 つ:
+
+1. **各ステップは自律性を減らすのではなく、増やしている。** v2.1.221 は自動コミットや自動プッシュを無効化したわけではない — ドラフト PR を常時オンからタスク単位のオプトインに変えただけ。ランタイムは今なお、あなたの作業を一時的なワークツリーからブランチに移して、それを忘れる前に永続化したいと思っている。
+2. **`/fork` と自動 PR フローは合成される。** フォークが `claude agents` の独自の行を持つと、それはバックグラウンドセッションになる — つまり終了時に同じコミット → プッシュ → 場合により PR のシーケンスが発火する。昼に一度 `/fork` したものが、午後には `origin` 上のブランチとして戻ってくる可能性がある。
+
+## バックグラウンドエージェント完了時に実際に起きること
+
+`v2.1.221` の `claude agents` バックグラウンドセッションで、最終のツール呼び出しが返ったあとのエンドツーエンドのシーケンス:
+
+<Steps items={[
+  { title: "変更があればワークツリーは残る", body: "ランタイムはワーキングツリーがダーティな限り、隔離ワークツリー(デフォルトは `~/.claude/worktrees/` 配下)を存続させる。エージェントが変更ゼロなら、ワークツリーは自動的に剪定される — ゴーストブランチは残らない。" },
+  { title: "コミット — 常に、エージェントのメッセージで", body: "エージェントはタスクを要約したコミットメッセージを書き、触れた全ファイルをコミットする。これは修正コミットではなく、作業の完成状態である。" },
+  { title: "プッシュ — 常に、新規ブランチへ", body: "ランタイムは(ワークツリー作成時の親 HEAD から作られた)ブランチにプッシュする。v2.1.221 が調整後も残したステップ: ここでの目的は提案の公開ではなく、作業をローカルマシンの外に保全することにある。" },
+  { title: "ドラフト PR — タスクが要求するときのみ", body: "v2.1.221 以前は PR が常にオープンされていた。今はタスク自体がレビュー可能な変更(fix、feature、refactor)を組み立てている場合のみランタイムがドラフト PR を開く。探索的な作業や `/subtask` から派生した調査はプッシュはするが PR は作らない。" },
+  { title: "Notification フックが発火", body: "`agent_completed` が `Notification` フック経由で発火する — `agent_needs_input` と同じチャネルで、ペイロードで区別する。あなたの Webhook、Slack ピング、デスクブザーの瞬間。" },
+  { title: "`claude agents` のセッション行が更新", body: "セッションは `claude agents` リストで Running から Complete に移り、ブランチ名と(開かれていれば)PR リンクを持つ。`/resume` は後からプロンプトとツール制限を保ったまま拾える — v2.1.216 の修正。" }
+]} />
+
+シーケンスは決してロールバックしない。プッシュが失敗しても(認証、保護ブランチなど)、ランタイムはローカルコミットを保ち、同じ通知経由で失敗を伝える — が、あなたの作業を削除することはない。
+
+## Notification フック — Claude ではなく自分に通知する
+
+`v2.1.198` が `Notification` フックに追加した 2 つのイベントは、セッションに立ち会うことなく人間をループ内に留める継ぎ目である。
+
+<PromptCard title="同じフック上の2つのペイロード形状">{`# agent_needs_input — セッションが承認や説明待ちで一時停止
+{ "event": "agent_needs_input", "session_id": "...", "agent": "code-review", "reason": "..." }
+
+# agent_completed — セッション完了、ブランチはプッシュ済み、PR は場合により開かれる
+{ "event": "agent_completed", "session_id": "...", "agent": "feature-x",
+  "branch": "claude/feature-x-2026-08-04", "pr_url": "https://github.com/..." /* or null */ }`}</PromptCard>
+
+`pr_url` フィールドはもっとも有用な 1 ビット: ランタイムがプッシュしたが PR を作らなかったとき(v2.1.221 の探索的作業のデフォルト)は `null`、作ったときは値が入る。このフィールドでルーティングすれば、2 つ目の設定層なしで「レビュー可能な作業だけ通知する」を組み立てられる。
+
+PR が生成された完了だけを Slack チャネルに通知する最小限のフック:
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "agent_completed",
+        "hooks": [
+          { "type": "command", "command": "jq -e '.pr_url' >/dev/null && jq -r '\"<\" + .pr_url + \"|Draft PR ready> — \" + .agent' | curl -X POST -H 'content-type: application/json' -d @- $SLACK_WEBHOOK_URL" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`jq -e '.pr_url'` のゲートがトリック全体: `-e` はフィールドが欠けているか `null` なら非ゼロ終了し、後段のパイプラインを短絡させる。コミット & プッシュのみのセッションは通知されない。PR を開いたセッションだけが通知される。
+
+## `#73197` が重要だった理由 — そして修正が設定キーではなかった理由
+
+Issue [`anthropics/claude-code#73197`](https://github.com/anthropics/claude-code/issues/73197) は **2026 年 7 月 2 日** — `v2.1.198` の翌日 — に起票され、`settings.json` の `backgroundAgents.autoCreatePr: false` か、少なくともコミット / プッシュ / PR の個別スイッチを求めた。理由は妥当だった: 「propose-only」ワークフローでは `origin` へのプッシュや PR オープンを許されているのは人間だけであり、デフォルト有効な公開ステップにはオフスイッチが必要だ。
+
+Anthropic の回答は形が違った。新しい設定を追加する代わりに、`v2.1.221` は**デフォルト自体を調整**し(タスクが要求するときのみ PR)、既存の権限システムを指した: `Bash(git push:*)` の deny ルールはプッシュをブロックし、`Bash(gh pr create:*)` の deny ルールは PR をブロックする。権限層はインタラクティブとバックグラウンドの両セッションで正典 — エージェントが終了時に何をするか決めても、ランタイムはこの層で禁止を強制する。
+
+<Callout type="warning" items={[
+  "`settings.json` に `backgroundAgents.autoCreatePr` キーは今も存在しない — 「機能を無効化する」は設定ではなく権限で綴る。",
+  "`Bash(git push:*)` の deny 権限は最後の自動プッシュもブロックする(インタラクティブなプッシュだけではない)。PR だけが懸念なら、`Bash(gh pr create:*)` を deny してプッシュを通し、`/resume` がブランチをきれいに拾えるようにする。",
+  "v2.1.221 が**今日**のデフォルト。より古い Claude Code(2.1.198 – 2.1.220)にピン留めしていると、常時 PR の挙動になる — その場合、権限ゲートが唯一の実質的な防御となる。"
+]} />
+
+## すべてのリリースで生き残る propose-only パターン
+
+ポリシーは設定層ではなく権限層で組み立てる。そうすればすべてのセッション(フォアグラウンド、バックグラウンド、`/fork`、`/subtask`、`/loop`)に適用され、どの `v2.1.x` バージョンでも同じように動く。
+
+<PromptCard title="settings.json — propose-only プロジェクトポリシー">{`{
+  "permissions": {
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr edit:*)"
+    ],
+    "allow": [
+      "Bash(git commit:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}`}</PromptCard>
+
+このポリシー下では:
+
+- バックグラウンドエージェントは依然としてワークツリー内でコミットする — あなたのレビューにはエージェントが作った diff がそのまま届く。
+- セッション終了時のプッシュは失敗する。ランタイムは `agent_completed` を `pr_url: null` で発火して失敗を通知する。
+- 通知が渡したワークツリーパスからあなたが自分で `git push` するまで、何も `origin` には届かない。
+
+これがコミュニティが `#73197` で求めたパターンを、すでに存在するツールで表現したものだ。そしてこれは v2.1.221 のデフォルトが向かっている形でもある — ランタイムは、どのエージェントが公開できるかの権限はあなたにあると受け入れている。
+
+## `/fork`、`/subtask`、`/resume` — どこに位置づくか
+
+`v2.1.212` と `v2.1.221` は自動 PR フローの周りでこれら 3 コマンドの意味を並べ替えた。まとめて読むこと:
+
+| コマンド | 開始するもの | 実行場所 | 自動 PR フロー適用? |
+|---|---|---|---|
+| `/background` | 新規バックグラウンドセッション | `claude agents` に独自の行 | Yes |
+| `/fork` (v2.1.212+) | 現会話のコピーを新規バックグラウンドセッションへ | `claude agents` に独自の行 | Yes |
+| `/subtask` (v2.1.221+、v2.1.221 以前の `/fork`) | 現セッション内のエフェメラルサブエージェント | 会話内 | No — 親が成果を所有 |
+| `/resume` | `claude agents` の過去セッションに再アタッチ | 元のあった場所 | そのセッションの設定次第 |
+| `/code-review` (v2.1.218+) | レビューをバックグラウンドサブエージェントとして | 独自の行 | Yes — ただしレビューは PR をほぼ生まないので、v2.1.221 は通常 PR なしプッシュ |
+
+v2.1.221 での改名(`/fork` → 会話内は `/subtask`)は重要な整理: `/fork` は今や「この会話を新しいバックグラウンドワーカーに渡して自分は先に進む」の意味 — これは自動 PR フローが想定していた形。`/subtask` は、既存セッション内でスコープ付きヘルパーが欲しく、完了 & 公開シーケンスを発火させたくないときに使う。
+
+## コスト、レースコンディション、そして誰も文書化しない2つの落とし穴
+
+リリースノートに載らない実世界のディテール 3 つ:
+
+- **バックグラウンドエージェントは同時実行キャップに数えられる。** `v2.1.198` 以降、サブエージェントはデフォルトでバックグラウンドになる — つまり `claude agents` リストで実行中セッションが 25 になると、新規スポーンを `Concurrent subagent limit reached` で拒否し始める。4 つの環境変数については [Subagent Fleet Limits](/docs/claude-code/subagent-fleet-limits) を参照。
+- **自動コミットは amend セーフではない。** 同じ会話から出た 2 つの `/fork` が両方とも完了して各自のブランチにプッシュすると、2 ブランチ、2 コミット、そして(v2.1.198 – v2.1.220 では)2 PR ができる。レースを意図したなら問題ないが、片方しか勝たないと思っていたなら問題。直列化が必要ならエージェントプロンプトに計画ステップを入れる。
+- **自動コミットするウォッチャーは二重コミットしうる。** ディスク上の変更を見て自動コミットするリポジトリウォッチャー(よくあるスクリプト)を併用していると、エージェント自身のセッション終了コミットとレースする — 空コミットやプッシュ時のマージコンフリクトになる。安全なトポロジーは: エージェントがワークツリーを所有し、ウォッチャーがメインクローンを所有し、両者は決して交わらないこと。
+
+<Quiz title="理解度チェック" questions={[
+  { q: "v2.1.221 のデフォルトで、バックグラウンドエージェントが `/subtask` で調査タスクを完了した。完了時に何が起きる?", options: ["何も起きない — `/subtask` は会話内実行なので親が成果を所有し、独立したコミット/プッシュは発火しない", "自動コミット、自動プッシュ、自動ドラフト PR — 任意のバックグラウンドセッションと同じ", "自動コミットと自動プッシュは行うが、調査は探索的なので PR はなし"], answer: 0, explain: "`/subtask` (v2.1.221 の新機能、会話内 `/fork` の改名)は現セッション内のエフェメラルサブエージェント。完了 & 公開シーケンスは独立したバックグラウンドセッション — `claude agents` に独自の行を持つもの — でのみ発火する。" },
+  { q: "ドラフト PR の作成をブロックしつつ、`/resume` がブランチを拾えるようプッシュは維持したい。何を設定する?", options: ["`settings.json` に `backgroundAgents.autoCreatePr: false` を設定", "`settings.json` の permissions で `Bash(gh pr create:*)` を deny", "`settings.json` の permissions で `Bash(git push:*)` を deny"], answer: 1, explain: "`backgroundAgents.autoCreatePr` キーは存在しない。`git push` の deny は有用なブランチ保全もブロックしてしまう。`gh pr create` の deny は PR だけをブロック — プッシュとコミットは動くので `/resume` はブランチを見つけられる。" },
+  { q: "`Notification` フックが `pr_url: null` で `agent_completed` を発火した。v2.1.221 で何を意味する?", options: ["プッシュが失敗し `origin` にブランチが存在しない", "ランタイムはコミットとプッシュはしたが、タスクがドラフト PR を要求しないと判断した", "エージェントが完了前に同時実行キャップに達した"], answer: 1, explain: "完了ペイロードの `pr_url: null` は v2.1.221 の「プッシュしたが PR は作らなかった」のシグナル — 探索的作業、調査、あるいはランタイムがレビュー可能な変更と判定しなかったもの。プッシュ失敗はペイロードで別の形で表れる。" }
+]} />
+
+<Flashcards title="自動 PR フロー — 各カードをめくる" cards={[
+  { front: "自動コミット + 自動プッシュ + 自動ドラフト PR を導入したバージョン", back: "v2.1.198、2026 年 7 月 1 日。`claude agents` 経由で起動されたバックグラウンドエージェントに適用。" },
+  { front: "デフォルトを調整したバージョン", back: "v2.1.221、2026 年 8 月 4 日。現在: 常にコミット + プッシュ、ドラフト PR はタスクが要求するときのみ。" },
+  { front: "バックグラウンドセッションの Notification フックイベント", back: "`agent_needs_input` (停止、承認待ち) と `agent_completed` (完了、ブランチプッシュ済み、`pr_url` は場合により値あり)。両方とも既存の `Notification` フックを流れる。" },
+  { front: "`/resume` を壊さずにドラフト PR を無効化する方法", back: "`settings.json` の permissions で `Bash(gh pr create:*)` を deny。プッシュはまだ走るのでブランチは `origin` に到達し、`/resume` はきれいに見つける。" },
+  { front: "v2.1.221 での会話内サブエージェントコマンド", back: "`/subtask`。以前の名前 `/fork` は「この会話を新規バックグラウンドセッションにコピーする」の意味 — 自動 PR フローを発火するバージョン — に割り当て直された。" },
+  { front: "ワークツリーはデフォルトでどこに存在するか", back: "`~/.claude/worktrees/`。変更ゼロのワークツリーはセッション終了時に自動剪定される。ダーティなワークツリーは残り、`/resume` が見つけられる。" }
+]} />
+
+<Callout type="takeaways" items={[
+  "自動 PR フローは設定層ではなくランタイム層に存在する — `backgroundAgents.autoCreatePr` キーはなく、今後も追加されない。権限を使う。",
+  "v2.1.221 (今日のデフォルト)は常にコミットしてプッシュする。ドラフト PR はタスクがレビュー可能な変更を組み立てるときだけ開く。通知の `pr_url` フィールドを読んでどちらが起きたか判別する。",
+  "`/fork` は今や「この会話をバックグラウンドワーカーに渡す」の意味。会話内ヘルパーが欲しく完了 & 公開シーケンスを発火させたくないときは `/subtask` に手を伸ばす。",
+  "propose-only パターンは `Bash(gh pr create:*)` の権限 deny。すべての v2.1.x バージョンと、バックグラウンドセッションを生むすべてのコマンドで生き残る。",
+  "バックグラウンドエージェントは今も `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` にカウントされる。`claude agents` に 25 の半完了セッションがある艦隊は、新規スポーンを拒否し始める。"
+]} />
+
+## 次に
+
+- [Background Tasks, /loop & Scheduling](/docs/claude-code/background-tasks) — これらのバックグラウンドセッションの土台となるプリミティブ
+- [Subagent Fleet Limits](/docs/claude-code/subagent-fleet-limits) — `claude agents` に 25 の開いているセッションがあると、なぜスポーンが失敗し始めるか
+- [Hooks: Deterministic Automation](/docs/claude-code/hooks) — `Notification` フックのペイロードとルーティング方法
+- [Permissions & Modes](/docs/claude-code/permissions) — 「propose-only」が実際に強制される層
+- [Hardening Autonomous Runs](/docs/security/hardening-autonomous-runs) — 人間なしで公開する何かのためのセキュリティ姿勢
+
+## ソースと参考文献
+
+- [Claude Code changelog](https://code.claude.com/docs/en/changelog) — v2.1.198 (2026-07-01) から v2.1.221 (2026-08-04) までの正典バージョン履歴。
+- [`anthropics/claude-code#73197`](https://github.com/anthropics/claude-code/issues/73197) — `backgroundAgents.autoCreatePr: false` を求めた 2026 年 7 月 2 日の issue。v2.1.221 のデフォルト調整の動機となった。
+- [Claude Code v2.1.198: Background Agents Now Commit, Push, and Open Draft PRs](https://aiagentsfirst.com/claude-code-v2-1-198-background-agents) — v2.1.198 の完全なリリース内訳を含むサードパーティ執筆、7 月 1 日公開。
+- [Claude Code v2.1.198 Release Notes — 33 Changes](https://www.claudeupdates.dev/version/2.1.198) — Notification フックのペイロードとフラグ競合修正を列挙。
+- [Claude Code Updates by Anthropic — August 2026](https://releasebot.io/updates/anthropic/claude-code) — v2.1.212 (`/fork`, `/resume`)、v2.1.216 (再開セッション復元)、v2.1.218 (`/code-review` バックグラウンド)、v2.1.221 (デフォルト調整、`/subtask` 改名)を含むクロスリリースビュー。
+- [Claude Code v2.1.220 to v2.1.221 Major Updates](https://dev.classmethod.jp/en/articles/20260804-cc-updates-v2-1-221/) — デフォルト変更の正確な文言を含む当日公開。
+- [Hooks reference — Claude Code Docs](https://code.claude.com/docs/en/hooks) — `Notification` フックの契約と stdin ペイロード形状。
