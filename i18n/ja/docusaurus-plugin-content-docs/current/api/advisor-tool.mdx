@@ -1,0 +1,377 @@
+---
+sidebar_position: 8.7
+title: "advisorツール:Sonnetが手を動かし、Fableが考える"
+description: "アドバイザーサーバーツール(ベータ advisor-tool-2026-03-01)は、高速な実行モデルがターンの途中でより強力なモデルに相談することを可能にする。全フィールドリファレンス、統合者の大半が見落とすトークン集計の罠、モデルペアリング表、そしてAnthropicが本番で提供する実プロンプトを網羅。"
+keywords: [Claude advisor tool, advisor_20260301, advisor-tool-2026-03-01, executor advisor pattern, Sonnet Opus routing, Sonnet Fable 5 advisor, Claude Code /advisor, advisorModel, opusplan, cost optimization Claude API, usage.iterations, advisor_message, advisor_result, advisor_redacted_result, advisor prompt caching]
+---
+
+<LevelBadge level="intermediate" />
+
+Anthropicは静かに、しかし重大なプリミティブをベータで投入した ── **advisorツール**である。高速な実行モデル(Sonnet、Haiku)がターンを進め、判断ポイントで全トランスクリプトをより強力なアドバイザー(Opus 5、Fable 5、Mythos 5)に渡し、アドバイザーが計画を返し、実行側は出力を続ける。すべてサーバー側で、1回の `/v1/messages` 呼び出しで完結する ── クライアント側の追加ラウンドトリップは不要。
+
+もしあなたが手動でモデルを切り替えてきたなら(計画にOpus、書き出しにSonnet)、advisorはその往復を1リクエストにまとめる。またこれは、1レスポンス内で**2つのモデルティアにまたがって課金**されるのが常態化する初の主流本番パターンでもあり、2026年3月以前に書かれた素朴な `usage.output_tokens * price` のコスト計算をことごとく壊す。
+
+<Callout type="objectives" items={[
+  "ベータヘッダー advisor-tool-2026-03-01、実行モデル、advisorツール定義を含むリクエストを送信する",
+  "usage.iterations を正しく読む ── トップレベル output_tokens は実行モデル分のみ。advisorのトークンは iteration の advisor_message エントリ内にある",
+  "実行/アドバイザーのペアを選ぶ ── アドバイザーは実行モデル以上の能力が必須、Opus 5 / Fable 5 / Mythos 5 は暗号化コンテンツを返しそのまま往復する必要がある",
+  "暴走する助言をツール定義の max_tokens で制限する(最小1024) ── トップレベルの max_tokens はアドバイザーを制限しない",
+  "3回以上の advisor 呼び出しがある会話ではアドバイザー側キャッシュを有効化する。そして clear_thinking のデフォルトが静かにそのキャッシュを殺す理由を知っておく",
+  "Claude Code で advisorModel を保存して /advisor を有効化する ── Fable 5 のロールアウトの落とし穴も含めて(Fable アクセスを持つ組織でも現在は advisor として無効化されている)",
+]} />
+
+<VerifyNote lastVerified="2026-08-04" source="https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool">
+Anthropic公式のadvisorツールドキュメント(プラットフォーム + Claude Code)に対して2026年8月4日に検証済み。advisorはベータ ── モデルペアリング、暗号化挙動、Fable 5のadvisor無効化ロールアウト、およびプラットフォーム利用可能リスト(Anthropic API + AWS上のClaude Platformのみ)が最も変化しやすい部分。本番で挙動を固める前に元ソースを再確認すること。
+</VerifyNote>
+
+## なぜadvisorが存在するのか(そしてなぜ「2つのAPIを呼ぶだけ」ではないのか)
+
+素朴な代替は明らかだ:Opusを呼んで計画を得て、その計画をシステムプロンプトに入れてSonnetを呼ぶ。Anthropic自身のドキュメントはadvisorがそれに勝る理由を率直に説明している:
+
+1. advisorは**実行モデルの完全なトランスクリプトを読む** ── 過去のすべてのターン、すべてのツール呼び出しと結果、加えて実行モデルが*現在のターンで既に生成したテキスト*まで。あなた自身でそれらすべてをシリアライズして転送する必要はない。
+2. **1回の `/v1/messages` リクエスト内で実行される**。あなたのストリーミング接続は一時停止するだけ(約30秒ごとにSSE `ping` キープアライブ付き)で、`advisor_tool_result` ブロックが単一の `content_block_start` イベントで完全な形で到着する ── デルタなし。直後に実行モデルの出力ストリーミングが再開する。
+3. **アドバイザーを呼ぶ**タイミングは実行モデルが決める。「常に最初に計画」とハードコードする必要はない。Claudeはアプローチを確定する前、同じエラーが繰り返す時、タスク完了を宣言する前にadvisorを呼ぶ傾向がある。
+
+advisorはAnthropicが用意した独自のシステムプロンプトの下で、ツールなし、コンテキスト管理なしで動作し、その思考ブロックは結果を返す前に取り除かれる。実行モデルには助言テキスト(または暗号化ブロブ)のみが届く。
+
+## クイックスタート ── 最小構成のadvisorリクエスト
+
+<PromptCard title="Sonnet 5実行モデル + Fable 5アドバイザー(Python)">
+{`import anthropic
+
+client = anthropic.Anthropic()
+
+response = client.beta.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=4096,
+    betas=["advisor-tool-2026-03-01"],
+    tools=[
+        {
+            "type": "advisor_20260301",
+            "name": "advisor",
+            "model": "claude-fable-5",
+        }
+    ],
+    messages=[
+        {
+            "role": "user",
+            "content": "Build a concurrent worker pool in Go with graceful shutdown.",
+        }
+    ],
+)
+
+print(response)`}
+</PromptCard>
+
+3つの注目点:
+
+- `type` 文字列は `"advisor_20260301"`、`name` は `"advisor"` でなければならない。両方とも文字通りに強制される。
+- `betas=["advisor-tool-2026-03-01"]` ヘッダーがツールを開くフラグ。cURLでは `-H "anthropic-beta: advisor-tool-2026-03-01"` と同じ文字列。
+- 実行モデルが発行する `server_tool_use` ブロックの `input` は常に空。あなたが埋めることはない。サーバーがトランスクリプトから自動的にアドバイザーのビューを構築する。
+
+## ペアリングルール(そしてFable 5のサプライズ)
+
+アドバイザーは**実行モデル以上の能力**である必要があり、Anthropicは同等の能力を持つモデルを互いのアドバイザーとしてランク付けする(Opus 4.7とOpus 4.8は互いをアドバイスできる、Sonnet 5とOpus 4.6も同様)。2026年8月時点でClaude APIで受け入れられる完全なマトリクスは以下の通り:
+
+| 実行モデル | 受け入れ可能なアドバイザー |
+|---|---|
+| `claude-haiku-4-5` | Mythos 5, Fable 5, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5, Sonnet 4.6 |
+| `claude-sonnet-4-6` | Mythos 5, Fable 5, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5, Sonnet 4.6 |
+| `claude-sonnet-5` | Mythos 5, Fable 5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5 |
+| `claude-opus-4-6` | Mythos 5, Fable 5, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5 |
+| `claude-opus-4-7` | Mythos 5, Fable 5, Opus 5, Opus 4.8, Opus 4.7 |
+| `claude-opus-4-8` | Mythos 5, Fable 5, Opus 5, Opus 4.8, Opus 4.7 |
+| `claude-opus-5` | Mythos 5, Fable 5, Opus 5 |
+| `claude-fable-5` | Fable 5, Opus 5 |
+| `claude-mythos-5` | Mythos 5, Opus 5 |
+
+無効なペアは、サポートされていない組み合わせを明示した `400 invalid_request_error` を返す。そしてClaude Code特有の落とし穴も別途強調する価値がある:**Fable 5は現在Claude Code内でアドバイザーとして無効化されている**、Fable 5アクセスを持つ組織でも同様で、これはサーバー側ロールアウトで制御されている。`/advisor` ピッカーは `Fable 5 (temporarily unavailable)` と暗く表示され、`/advisor fable` は拒否される。これはAPIには影響しない ── APIでは `claude-fable-5` をアドバイザーとして今日から使える。
+
+## 統合者の大半が踏み抜くトークン集計の罠
+
+これがadvisorに関する最大の驚きであり、コスト計算を書き直さずにadvisor統合を出荷すべきでない理由だ。
+
+**トップレベルの `usage.output_tokens` は実行モデルのトークンのみを反映する。** アドバイザートークンはトップレベル合計に含まれない。なぜならアドバイザーモデルの料金で課金され、それはほぼ常に異なるからだ。全体像を見るには `usage.iterations[]` を読む必要がある ── これはこの機能のためにAnthropicが追加した配列だ:
+
+```json
+{
+  "usage": {
+    "input_tokens": 412,
+    "cache_read_input_tokens": 0,
+    "output_tokens": 531,
+    "iterations": [
+      { "type": "message",         "input_tokens": 412,  "output_tokens": 89 },
+      { "type": "advisor_message", "model": "claude-fable-5",
+                                   "input_tokens": 823,  "output_tokens": 1612 },
+      { "type": "message",         "input_tokens": 1348, "cache_read_input_tokens": 412,
+                                   "output_tokens": 442 }
+    ]
+  }
+}
+```
+
+`advisor_message` とタグ付けされたイテレーションはアドバイザーの料金で、`message` とタグ付けされたものは実行モデルの料金で課金される。トップレベルフィールドの集計ルールも非対称だ ── トップレベルの `output_tokens` は*すべての*実行モデルイテレーションを合計するが、トップレベルの `input_tokens` と `cache_read_input_tokens` は*最初の*実行モデルイテレーションのみを反映する(後続の実行モデルイテレーションの入力には前の出力トークンが含まれるため、再合計は二重カウントになる)。
+
+<Callout type="warning" items={[
+  "コストを usage.input_tokens * exec_input_price + usage.output_tokens * exec_output_price で計算すると、アドバイザーの支出全体分だけ静かに過少報告することになる ── アドバイザー呼び出しは通常思考込みで1,400〜1,800トークンを、はるかに高い単価で生成する。",
+  "アドバイザートークンは実行モデルに適用されたどのタスク予算も消費しない。task_budget を絶対的な上限として頼っている場合、アドバイザーはその外側にいる。",
+  "Priority Tier はモデル単位で適用される。実行モデルに対する Priority Tier のコミットメントはアドバイザーに拡張されない。あなたの組織がアドバイザーモデルにもコミットメントを持っていて初めてアドバイザー呼び出しが Priority Tier で動く。",
+]} />
+
+## 暴走する助言を制限する ── max_tokens の落とし穴
+
+**トップレベル**の `max_tokens` は実行モデルの出力のみを制限する。呼び出しごとのアドバイザー総出力(思考 + テキスト)を制限するには、**ツール定義**に `max_tokens` を設定する:
+
+<PromptCard title="アドバイザーを1呼び出し2048トークンに制限">
+{`tools = [
+    {
+        "type": "advisor_20260301",
+        "name": "advisor",
+        "model": "claude-fable-5",
+        "max_tokens": 2048,   # minimum is 1024; setting above the advisor's own output cap returns 400
+        "max_uses": 5         # optional per-request cap; extra calls return error_code max_uses_exceeded
+    }
+]`}
+</PromptCard>
+
+Anthropic自身のハード推論ベンチマーク(構成ごとにn=40)は、実用的な出発点として以下の数値を報告している:
+
+| ツールの `max_tokens` | アドバイザー平均出力 | 切り詰められた呼び出し |
+|---|---|---|
+| 未設定 | ハードタスクで約10k+トークン | 0% |
+| 2048(推奨) | 未設定の約7分の1 | 約0% |
+| 1024(最小) | 未設定の約10分の1 | 約10% |
+
+このサンプルサイズでは3構成間の精度差はノイズの範囲内だった。アドバイザーが上限に達すると、結果ブロックは `stop_reason: "max_tokens"` を持ち、*さらに*Anthropicは助言テキストの末尾に `[Advisor output truncated at max_tokens=2048.]`(実際の上限を明示)を追記し、実行モデルが自身のコンテキスト内で切り詰めを認識できるようにする。両シグナルはツール定義に `max_tokens` を設定した場合のみ現れる ── 省略すると両方とも得られない。
+
+## 誰もが見落とすプロンプトキャッシュ層
+
+advisorの周りには独立した2つのキャッシュ層があり、どちらを間違えても静かなコスト回帰になる。
+
+<Steps items={[
+  {
+    title: "実行モデル側キャッシュ(標準で動作)",
+    body: "advisor_tool_result ブロックは他のコンテンツブロックと同様にキャッシュ可能。後続ターンでその後ろに cache_control ブレークポイントを置けば通常通りヒットする。実行モデルのプロンプトは、クライアントがテキストを受け取ったか encrypted_content を受け取ったかに関わらず常に平文の助言を含むため、キャッシュ挙動は両結果バリアントで同一。"
+  },
+  {
+    title: "アドバイザー側キャッシュ(オプトイン、デフォルトはオフ)",
+    body: "ツール定義にキャッシュを設定する ── {\"type\": \"ephemeral\", \"ttl\": \"5m\" | \"1h\"} ── するとアドバイザーは同じ会話内の呼び出し間で自身のトランスクリプトをキャッシュする。N回目のアドバイザー呼び出しは(N-1)回目のプロンプトに1セグメント追加したものなので、プレフィックスは安定し、2回目以降の advisor_message から cache_read_input_tokens が非ゼロになる。Anthropicの目安:3回以上のアドバイザー呼び出しが見込まれる会話でのみ有効化する。"
+  },
+  {
+    title: "静かな殺し屋:clear_thinking のデフォルト値",
+    body: "コンテキスト編集ツール clear_thinking は、keep 値が 'all' でない場合、ターンごとにアドバイザーの引用トランスクリプトをシフトさせ、アドバイザー側キャッシュミスを引き起こす。拡張思考が有効で clear_thinking の明示設定がない場合、APIは古いOpus/SonnetモデルとすべてのHaikuモデルで keep: {type: 'thinking_turns', value: 1} をデフォルトとし、これがその挙動を引き起こす。Opus 4.5+ と Sonnet 4.6+ ではデフォルトが keep: 'all' でキャッシュ安全。Haikuまたは古い実行モデルでアドバイザー側キャッシュを使うなら、明示的に keep: 'all' を設定すること。"
+  }
+]} />
+
+会話の途中で `caching` をオン/オフに切り替えることもキャッシュを無効化する。一度設定したら変えない。
+
+## 2つの結果バリアントと、なぜどちらでも問題ないのか
+
+成功したアドバイザー呼び出しは2つの `content` 形状のうち1つを返す:
+
+- `text` フィールドを持つ `advisor_result` ── 人間が読める助言。Claude Opus 4.8とその他のOpus 5世代以外のアドバイザーが返す。
+- `encrypted_content` フィールドを持つ `advisor_redacted_result` ── 読めない不透明ブロブ。**Claude Opus 5、Claude Fable 5、Claude Mythos 5** アドバイザーが返す。
+
+受け取ったどちらでも**そのまま**後続ターンで往復する。次のターンでサーバーがブロブを復号し、実行モデルのプロンプトに平文をレンダリングする ── 実行モデルはどちらの場合も同じ内容を見る。会話の途中でアドバイザーを切り替える場合は `content.type` で分岐して両形状を扱う。
+
+<Callout type="tip" items={[
+  "リダクト版は制限ではなく仕組みそのもの ── Opus 5 / Fable 5 / Mythos 5 が内部推論をクライアントに公開せずに実行モデルが行動できる助言を出せる仕組み。ロギング層で助言テキストが必要ならOpus 4.8をアドバイザーに使う。",
+  "両バリアントとも、ツール定義に max_tokens を設定すれば stop_reason を持ち、設定しなければ持たない。追記文字列をパースせずに切り詰めを検出するのに使える。",
+]} />
+
+## マルチターン ── ちょうど1回だけ踏む見えない400
+
+後続ターンで `tools` から advisor ツールを省略した際、メッセージ履歴にまだ `advisor_tool_result` ブロックがある場合、APIは `400 invalid_request_error` を返す。2つの結果:
+
+1. **アドバイザー状態は粘着的**。あるターンでアドバイザーを使ったら、その会話の後続ターンは `tools` にツールを残しておくか、履歴からアドバイザー結果ブロックを削除する必要がある。組み込みの会話レベルの上限はない。
+2. **クライアント側で会話ごとの予算を強制するには**、自分でアドバイザー呼び出しを数える。上限に達したら、同じリクエスト内で `tools` からadvisorツールを削除し、**かつ**メッセージ履歴からすべての `advisor_tool_result` ブロックを削除する。
+
+一時停止したターンの再開の踊りにも名前を付けておく価値がある(儀式的に真似ないため):アドバイザー呼び出しがまだ保留中の状態で `stop_reason: "pause_turn"` でレスポンスが終わることがある(レスポンスに `server_tool_use` ブロックは含まれるが `advisor_tool_result` はまだない)。再開するには、そのアシスタントメッセージを**変更せず**に `messages` に追加し、`server_tool_use` ブロックを保持し、同じアドバイザーツール + ベータヘッダーで再送する。ユーザーメッセージ不要、tool_result不要。APIは保留中のアドバイザー呼び出しを実行し、実行モデルのターンを続ける。再開したターンも再び一時停止することがある ── その場合は繰り返すだけ。
+
+## 無視すべきエラーコードと浮上させるべきエラーコード
+
+アドバイザーのサブ呼び出しが失敗しても、リクエストは**失敗しない**。実行モデルはエラーを見てさらなる助言なしで続行する。完全なエラーテーブル:
+
+| `error_code` | 意味 | 実用的な対応 |
+|---|---|---|
+| `max_uses_exceeded` | リクエストごとの `max_uses` 上限に到達 | 期待通り ── あなたが設定した。デバッグレベルでログ記録。 |
+| `too_many_requests` | アドバイザーサブ推論がレート制限された(直接呼び出しと同じモデル別バケット) | 繰り返す場合はアラート ── アドバイザーモデルのレート制限を飽和させている |
+| `overloaded` | アドバイザーサブ推論がキャパシティに到達 | 品質が重要ならターン全体をリトライ、そうでなければ流す |
+| `prompt_too_long` | トランスクリプトがアドバイザーのコンテキストウィンドウを超えた | 1MコンテキストのOpus 5アドバイザーでは稀、小さいコンテキストのアドバイザーではより起こりやすい |
+| `execution_time_exceeded` | アドバイザーサブ推論がタイムアウトした | ツール定義の `max_tokens` を制限してアドバイザー生成長を減らす |
+| `unavailable` | それ以外すべて | 一時的なものとして扱う |
+
+決定的な非対称性:**実行モデル**のレート制限はリクエスト全体をHTTP 429で失敗させる。**アドバイザー**のレート制限はツール結果内に現れ、リクエストは成功したままだ。
+
+## Claude Code:/advisor、--advisor、advisorModel
+
+CLIは同じ設定を設定する3つのサーフェスを通じてadvisorを公開する:
+
+<PromptCard title="Claude Codeでadvisorを有効化する ── 等価な3つの方法">
+{`# 1. Interactive picker or direct assignment (saves to your user settings)
+/advisor
+/advisor opus
+/advisor sonnet
+/advisor claude-opus-5   # full model ID also works
+
+# 2. Persistent default in your settings file
+# ~/.config/claude/settings.json (or equivalent)
+{ "advisorModel": "opus" }
+
+# 3. Per-session flag (overrides advisorModel for that launch, hidden from --help)
+claude --advisor opus
+
+# Turn off
+/advisor off
+# Or disable the tool entirely (all three surfaces become no-ops):
+export CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`}
+</PromptCard>
+
+Claude Codeのメインモデル/アドバイザーペアリング表はAPI表のサブセットだ ── `opus` と `sonnet` はClaude Code組み込みのデフォルトバージョンに解決されるエイリアスで、リリースとともに進化する。注目すべきルール:
+
+- **Opus 4.7+ メインは Opus 4.7 以降のみをアドバイザーとして受け入れる** ── Opus 4.7 メインに Opus 4.6 や Sonnet 5 のアドバイザーは拒否される。
+- **Sonnet 5 メインは Sonnet 4.6 をアドバイザーとして拒否する** ── ただし Sonnet 5 は受け入れる(「2つ目の Sonnet が1つ目を読む」安価な独立チェック)。
+- **サブエージェントは設定されたアドバイザーを継承**し、それぞれのモデルに対して同じペアリングチェックを適用する。
+- **セッション途中でadvisorを有効化/無効化してもメインモデルのプロンプトキャッシュは無効化されない** ── モデルやエフォートレベルの変更とは異なり無効化される。これが `/advisor` をタスク途中で安全に切り替えられる理由。
+
+呼び出し中はアドバイザーモデル名付きの `Advising` 行をトランスクリプトで見る;`Ctrl+O` を押して展開し完全なガイダンスを読む。Claudeは概ね助言に従うが、自身の証拠が特定の主張と矛盾する時(試して手順が失敗する、ファイル内容が助言と矛盾する)は適応する ── 無条件に従うのではなく矛盾を浮上させる。
+
+## Anthropicが実際に提供する2つの本番プロンプトパターン
+
+公式ドキュメントにはAnthropicが大規模にテストした2つのシステムプロンプトが含まれている。コピーする価値がある。なぜなら「advisorは何をすべきか知っている」はデフォルトではないから ── 実行モデルは**いつ**advisorを呼ぶかについて明示的なガイダンスが必要で、アドバイザーは二人称で書かれたプロンプトから恩恵を受ける(あなたのシステムプロンプトを引用コンテキストとして見るため、「you are...」の方が「the executor is...」よりも確実に届く)。
+
+<PromptCard title="コーディングタスク用推奨システムプロンプト(Sonnet/Opus実行モデル)">
+{`You have access to an advisor tool that consults a stronger model for
+strategic guidance. Call it when the plan matters more than the code:
+
+- Before committing to an approach on a non-trivial task.
+- When stuck — errors recurring, approach not converging, results that
+  don't fit.
+- Before declaring the task complete, to independently check the work.
+
+Do NOT call it for routine turns where the next step is obvious. The
+advisor sees the full transcript, so state the specific decision you
+want reviewed in the turn where you invoke it.`}
+</PromptCard>
+
+Haiku実行モデル向けには、Anthropicはより多くのadvisor呼び出しを促す少しナッジされたバリアントを提供する(Haikuはデフォルトで相談不足):
+
+<PromptCard title="Haiku実行モデル用の代替システムプロンプト">
+{`You have access to an advisor tool. Consult it whenever a decision
+requires judgment beyond mechanical execution:
+
+- Before committing to a non-trivial approach.
+- When stuck -- errors recurring, approach not converging, results that
+  don't fit.
+- Before declaring the task complete.
+- When the user's request contains ambiguity you cannot resolve from
+  context.
+
+Bias toward calling the advisor rather than guessing. The cost of a
+consult is small compared to the cost of a wrong direction on a long
+task.`}
+</PromptCard>
+
+プロンプトを通じてアドバイザー出力長を削減するには(ツールの `max_tokens` の代替または補完)、Anthropicがテストした配置は**ユーザーメッセージ**の中の1行だ ── システムプロンプトではなく。なぜならアドバイザーは両方を引用として見るが、直接語りかけるユーザーメッセージの指示の方が三人称のシステムプロンプトよりも確実に従われるから。例:`Advisor: keep guidance to 3-5 sentences.`
+
+特定のリクエストで相談を**強制**するには、`tool_choice` を `{"type": "tool", "name": "advisor"}` に設定する。非互換性が1つ:強制ツール使用は手動拡張思考(`thinking: {type: "enabled"}`)と組み合わせられない ── 両方有効化するとAPIが `400 invalid_request_error` を返す。適応的思考は強制ツール使用をサポートする。
+
+## advisorが勝つ場面と負ける場面
+
+Claude Codeにはモデルの強みを組み合わせる4つの方法がある。**いつ**強力なモデルを走らせたいかで選ぶ。
+
+| アプローチ | 強力なモデルが走る時 | 開始者 |
+|---|---|---|
+| **advisorツール** | タスク途中の判断ポイント | Claudeがガイダンスを必要とした時に呼ぶ |
+| **opusplan** | プランモード中、その後Sonnetに切り替えて実行 | あなたがプランモードに入る |
+| **サブエージェント** with `model` set | 委譲されたサブタスク全体 | Claudeが委譲、またはあなたが呼び出す |
+| **`/model` 切り替え** | 以降のすべてのターン | あなたが手動でモデルを切り替える |
+
+advisorは*Claudeの裁量でオンデマンドに*強力なモデルを走らせる唯一の方法だ。`opusplan` は決定論的(プランモード進入)だが計画にスコープされる。サブエージェントはサブタスク全体に強力なモデルをコミットする。`/model` はハンマー。
+
+## プラットフォーム利用可能性(あなたが躓くやつ)
+
+advisorツールは**Anthropic APIとAWS上のClaude Platform**でベータ利用可能だ。2026年8月時点でAmazon Bedrock、Google Cloud Vertex、Microsoft Foundry では**利用不可**。`ANTHROPIC_BASE_URL` で設定されたLLMゲートウェイ経由では、ゲートウェイがリクエストを無傷で転送するかどうかに依存する。
+
+もしあなたがマルチクラウドでBedrockやVertex経由でAnthropicの障害を乗り越えている場合、advisorは今日その障害回避パスの一部ではない。
+
+<Quiz questions={[
+  {
+    q: "あなたのSonnet 5実行モデル + Fable 5アドバイザーのリクエストが usage.output_tokens = 400 のレスポンスを返した。アドバイザーはいくつ生成したか?",
+    options: [
+      "400出力トークン ── それが合計",
+      "そのフィールドからは不明 ── usage.iterations[] の type advisor_message のエントリを確認する",
+      "約700トークン ── output_tokens にほぼ比例する",
+      "ゼロ ── アドバイザーは呼び出されていない"
+    ],
+    answer: 1,
+    explain: "トップレベル usage.output_tokens は実行モデルのトークンのみを反映する。アドバイザートークンは usage.iterations[] の type: 'advisor_message' のエントリごとに分解されており、それぞれが独自の input_tokens/output_tokens/model を持つ ── これが素朴なコスト計算が静かにアドバイザー支出を過少報告する理由。"
+  },
+  {
+    q: "全アドバイザー呼び出しにハード2048トークンの上限をかけたい。max_tokensをどこに設定するか?",
+    options: [
+      "リクエストのトップレベル、model と messages と並んで",
+      "ツール定義オブジェクトの内部(最小値1024)",
+      "環境変数 ADVISOR_MAX_TOKENS として",
+      "上限を設定できない ── アドバイザーは停止するまで生成する"
+    ],
+    answer: 1,
+    explain: "トップレベル max_tokens は実行モデル出力のみを制限する。呼び出しごとのアドバイザー総出力(思考 + テキスト)を制限するには、advisorツール定義の内部に max_tokens を設定する。最小は1024、アドバイザーモデル自身の出力上限を超えて設定すると400を返す。"
+  },
+  {
+    q: "claude-opus-4-7 を実行モデルとして、claude-sonnet-5 をアドバイザーとして構成した。何が起きるか?",
+    options: [
+      "動く ── Sonnet 5はサポートされたアドバイザー",
+      "動くが能力順序に関する警告付き",
+      "400 invalid_request_error ── Opus 4.7の受け入れアドバイザーは Mythos 5、Fable 5、Opus 5、Opus 4.8、Opus 4.7",
+      "動くが実行モデルを静かに Sonnet 5 にダウングレード"
+    ],
+    answer: 2,
+    explain: "アドバイザーは実行モデル以上の能力が必須。Sonnet 5はOpus 4.7より低くランクされるため、このペアはサポートされない組み合わせを明示した400 invalid_request_errorで拒否される。Opus 4.7が受け入れるのは Mythos 5、Fable 5、Opus 5、Opus 4.8、Opus 4.7 のみ。"
+  },
+  {
+    q: "Claude Fable 5アドバイザーが encrypted_content フィールドを持つ advisor_redacted_result 型のコンテンツを返した。次のターンで何をするか?",
+    options: [
+      "クライアント側で復号し平文を次の実行モデル呼び出しに渡す",
+      "破棄する ── 現在のターン後に助言は失われる",
+      "encrypted_content をそのまま往復する;サーバーがそれを実行モデルのプロンプトに復号する",
+      "アドバイザーに同じ助言を再要求して平文バージョンを得る"
+    ],
+    answer: 2,
+    explain: "Opus 5、Fable 5、Mythos 5アドバイザーは不透明な encrypted_content ブロブを持つ advisor_redacted_result を返す。それを後続ターンでそのまま往復すると、サーバーが実行モデルのコンテキストに復号する。実行モデルのプロンプトは常に平文を含むため、キャッシュ挙動は平文バリアントと同一。"
+  },
+  {
+    q: "クライアント側コスト上限を強制するため、後続ターンで `tools` 配列から advisor ツールを削除したい。他に何をする必要があるか?",
+    options: [
+      "何もしない ── APIは会話途中のツール削除を受け入れる",
+      "すべての前のメッセージで advisor.disabled = true を設定する",
+      "メッセージ履歴からすべての advisor_tool_result ブロックを削除する、さもなくばAPIが 400 invalid_request_error を返す",
+      "変更を通知するため最初に /v1/messages/end-advisor を呼ぶ"
+    ],
+    answer: 2,
+    explain: "advisorには組み込みの会話レベル上限がない。履歴に advisor_tool_result ブロックが残ったまま tools から advisor ツールを削除すると、APIは 400 invalid_request_error を返す。クライアント側の上限を強制するには、同じリクエスト内でツールを削除し、かつメッセージ履歴からすべての advisor_tool_result ブロックを削除する。"
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "advisorツールのベータヘッダー", back: "advisor-tool-2026-03-01(anthropic-beta HTTPヘッダーとしても、SDKのbetas配列内でも同一文字列)" },
+  { front: "ツール定義の必須 type と name フィールド", back: "type: 'advisor_20260301'、name: 'advisor' ── 両方とも文字通り強制される" },
+  { front: "トップレベル max_tokens はどこに適用されるか?", back: "実行モデル出力のみ。アドバイザーを制限するには、ツール定義の内部に max_tokens を設定する(最小1024)" },
+  { front: "どのアドバイザーが暗号化コンテンツを返すか?", back: "Claude Opus 5、Claude Fable 5、Claude Mythos 5 は encrypted_content ブロブを持つ advisor_redacted_result を返す。他は平文の text を持つ advisor_result を返す。" },
+  { front: "アドバイザー側プロンプトキャッシュの有効化方法は?", back: "ツール定義に caching: {type: 'ephemeral', ttl: '5m' | '1h'} を追加する。3回以上のアドバイザー呼び出しがある会話でのみ推奨。" },
+  { front: "何がアドバイザー側キャッシュを静かに殺すか?", back: "keep 値が 'all' 以外の clear_thinking。Haikuおよびpre-Opus-4.5実行モデルではデフォルトが keep: {type: 'thinking_turns', value: 1} で、ターンごとにトランスクリプトをシフトさせミスを引き起こす。keep: 'all' を明示設定すること。" },
+  { front: "アドバイザーのレート制限はリクエストを失敗させるか?", back: "しない ── ツール結果内で error_code: 'too_many_requests' として現れ、実行モデルはさらなる助言なしで続行する。実行モデルのレート制限のみがリクエスト全体をHTTP 429で失敗させる。" },
+  { front: "プラットフォーム利用可能性", back: "Anthropic API + AWS上のClaude Platformのみ。2026年8月時点でBedrock、Vertex、Foundryでは利用不可。" },
+  { front: "Claude Codeで advisor ツールをグローバルにオフにする", back: "export CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 ── /advisor は利用不可、advisorModel は無視、--advisor は受け入れられるが効果なし" }
+]} />
+
+## 出典と参考文献
+
+- [Anthropic — Advisor tool (Claude APIドキュメント)](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool) ── 主要ソース;このページ全体で引用されているフィールドリファレンス、ペアリング表、ストリーミング挙動、Anthropicがテストしたプロンプトと切り詰めベンチマーク
+- [Anthropic — Escalate hard decisions with the advisor tool (Claude Codeドキュメント)](https://code.claude.com/docs/en/advisor) ── CLI固有のサーフェス:`/advisor`、`advisorModel`、`--advisor`、Fable-5-disabled-as-advisor ロールアウト、ペアリングサブセット
+- [Anthropic — Server tools reference](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools) ── `server_tool_use` ブロック形状と、advisor が継承する「1ターンでサーバーツールとクライアントツールを混ぜる」挙動
+- [Anthropic — Prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) ── 実行モデル側の `advisor_tool_result` ブロックとアドバイザー側 `caching` オプトインの両方に適用されるキャッシュセマンティクス
+- [Anthropic — Context editing](https://platform.claude.com/docs/en/build-with-claude/context-editing) ── 古い実行モデルでアドバイザー側キャッシュを静かに殺す `clear_thinking` デフォルト
+- [AILmanac — エフォートチューニング:5段階、モデルデフォルト、キャッシュの罠](/docs/api/effort-tuning) ── advisorと対になる姉妹機能;両方ともトークン集計を変えるモデル別サーフェスノブ
+- [AILmanac — モデルの選び方](/docs/api/choosing-a-model) ── どの実行/アドバイザーペアが合法かを決定するモデルティア
+- [Anthropicブログ — The advisor strategy](https://claude.com/blog/the-advisor-strategy) ── Anthropicブログから「高速実行モデルと強力なアドバイザーがなぜ機能するか」のフレーミング
