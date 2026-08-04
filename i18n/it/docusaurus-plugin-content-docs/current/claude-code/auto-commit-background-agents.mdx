@@ -1,0 +1,191 @@
+---
+sidebar_position: 15.5
+title: "Agenti in background con auto-commit: handoff draft-PR"
+description: "Il 1º luglio 2026 Claude Code v2.1.198 ha permesso agli agenti in background di committare, pushare e aprire una draft PR da soli. Cinque settimane dopo v2.1.221 ha ritoccato il default. Ecco cosa fa davvero il flusso, l'hook di notifica che scatena, perché la community voleva un interruttore off, e il pattern propose-only che continua a funzionare."
+keywords: [Claude Code, background agents, /background, /fork, /resume, /subtask, auto-commit, draft PR, worktree, propose-only, v2.1.198, v2.1.221, Notification hook, agent_completed]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-08-04" source="https://code.claude.com/docs/en/changelog">
+I default degli agenti in background sono cambiati due volte in cinque settimane (v2.1.198 → v2.1.221) e vengono ancora ritoccati. Conferma il comportamento corrente di commit/push/PR nel changelog di Claude Code prima di costruirci sopra una policy.
+</VerifyNote>
+
+Il **1º luglio 2026** Claude Code ha rilasciato `v2.1.198` e ha chiuso in silenzio l'ultimo passaggio manuale nel loop dell'agente: **gli agenti in background lanciati da `claude agents` hanno iniziato a fare auto-commit, auto-push e auto-apertura di una draft PR** quando finivano un lavoro di codice in un worktree. Sei passato da "ecco un task" direttamente a "ecco una draft da revisionare" — senza premere un tasto in mezzo.
+
+La reazione è stata immediata e divisa. Ad alcuni utenti è piaciuto; altri hanno aperto `anthropics/claude-code#73197` il giorno dopo chiedendo un interruttore off perché i loro **workflow propose-only** (l'agente propone, l'umano committa) continuassero a funzionare. Cinque settimane dopo, il **4 agosto 2026**, `v2.1.221` ha ammorbidito il default: ora le sessioni in background **committano e pushano sempre per preservare il lavoro, ma aprono una draft PR solo quando il task lo richiede davvero**. Stessa primitiva, default più soft.
+
+Se fai girare agenti non presidiati — triage notturno, un `/loop` su `/code-review`, una flotta di sessioni `/fork` — questo è il workflow in cui sei già dentro. Ecco cosa fa end-to-end, cosa scatta quando, e come plasmarlo sulla soglia di fiducia del tuo team.
+
+<Callout type="objectives" items={[
+  "L'esatto flusso end-to-end dal lancio di `claude agents` alla draft PR — commit, push, notifica, tutto",
+  "Cosa ha rilasciato v2.1.198, cosa ha ritoccato v2.1.221 e perché il default si è ammorbidito",
+  "Come `/fork`, `/resume`, `/background` e (nuovo in v2.1.221) `/subtask` si incastrano intorno al flusso auto-PR",
+  "Il payload dell'hook Notification — `agent_needs_input` vs `agent_completed` — e come avvisare te stesso invece di Claude",
+  "Un pattern propose-only che sopravvive a ogni release usando i permessi, non le impostazioni, come punto di enforcement"
+]} />
+
+## I quattro eventi di rilascio, in ordine
+
+Il flusso auto-PR non è arrivato tutto insieme — è atterrato su cinque release in sei settimane. Leggerli in ordine ti dice a cosa serve davvero ciascuno strato del comportamento attuale.
+
+| Data | Versione | Cambiamento |
+|---|---|---|
+| 2026-07-01 | `v2.1.198` | I subagent girano in background **di default**. Gli agenti in background lanciati da `claude agents` fanno **auto-commit, auto-push e auto-apertura di una draft PR** al completamento. L'hook `Notification` scatena `agent_needs_input` e `agent_completed` per le sessioni in background. |
+| 2026-07-15 (circa) | `v2.1.212` | `/fork` copia la tua conversazione in una nuova sessione **in background** (con una sua riga in `claude agents`) mentre tu continui a lavorare. `/resume` apre un picker delle sessioni passate, incluse quelle cancellate. |
+| 2026-07-20 (circa) | `v2.1.216` | Fix: le sessioni in background ripristinate **recuperano il prompt e le restrizioni sui tool dell'agente** invece di ricadere sull'agente default. |
+| 2026-07-22 (circa) | `v2.1.218` | `/code-review` gira come **subagent in background** di default — la review non riempie più la conversazione. |
+| 2026-08-04 | `v2.1.221` | Default ritoccato: le sessioni in background **committano e pushano sempre** per preservare il lavoro, ma **aprono una draft PR solo quando il task lo richiede**. Il subagent in-session che `/fork` lanciava prima ora è `/subtask`. |
+
+Due cose vale la pena notare in quell'arco:
+
+1. **Ogni passo è più autonomia, non meno.** v2.1.221 non ha disabilitato auto-commit o auto-push — ha solo reso la draft PR opt-in-per-task invece che sempre-attiva. Il runtime vuole comunque il tuo lavoro fuori da un worktree effimero e su un branch prima di dimenticarsene.
+2. **`/fork` e il flusso auto-PR si compongono.** Una volta che un fork è la sua riga in `claude agents`, è una sessione in background — il che significa che quando finisce, la stessa sequenza commit → push → forse-PR scatta. Un singolo `/fork` lanciato a pranzo può tornare come branch su `origin` nel pomeriggio.
+
+## Cosa succede davvero quando un agente in background finisce
+
+La sequenza end-to-end per una sessione in background di `claude agents` su `v2.1.221`, appena la sua ultima chiamata a tool ritorna:
+
+<Steps items={[
+  { title: "Il worktree resta se ci sono modifiche", body: "Il runtime tiene vivo il worktree isolato (posizione default sotto `~/.claude/worktrees/`) finché il working tree è dirty. Se l'agente non ha fatto nessuna modifica, il worktree viene potato automaticamente — niente branch fantasma." },
+  { title: "Commit — sempre, con il messaggio dell'agente", body: "L'agente scrive un messaggio di commit che riassume il task e committa ogni file che ha toccato. Non è un fixup — è lo stato finito del lavoro." },
+  { title: "Push — sempre, su un branch fresco", body: "Il runtime pusha su un branch (creato dall'HEAD del parent quando è stato fatto il worktree). Questo è il passo che v2.1.221 ha tenuto anche dopo il tuning: il punto è preservare il lavoro fuori dalla macchina locale, non pubblicare una proposta." },
+  { title: "Draft PR — solo quando il task lo richiede", body: "Prima di v2.1.221 la PR si apriva sempre. Ora il runtime apre una draft PR solo se il task in sé inquadra un cambiamento revisionabile (fix, feature, refactor). Lavoro esplorativo o ricerca lanciata da `/subtask` pusha ma non apre PR." },
+  { title: "Scatta l'hook Notification", body: "`agent_completed` scatta attraverso l'hook `Notification` — stesso canale di `agent_needs_input`, distinguibili dal payload. È il tuo webhook, il tuo ping su Slack, il tuo momento buzzer-da-scrivania." },
+  { title: "La riga della sessione si aggiorna in `claude agents`", body: "La sessione passa da Running a Complete nella lista `claude agents`, portando con sé il nome del branch e (se aperto) il link della PR. `/resume` può riprenderla dopo con il suo prompt e le sue restrizioni sui tool intatti — il fix di v2.1.216." }
+]} />
+
+La sequenza non fa mai rollback. Se il push fallisce (auth, branch protetto), il runtime mantiene il commit locale e fa emergere il fallimento tramite la stessa notifica — ma non cancella il tuo lavoro.
+
+## L'hook Notification — avvisa te stesso, non Claude
+
+I due eventi che `v2.1.198` ha aggiunto all'hook `Notification` sono il punto di sutura in cui tieni gli umani nel loop senza mai presenziare la sessione.
+
+<PromptCard title="Due forme di payload sullo stesso hook">{`# agent_needs_input — session paused waiting for approval or clarification
+{ "event": "agent_needs_input", "session_id": "...", "agent": "code-review", "reason": "..." }
+
+# agent_completed — session finished; branch pushed, PR maybe opened
+{ "event": "agent_completed", "session_id": "...", "agent": "feature-x",
+  "branch": "claude/feature-x-2026-08-04", "pr_url": "https://github.com/..." /* or null */ }`}</PromptCard>
+
+Il campo `pr_url` è il singolo bit più utile: è `null` quando il runtime ha pushato-ma-non-ha-aperto-PR (il default di v2.1.221 per lavoro esplorativo) ed è popolato quando l'ha aperta. Fare routing su quel campo è come costruisci "pingami solo per lavoro revisionabile" senza un secondo livello di configurazione.
+
+Un hook minimale che pinga un canale Slack solo per i completamenti che hanno prodotto una PR:
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "agent_completed",
+        "hooks": [
+          { "type": "command", "command": "jq -e '.pr_url' >/dev/null && jq -r '\"<\" + .pr_url + \"|Draft PR ready> — \" + .agent' | curl -X POST -H 'content-type: application/json' -d @- $SLACK_WEBHOOK_URL" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Il gate `jq -e '.pr_url'` è tutto il trucco: `-e` esce con codice diverso da zero quando il campo manca o è `null`, cortocircuitando il resto della pipeline. Le sessioni che hanno solo committato-e-pushato non pingano. Le sessioni che hanno aperto una PR sì.
+
+## Perché `#73197` è stato importante — e perché il fix non è stata una chiave di settings
+
+L'issue [`anthropics/claude-code#73197`](https://github.com/anthropics/claude-code/issues/73197), aperta il **2 luglio 2026** — un giorno dopo `v2.1.198` — chiedeva un `backgroundAgents.autoCreatePr: false` in `settings.json`, o almeno manopole separate per commit / push / PR. Il ragionamento era sensato: in un workflow "propose-only" l'umano è l'unico autorizzato a pushare su `origin` o aprire PR, e uno step di pubblicazione default-on ha bisogno di un interruttore off.
+
+La risposta di Anthropic è stata di forma diversa. Invece di una nuova impostazione, `v2.1.221` **ha ritoccato il default in sé** (PR solo quando il task lo richiede) e ha indicato il sistema di permessi esistente: una regola deny `Bash(git push:*)` blocca il push, e una regola deny `Bash(gh pr create:*)` blocca la PR. Il layer dei permessi è autoritativo sia per sessioni interattive che in background — è come il runtime forza il divieto indipendentemente da cosa decide di fare l'agente alla fine.
+
+<Callout type="warning" items={[
+  "Non esiste ancora una chiave `backgroundAgents.autoCreatePr` in `settings.json` — 'disabilita la feature' si scrive con i permessi, non con le impostazioni.",
+  "Un deny di permesso su `Bash(git push:*)` blocca anche l'auto-push finale, non solo i push interattivi. Se la tua unica preoccupazione è la PR, deny `Bash(gh pr create:*)` e lascia passare il push così che `/resume` possa riprendere il branch pulito.",
+  "v2.1.221 è il default *oggi*. Se pinni una Claude Code più vecchia (2.1.198 – 2.1.220), ottieni il comportamento sempre-PR — e il gate dei permessi è la tua unica difesa reale."
+]} />
+
+## Il pattern propose-only che sopravvive a ogni release
+
+Costruisci la policy al layer dei permessi, non al layer delle impostazioni. Così si applica a ogni sessione (foreground, background, `/fork`, `/subtask`, `/loop`) e non le importa in quale versione di `v2.1.x` sei.
+
+<PromptCard title="settings.json — policy di progetto propose-only">{`{
+  "permissions": {
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr edit:*)"
+    ],
+    "allow": [
+      "Bash(git commit:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}`}</PromptCard>
+
+Sotto questa policy:
+
+- L'agente in background committa comunque dentro il suo worktree — la tua review ha il diff esattamente come l'agente l'ha prodotto.
+- Il push a fine sessione fallisce. Il runtime fa emergere il fallimento tramite `agent_completed` con `pr_url: null`.
+- Niente arriva su `origin` finché non pushati tu stesso il branch da solo dal path del worktree che la notifica ti ha consegnato.
+
+Questo è il pattern che la community ha chiesto in `#73197`, espresso con strumenti che già esistono. Ed è anche la forma verso cui sta convergendo il default di v2.1.221 — il runtime semplicemente accetta te come fonte di autorità su quali agenti possono pubblicare.
+
+## `/fork`, `/subtask`, `/resume` — dove si incastrano
+
+`v2.1.212` e `v2.1.221` hanno rimescolato cosa fanno questi tre comandi intorno al flusso auto-PR. Leggili insieme:
+
+| Comando | Cosa avvia | Dove gira | Si applica il flusso auto-PR? |
+|---|---|---|---|
+| `/background` | Nuova sessione in background | Sua riga in `claude agents` | Sì |
+| `/fork` (v2.1.212+) | Copia della conversazione corrente in una nuova sessione in background | Sua riga in `claude agents` | Sì |
+| `/subtask` (v2.1.221+, era `/fork` in-session) | Subagent effimero dentro la sessione corrente | In-conversazione | No — il parent possiede il risultato |
+| `/resume` | Riaggancia una qualsiasi sessione precedente in `claude agents` | Dov'era | Qualsiasi fosse la config di quella sessione |
+| `/code-review` (v2.1.218+) | Review come subagent in background | Sua riga | Sì — ma le review producono raramente PR, quindi v2.1.221 di solito pusha-senza-PR |
+
+Il rinomino in v2.1.221 (`/fork` → `/subtask` per il caso in-session) è la pulizia importante: `/fork` ora significa "consegna questa conversazione a un nuovo worker in background e togliti di mezzo", che è la forma intorno alla quale è stato progettato il flusso auto-PR. `/subtask` è quello che usi quando vuoi un helper con scope nella tua sessione esistente e non vuoi che la sequenza finisci-e-pubblica scatti.
+
+## Costo, race condition e le due gotcha che nessuno documenta
+
+Tre dettagli reali che non compaiono nelle release notes:
+
+- **Gli agenti in background contano contro il cap di concorrenza.** Da `v2.1.198`, i subagent sono di default in background — il che significa che una lista `claude agents` di 25 sessioni in esecuzione inizierà a rifiutare nuovi spawn con `Concurrent subagent limit reached`. Vedi [Limiti della flotta di subagent](/docs/claude-code/subagent-fleet-limits) per le quattro variabili d'ambiente.
+- **L'auto-commit non è amend-safe.** Se due `/fork` dalla stessa conversazione finiscono entrambi e pushano entrambi sui loro branch, ottieni due branch, due commit e (su v2.1.198 – v2.1.220) due PR. Bene quando l'hai voluto come race; non bene quando pensavi ne avrebbe vinto solo uno. Metti uno step di plan nel prompt dell'agente se ti serve serializzazione.
+- **Un watcher che fa auto-commit può double-committare.** Se fai girare anche un repo watcher (uno script comune che auto-committa cambi che vede su disco), può correre con il commit di fine sessione dell'agente — finisci con un commit vuoto o un merge conflict al push. La topologia sicura è: l'agente possiede il worktree, il watcher possiede il clone principale, e mai i due si incontrino.
+
+<Quiz title="Verifica te stesso" questions={[
+  { q: "Sui default di v2.1.221, un agente in background finisce un task di ricerca con `/subtask`. Cosa succede al completamento?", options: ["Niente — `/subtask` gira in-conversazione, quindi il parent possiede il risultato e nessun commit/push separato scatta", "Auto-commit, auto-push, auto-draft-PR — come qualsiasi sessione in background", "Auto-commit e auto-push, ma niente PR perché la ricerca è esplorativa"], answer: 0, explain: "`/subtask` (nuovo in v2.1.221, il rinomino del `/fork` in-session) è un subagent effimero dentro la sessione corrente. La sequenza finisci-e-pubblica scatta solo per sessioni standalone in background — quelle con la loro riga in `claude agents`." },
+  { q: "Vuoi bloccare la creazione di draft PR ma mantenere il push così che `/resume` possa riprendere il branch. Cosa configuri?", options: ["Imposta `backgroundAgents.autoCreatePr: false` in `settings.json`", "Deny `Bash(gh pr create:*)` nei permessi di `settings.json`", "Deny `Bash(git push:*)` nei permessi di `settings.json`"], answer: 1, explain: "Non esiste una chiave `backgroundAgents.autoCreatePr`. Fare deny di `git push` blocca anche la preservazione utile del branch. Fare deny di `gh pr create` blocca solo la PR — il push e il commit girano comunque, quindi `/resume` trova il branch." },
+  { q: "L'hook `Notification` scatena `agent_completed` con `pr_url: null`. Cosa significa su v2.1.221?", options: ["Il push è fallito e nessun branch esiste su `origin`", "Il runtime ha committato e pushato, ma ha deciso che il task non richiedeva una draft PR", "L'agente ha colpito il cap di concorrenza prima di finire"], answer: 1, explain: "`pr_url: null` nel payload di completamento è il segnale di v2.1.221 per 'pushato ma non aperto PR' — lavoro esplorativo, ricerca o qualsiasi cosa il runtime non giudichi come cambiamento revisionabile. I fallimenti di push emergono diversamente nel payload." }
+]} />
+
+<Flashcards title="Flusso auto-PR — gira ogni carta" cards={[
+  { front: "Versione che ha introdotto auto-commit + auto-push + auto-draft-PR", back: "v2.1.198, 1º luglio 2026. Applicato agli agenti in background lanciati via `claude agents`." },
+  { front: "Versione che ha ritoccato il default", back: "v2.1.221, 4 agosto 2026. Ora: sempre commit + push, draft PR solo quando il task lo richiede." },
+  { front: "Eventi dell'hook Notification per sessioni in background", back: "`agent_needs_input` (in pausa, vuole approvazione) e `agent_completed` (finito, branch pushato, `pr_url` forse popolato). Entrambi fluiscono attraverso l'hook `Notification` esistente." },
+  { front: "Come disabilitare le draft PR senza rompere `/resume`", back: "Deny `Bash(gh pr create:*)` nei permessi di `settings.json`. Il push gira comunque, quindi il branch è disponibile su `origin` e `/resume` lo trova pulito." },
+  { front: "Comando per subagent in-session su v2.1.221", back: "`/subtask`. Il nome precedente `/fork` è stato riassegnato a significare 'copia questa conversazione in una nuova sessione in background' — la versione che scatena il flusso auto-PR." },
+  { front: "Dove vivono i worktree di default", back: "`~/.claude/worktrees/`. I worktree con zero modifiche vengono potati automaticamente a fine sessione; i worktree dirty restano così che `/resume` possa trovarli." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Il flusso auto-PR vive al layer del runtime, non al layer delle impostazioni — non c'è una chiave `backgroundAgents.autoCreatePr`, e non ci sarà. Usa i permessi.",
+  "v2.1.221 (il default di oggi) committa e pusha sempre; apre una draft PR solo quando il task inquadra un cambiamento revisionabile. Leggi il campo `pr_url` della notifica per capire quale dei due è successo.",
+  "`/fork` ora significa 'consegna questa conversazione a un worker in background'; `/subtask` è quello che afferri quando vuoi un helper in-conversazione senza la sequenza finisci-e-pubblica.",
+  "Il pattern propose-only è un deny di permesso su `Bash(gh pr create:*)`. Sopravvive a ogni versione di v2.1.x e a ogni comando che produce una sessione in background.",
+  "Gli agenti in background contano comunque contro `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`. Una flotta di 25 sessioni a metà in `claude agents` inizierà a rifiutare nuovi spawn."
+]} />
+
+## Prossimo
+
+- [Task in background, /loop & scheduling](/docs/claude-code/background-tasks) — le primitive sotto queste sessioni in background
+- [Limiti della flotta di subagent](/docs/claude-code/subagent-fleet-limits) — perché 25 sessioni aperte in `claude agents` inizieranno a fallire gli spawn
+- [Hook: automazione deterministica](/docs/claude-code/hooks) — il payload dell'hook `Notification` e come farci routing sopra
+- [Permessi & modalità](/docs/claude-code/permissions) — il layer effettivo dove viene forzato "propose-only"
+- [Hardening dei run autonomi](/docs/security/hardening-autonomous-runs) — la postura di sicurezza per qualsiasi cosa pubblichi senza un umano
+
+## Fonti & approfondimenti
+
+- [Changelog Claude Code](https://code.claude.com/docs/en/changelog) — storia delle versioni autoritativa da v2.1.198 (2026-07-01) fino a v2.1.221 (2026-08-04).
+- [`anthropics/claude-code#73197`](https://github.com/anthropics/claude-code/issues/73197) — l'issue del 2 luglio 2026 che chiedeva `backgroundAgents.autoCreatePr: false`. Ha motivato il tuning del default in v2.1.221.
+- [Claude Code v2.1.198: Background Agents Now Commit, Push, and Open Draft PRs](https://aiagentsfirst.com/claude-code-v2-1-198-background-agents) — writeup di terze parti con il breakdown completo della release v2.1.198, pubblicato il 1º luglio.
+- [Claude Code v2.1.198 Release Notes — 33 Changes](https://www.claudeupdates.dev/version/2.1.198) — enumera i payload dell'hook Notification e il fix del flag-conflict.
+- [Claude Code Updates by Anthropic — August 2026](https://releasebot.io/updates/anthropic/claude-code) — vista cross-release incluse v2.1.212 (`/fork`, `/resume`), v2.1.216 (restore di sessione ripristinata), v2.1.218 (`/code-review` in background), v2.1.221 (tuning del default, rinomino `/subtask`).
+- [Claude Code v2.1.220 to v2.1.221 Major Updates](https://dev.classmethod.jp/en/articles/20260804-cc-updates-v2-1-221/) — pubblicazione day-of con la formulazione esatta del cambio di default.
+- [Hooks reference — Claude Code Docs](https://code.claude.com/docs/en/hooks) — il contratto dell'hook `Notification` e la forma del payload stdin.
