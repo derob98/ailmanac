@@ -1,0 +1,207 @@
+---
+sidebar_position: 8.75
+title: "Poolside Laguna : des modèles de code open-weight qui frappent au-dessus de leur catégorie"
+description: "La famille Laguna de Poolside AI (XS 2.1, S 2.1, M.1) — des modèles de code MoE avec 3B–23B paramètres actifs, contexte 1M tokens, licence OpenMDW-1.1. Ce que le S 2.1 8B-actif bat réellement, pourquoi le XS 2.1 3B-actif tourne sur un MacBook, le premier pipeline d'entraînement RL-en-FP8 connu, et quand y recourir plutôt qu'à Claude, GLM-5.2 ou Kimi K3."
+keywords: [Poolside, Laguna, Laguna S 2.1, Laguna XS 2.1, Laguna M.1, open weight coding model, OpenMDW-1.1, MoE, SWE-Bench Multilingual, Terminal-Bench, DeepSWE, agentic coding, local coding LLM, MLX GGUF, RL FP8]
+---
+
+<LevelBadge level="intermediate" />
+
+Le **2 juillet 2026**, Poolside AI — un labo de foundation models basé aux US qui a levé environ 2 Md$ à une valo de 12 Md$ avec la participation de NVIDIA — a livré ses premiers modèles publics : la **famille Laguna**. Trois modèles de code MoE, tous publiés sous la licence permissive **OpenMDW-1.1**, partageant un corpus de pretraining unique et différant principalement par la taille de la machine sur laquelle on les pointe. Deux semaines plus tard ils ont étendu la famille avec **Laguna S 2.1**, un MoE 118B/8B-actif qui bat **DeepSeek-V4-Pro-Max** sur DeepSWE v1.1 (**40,4 % vs 9,0 %**) tout en activant un sixième des paramètres, et atterrit à **78,5 % sur SWE-Bench Multilingual** — le meilleur score publié sur ce leaderboard au lancement.
+
+Cette page est le guide de terrain pratique pour la famille : ce qui rend réellement chaque taille intéressante, les deux choix de pipeline d'entraînement que la plupart des couvertures ont sautés, la photo honnête de benchmark contre les concurrents fermés de pointe et open-weight, comment les faire tourner en local aujourd'hui, et les tâches spécifiques où prendre un Laguna est le bon appel plutôt que Claude, GLM-5.2 ou Kimi K3.
+
+<Callout type="objectives" items={[
+  "Connaître la famille en un coup d'œil — trois tailles, un corpus, une licence — et quelle taille mappe sur votre hardware",
+  "Comprendre pourquoi 8B paramètres actifs peuvent battre 1,6T total : routage MoE + post-training spécialisé code",
+  "Lire la photo honnête de benchmark à travers SWE-Bench Multilingual, Terminal-Bench 2.1, DeepSWE v1.1 et SWE-Bench Pro",
+  "Connaître les deux premières du pipeline d'entraînement qui façonnent le comportement du modèle — RL en FP8 et entraînement multi-harness",
+  "Faire tourner Laguna via OpenRouter en trois lignes, ou en local via GGUF/MLX sur un MacBook ou DGX Spark",
+  "Décider quand Laguna est le bon outil vs Claude Opus 5, GLM-5.2, Kimi K3 ou GPT-5.5"
+]} />
+
+## La famille en un coup d'œil
+
+Trois modèles, un run de pretraining partagé, trois enveloppes hardware. C'est intentionnel : Poolside a pré-entraîné une fois et post-entraîné par taille, donc la personnalité est cohérente à travers la famille et vous choisissez une taille en fonction de la boîte que vous avez, pas de la forme de la tâche.
+
+| Modèle | Params totaux | Params actifs | Contexte | Hardware cible | Licence |
+|---|---|---|---|---|---|
+| **Laguna XS 2.1** | 33B (MoE) | 3B | jusqu'à 256K | Laptop unique / GPU MacBook | OpenMDW-1.1 |
+| **Laguna S 2.1** | 118B (MoE) | 8B | jusqu'à 1M | DGX Spark unique ou H200 en FP8 | OpenMDW-1.1 |
+| **Laguna M.1** | 225B (MoE) | 23B | 256K+ | Nœud entreprise multi-GPU | OpenMDW-1.1 |
+
+Les trois takeaways pratiques de ce tableau :
+
+- **Même corpus à travers la famille.** Le post-training de Laguna S 2.1 n'a ajouté aucune donnée nouvelle par-dessus celle de XS 2.1 — l'annonce S 2.1 le mentionne explicitement. Les améliorations de comportement viennent de la plus grande classe de modèle et d'une recette de post-training différente, pas de le nourrir avec de nouveaux documents. Cela signifie que la sagesse de fine-tuning transfère proprement à travers les tailles.
+- **La colonne active-param est ce qui compte pour le coût d'inférence.** À 8B actif, Laguna S 2.1 a le profil de calcul d'un modèle dense 8B par token, pas d'un 118B. C'est la différence entre « tourne sur un seul accélérateur » et « a besoin d'un rack ».
+- **OpenMDW-1.1 est une vraie licence permissive, pas une licence source-available.** Elle a été publiée par la Linux Foundation pour combler l'écart entre les licences open-source traditionnelles (qui ne couvrent pas proprement les poids et les données) et les licences vendeur « open » qui interdisent silencieusement l'usage commercial. Accorde des droits illimités et sans royalties à travers copyright, brevet, base de données et secret commercial ; les sorties sont explicitement libres.
+
+<VerifyNote lastVerified="2026-08-03" source="https://poolside.ai/blog/introducing-laguna-s-2-1">
+Les comptes de paramètres, fenêtres de contexte et licences viennent des matériaux de lancement de Poolside et de la couverture indépendante. Les scores de benchmark dans la prochaine section viennent du post de lancement de Poolside et sont confirmés contre l'analyse MarkTechPost ; le rang de leaderboard est cité au lancement et bouge chaque semaine. Confirmez les chiffres actuels sur le blog Poolside et la fiche modèle Hugging Face avant de les citer.
+</VerifyNote>
+
+## Trois choses qui ne sont pas évidentes depuis les titres
+
+### 1. RL en FP8 est un vrai déblocage d'ingénierie, pas du marketing
+
+Le reinforcement learning pour le post-training LLM a historiquement tourné en BF16 parce que le bruit de gradient à la précision FP8 était supposé faire exploser le petit signal que le RL fournit. Poolside affirme publiquement que Laguna S 2.1 est le **premier modèle à échelle de pointe entraîné avec RL en FP8**. Si vrai — et aucun contre-exemple n'a fait surface au début août 2026 — cela réduit de moitié l'empreinte mémoire de l'étape RL et permet à un cluster donné de dépenser le calcul RL sur des tâches qui étaient trop chères.
+
+La conséquence pratique pour les utilisateurs : **l'étape RL de Poolside était sélective**. Ils rapportent **409k environnements d'entraînement** (83k terminal, 168k software-engineering), avec le **SFT bootstrappant la plupart des comportements depuis des données synthétiques** et le **RL réservé aux problèmes de plus haute difficulté**. Cela apparaît dans les deltas de benchmark — le boost du mode thinking sur DeepSWE v1.1 passe de **16,5 % → 40,4 %** — qui est la forme que vous attendriez quand le RL a été dépensé étroitement sur du raisonnement dur plutôt que étalé sur chaque tâche.
+
+### 2. L'entraînement multi-harness est pourquoi il ne s'écroule pas dans les agents tiers
+
+Les modèles de code sont habituellement entraînés à l'intérieur d'un seul harness d'agent (le scaffold propre du vendeur) puis déployés dans des dizaines d'autres (Cursor, Cline, Aider, Continue, Kilo, etc.). L'écart entre harness d'entraînement et de déploiement est d'où viennent beaucoup d'échecs « le benchmark disait que ça marchait ». Poolside a entraîné Laguna à travers **83k environnements terminal et 168k environnements software-engineering** couvrant **plusieurs harness**, ce qui est le mécanisme qu'ils créditent pour rendre le modèle utilisable hors de leur propre scaffold dès le premier jour.
+
+Le signe visible d'un entraînement multi-harness dans le comportement rapporté de Laguna : **persistance** (n'abandonne pas une approche après un appel d'outil raté), **vérification-d'abord** (relit sa propre sortie avant de livrer), et **débrouillardise** (trouve des chemins alternatifs quand le direct est bloqué). Ce sont des comportements d'agent, pas des comportements de next-token — vous ne les obtenez pas de plus de données de pretraining.
+
+Les limitations connues qui mappent directement sur ce même choix de conception valent la peine d'être notées pour ne pas être surpris :
+
+- Peine avec les **légères variations de schéma** dans les harness tiers vs celui natif de Poolside — le harness doit ressembler « suffisamment » à quelque chose dans les 409k envs d'entraînement.
+- Émet parfois du **JSON incorrectement échappé dans les appels d'outils imbriqués à l'intérieur d'arrays**. Rare mais réel.
+- **Surréfléchit sur les problèmes de compétition de maths** — le thinking étendu tourne plus longtemps que nécessaire sur les tâches type AIME. Bien pour le code, gaspilleur pour les maths.
+
+### 3. Le ratio de paramètres actifs est toute l'histoire sur le coût
+
+Le chiffre qui attrape l'œil est **1,6T vs 8B** : Laguna S 2.1 bat DeepSeek-V4-Pro-Max (1,6T total) sur DeepSWE v1.1 de 31,4 points tout en activant un sixième des paramètres par token. Mais le cadrage utile est le coût d'inférence :
+
+| Modèle | Params actifs / token | Compute brut par token | Prix API de référence* |
+|---|---|---|---|
+| Laguna XS 2.1 | 3B | ~3B dense-équivalent | free-tier / plage 0,05 $ |
+| **Laguna S 2.1** | **8B** | **~8B dense-équivalent** | **0,10 $ in / 0,20 $ out par M (OpenRouter)** |
+| GLM-5.2 | ~40B | ~40B dense-équivalent | 1,20-1,40 $ in / 4,10-4,40 $ out par M |
+| Kimi K3 | ~32B | ~32B dense-équivalent | similaire à la plage GLM |
+| Claude Opus 5 (de pointe) | dense, non divulgué | de pointe | 15 $ in / 75 $ out par M |
+
+<small>*Prix depuis OpenRouter et agrégateurs équivalents, début août 2026 — traiter comme approximatif.</small>
+
+L'**écart 150× par token entre S 2.1 sur OpenRouter et Claude Opus 5** n'est pas un combat équitable pour la génération de titres, mais le ratio utile est **S 2.1 vs les autres modèles open-weight de pointe** (GLM-5.2, Kimi K3) : Laguna est ~12× moins cher par token output, avec des scores SWE-Bench Multilingual dans la même ligue. C'est l'enveloppe de prix qui change ce qu'il est économiquement sain de confier à un modèle.
+
+## Photo de benchmark — la version honnête
+
+Les scores rapportés au lancement de S 2.1, croisés entre le propre post de Poolside et la couverture tiers :
+
+| Benchmark | Laguna S 2.1 | Ce qu'il mesure | Notes |
+|---|---|---|---|
+| **SWE-Bench Multilingual** | **78,5 %** | Vraies tâches de fix GitHub à travers de nombreux langages | Meilleur score open-weight publié au lancement |
+| **Terminal-Bench 2.1** | **70,2 %** (thinking) / 60,4 % (non-thinking) | Workflows shell longs | ~10 points d'uplift en mode thinking |
+| **SWE-Bench Pro (Public)** | 59,4 % | Fixes autonomes plus durs au niveau du repo | Modèles fermés de pointe toujours devant |
+| **DeepSWE v1.1** | **40,4 %** (thinking) / 16,5 % (non-thinking) | Benchmarks SWE durs | Bat DeepSeek-V4-Pro-Max à 9,0 % malgré ~1/200 des params actifs |
+| **SWE Atlas (Codebase QnA)** | 46,2 % | Comprendre de grands repos | Devant les chiffres DeepSWE |
+| **Toolathlon Verified** | 49,7 % | Orchestration multi-outils | Milieu de peloton |
+
+Trois règles d'interprétation pour les lire :
+
+- **SWE-Bench Multilingual et Terminal-Bench 2.1 sont les chiffres à prendre au sérieux** pour un modèle de code agentique. Ils mappent sur du travail que vous assignerez réellement — « fixer ce bug dans un vrai repo », « faire passer ce workflow shell au vert ». Poolside mène les deux du côté open-weight.
+- **Le fermé de pointe gagne encore sur les benchmarks les plus durs.** Claude Fable 5 et Kimi K3 mènent sur SWE-Bench Pro et sur certaines tranches de Toolathlon. Ne lisez pas le lancement de Laguna comme « Anthropic est battu » — lisez-le comme « le plafond open-weight pour le code vient de monter de plusieurs points ».
+- **Le mode thinking n'est pas gratuit mais c'est là que la plupart de la victoire est.** Terminal-Bench 60,4 % → 70,2 %, DeepSWE 16,5 % → 40,4 %. Si vous coupez le thinking pour des raisons de coût, vous abandonnez une grosse tranche du modèle.
+
+## Faire tourner Laguna
+
+<Steps items={[
+  {title: "Le plus rapide — hébergé via OpenRouter", body: "OpenRouter, Baseten Model Library, Vercel AI Gateway et les intégrations Kilo/Cline/Hermes ont tous offert l'accès dès le premier jour. Prix listé OpenRouter au lancement : 0,10 $ par M input, 0,20 $ par M output, avec un tier gratuit à contexte 256K pour évaluation. Endpoint chat completions compatible OpenAI — swap l'URL de base et l'ID du modèle."},
+  {title: "Local, petit bout — Laguna XS 2.1 via Ollama ou MLX", body: "XS 2.1 (33B/3B MoE) a des conversions GGUF et MLX. Sur un MacBook 32-64GB il tourne à vitesses utilisables sous llama.cpp ou MLX. C'est la taille à utiliser quand vous voulez un assistant de code qui ne quitte jamais le laptop."},
+  {title: "Local, gros bout — Laguna S 2.1 sur un DGX Spark unique ou H200", body: "Empreinte mémoire par précision : BF16 ~236GB (a besoin de 2 Sparks ou un nœud multi-GPU), FP8 ~118GB (Spark unique ou H200), INT4 ~59GB (rentre confortablement dans la mémoire unifiée 128GB d'un Spark unique). vLLM, SGLang et Ollama tous supportés au lancement. Poids NVFP4 aussi publiés pour les parts NVIDIA les plus récentes."},
+  {title: "Évaluation zéro-setup", body: "chat.poolside.ai sert la famille sans authentification pour évaluation interactive. Utilisez-le pour construire un ressenti avant de le câbler dans un agent."},
+]} />
+
+<PromptCard title="Appeler Laguna S 2.1 via OpenRouter (Python)">
+{`import os, openai
+
+client = openai.OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENROUTER_API_KEY"],
+)
+
+resp = client.chat.completions.create(
+    model="poolside/laguna-s-2.1",
+    messages=[
+        {"role": "system", "content": "You are a senior engineer. Reply with a unified diff, no prose."},
+        {"role": "user", "content": "Fix the off-by-one in this function:\\n\\ndef last_n(xs, n): return xs[-n-1:]"},
+    ],
+)
+print(resp.choices[0].message.content)`}
+</PromptCard>
+
+## Quand prendre Laguna vs les alternatives
+
+La carte de décision pragmatique, étant donné le paysage de modèles au début août 2026 :
+
+| Tâche | Meilleur choix | Pourquoi |
+|---|---|---|
+| Fix de bug long au niveau du repo, sensible au budget | **Laguna S 2.1** | SWE-Bench Multilingual open-weight de tête, ~12× moins cher par token output que GLM-5.2 ou Kimi K3 |
+| Code agentique sur MacBook, offline requis | **Laguna XS 2.1** | 3B params actifs + build MLX ; rien d'autre à cette taille n'atteint un SWE-Bench Multilingual comparable |
+| Accuracy absolue de pointe sur les tâches les plus dures, coût sans objet | **Claude Opus 5** ou Fable 5 | Fermé de pointe mène encore SWE-Bench Pro et les tranches les plus dures |
+| Contexte 1M-token sur un repo, licence permissive nécessaire | **GLM-5.2** ou **Laguna S 2.1** | Les deux offrent contexte 1M sous licences permissives ; GLM-5.2 est plus fort sur le raisonnement général, Laguna est plus fort sur le code agentique |
+| Orchestration multi-outils où vous avez besoin de sémantique d'appel d'outils serrée | **Claude** ou **Kimi K3** | Le score Toolathlon milieu-de-peloton de Laguna et le cas limite JSON-escaping connu en font un défaut plus faible ici |
+| Environnement régulé, aucune donnée ne quitte la boîte | **Laguna S 2.1 self-hosted** | OpenMDW-1.1 accorde l'usage commercial illimité, labo d'origine US ; FP8 rentre dans un accélérateur unique |
+
+Le one-liner : **Laguna est le sweet spot actuel quand vous voulez un comportement de code classe pointe sur un petit budget de params actifs, et que la licence et l'origine comptent.** Utilisez-le quand ces contraintes lient ; recourez à Claude ou au fermé de pointe quand elles ne lient pas.
+
+## Lectures reliées
+
+- [GLM-5.2: Open-Weight Frontier Coding Model](/docs/models/glm-5-2-open-weight-frontier) — le point de comparaison direct sur l'autre leader open-weight ; astuce architecturale différente (IndexShare) pour le même but 1M-contexte.
+- [Kimi K3 Open-Weight Frontier](/docs/models/kimi-k3-open-weight-frontier) — l'autre grand modèle de code open-weight de pointe, params plus denses, enveloppe de comportement différente.
+- [DeepSeek & Qwen: Open Models Playbook](/docs/models/deepseek-qwen-open-models) — contexte sur le paysage de code open-weight contre lequel Laguna est en compétition.
+- [Run Models Locally with Ollama](/docs/models/run-models-locally-ollama) — le runtime local que vous utiliserez pour XS 2.1.
+- [Local Coding Agents](/docs/models/local-coding-agents) — où XS 2.1 s'insère dans l'histoire d'agent local.
+- [AI Gateways: LiteLLM, OpenRouter, Portkey](/docs/models/ai-gateways-litellm-openrouter-portkey) — comment swapper Laguna dans un stack OpenAI-compatible existant.
+- [What AI Costs Across Providers](/docs/models/what-ai-costs-across-providers) — la vue prix-par-tâche qui rend le ratio de Laguna visible.
+
+## Vérifiez votre prise
+
+<Quiz questions={[
+  {
+    q: "Laguna S 2.1 a 118B paramètres totaux mais seulement 8B actifs par token. Quel modèle bat-il sur DeepSWE v1.1 malgré une activation d'environ un sixième des paramètres ?",
+    options: [
+      "Claude Opus 5 (fermé de pointe)",
+      "DeepSeek-V4-Pro-Max (1,6T total)",
+      "Gemma 4 26B-A4B",
+      "GPT-5.5"
+    ],
+    answer: 1,
+    explain: "Laguna S 2.1 marque 40,4 % sur DeepSWE v1.1 (mode thinking) vs DeepSeek-V4-Pro-Max à 9,0 %, avec environ 1/6 des paramètres actifs par token. Les modèles fermés de pointe comme Claude Opus 5 et Kimi K3 mènent encore sur les tranches les plus dures, et Gemma 4 26B-A4B / GPT-5.5 ne sont pas la comparaison que Poolside a citée au lancement."
+  },
+  {
+    q: "Pourquoi le même pretrain 4 096-H200 se fait post-entraîner de trois façons différentes pour XS 2.1, S 2.1 et M.1 — plutôt que de servir le plus gros checkpoint partout ?",
+    options: [
+      "Le corpus de pretrain est différent pour chaque taille",
+      "OpenMDW-1.1 interdit de servir un fichier de poids à plusieurs tailles",
+      "Le compte de paramètres actifs fixe le coût de calcul par token — des tailles différentes rentrent dans des enveloppes hardware différentes à la même personnalité",
+      "Les modèles plus petits sont distillés depuis les plus grands après coup"
+    ],
+    answer: 2,
+    explain: "Le corpus de pretraining est partagé à travers la famille (Poolside l'a mentionné explicitement pour S 2.1). Ce qui diffère est la classe de modèle et la recette de post-training. Puisque les params actifs déterminent le coût d'inférence par token, split la famille en tailles actives 3B / 8B / 23B permet de choisir la boîte qu'on a — MacBook, DGX Spark unique ou nœud multi-GPU — sans changer la personnalité du modèle."
+  },
+  {
+    q: "Vous devez fixer un bug dans un dépôt de 200 fichiers et le coût compte. Les chiffres Terminal-Bench 2.1 comptent. Quel est le choix le plus défendable parmi ceux-ci, en supposant que vous n'avez pas besoin d'accuracy de pointe ?",
+    options: [
+      "Laguna XS 2.1 — c'est le moins cher",
+      "Laguna S 2.1 avec mode thinking activé",
+      "Laguna S 2.1 avec mode thinking désactivé — pour économiser du coût",
+      "GPT-5.5 — toujours déférer au fermé de pointe"
+    ],
+    answer: 1,
+    explain: "S 2.1 mène le côté open-weight sur Terminal-Bench 2.1 à 70,2 % avec thinking activé — c'est le chiffre pour les workflows shell/agent longs. Couper le thinking le fait chuter à 60,4 % et rend la plupart de la victoire. XS 2.1 est bon pour le travail laptop-local, pas l'échelle repo. GPT-5.5 est un choix correct mais pas le sujet de la question — le coût compte et S 2.1 à ~0,10/0,20 $ par M est des ordres de grandeur moins cher."
+  },
+  {
+    q: "Laquelle de celles-ci est un vrai mode d'échec documenté de Laguna S 2.1 qui compte pour l'usage en production ?",
+    options: [
+      "Ne peut pas utiliser d'appels d'outils du tout hors du propre harness de Poolside",
+      "Émet parfois du JSON incorrectement échappé dans des appels d'outils imbriqués à l'intérieur d'arrays",
+      "Refuse de répondre à toute question impliquant du code sous licences non permissives",
+      "Requiert une connexion internet pour router l'inférence"
+    ],
+    answer: 1,
+    explain: "Poolside a documenté trois limitations au lancement : dérive de schéma quand le harness tiers diffère du leur natif, JSON incorrectement échappé dans les appels d'outils imbriqués dans des arrays, et 'sur-réflexion' sur les problèmes de compétition de maths. Les appels d'outils marchent bien dans les harness tiers (c'est tout le point de leur entraînement multi-harness) — mais le cas limite d'escaping est réel et vaut la peine de s'en garder."
+  }
+]} />
+
+## Sources & lectures complémentaires
+
+- [Introducing Laguna S 2.1 — Poolside](https://poolside.ai/blog/introducing-laguna-s-2-1) — le post de lancement avec pipeline d'entraînement, tableau de benchmark et options d'inférence.
+- [Poolside AI Launches Open-Weight 'Laguna' Coding Models — Open Source For You](https://www.opensourceforu.com/2026/07/poolside-ai-launches-open-weight-laguna-coding-models/) — vue d'ensemble de la famille avec les specs XS 2.1 et M.1.
+- [American AI startup Poolside launches free, high-performing open model Laguna XS.2 — VentureBeat](https://venturebeat.com/technology/american-ai-startup-poolside-launches-free-high-performing-open-model-laguna-xs-2-for-local-agentic-coding) — la couverture du lancement du 2 juillet pour la famille initiale.
+- [Poolside drops Laguna S 2.1, an open-weight coding model that beats rivals 10x its size — VentureBeat](https://venturebeat.com/infrastructure/poolside-drops-laguna-s-2-1-an-open-weight-coding-model-that-beats-rivals-10x-its-size) — analyse post-lancement de la position comparative de S 2.1.
+- [Poolside Releases Laguna S 2.1 — MarkTechPost](https://www.marktechpost.com/2026/07/21/poolside-releases-laguna-s-2-1/) — croisement architecture et benchmark.
+- [Laguna XS 2.1 review — explainx.ai](https://explainx.ai/blog/poolside-laguna-s-2-1-open-weights-coding-model-july-2026) — impressions hands-on et notes hardware.
+- [OpenMDW license — Linux Foundation](https://www.linuxfoundation.org/press/linux-foundation-releases-openmdw-1.1-nvidia-adopts-openmdw-for-cosmos-isaac-gr00t-ising-and-nemotron-ai-model-families) — la licence sous laquelle les trois modèles Laguna livrent.

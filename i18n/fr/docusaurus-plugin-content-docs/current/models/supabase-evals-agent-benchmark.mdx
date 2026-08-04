@@ -1,0 +1,245 @@
+---
+sidebar_position: 4.6
+title: "Supabase Evals — benchmark d'agents sur vrai backend"
+description: "Supabase a open-sourcé un benchmark qui fait tourner Claude Code, Codex et OpenCode contre de vraies stacks Supabase conteneurisées — pas des mocks. Voici ce qu'il mesure, ce qu'il a trouvé sur la façon dont les modèles utilisent réellement docs et skills, et comment le faire tourner en local en une soirée."
+keywords: [supabase evals, coding agent benchmark, claude code vs codex, opencode benchmark, real backend benchmark, agent skills, llm as judge, evals apache 2.0, opus 5 sonnet 5 kimi k3, agent evaluation]
+---
+
+<LevelBadge level="intermediate" />
+
+Les leaderboards d'agents de code mesurent surtout des *diffs de pull request contre une suite de tests* — SWE-Bench et ses cousins. C'est utile, mais ce n'est pas ce qu'un utilisateur Supabase fait réellement : construire un schéma, fixer une policy RLS cassée, déboguer une Edge Function échouée, câbler l'auth. Le **1er août 2026**, Supabase a open-sourcé un benchmark qui note les agents de code sur ces tâches *réelles*, les faisant tourner contre de vraies stacks Supabase conteneurisées avec de vrais serveurs MCP et de vraies CLIs. C'est Apache-2.0, ça tourne en local sur un laptop, et ses scores précoces disent déjà quelque chose de surprenant sur la façon dont différents agents *utilisent* la documentation. Cette page est le guide de terrain pratique.
+
+<Callout type="objectives" items={[
+  "Comprendre ce qui rend Supabase Evals différent des benchmarks style SWE-Bench",
+  "Lire les résultats cross-agent honnêtement — où Opus 5, Sonnet 5, Kimi K3 et la ligne GPT-5 divergent réellement",
+  "Voir l'effet du chargement des skills sur le même modèle (avant vs après)",
+  "Faire tourner le benchmark vous-même contre votre propre agent et modèle en moins d'une heure",
+]} />
+
+<VerifyNote lastVerified="2026-08-03" source="https://github.com/supabase/evals">
+Le tableau de scores, le compte d'evals et les effets de skills sur cette page reflètent le leaderboard et le README **de la release du 1er août 2026**. Les scores live sur [supabase.com/evals](https://supabase.com/evals) sont mis à jour à mesure que de nouveaux modèles et expériences atterrissent ; la *forme* du benchmark (stacks réelles, scoring déterministe + LLM-judge, un seul retry) est durable, les pourcentages spécifiques ne le sont pas.
+</VerifyNote>
+
+## Ce qu'est réellement Supabase Evals
+
+Supabase Evals est un benchmark, un harness d'évaluation et un leaderboard public roulés en un repo Apache-2.0 à [github.com/supabase/evals](https://github.com/supabase/evals). Il existe parce que les tests style SWE-Bench répondent à la mauvaise question pour le travail backend — ils mesurent « cet agent peut-il fermer une issue GitHub déposée contre une suite de tests Python » — alors que la plupart du vrai travail Supabase est plus proche de *l'ops sur un système en marche* : votre policy RLS a commencé à rejeter des requêtes valides, votre Edge Function 500-e en prod, votre migration n'a pas pris.
+
+Trois choses le séparent de ce qui existait :
+
+- **Vraies stacks, pas des mocks.** Chaque scénario boote un sandbox Docker frais qui monte la socket Docker de l'host, donc `supabase start` fait tourner la stack locale comme conteneurs frères. L'agent parle à une surface compatible Management-API (`@supabase/lite`) *et* de vrais serveurs MCP et la vraie CLI Supabase. Rien n'est stubbé.
+- **Vérifications déterministes d'abord, LLM-as-judge seulement où nécessaire.** Un scorer peut requêter la base résultante, hitter la Edge Function déployée, ou lancer `vitest` à la racine du repo sur les fichiers produits. Le juge LLM est un backup pour les réponses libres (« l'explication de l'agent correspondait-elle à la vraie cause racine ? »), pas la note primaire.
+- **Un seul retry, puis c'est final.** Pas de best-of-N cherry-picked. Cela seul rend les chiffres moins flatteurs que la plupart des benchmarks de PR d'agents.
+
+## La grille de scénarios
+
+La release d'août 2026 livre **38 scénarios d'eval** sous `evals/<id>/`. Ils sont organisés sur trois axes pour que les résultats puissent être découpés de façon significative :
+
+- **Neuf produits** — database, auth, storage, edge functions, realtime, cron, queues, vectors, data-api
+- **Neuf topics** — RLS, security, migrations, SQL, SDK, observability, self-hosting, tests, declarative-schema
+- **Quatre stages** — `build` (faire quelque chose de nouveau), `deploy` (le livrer), `investigate` (comprendre ce qui ne va pas), `resolve` (fixer)
+
+Chaque eval est un répertoire avec un `PROMPT.md` (la tâche que l'agent voit, plus le frontmatter metadata), un scorer `EVAL.ts`, et optionnellement `remote/` (état de projet hébergé pré-seedé — SQL, logs, fonctions déjà déployées) et `local/` (fichiers de départ copiés dans le workspace sandbox de l'agent). Les scénarios viennent de vrais tickets de support et issues GitHub, pas de prompts synthétiques.
+
+## Deux runtimes, choisis par eval
+
+Chaque eval tourne dans l'un des deux modes, décidé automatiquement par sa forme :
+
+- **Mode outils.** Pas de sandbox. L'agent obtient une surface MCP/outil (Management API, SQL, storage, etc.) et sa réponse est notée en inspectant l'état du projet résultant. Utilisé pour les evals qui vivent entièrement dans la plateforme (pas de répertoire `local/`, pas de `interface: cli`).
+- **Mode local-stack.** Un sandbox Docker frais avec la vraie CLI Supabase installée. L'agent obtient un outil `bash` plus des outils de fichiers, et peut lancer `supabase init/start/db/test` contre une vraie stack locale qui spawne comme conteneurs frères. Après que l'agent s'arrête, le harness `docker cp`-e le workspace dehors et lance `vite`/`vitest` depuis l'host pour le noter. Utilisé quand un workspace `local/` existe ou quand `interface: cli` est déclaré.
+
+L'astuce maligne : **la toolchain de l'host note ce que le sandbox a produit.** Les scorers n'ont pas besoin de vivre dans l'image sandbox.
+
+## Résultats cross-agent (août 2026)
+
+Les runs initiaux du leaderboard opposent les **agents first-party** (Claude Code, Codex, expérimentations d'exécuteur Claude API) contre l'**OpenCode model-agnostic** à travers les lignes Claude Opus 5, Claude Sonnet 5, Kimi K3 et GPT-5.4/5.6. Les chiffres ci-dessous sont pour le **stage `build`**, où le post initial rapporte les résultats les plus tranchés.
+
+| Agent + modèle | Build (sans skills) | Build (avec skills) |
+|---|---|---|
+| Claude Code + Opus 5 | 100 % | 100 % |
+| OpenCode + Kimi K3 | 100 % | 100 % |
+| Claude Code + Sonnet 5 | 78 % | 100 % |
+| Codex + GPT-5.6 (Sol) | 89 % | 100 % |
+| Codex + GPT-5.4 mini | 78 % | 89 % |
+
+Deux choses ressortent :
+
+- **Opus 5 et Kimi K3 maxent `build` sans aide.** Kimi K3 tournant via OpenCode égalisant Opus 5 tournant via Claude Code est un vrai signal sur le rattrapage des modèles open-weight sur le travail de forme backend — pas une revendication SOTA générale, mais spécifique et reproductible.
+- **Les skills sont un gros multiplicateur sur les modèles plus petits/moyens.** Charger le skill Supabase fait passer Sonnet 5 de 78 % à 100 % sur `build`, et fait passer le hit rate du skill Postgres-best-practices d'environ 10 % à 60 % à travers la suite plus large. Si vous tournez Sonnet 5 (ou tout modèle moyen), *ne pas* charger le skill pertinent laisse 20+ points au sol.
+
+## Le résultat que personne n'attendait : les modèles utilisent les docs très différemment
+
+Le chiffre le plus intéressant de la release n'est pas un score, c'est un comportement :
+
+> **Codex / GPT-5.6 lit environ 8 pages de docs par scénario. Claude Code en lit environ 2 — et consulte les docs dans moins de 40 % des scénarios même avec les skills chargés.**
+
+Les deux agents regardaient les mêmes tâches, les mêmes outils MCP et les mêmes skills. Codex tire réflexivement la documentation avant d'agir ; Claude Code essaie plus souvent de mémoire et ne lit les docs que quand il frappe un mur. Ni l'un ni l'autre n'est « bon » — Opus 5 via Claude Code a quand même marqué 100 % sur `build`. Mais c'est un *mode d'opération* très différent, et cela explique beaucoup de rapports anecdotiques sur le ressenti différent des deux agents.
+
+`★ Insight ─────────────────────────────────────`
+- Les rapports de benchmark écrasent habituellement un agent à un seul chiffre. Supabase Evals est inhabituellement précieux parce qu'il *instrumente le comportement de l'agent* — combien de fois il lit les docs, quels skills il a chargés, combien d'outils il a appelés — et ce comportement est souvent l'histoire, pas le score.
+- L'écart ici n'est pas un écart de modèle, c'est un écart de **policy de harness**. Le même modèle de base dans un harness différent se comporterait probablement différemment. Voir [Coding Agent CLIs Compared](/docs/models/coding-agent-clis-compared) pour pourquoi le harness compte au moins autant que le modèle.
+- Scorers déterministes plus un retry (pas de best-of-N) est ce qui rend les chiffres ici comparables *à travers* les agents. La plupart des leaderboards publics d'agents permettent silencieusement les retries ou la self-consistency, ce qui flatte les modèles plus lents/plus faibles.
+`─────────────────────────────────────────────────`
+
+## Trois trébuchements cohérents à travers chaque agent
+
+Peu importe le modèle, chaque agent testé a trébuché sur les mêmes trois patterns :
+
+- **Écrire à la main les migrations au lieu d'utiliser les schémas déclaratifs.** Le workflow schéma-déclaratif est plus récent ; les données d'entraînement sont lourdes en migrations `create table` old-style, donc les agents défaultent à celles-ci même quand le projet est setup pour du déclaratif.
+- **Vérifier l'auth à la main au lieu d'utiliser `@supabase/server`.** Les agents câblent le cookie-parsing et le session-checking à la main plutôt que d'utiliser les helpers server-side plus récents qui existent exactement pour ça.
+- **Consultation de docs incohérente.** Comme ci-dessus — le même agent va consulter les docs sur un scénario et essayer de mémoire sur le suivant, sans règle évidente pour lequel.
+
+Ce sont le genre d'échecs qui n'apparaissent pas dans `pass@1` sur un benchmark synthétique, parce qu'il n'y a pas de réponse « fausse mais qui marche » à noter — le code compile, il utilise juste le pattern obsolète. Les evals real-container les attrapent parce qu'un scorer peut *inspecter le projet produit* et vérifier « ont-ils utilisé le schéma déclaratif, oui/non ».
+
+## Le faire tourner en local
+
+Il vous faut Docker, `pnpm` et une clé API pour le provider que vous voulez noter. Les ports 54321–54329 doivent être libres (arrêtez toute stack `supabase start` locale d'abord). Le tout tourne sur un laptop ; un petit run finit en minutes.
+
+<Steps items={[
+  { title: "Cloner avec sous-modules", body: "Les skills vivent dans un sous-module — un clone plain vous laissera sans les skills d'agent Supabase. Utilisez --recurse-submodules la première fois." },
+  { title: "Installer et configurer", body: "`pnpm install`, puis copiez `.env.example` en `.env` et collez la clé provider dont vous avez besoin (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.)." },
+  { title: "Faire tourner un eval contre une expérience", body: "Commencez étroit. Prenez un seul scénario et une seule config agent/modèle, pour pouvoir regarder les tours de l'agent et confirmer que votre setup marche avant de dépenser du temps ou des tokens sur un sweep complet." },
+  { title: "Comparer les expériences tête-à-tête", body: "Une fois qu'un run marche, étendez le flag `--experiment` pour comparer, e.g., Sonnet 5 avec vs sans skills, ou Claude Code vs Codex sur le même scénario." },
+  { title: "Exporter les résultats et les inspecter", body: "`pnpm export-results` écrit `eval-results.json` ; `pnpm web` ouvre un viewer local avec les traces par tour pour que vous puissiez *lire ce que l'agent a réellement fait* — c'est là que le vrai apprentissage est." },
+]} />
+
+<PromptCard title="Cloner le repo avec sous-modules">
+{`git clone --recurse-submodules https://github.com/supabase/evals.git
+cd evals
+pnpm install
+cp .env.example .env`}
+</PromptCard>
+
+<PromptCard title="Faire tourner un seul eval contre une seule expérience">
+{`pnpm eval -- \\
+  --eval resolve-dataapi-001-empty-results \\
+  --experiment claude-code-sonnet-5`}
+</PromptCard>
+
+<PromptCard title="Tête-à-tête : même modèle, skills on vs off">
+{`pnpm eval -- \\
+  --experiment claude-code-sonnet-5 \\
+  --experiment claude-code-sonnet-5-no-skills \\
+  --suite benchmark`}
+</PromptCard>
+
+<PromptCard title="Sweep de benchmark complet à travers toutes les expériences livrées">
+{`pnpm eval -- \\
+  --suite benchmark \\
+  --experiment-suite benchmark,no-skills
+
+pnpm export-results
+pnpm web`}
+</PromptCard>
+
+## Anatomie d'une expérience (pour que vous puissiez ajouter la vôtre)
+
+Un fichier d'expérience sous `experiments/<name>.ts` est où vous câblez **un agent, un runtime et un modèle** en une configuration comparable. Cette séparation est délibérée : elle signifie que « Claude Code avec Sonnet 5 et pas de skills » est une *expérience différente* de « Claude Code avec Sonnet 5 et skills chargés », et les deux sont différentes de « OpenCode avec Kimi K3 ». Vous pouvez tenir deux des trois axes constants et faire varier le troisième.
+
+Les variantes `-no-skills` livrées dans le repo (e.g. `claude-code-sonnet-5-no-skills.ts` vs `claude-code-sonnet-5.ts`) sont ce qui rend la revendication « les skills nous ont fait passer de 78 % à 100 % » mesurable plutôt qu'un ressenti.
+
+Si vous faites tourner un agent custom — une boucle maison, un fork interne, un harness expérimental — le pattern est : écrire un fichier d'expérience qui déclare votre agent, opt-in `localStack: localStackRuntime()` si vous voulez aussi les evals sandbox, et le faire tourner contre la suite `benchmark`. Vos chiffres atterrissent dans le même tableau que ceux de tout le monde.
+
+## Skills, chargés paresseusement
+
+Les deux runtimes utilisent la **divulgation progressive** pour les skills : seul le nom et la description de chaque skill sit dans le system prompt en permanence ; l'agent tire les instructions complètes à la demande. C'est pourquoi « skills on » coûte seulement quelques tokens supplémentaires par tour mais peut lever un score de 20+ points — l'agent ne paie pour le corps d'un skill que quand il décide que le skill est pertinent.
+
+Les deux runtimes diffèrent *seulement* dans la façon dont le corps est fetché :
+
+- **Mode local-stack (sandbox).** Les skills sont installés dans le sandbox avec la CLI `skills` de Vercel (cuite dans l'image sandbox, sourcée depuis le répertoire local `skills/` — jamais du réseau) sous `.claude/skills/`. Quand une tâche match, l'agent lit `.claude/skills/<name>/SKILL.md` et tous les fichiers qu'il référence avec ses outils de fichiers.
+- **Mode outils.** Pas de filesystem, donc un outil `load_skill` retourne les instructions complètes d'un skill quand l'agent l'appelle par nom.
+
+Pour le contexte sur le standard cross-agent émergent de skills que cela utilise, voir [SKILL.md as an Open Standard](/docs/models/skill-md-open-standard).
+
+## Où cela s'insère dans la carte AILmanac
+
+- **Le benchmark lui-même → cette page.** Ce que Supabase Evals mesure, comment, et ce qu'il a trouvé.
+- **[Evaluating Agents](/docs/playbooks/evaluating-agents)** — le playbook général pour mesurer tout agent de code sur votre propre stack.
+- **[Coding Agent CLIs Compared](/docs/models/coding-agent-clis-compared)** — la moitié *harness* de l'histoire (Claude Code vs Codex vs OpenCode en tant que programmes, indépendants de tout benchmark).
+- **[Claude vs GPT vs Gemini for Coding](/docs/models/claude-gpt-gemini-for-coding)** — la moitié *modèle*.
+
+`★ Insight ─────────────────────────────────────`
+- Les benchmarks comme celui-ci sont plus utiles *directionnellement*, pas absolument. « Sonnet 5 a gagné 22 points avec le skill Supabase chargé » transfère à votre propre projet ; « Sonnet 5 marque 100 % sur `build` » ne transfère pas nécessairement.
+- La bonne question après avoir lu un leaderboard n'est pas « quel agent a gagné », c'est **« qu'est-ce que ce benchmark teste qui ressemble à mon travail »** — et alors seuls les sous-scores sur ces tranches comptent.
+`─────────────────────────────────────────────────`
+
+## Auto-check rapide
+
+<Quiz questions={[
+  {
+    q: "Qu'est-ce qui rend Supabase Evals structurellement différent des benchmarks style SWE-Bench ?",
+    options: [
+      "Il note les agents contre de vraies stacks Supabase conteneurisées (vraie CLI, vrais serveurs MCP) au lieu d'une suite de tests fixe",
+      "Il utilise seulement du scoring LLM-as-a-judge sans vérifications déterministes",
+      "Il permet des retries illimités et rapporte le best-of-N",
+      "Il note seulement les agents closed-source",
+    ],
+    answer: 0,
+    explain: "Chaque scénario boote un vrai sandbox Docker et laisse l'agent parler à un vrai outillage Supabase. Le scoring est déterministe d'abord (requêter la DB, hitter la Edge Function, lancer vitest), avec LLM-as-a-judge comme backup, et un seul retry.",
+  },
+  {
+    q: "La release d'août 2026 rapporte que Codex/GPT-5.6 et Claude Code diffèrent nettement dans un *comportement* sur les mêmes scénarios. Lequel ?",
+    options: [
+      "À quelle fréquence ils s'appellent l'un l'autre pour de l'aide",
+      "Combien de pages de docs ils lisent par scénario (Codex ~8, Claude Code ~2, et Claude Code vérifie les docs dans moins de 40 % des scénarios)",
+      "Combien de retries ils consomment avant de répondre",
+      "Dans quel langage ils génèrent le code",
+    ],
+    answer: 1,
+    explain: "L'écart comportemental est la policy de consultation de docs, pas la capacité brute — Opus 5 dans Claude Code hitte quand même 100 % sur build. Codex tire réflexivement la documentation ; Claude Code essaie souvent de mémoire d'abord.",
+  },
+  {
+    q: "Charger le skill Supabase fait passer le score `build` de Sonnet 5 de 78 % à 100 %. Qu'est-ce que cela suggère le plus fortement ?",
+    options: [
+      "Sonnet 5 est un modèle faible globalement",
+      "Les skills sont un gros multiplicateur pour les modèles moyens/petits sur le travail domain-specific ; ne pas les charger laisse des points au sol",
+      "Les skills n'aident que les agents closed-source",
+      "Le chiffre 78 % est un bug dans le harness",
+    ],
+    answer: 1,
+    explain: "Les modèles de pointe comme Opus 5 maxent déjà sans skills ; les skills ferment l'écart pour les modèles moyens sur les tâches domain-specific. Le même pattern apparaît avec Postgres-best-practices passant d'environ 10 % à 60 % de hit rate à travers la suite.",
+  },
+  {
+    q: "Vous voulez comparer 'skills on' vs 'skills off' équitablement pour le même modèle. Quelle est la bonne primitive dans Supabase Evals ?",
+    options: [
+      "Faire tourner la même expérience deux fois et espérer du hasard",
+      "Utiliser deux fichiers d'expérience différents (e.g. `claude-code-sonnet-5.ts` et `claude-code-sonnet-5-no-skills.ts`) contre la même suite d'eval",
+      "Changer la température du modèle entre les runs",
+      "Ne regarder que le score LLM-judge et ignorer les vérifications déterministes",
+    ],
+    answer: 1,
+    explain: "Chaque fichier d'expérience câble un agent + runtime + modèle + set de skills en une unité comparable. Les variantes `-no-skills` livrées existent précisément pour que 'skills on vs off' soit une comparaison contrôlée, pas un appel au feeling.",
+  },
+  {
+    q: "Quel trébuchement n'est *pas* l'un des trois échecs cohérents rapportés à travers chaque agent testé ?",
+    options: [
+      "Écrire à la main les migrations au lieu d'utiliser les schémas déclaratifs",
+      "Vérifier l'auth à la main au lieu d'utiliser `@supabase/server`",
+      "Consultation de documentation incohérente à travers les scénarios",
+      "Produire du code qui ne compile pas au premier essai",
+    ],
+    answer: 3,
+    explain: "Les trois trébuchements rapportés sont tous des échecs *code-qui-tourne-mais-utilise-le-mauvais-pattern* — exactement le genre qu'un benchmark synthétique pass@1 raterait. Les échecs de compile ne sont pas le pattern partagé ici.",
+  },
+]} />
+
+## Flashcards
+
+<Flashcards cards={[
+  { front: "Sous quelle licence Supabase Evals est-il publié ?", back: "Apache-2.0. Public sur github.com/supabase/evals — vous pouvez forker, ajouter des expériences et le faire tourner localement sans restriction commerciale." },
+  { front: "Combien de scénarios d'eval livrent dans la release initiale ?", back: "38, découpés à travers neuf produits, neuf topics et quatre stages (build / deploy / investigate / resolve). Les scénarios viennent de vrais tickets de support et issues GitHub." },
+  { front: "Quels sont les deux runtimes et comment le harness choisit ?", back: "Mode outils (surface MCP, pas de sandbox) et mode local-stack (sandbox Docker avec vraie CLI Supabase). Local-stack est choisi automatiquement quand un eval livre un workspace `local/` ou déclare `interface: cli`." },
+  { front: "Quelle est la règle de scoring ?", back: "Vérifications déterministes d'abord (requêter DB, hitter Edge Function, lancer vitest), LLM-as-judge seulement pour les réponses libres, et un seul retry permis avant que la note soit finale. Pas de best-of-N." },
+  { front: "Qu'est-ce qu'une 'expérience' dans Supabase Evals ?", back: "Un fichier sous `experiments/<name>.ts` qui bind un agent + runtime + modèle + set de skills en une configuration comparable. `claude-code-sonnet-5.ts` et `claude-code-sonnet-5-no-skills.ts` sont deux expériences différentes." },
+  { front: "Pourquoi les runs 'skills on' ne coûtent-ils que quelques tokens supplémentaires par tour ?", back: "Divulgation progressive — seul le nom + la description de chaque skill sit dans le system prompt. L'agent tire le corps complet d'un skill à la demande (via lecture de fichier en mode sandbox, via outil `load_skill` en mode outils)." },
+  { front: "Qu'a trouvé la release sur la façon dont Codex vs Claude Code utilisent les docs ?", back: "Codex / GPT-5.6 lit ~8 pages de docs par scénario ; Claude Code lit ~2 et consulte les docs dans moins de 40 % des scénarios même avec skills chargés. Mêmes tâches, mêmes outils — policy d'agent différente." },
+]} />
+
+## Sources & lectures complémentaires
+
+- [github.com/supabase/evals](https://github.com/supabase/evals) — le repo (Apache-2.0), incluant le README complet dont cette page tire.
+- [Introducing Supabase Evals](https://supabase.com/blog/introducing-supabase-evals) — le post de lancement avec le leaderboard cross-agent initial.
+- [supabase.com/evals](https://supabase.com/evals) — le leaderboard public live.
+- [github.com/supabase/agent-skills](https://github.com/supabase/agent-skills) — le sous-module skills que le benchmark épingle.
+- [github.com/supabase/supabase-lite](https://github.com/supabase/supabase-lite) — `@supabase/lite`, la surface compatible Management-API contre laquelle le harness tourne.
+- [MarkTechPost — Supabase Releases Evals](https://www.marktechpost.com/2026/08/01/supabase-releases-evals-an-open-source-benchmark-that-scores-claude-code-codex-and-opencode-on-real-supabase-tasks/) — résumé tiers des résultats du lancement.
+- Relié sur AILmanac : [Evaluating Agents](/docs/playbooks/evaluating-agents) · [Coding Agent CLIs Compared](/docs/models/coding-agent-clis-compared) · [SKILL.md as an Open Standard](/docs/models/skill-md-open-standard).
