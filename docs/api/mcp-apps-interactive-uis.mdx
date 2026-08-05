@@ -1,0 +1,227 @@
+---
+sidebar_position: 13.6
+title: "MCP Apps: Interactive UIs Inside a Tool Call"
+description: "MCP Apps (SEP-1865) lets an MCP server ship an HTML UI that the client renders inside a sandboxed iframe — with every action still routed through the standard JSON-RPC audit path. What the spec actually says, what to build with it, and what to refuse to build."
+keywords: [MCP Apps, SEP-1865, ui://, text/html;profile=mcp-app, sandboxed iframe, postMessage, MCP extension, Model Context Protocol UI, io.modelcontextprotocol/ui]
+---
+
+<LevelBadge level="advanced" />
+
+For its entire first year MCP was a **text protocol**: a tool call returned JSON or Markdown and the client rendered whatever it liked. **MCP Apps** — the first official extension, finalized **January 26, 2026** and folded into the **[2026-07-28 core spec](/docs/api/mcp-2026-07-28-stateless)** — adds a UI channel. A server can now ship a chunk of HTML, the client renders it in a **sandboxed iframe**, and the iframe talks back over **JSON-RPC 2.0 on `postMessage`**. Every write still passes through the same audit path as any other tool call. Think interactive report + confirm-before-execute, not "run a full webapp inside Claude."
+
+<Callout type="objectives" items={[
+  "What MCP Apps actually is — and the four things it deliberately is NOT",
+  "The wire shape: capability negotiation, ui:// resources, the tool _meta.ui link, and the postMessage bridge",
+  "The security model — sandbox, CSP, Permission Policy, host approval — and where it still leaves you exposed",
+  "When to reach for an App instead of a plain tool result (rare-but-worth-it patterns)",
+  "How this composes with the rest of the 2026-07-28 stateless spec you already speak",
+]} />
+
+<VerifyNote lastVerified="2026-08-05" source="https://modelcontextprotocol.io/seps/1865-mcp-apps-interactive-user-interfaces-for-mcp">
+Extension identifier `io.modelcontextprotocol/ui`; MIME type `text/html;profile=mcp-app`; UI URI scheme `ui://`. Frozen text of the extension lives in the [`ext-apps` repo](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx) and shipped as an official extension alongside the 2026-07-28 core release. Field names, capability shape, and host defaults still move at the edges — confirm against the SEP and your SDK release notes before you ship.
+</VerifyNote>
+
+## The one-paragraph version
+
+The server declares one or more **UI resources** at `ui://<server>/<name>` URIs with MIME type `text/html;profile=mcp-app`. A tool advertises "I have a UI" by putting `_meta.ui.resourceUri` on its schema. On a `tools/call` the server can return the usual text/data **plus** a reference to the UI resource; the client fetches the HTML with `resources/read`, drops it into a sandboxed `<iframe>`, and now the iframe and the host chat over `postMessage` using JSON-RPC 2.0. **UI-initiated tool calls still require the same user approval as any other tool call** — the App can render, it can propose, it cannot silently execute.
+
+## What MCP Apps is NOT
+
+<Callout type="warning" items={[
+  "Not a full webapp runtime. The iframe defaults to no network (`connect-src 'none'`), no top-level navigation, and no third-party scripts. If your idea needs to load React from a CDN and call your own API, this isn't it.",
+  "Not a way to bypass tool-call approval. UI actions that mutate anything still travel as normal JSON-RPC tool calls the host can log, throttle, and require explicit user consent for.",
+  "Not sanitization. The sandbox limits what the UI can DO, not what it can trick a user into typing. Treat every App like third-party code — allowlist which servers can render UI at all.",
+  "Not persistent. There is no session; when the tool call ends, the iframe goes away. Any state you need across calls lives in a server-side handle you return, exactly like the rest of the stateless spec.",
+]} />
+
+## The four moving parts
+
+<Steps items={[
+  {title: "1. Capability negotiation", body: "The client advertises the extension in its per-request _meta.capabilities under the reverse-DNS namespace io.modelcontextprotocol/ui, listing the MIME types it can render. A server that sees no such capability just skips the UI channel and returns plain results — the whole extension is opt-in on both sides."},
+  {title: "2. UI resource declaration", body: "The server exposes one or more resources at ui://<server>/<name> URIs with MIME text/html;profile=mcp-app. Resources are pre-declared so the host can prefetch, hash, and review them before any tool ever runs. Content is served through the ordinary resources/read call — no new endpoints."},
+  {title: "3. Tool → UI linkage", body: "Any tool that wants to render a UI attaches _meta.ui = { resourceUri: 'ui://…', visibility: ['model' | 'app'] } to its schema. visibility controls whether the model can 'see' the UI reference (useful for models that reason about UI affordances) or whether it's app-only."},
+  {title: "4. postMessage bridge", body: "Inside the sandboxed iframe, UI code speaks JSON-RPC 2.0 to window.parent via postMessage. First message is typically ui/initialize with the tool arguments and any handles the server passed down. From there the UI can request additional resources, call tools (with user approval), and send notifications back."},
+]} />
+
+## Wire shapes you'll actually type
+
+Capability advertisement on a client request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": { "name": "get_weather", "arguments": { "location": "Milan" } },
+  "_meta": {
+    "capabilities": {
+      "extensions": {
+        "io.modelcontextprotocol/ui": {
+          "mimeTypes": ["text/html;profile=mcp-app"]
+        }
+      }
+    }
+  }
+}
+```
+
+The tool schema, on the server side:
+
+```json
+{
+  "name": "get_weather",
+  "description": "Get current weather and a 7-day forecast for a location.",
+  "inputSchema": {
+    "type": "object",
+    "properties": { "location": { "type": "string" } },
+    "required": ["location"]
+  },
+  "_meta": {
+    "ui": {
+      "resourceUri": "ui://weather-server/dashboard-template",
+      "visibility": ["model", "app"]
+    }
+  }
+}
+```
+
+The UI resource declared next to it:
+
+```json
+{
+  "uri": "ui://weather-server/dashboard-template",
+  "mimeType": "text/html;profile=mcp-app",
+  "_meta": {
+    "ui": {
+      "connectDomains": [],
+      "permissions": []
+    }
+  }
+}
+```
+
+And the first message the iframe sends back:
+
+<PromptCard title="UI → host: JSON-RPC 2.0 over postMessage">{`window.parent.postMessage(
+  {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "ui/initialize",
+    params: {
+      toolName: "get_weather",
+      toolArguments: { location: "Milan" },
+      toolResult: /* whatever the server returned alongside the UI */
+    }
+  },
+  "*"
+);`}</PromptCard>
+
+Everything after that — asking the host to call another tool, subscribing to a resource, sending a UI-side event — is more JSON-RPC 2.0 on the same channel, structured identically to the wire protocol you already speak on the server side. That's the whole point: **UI developers can use the standard `@modelcontextprotocol/sdk`** instead of learning a bespoke shim.
+
+## Security model in one screen
+
+<Callout type="info" items={[
+  "Sandbox: content renders in a sandboxed <iframe>. Default: no top-level navigation, no forms to arbitrary origins, no popups, no plugins.",
+  "CSP by default: connect-src 'none'. The UI cannot fetch() anywhere. To allow specific origins, the server declares them in the resource's _meta.ui.connectDomains and the host builds the CSP header from that list.",
+  "Permission Policy: the resource's _meta.ui.permissions map into the iframe's allow attribute — camera, microphone, geolocation, clipboard-write. Nothing is granted implicitly.",
+  "Every UI-initiated write is a normal tool call. The host validates it, may require user approval, and logs it in the same audit stream as a model-initiated call.",
+  "Templates are prefetchable and hashable. A host that pins to a specific hash catches a swap-under-you attack; a host that doesn't gets whatever the server serves that day.",
+]} />
+
+## When to actually reach for an App
+
+The bar is high on purpose — every App is client surface area for you and attack surface for the user. Reach for one only when a UI beats a chat turn by a clear margin:
+
+- **Data-grid confirms.** "Here are 47 rows I'm about to update — uncheck the ones you don't want." A chat rendering of that is either enormous or dishonest; a grid with checkboxes is honest and fast.
+- **Chart-driven approval.** "Here's the query plan / cost projection / trace waterfall. Approve or reject." Charts are cheap in HTML and terrible as ASCII.
+- **Structured pickers** where the shape of the input is not text. Date-range with a mini calendar, tree-select over a filesystem or an org chart, map picker with a bounding box.
+- **In-place editors** for the small step where a diff view + accept/reject beats regenerating the whole answer.
+
+If your idea is "let me embed a whole dashboard," it doesn't belong here — link out. If your idea is "let me run arbitrary user code in the sandbox," it definitely doesn't belong here.
+
+## The 2025-11-25 compatibility contract
+
+MCP Apps rides on the extension framework introduced in the 2026-07-28 core spec, but the extension itself has been **Final since 2026-01-26**. Practical implication: a client that only speaks the older 2025-11-25 revision plus this extension can already render Apps; a stateless 2026-07-28 client picks it up as one entry in its per-request capability map. Because the extension is opt-in on both sides, a server that adds it never breaks an old client — it just skips the UI branch. This is the shape every future MCP extension will take, so understanding this handshake pays down debt for the ones to come.
+
+## Where MCP Apps lands on the AILmanac map
+
+- **[MCP 2026-07-28: The Stateless Spec](/docs/api/mcp-2026-07-28-stateless)** — the core protocol Apps rides on; especially the Extensions framework section (SEP-2133).
+- **[MCP & Connecting to Tools](/docs/api/mcp)** — the API-side connector. It's the client that will render the iframe; today's connector abstracts the transport, so Apps flows through unchanged.
+- **[MCP in Claude Code](/docs/claude-code/mcp)** — where Claude Code's MCP support is going; UI rendering is a client capability, not a server capability, so this is the surface that decides which Apps ever render for you.
+- **[Securing MCP Servers](/docs/security/securing-mcp-servers)** — the hardening pattern for the servers on the other end of that iframe.
+
+## Quick check
+
+<Quiz questions={[
+  {
+    q: "How does an MCP Apps iframe talk back to the host?",
+    options: [
+      "A new WebSocket the server opens to the client",
+      "A bespoke JSON schema the extension defines",
+      "JSON-RPC 2.0 messages sent via window.parent.postMessage",
+      "By writing to a shared IndexedDB the host polls"
+    ],
+    answer: 2,
+    explain: "The spec deliberately reuses the same JSON-RPC 2.0 wire the rest of MCP already speaks — over postMessage inside a sandboxed iframe — so UI code can use the standard SDK instead of a custom shim."
+  },
+  {
+    q: "By default, what network access does an MCP Apps iframe have?",
+    options: [
+      "Any origin — the sandbox only restricts navigation",
+      "None. The default CSP is connect-src 'none' until the resource declares connectDomains",
+      "Only the origin that served the tool call",
+      "Only same-origin as the host application"
+    ],
+    answer: 1,
+    explain: "The default is deny-all. A UI resource opts into specific origins via _meta.ui.connectDomains, which the host translates into the iframe's CSP. If a template declares nothing, it can fetch nothing."
+  },
+  {
+    q: "A tool wants to render a UI. What is the ONE piece of metadata that turns a plain tool into a UI-carrying one?",
+    options: [
+      "_meta.mimeType: 'text/html;profile=mcp-app' on the tool",
+      "capability: 'ui' on the server-level advertisement",
+      "_meta.ui.resourceUri pointing at a ui:// resource",
+      "outputSchema.type = 'ui'"
+    ],
+    answer: 2,
+    explain: "_meta.ui.resourceUri is the link from a tool to its UI resource. Everything else (mime type, connectDomains, permissions) hangs off the resource itself, not the tool."
+  },
+  {
+    q: "A UI inside the iframe wants to mutate something on the server. What happens?",
+    options: [
+      "It writes directly — that's the whole point of MCP Apps",
+      "It emits a UI event the server picks up out of band",
+      "It sends a normal tools/call over the postMessage bridge, which the host validates and may require user approval for",
+      "It cannot — Apps are strictly read-only"
+    ],
+    answer: 2,
+    explain: "UI-initiated writes travel as normal tool calls the host mediates. The whole security argument for MCP Apps rests on this: rendering is server-driven, but every write still routes through the standard approval + audit path."
+  }
+]} />
+
+## Vocabulary
+
+<Flashcards title="MCP Apps terminology" cards={[
+  {front: "MCP Apps (SEP-1865)", back: "The first official MCP extension. Lets a server ship HTML rendered by the client in a sandboxed iframe, with the iframe speaking JSON-RPC 2.0 back over postMessage. Final 2026-01-26; rides on the 2026-07-28 core spec."},
+  {front: "io.modelcontextprotocol/ui", back: "The reverse-DNS extension identifier. Clients advertise support inside _meta.capabilities.extensions on every request."},
+  {front: "text/html;profile=mcp-app", back: "The MIME type UI resources must use. Distinct from plain text/html precisely so a host can tell 'this HTML is an MCP App' before touching it."},
+  {front: "ui:// scheme", back: "URI scheme for UI resources, e.g. ui://weather-server/dashboard-template. Pre-declared so a host can prefetch, hash, and review the template before a tool ever runs."},
+  {front: "_meta.ui on a tool", back: "The link from a tool to its UI resource. Carries resourceUri (which ui:// URI to render) and visibility (whether the model, the app, or both can see it)."},
+  {front: "_meta.ui on a resource", back: "The security envelope on the UI resource itself. Carries connectDomains (drives CSP connect-src) and permissions (drives the iframe allow attribute)."},
+  {front: "ui/initialize", back: "The conventional first postMessage the iframe sends to the host: the tool name, its arguments, and whatever the server passed alongside the UI reference."},
+  {front: "UI-initiated tool call", back: "A tool call the iframe originates. Travels as a normal JSON-RPC tools/call over postMessage → host → server, and is subject to the same user-approval + audit rules as any other tool call."},
+  {front: "Template pinning", back: "A host that stores the hash of a UI resource can detect a template being swapped underneath it. Not in the spec — a defensive habit worth adopting on the client side."}
+]} />
+
+## Sources & further reading
+
+- **[SEP-1865: MCP Apps — Interactive User Interfaces for MCP](https://modelcontextprotocol.io/seps/1865-mcp-apps-interactive-user-interfaces-for-mcp)** — the specification itself.
+- **[`ext-apps` repository](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx)** — the frozen 2026-01-26 spec text: capability shape, CSP defaults, postMessage semantics.
+- **[MCP Apps: Extending servers with interactive user interfaces](https://blog.modelcontextprotocol.io/posts/2025-11-21-mcp-apps/)** — the announcement post that walks through the design rationale.
+- **[The 2026-07-28 MCP Specification Release Candidate](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/)** — the core release Apps ships alongside; the Extensions framework section explains the negotiation pattern all extensions now follow.
+- **[Anthropic and OpenAI Join Forces to Standardize Interactive AI Interfaces with MCP Apps](https://inkeep.com/blog/anthropic-openai-mcp-apps-extension)** — context on the multi-vendor collaboration behind SEP-1865.
+
+## Next
+
+- **[MCP 2026-07-28: The Stateless Spec](/docs/api/mcp-2026-07-28-stateless)** — the core protocol every MCP Apps host and server also speaks.
+- **[Securing MCP Servers](/docs/security/securing-mcp-servers)** — the server-side hardening you want in place before you accept UI-initiated tool calls.
+- **[MCP & Connecting to Tools](/docs/api/mcp)** — how the API-side connector actually reaches the server whose App you're rendering.
