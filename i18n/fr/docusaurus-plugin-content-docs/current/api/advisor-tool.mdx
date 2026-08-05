@@ -1,0 +1,377 @@
+---
+sidebar_position: 8.7
+title: "L'outil advisor : Sonnet fait le travail, Fable fait la réflexion"
+description: "L'outil serveur advisor (beta advisor-tool-2026-03-01) permet à un modèle exécuteur rapide de consulter un modèle plus fort en milieu de tour. Référence complète des champs, le piège de comptabilité de tokens que la plupart des intégrateurs manquent, la matrice d'appariement de modèles, et les prompts exacts qu'Anthropic livre en production."
+keywords: [Claude advisor tool, advisor_20260301, advisor-tool-2026-03-01, pattern exécuteur advisor, routage Sonnet Opus, Sonnet Fable 5 advisor, Claude Code /advisor, advisorModel, opusplan, optimisation coût Claude API, usage.iterations, advisor_message, advisor_result, advisor_redacted_result, cache prompts advisor]
+---
+
+<LevelBadge level="intermediate" />
+
+Anthropic a livré une primitive discrète mais conséquente en bêta : **l'outil advisor**. Un modèle exécuteur rapide (Sonnet, Haiku) mène le tour ; aux points de décision il passe le transcript complet à un advisor plus fort (Opus 5, Fable 5, Mythos 5), l'advisor retourne un plan, et l'exécuteur continue à taper. Tout côté serveur, dans un seul appel `/v1/messages` — pas de round trip supplémentaire de votre côté.
+
+Si vous basculiez entre modèles à la main — Opus pour planifier, Sonnet pour l'écrire — l'advisor effondre cette danse en une seule requête. C'est aussi le premier pattern de production grand public où vous êtes routinement facturé à travers **deux tiers de modèles à l'intérieur d'une réponse**, ce qui casse chaque tracker de coût naïf `usage.output_tokens * price` écrit avant mars 2026.
+
+<Callout type="objectives" items={[
+  "Envoyer une requête avec l'en-tête bêta advisor-tool-2026-03-01, un modèle exécuteur, et la définition de l'outil advisor",
+  "Lire usage.iterations correctement — le output_tokens de niveau supérieur est exécuteur seulement ; les tokens advisor vivent dans les entrées d'itération de type advisor_message",
+  "Choisir la paire exécuteur/advisor — l'advisor doit être au moins aussi capable que l'exécuteur, et Opus 5 / Fable 5 / Mythos 5 retournent du contenu chiffré que vous devez round-tripper verbatim",
+  "Plafonner le conseil emballé avec max_tokens sur la définition de l'outil (min 1024) — max_tokens de niveau supérieur ne borne PAS l'advisor",
+  "Activer le cache côté advisor pour les conversations avec 3+ appels advisor, et savoir pourquoi le défaut de clear_thinking tue silencieusement ce cache",
+  "Activer /advisor dans Claude Code avec un advisorModel sauvegardé — y compris le piège de rollout Fable 5 (actuellement désactivé comme advisor même pour les organisations avec accès Fable)",
+]} />
+
+<VerifyNote lastVerified="2026-08-04" source="https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool">
+Vérifié contre les docs officiels d'Anthropic sur l'outil advisor (plateforme + Claude Code) le 4 août 2026. L'advisor est en bêta — les appariements de modèles, le comportement de chiffrement, le rollout Fable-5-désactivé-comme-advisor, et la liste de disponibilité plateforme (Anthropic API + Claude Platform sur AWS seulement) sont les pièces les plus susceptibles de changer. Revérifiez la source avant d'épingler le comportement en production.
+</VerifyNote>
+
+## Pourquoi l'advisor existe (et pourquoi ce n'est pas juste « appeler deux APIs »)
+
+L'alternative naïve est évidente : appeler Opus, obtenir un plan, puis appeler Sonnet avec le plan comme system prompt. Les propres docs d'Anthropic sont directes sur pourquoi l'advisor bat cela :
+
+1. L'advisor **lit le transcript complet de l'exécuteur** — chaque tour précédent, chaque appel d'outil, chaque résultat, plus le texte que l'exécuteur a produit *jusqu'à présent dans le tour actuel*. Vous devriez sérialiser et transférer tout cela vous-même.
+2. Il s'exécute **à l'intérieur d'une seule requête `/v1/messages`**. Votre connexion en streaming fait simplement pause (avec des SSE `ping` keepalives environ toutes les 30s) et puis le bloc `advisor_tool_result` arrive complètement formé dans un seul événement `content_block_start` — pas de deltas. La sortie de l'exécuteur reprend le streaming juste après.
+3. L'exécuteur décide *quand* appeler l'advisor. Vous ne codez pas en dur « toujours planifier d'abord ». Claude tend à l'appeler avant de s'engager sur une approche, quand la même erreur se répète, et avant de déclarer la tâche complète.
+
+L'advisor s'exécute sous son propre system prompt fourni par Anthropic, sans outils, sans gestion de contexte, et ses blocs de thinking sont supprimés avant que le résultat retourne. Seul le texte de conseil (ou un blob chiffré) atteint l'exécuteur.
+
+## Démarrage rapide — la requête advisor minimale viable
+
+<PromptCard title="Exécuteur Sonnet 5 + advisor Fable 5 (Python)">
+{`import anthropic
+
+client = anthropic.Anthropic()
+
+response = client.beta.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=4096,
+    betas=["advisor-tool-2026-03-01"],
+    tools=[
+        {
+            "type": "advisor_20260301",
+            "name": "advisor",
+            "model": "claude-fable-5",
+        }
+    ],
+    messages=[
+        {
+            "role": "user",
+            "content": "Build a concurrent worker pool in Go with graceful shutdown.",
+        }
+    ],
+)
+
+print(response)`}
+</PromptCard>
+
+Trois choses à remarquer :
+
+- La chaîne `type` est `"advisor_20260301"` et le `name` doit être `"advisor"`. Les deux sont appliqués littéralement.
+- L'en-tête `betas=["advisor-tool-2026-03-01"]` est le drapeau qui ouvre l'outil. Même chaîne sur cURL comme `-H "anthropic-beta: advisor-tool-2026-03-01"`.
+- L'`input` sur le bloc `server_tool_use` que l'exécuteur émet est toujours vide. Vous ne le remplissez jamais. Le serveur construit la vue de l'advisor à partir du transcript automatiquement.
+
+## La règle d'appariement (et la surprise sur Fable 5)
+
+L'advisor doit être **au moins aussi capable que l'exécuteur**, et Anthropic classe les modèles également-capables comme conseillers l'un pour l'autre (Opus 4.7 et Opus 4.8 peuvent se conseiller mutuellement, Sonnet 5 et Opus 4.6 aussi). Voici la matrice complète acceptée sur l'API Claude au 4 août 2026 :
+
+| Exécuteur | Conseillers acceptés |
+|---|---|
+| `claude-haiku-4-5` | Mythos 5, Fable 5, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5, Sonnet 4.6 |
+| `claude-sonnet-4-6` | Mythos 5, Fable 5, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5, Sonnet 4.6 |
+| `claude-sonnet-5` | Mythos 5, Fable 5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5 |
+| `claude-opus-4-6` | Mythos 5, Fable 5, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5 |
+| `claude-opus-4-7` | Mythos 5, Fable 5, Opus 5, Opus 4.8, Opus 4.7 |
+| `claude-opus-4-8` | Mythos 5, Fable 5, Opus 5, Opus 4.8, Opus 4.7 |
+| `claude-opus-5` | Mythos 5, Fable 5, Opus 5 |
+| `claude-fable-5` | Fable 5, Opus 5 |
+| `claude-mythos-5` | Mythos 5, Opus 5 |
+
+Les paires invalides retournent un `400 invalid_request_error` nommant la combinaison non supportée. Et il y a un twist Claude Code qui vaut la peine d'être signalé séparément : **Fable 5 est actuellement désactivé comme advisor dans Claude Code** pour les organisations qui ont autrement accès à Fable 5, contrôlé par un rollout côté serveur. Le picker `/advisor` montre une ligne grisée `Fable 5 (temporarily unavailable)` et `/advisor fable` est rejeté. Cela n'affecte pas l'API, où `claude-fable-5` comme advisor fonctionne aujourd'hui.
+
+## Le piège de comptabilité de tokens dans lequel la plupart des intégrateurs tombent
+
+C'est la seule chose la plus surprenante sur l'advisor et la raison pour laquelle vous ne devriez pas livrer une intégration advisor sans réécrire d'abord votre tracker de coût.
+
+**Le `usage.output_tokens` de niveau supérieur reflète les tokens de l'exécuteur seulement.** Les tokens de l'advisor ne sont pas roulés dans les totaux de niveau supérieur parce qu'ils sont facturés aux tarifs du modèle advisor, qui sont presque toujours différents. Pour voir le tableau complet vous devez lire `usage.iterations[]`, un tableau qu'Anthropic a ajouté spécifiquement pour cette fonctionnalité :
+
+```json
+{
+  "usage": {
+    "input_tokens": 412,
+    "cache_read_input_tokens": 0,
+    "output_tokens": 531,
+    "iterations": [
+      { "type": "message",         "input_tokens": 412,  "output_tokens": 89 },
+      { "type": "advisor_message", "model": "claude-fable-5",
+                                   "input_tokens": 823,  "output_tokens": 1612 },
+      { "type": "message",         "input_tokens": 1348, "cache_read_input_tokens": 412,
+                                   "output_tokens": 442 }
+    ]
+  }
+}
+```
+
+Les itérations taguées `advisor_message` sont facturées aux tarifs de l'advisor ; les itérations taguées `message` sont facturées aux tarifs de l'exécuteur. Les règles d'agrégation pour les champs de niveau supérieur sont aussi asymétriques — `output_tokens` de niveau supérieur somme *toutes* les itérations exécuteur, mais `input_tokens` et `cache_read_input_tokens` de niveau supérieur reflètent la *première* itération exécuteur seulement (les inputs des itérations exécuteur ultérieures incluent des tokens de sortie antérieurs, donc les re-sommer les compterait en double).
+
+<Callout type="warning" items={[
+  "Si vous calculez le coût comme usage.input_tokens * exec_input_price + usage.output_tokens * exec_output_price, vous sous-rapporterez silencieusement de toute la dépense de l'advisor — les appels advisor émettent typiquement 1 400 à 1 800 tokens au total y compris thinking, à un tarif par token substantiellement plus élevé.",
+  "Les tokens de l'advisor ne tirent PAS d'un budget de tâche appliqué à l'exécuteur. Si vous vous reposez sur task_budget comme plafond de dépense dur, l'advisor est en dehors.",
+  "Le Priority Tier s'applique par modèle. Un engagement Priority Tier sur l'exécuteur ne s'étend pas à l'advisor. Les appels advisor s'exécutent en Priority Tier seulement si votre organisation détient aussi un engagement sur le modèle advisor.",
+]} />
+
+## Plafonner le conseil emballé — le piège de max_tokens
+
+Le `max_tokens` de **niveau supérieur** borne la sortie de l'exécuteur seulement. Pour plafonner la sortie totale de l'advisor par appel (thinking + texte), mettez `max_tokens` sur la **définition de l'outil** :
+
+<PromptCard title="Plafonner l'advisor à 2048 tokens par appel">
+{`tools = [
+    {
+        "type": "advisor_20260301",
+        "name": "advisor",
+        "model": "claude-fable-5",
+        "max_tokens": 2048,   # minimum is 1024; setting above the advisor's own output cap returns 400
+        "max_uses": 5         # optional per-request cap; extra calls return error_code max_uses_exceeded
+    }
+]`}
+</PromptCard>
+
+Le propre benchmark de raisonnement dur d'Anthropic (n=40 par configuration) rapporte ces chiffres comme points de départ pratiques :
+
+| `max_tokens` sur l'outil | Sortie moyenne de l'advisor | Appels tronqués |
+|---|---|---|
+| Non défini | ~10k+ tokens sur tâches dures | 0% |
+| 2048 (recommandé) | ~7× plus petit que non défini | ~0% |
+| 1024 (minimum) | ~10× plus petit que non défini | ~10% |
+
+Les différences de précision entre les trois configurations étaient dans le bruit à cette taille d'échantillon. Quand l'advisor atteint le plafond, le bloc de résultat porte `stop_reason: "max_tokens"` *et* Anthropic ajoute `[Advisor output truncated at max_tokens=2048.]` (nommant votre plafond réel) au texte de conseil pour que l'exécuteur voie la troncation dans son propre contexte. Les deux signaux n'apparaissent que quand vous mettez `max_tokens` sur la définition de l'outil — omettez-le et vous n'obtenez ni l'un ni l'autre.
+
+## La couche de cache de prompt que tout le monde manque
+
+Il y a deux couches de cache indépendantes autour de l'advisor, et se tromper sur l'une ou l'autre est une régression de coût silencieuse.
+
+<Steps items={[
+  {
+    title: "Cache côté exécuteur (fonctionne d'emblée)",
+    body: "Le bloc advisor_tool_result est cacheable comme tout bloc de contenu. Un breakpoint cache_control placé après sur un tour ultérieur hit normalement. Le prompt de l'exécuteur contient toujours le conseil en clair peu importe si votre client a reçu du texte ou de l'encrypted_content, donc le comportement de cache est identique pour les deux variantes de résultat."
+  },
+  {
+    title: "Cache côté advisor (opt-in, off par défaut)",
+    body: "Mettez caching sur la définition de l'outil — {\"type\": \"ephemeral\", \"ttl\": \"5m\" | \"1h\"} — et l'advisor cache son propre transcript à travers les appels dans la même conversation. Le Nième appel advisor est le prompt du (N-1)ième appel avec un segment de plus ajouté, donc le préfixe est stable et cache_read_input_tokens devient non-zéro à partir du second advisor_message. Règle empirique d'Anthropic : n'activez le caching que pour les conversations attendues d'avoir 3+ appels advisor."
+  },
+  {
+    title: "Le tueur silencieux : la valeur par défaut de clear_thinking",
+    body: "L'outil d'édition de contexte clear_thinking décale le transcript cité de l'advisor à chaque tour quand sa valeur keep n'est pas 'all', causant des cache miss côté advisor. Quand l'extended thinking est activé sans config clear_thinking explicite, l'API défauts à keep: {type: 'thinking_turns', value: 1} sur les modèles Opus/Sonnet antérieurs et tous les modèles Haiku, ce qui déclenche ce comportement. Sur Opus 4.5+ et Sonnet 4.6+ le défaut est keep: 'all', qui est cache-safe. Si vous utilisez le cache côté advisor sur Haiku ou des exécuteurs plus anciens, mettez explicitement keep: 'all'."
+  }
+]} />
+
+Basculer `caching` on et off en milieu de conversation invalide aussi le cache. Mettez-le une fois, laissez-le.
+
+## Les deux variantes de résultat et pourquoi les deux vont bien
+
+Les appels advisor réussis retournent une des deux formes `content` :
+
+- `advisor_result` avec un champ `text` — conseil lisible par humain. Retourné par Claude Opus 4.8 et les autres conseillers non-Opus-5-génération.
+- `advisor_redacted_result` avec un champ `encrypted_content` — un blob opaque que vous ne pouvez pas lire. Retourné par les conseillers **Claude Opus 5, Claude Fable 5, et Claude Mythos 5**.
+
+Round-trippez celui que vous obtenez **verbatim** sur les tours ultérieurs. Au tour suivant, le serveur déchiffre le blob et rend le clair dans le prompt de l'exécuteur — l'exécuteur voit le même contenu de toute façon. Si vous changez de conseillers en milieu de conversation, branchez sur `content.type` pour gérer les deux formes.
+
+<Callout type="tip" items={[
+  "La variante rédigée n'est pas une limitation — c'est le mécanisme qui permet à Opus 5 / Fable 5 / Mythos 5 d'émettre un conseil sur lequel l'exécuteur peut agir sans exposer le raisonnement interne à votre client. Si vous avez besoin du texte de conseil à votre couche de logging, utilisez Opus 4.8 comme advisor.",
+  "Les deux variantes portent un stop_reason quand vous mettez max_tokens sur la définition de l'outil, et l'omettent quand vous ne le faites pas. Utilisez-le pour détecter la troncation sans parser la chaîne ajoutée.",
+]} />
+
+## Multi-tour : le 400 invisible que vous atteindrez exactement une fois
+
+Si vous omettez l'outil advisor de `tools` sur un tour de suivi pendant que l'historique de messages contient encore des blocs `advisor_tool_result`, l'API retourne `400 invalid_request_error`. Deux conséquences :
+
+1. **L'état advisor est collant.** Une fois qu'un tour a utilisé l'advisor, les tours ultérieurs dans cette conversation doivent garder l'outil dans `tools` OU stripper les blocs de résultat advisor de l'historique. Il n'y a pas de plafond intégré au niveau conversation.
+2. **Pour appliquer un budget client par conversation**, comptez les appels advisor vous-même. Quand vous atteignez votre plafond, retirez l'outil advisor de `tools` **et** supprimez chaque bloc `advisor_tool_result` de l'historique de messages dans la même requête.
+
+Il y a aussi une danse de reprise-d'un-tour-en-pause qui vaut la peine d'être nommée pour ne pas cargo-culter autour : une réponse peut se terminer avec `stop_reason: "pause_turn"` pendant qu'un appel advisor est encore en attente (la réponse contient le bloc `server_tool_use` mais pas encore de `advisor_tool_result`). Pour reprendre, ajoutez ce message assistant à `messages` **inchangé**, en gardant le bloc `server_tool_use`, et renvoyez avec le même outil advisor + en-tête bêta. Pas de message user, pas de tool_result. L'API exécute l'appel advisor en attente et continue le tour de l'exécuteur. Un tour repris peut faire pause encore — répétez juste.
+
+## Codes d'erreur à ignorer vs faire remonter
+
+L'échec du sous-appel advisor **ne** fait **pas** échouer la requête. L'exécuteur voit l'erreur et continue sans plus de conseil. La table d'erreurs complète :
+
+| `error_code` | Signification | Réponse pratique |
+|---|---|---|
+| `max_uses_exceeded` | A atteint le plafond `max_uses` par requête | Attendu — vous l'avez configuré. Loguez au niveau debug. |
+| `too_many_requests` | Sous-inférence advisor rate-limitée (du même bucket par modèle que les appels directs) | Alertez si ça arrive répétitivement — vous saturez la limite de rate de votre modèle advisor |
+| `overloaded` | Sous-inférence advisor a atteint capacité | Réessayez le tour entier si la qualité importe ; sinon laissez passer |
+| `prompt_too_long` | Transcript a dépassé la fenêtre de contexte de l'advisor | Rare avec les conseillers Opus 5 à contexte 1M ; plus probable avec des choix de conseiller à contexte plus petit |
+| `execution_time_exceeded` | Sous-inférence advisor a expiré | Plafonnez `max_tokens` sur la définition de l'outil pour réduire la longueur de génération de l'advisor |
+| `unavailable` | Tout le reste | Traitez comme transitoire |
+
+L'asymétrie critique : un rate limit sur l'**exécuteur** fait échouer la requête entière avec HTTP 429. Un rate limit sur l'**advisor** apparaît à l'intérieur du résultat d'outil et la requête réussit quand même.
+
+## Claude Code : /advisor, --advisor, et advisorModel
+
+Le CLI expose l'advisor à travers trois surfaces qui mettent toutes le même setting :
+
+<PromptCard title="Activer l'advisor dans Claude Code — trois façons équivalentes">
+{`# 1. Interactive picker or direct assignment (saves to your user settings)
+/advisor
+/advisor opus
+/advisor sonnet
+/advisor claude-opus-5   # full model ID also works
+
+# 2. Persistent default in your settings file
+# ~/.config/claude/settings.json (or equivalent)
+{ "advisorModel": "opus" }
+
+# 3. Per-session flag (overrides advisorModel for that launch, hidden from --help)
+claude --advisor opus
+
+# Turn off
+/advisor off
+# Or disable the tool entirely (all three surfaces become no-ops):
+export CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`}
+</PromptCard>
+
+La matrice d'appariement modèle-principal / advisor dans Claude Code est un sous-ensemble de la matrice API — `opus` et `sonnet` sont des alias qui résolvent à la version par défaut intégrée de Claude Code et avancent avec les releases. Règles notables :
+
+- **Les principaux Opus 4.7+ n'acceptent qu'Opus 4.7 ou plus tard comme conseiller** — un principal Opus 4.7 avec un advisor Opus 4.6 ou Sonnet 5 est rejeté.
+- **Le principal Sonnet 5 rejette Sonnet 4.6 comme advisor** — mais accepte Sonnet 5 (un « deuxième Sonnet lit le premier » pour une vérification indépendante bon marché).
+- **Les sous-agents héritent de l'advisor configuré** et appliquent la même vérification d'appariement contre leur propre modèle.
+- **Activer ou désactiver l'advisor en milieu de session n'invalide PAS le cache de prompts du modèle principal** — contrairement au changement de modèle ou de niveau d'effort, qui le fait. C'est pourquoi `/advisor` est sûr à basculer en milieu de tâche.
+
+Regardez le transcript pour une ligne `Advising` avec le nom du modèle advisor pendant que l'appel est en cours ; appuyez `Ctrl+O` pour l'agrandir et lire le guidage complet. Claude suit généralement le conseil mais adapte quand ses propres preuves contredisent une revendication spécifique (une étape échoue quand essayée, le contenu de fichier contredit le conseil) — il fait remonter le conflit plutôt que de suivre inconditionnellement.
+
+## Les deux patterns de prompt de production qu'Anthropic livre réellement
+
+Les docs officiels incluent deux system prompts qu'Anthropic a testé à l'échelle. Ils valent la peine d'être copiés, parce que « l'advisor sait quoi faire » n'est pas un défaut — l'exécuteur a besoin d'un guidage explicite sur **quand** appeler l'advisor, et l'advisor bénéficie de prompts écrits à la deuxième personne (il voit votre system prompt comme contexte cité, donc « tu es... » atterrit plus fiablement que « l'exécuteur est... »).
+
+<PromptCard title="System prompt suggéré pour tâches de codage (exécuteur Sonnet/Opus)">
+{`You have access to an advisor tool that consults a stronger model for
+strategic guidance. Call it when the plan matters more than the code:
+
+- Before committing to an approach on a non-trivial task.
+- When stuck — errors recurring, approach not converging, results that
+  don't fit.
+- Before declaring the task complete, to independently check the work.
+
+Do NOT call it for routine turns where the next step is obvious. The
+advisor sees the full transcript, so state the specific decision you
+want reviewed in the turn where you invoke it.`}
+</PromptCard>
+
+Pour l'exécuteur Haiku, Anthropic livre une variante légèrement poussée qui encourage plus d'appels advisor (Haiku sous-consulte par défaut) :
+
+<PromptCard title="System prompt alternatif pour exécuteurs Haiku">
+{`You have access to an advisor tool. Consult it whenever a decision
+requires judgment beyond mechanical execution:
+
+- Before committing to a non-trivial approach.
+- When stuck -- errors recurring, approach not converging, results that
+  don't fit.
+- Before declaring the task complete.
+- When the user's request contains ambiguity you cannot resolve from
+  context.
+
+Bias toward calling the advisor rather than guessing. The cost of a
+consult is small compared to the cost of a wrong direction on a long
+task.`}
+</PromptCard>
+
+Pour trimmer la longueur de sortie de l'advisor via prompting (une alternative ou complément à `max_tokens` sur l'outil), le placement testé d'Anthropic est une ligne dans le **message user** — pas le system prompt — parce que l'advisor voit les deux cités, mais les instructions de message user l'adressant directement sont suivies plus fiablement que les system prompts à la troisième personne. Exemple : `Advisor: keep guidance to 3-5 sentences.`
+
+Pour **forcer** une consultation sur une requête spécifique, mettez `tool_choice` à `{"type": "tool", "name": "advisor"}`. Une incompatibilité : l'usage d'outil forcé ne peut pas être combiné avec l'extended thinking manuel (`thinking: {type: "enabled"}`) — l'API retourne `400 invalid_request_error` si vous activez les deux. Le thinking adaptatif supporte l'usage d'outil forcé.
+
+## Où l'advisor bat — et perd contre — ses alternatives
+
+Vous avez quatre façons de combiner les forces des modèles dans Claude Code. Choisissez selon **quand** vous voulez que le modèle plus fort s'exécute.
+
+| Approche | Le modèle plus fort s'exécute | Démarré par |
+|---|---|---|
+| **Outil advisor** | Aux points de décision, en milieu de tâche | Claude l'appelle quand il a besoin de guidage |
+| **opusplan** | Pendant le mode plan, puis bascule vers Sonnet pour l'exécution | Vous entrez en mode plan |
+| **Sous-agents** avec `model` défini | Pour toute la sous-tâche déléguée | Claude délègue, ou vous l'invoquez |
+| **Bascule `/model`** | Pour tous les tours ultérieurs | Vous changez de modèle manuellement |
+
+L'advisor est le seul qui exécute le modèle fort *à la discrétion de Claude, à la demande*. `opusplan` est déterministe (entrée mode plan) mais limité au planning. Les sous-agents engagent le modèle fort à une sous-tâche entière. `/model` est le marteau-pilon.
+
+## Disponibilité plateforme (celle sur laquelle vous trébucherez)
+
+L'outil advisor est disponible en bêta sur **l'API Anthropic et Claude Platform sur AWS**. Il n'est **pas** disponible sur Amazon Bedrock, Google Cloud Vertex, ou Microsoft Foundry au 4 août 2026. À travers une passerelle LLM configurée avec `ANTHROPIC_BASE_URL`, la disponibilité dépend si la passerelle transmet la requête intacte.
+
+Si vous êtes multi-cloud et passez les requêtes à travers Bedrock ou Vertex pour survivre à une panne Anthropic, l'advisor ne fait pas partie de ce chemin de failover aujourd'hui.
+
+<Quiz questions={[
+  {
+    q: "Votre requête exécuteur Sonnet 5 + advisor Fable 5 retourne une réponse avec usage.output_tokens = 400. Combien l'advisor a-t-il généré ?",
+    options: [
+      "400 tokens de sortie — c'est le total",
+      "Inconnu depuis ce champ — vérifiez usage.iterations[] pour l'entrée avec type advisor_message",
+      "Environ 700 tokens — c'est à peu près proportionnel à output_tokens",
+      "Zéro — l'advisor n'a jamais été invoqué"
+    ],
+    answer: 1,
+    explain: "Le usage.output_tokens de niveau supérieur reflète les tokens de l'exécuteur seulement. Les tokens de l'advisor sont détaillés par itération dans usage.iterations[] sous des entrées avec type: 'advisor_message', chacune portant ses propres input_tokens/output_tokens/model — c'est pourquoi les trackers de coût naïfs sous-rapportent silencieusement la dépense de l'advisor."
+  },
+  {
+    q: "Vous voulez un plafond dur de 2048 tokens sur chaque appel advisor. Où mettez-vous max_tokens ?",
+    options: [
+      "Au niveau supérieur de la requête, aux côtés de model et messages",
+      "À l'intérieur de l'objet de définition de l'outil (valeur min 1024)",
+      "Comme variable d'environnement ADVISOR_MAX_TOKENS",
+      "Vous ne pouvez pas le plafonner — l'advisor génère jusqu'à ce qu'il s'arrête"
+    ],
+    answer: 1,
+    explain: "Le max_tokens de niveau supérieur borne la sortie de l'exécuteur seulement. Pour plafonner la sortie totale de l'advisor par appel (thinking + texte) vous mettez max_tokens à l'intérieur de la définition de l'outil advisor. Le minimum est 1024 ; mettre au-dessus du plafond de sortie propre du modèle advisor retourne 400."
+  },
+  {
+    q: "Vous configurez claude-opus-4-7 comme exécuteur et claude-sonnet-5 comme advisor. Que se passe-t-il ?",
+    options: [
+      "Fonctionne — Sonnet 5 est un advisor supporté",
+      "Fonctionne mais avec un avertissement sur l'ordre de capacité",
+      "400 invalid_request_error — les conseillers acceptés d'Opus 4.7 sont Mythos 5, Fable 5, Opus 5, Opus 4.8, et Opus 4.7",
+      "Fonctionne mais rétrograde silencieusement l'exécuteur vers Sonnet 5"
+    ],
+    answer: 2,
+    explain: "L'advisor doit être au moins aussi capable que l'exécuteur. Sonnet 5 est classé sous Opus 4.7, donc cette paire est rejetée avec 400 invalid_request_error nommant la combinaison non supportée. Opus 4.7 n'accepte que Mythos 5, Fable 5, Opus 5, Opus 4.8, et Opus 4.7."
+  },
+  {
+    q: "Votre advisor Claude Fable 5 retourne du content de type advisor_redacted_result avec un champ encrypted_content. Que faites-vous au tour suivant ?",
+    options: [
+      "Le déchiffrer côté client et passer le clair à l'appel exécuteur suivant",
+      "Le jeter — le conseil est perdu après le tour actuel",
+      "Round-tripper le encrypted_content verbatim ; le serveur le déchiffre dans le prompt de l'exécuteur",
+      "Re-demander le même conseil de l'advisor pour obtenir une version en clair"
+    ],
+    answer: 2,
+    explain: "Les conseillers Opus 5, Fable 5, et Mythos 5 retournent advisor_redacted_result avec un blob encrypted_content opaque. Vous le round-trippez verbatim sur les tours ultérieurs et le serveur le déchiffre dans le contexte de l'exécuteur. Le prompt de l'exécuteur contient toujours le clair de toute façon, donc le comportement de cache est identique à la variante en clair."
+  },
+  {
+    q: "Vous voulez retirer l'outil advisor de votre tableau `tools` sur un tour de suivi pour appliquer un plafond de coût client. Quoi d'autre devez-vous faire ?",
+    options: [
+      "Rien — l'API accepte de retirer des outils en milieu de conversation",
+      "Mettre advisor.disabled = true sur tous les messages précédents",
+      "Stripper tous les blocs advisor_tool_result de l'historique de messages, ou l'API retourne 400 invalid_request_error",
+      "Appeler /v1/messages/end-advisor d'abord pour signaler le changement"
+    ],
+    answer: 2,
+    explain: "L'advisor n'a pas de plafond intégré au niveau conversation. Si vous retirez l'outil advisor de tools pendant que les blocs advisor_tool_result restent dans l'historique, l'API retourne 400 invalid_request_error. Pour appliquer un plafond côté client, retirez l'outil ET strippez chaque bloc advisor_tool_result de l'historique de messages dans la même requête."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "En-tête bêta pour l'outil advisor", back: "advisor-tool-2026-03-01 (chaîne identique comme en-tête HTTP anthropic-beta ou dans le tableau betas du SDK)" },
+  { front: "Champs type et name requis sur la définition de l'outil", back: "type: 'advisor_20260301', name: 'advisor' — les deux appliqués littéralement" },
+  { front: "Où s'applique le max_tokens de niveau supérieur ?", back: "Sortie de l'exécuteur seulement. Pour plafonner l'advisor, mettez max_tokens à l'intérieur de la définition de l'outil (min 1024)" },
+  { front: "Quels conseillers retournent du contenu chiffré ?", back: "Claude Opus 5, Claude Fable 5, et Claude Mythos 5 retournent advisor_redacted_result avec un blob encrypted_content. Les autres retournent advisor_result avec du text en clair." },
+  { front: "Comment activez-vous le cache de prompts côté advisor ?", back: "Ajoutez caching: {type: 'ephemeral', ttl: '5m' | '1h'} sur la définition de l'outil. Recommandé seulement pour les conversations avec 3+ appels advisor." },
+  { front: "Qu'est-ce qui tue le cache côté advisor silencieusement ?", back: "clear_thinking avec une valeur keep autre que 'all'. Sur Haiku et exécuteurs pré-Opus-4.5 le défaut est keep: {type: 'thinking_turns', value: 1}, qui décale le transcript à chaque tour et cause des miss. Mettez keep: 'all' explicitement." },
+  { front: "Un rate-limit advisor fait-il échouer la requête ?", back: "Non — il apparaît comme error_code: 'too_many_requests' à l'intérieur du résultat d'outil, et l'exécuteur continue sans plus de conseil. Seul un rate-limit exécuteur fait échouer la requête entière avec HTTP 429." },
+  { front: "Disponibilité plateforme", back: "API Anthropic + Claude Platform sur AWS seulement. Pas sur Bedrock, Vertex, ou Foundry au 4 août 2026." },
+  { front: "Désactiver l'outil advisor dans Claude Code globalement", back: "export CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 — /advisor devient indisponible, advisorModel est ignoré, --advisor est accepté mais n'a aucun effet" }
+]} />
+
+## Sources & lectures complémentaires
+
+- [Anthropic — Advisor tool (docs API Claude)](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool) — la source primaire ; référence de champs, matrice d'appariement, comportement de streaming, et les prompts Anthropic-testés et benchmarks de troncation cités partout dans cette page
+- [Anthropic — Escalate hard decisions with the advisor tool (docs Claude Code)](https://code.claude.com/docs/en/advisor) — la surface CLI-spécifique : `/advisor`, `advisorModel`, `--advisor`, le rollout Fable-5-désactivé-comme-advisor, et le sous-ensemble d'appariement
+- [Anthropic — Référence des outils serveur](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools) — la forme du bloc `server_tool_use` et le comportement « mélanger outils serveur et outils client dans un tour » que l'advisor hérite
+- [Anthropic — Prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) — sémantique de cache qui s'applique à la fois au bloc `advisor_tool_result` côté exécuteur et à l'opt-in `caching` côté advisor
+- [Anthropic — Context editing](https://platform.claude.com/docs/en/build-with-claude/context-editing) — le défaut `clear_thinking` qui tue silencieusement le cache côté advisor sur les exécuteurs plus anciens
+- [AILmanac — Effort tuning : 5 niveaux, défauts de modèle, et le piège du cache](/docs/api/effort-tuning) — la fonctionnalité sœur qui s'associe à l'advisor ; les deux sont des boutons de surface par modèle qui changent la comptabilité de tokens
+- [AILmanac — Choisir un modèle](/docs/api/choosing-a-model) — les tiers de modèles qui déterminent quelles paires exécuteur/advisor sont légales
+- [Blog Anthropic — La stratégie advisor](https://claude.com/blog/the-advisor-strategy) — le cadrage « pourquoi un exécuteur rapide avec un advisor plus fort fonctionne » depuis le blog d'Anthropic
