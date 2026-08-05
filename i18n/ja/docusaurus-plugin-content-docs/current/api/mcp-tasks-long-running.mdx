@@ -1,0 +1,339 @@
+---
+sidebar_position: 13.6
+title: "MCP Tasks:セッションなしで長時間実行する仕事"
+description: "2026-07-28のステートレスMCP仕様がセッションを廃止した — では、20分のCIジョブ、バッチインポート、人間の承認ゲートをどうモデル化するのか?公式のTasks拡張(SEP-2663)で解決する。完全なライフサイクル、ワイヤープロトコル、旧実験版Tasks APIからの移行、そして本番で実際に機能するポーリング/通知パターン。"
+keywords: [MCP, Model Context Protocol, Tasks, SEP-2663, long-running, tasks/get, tasks/update, tasks/cancel, extensions, ext-tasks, 2026-07-28, migration, elicitation, human-in-the-loop, notifications/tasks, subscriptions/listen]
+---
+
+<LevelBadge level="advanced" />
+
+ステートレスな[MCP 2026-07-28仕様](/docs/api/mcp-2026-07-28-stateless)はセッションを廃止することで水平スケーリングを解決したが、同時に「ツールの実行に20分かかる場合はどうする?」という問いの簡単な答えも廃止した。その答えが **Tasks拡張**(`io.modelcontextprotocol/tasks`、SEP-2663)である。サーバーはブロックせず、代わりに永続的な *タスクハンドル* を返し、クライアントが `tasks/get`、`tasks/update`、`tasks/cancel` で作業を駆動する。2026年後半、まともな長時間実行MCPサーバーはすべてこのパターンで実装される。
+
+<Callout type="objectives" items={[
+  "サーバーがロードバランサーやサーバーレスランタイムの背後に置かれた瞬間、リクエストのブロックが機能しなくなる理由",
+  "5つのタスク状態 — working、input_required、completed、failed、cancelled — と、どの遷移が合法か",
+  "ワイヤープロトコル:能力ネゴシエーション、CreateTaskResult、tasks/getポーリング、notifications/tasksプッシュ",
+  "input_requiredが持続的な接続なしで旧来のelicitationを置き換える方法",
+  "2025-11-25の実験版Tasks APIからの移行 — なぜアップグレードではなく書き直しなのか",
+  "落とし穴:協調的キャンセル、tasks/listが意図的に削除された理由、TTL失効、テナント間漏洩",
+]} />
+
+<VerifyNote lastVerified="2026-08-05" source="https://modelcontextprotocol.io/extensions/tasks/overview">
+Tasks拡張は **2026-07-28** のMCPリリースに含まれて出荷され、AWSが貢献した。[ext-tasksリポジトリ](https://github.com/modelcontextprotocol/ext-tasks)は依然としてSEP-2663の追跡としてマークされている。4つのTier 1 SDK(TypeScript、Python、Go、C#)は新仕様をサポートしているが、Taskヘルパー APIはまだ安定化中である。SDKのバージョンを固定し、出荷前に拡張機能クライアントマトリクスを確認すること — Claude、Cursor、その他のホストは独立してオプトインする。
+</VerifyNote>
+
+## 一段落版
+
+ステートレスなMCPサーバーは長時間保持される接続に依存できない:HTTPの中継が切断し、ロードバランサーがクライアントを新しいインスタンスに再割り当てし、モバイルネットワークが瞬断する。Tasksは長時間ツールコールを **永続的なリソース** に変える — サーバーは最初のリクエストに応答する前に `taskId` を永続化する。クライアントはサーバーが提案した間隔で `tasks/get(taskId)` をポーリングする。ステータスが `completed`、`failed`、`cancelled` に変わると、ポーリング応答は同期呼び出しが返したはずと同じペイロードを運ぶ。実行中、サーバーは `input_required` に移行して質問できる — クライアントは `tasks/update` で答え、ポーリングが再開される。これがモデル全体だ。
+
+## なぜブロックしないのか?
+
+作業が終わるまで接続を保持することはできる。MCPワーキンググループはこれを検討し、却下した — サーバーレス開発者なら誰もが知っている理由で:
+
+<Callout type="warning" items={[
+  "タイムアウト。AWS API Gatewayは29秒でキャップ。Cloudflare Workersは30秒CPU + 6分ウォール。Vercel Functionsは5分。バッチインポートをそれらのいずれかを通してロングポーリングすると、途中で504を食らう。",
+  "クラッシュ耐性。クライアントタブがリロードされたりネットワークが切断されたりすると、ブロックされた呼び出しは結果を失う。taskIdは永続的である — 同じクライアントが数分後にポーリングを再開できる。",
+  "ロードバランサーの粘着性。ブロッキングはリクエストを1つのサーバーインスタンスに固定する。操作中のスケールインイベントごとに呼び出しが殺される。",
+  "進行状況の可視性。ブロックされた呼び出しは終わるまで何も返さない。タスクはプログレスバーとしてレンダリングできるステータスメッセージを運ぶ。",
+  "実行中の入力。ツールがユーザー確認を必要とする場合、ブロックされた呼び出しはサーバー→クライアントの一方的なメッセージなしでは尋ねる方法がない — これはステートレス仕様が禁じている。",
+]} />
+
+## 5状態ライフサイクル
+
+すべてのタスクはこれらの状態のちょうど1つに存在する。`completed`、`failed`、`cancelled` は **終端** — 到達すると状態は変わらない:
+
+| Status           | 意味                                                                              | 設定される値       |
+| ---------------- | ------------------------------------------------------------------------------------ | --------------- |
+| `working`        | 操作進行中。サーバーは進行に応じてオプションのステータスメッセージを更新する。        | `statusMessage` |
+| `input_required` | サーバーはクライアント入力を待ってブロックされている。要求を提示し、`tasks/update` で送信する。 | `inputRequests` |
+| `completed`      | 操作は成功裏に終了。`result` は同期呼び出しが返したであろう値を保持する。 | `result`        |
+| `failed`         | 実行中にJSON-RPCエラーが発生した。                                            | `error`         |
+| `cancelled`      | クライアントがキャンセルを要求し、サーバーがそれを尊重した。すべてのリクエストで保証されるわけではない。 | —               |
+
+合法な遷移:`working ↔ input_required`、`working → completed | failed | cancelled`、`input_required → working | failed | cancelled`。それ以外はサーバーのバグである。
+
+## ワイヤープロトコル
+
+### 1. 双方がオプトイン
+
+Tasksはコアではなく *拡張* である — 双方がそれを広告しなければならない。クライアントはすべてのリクエストの `_meta` に入れ、サーバーは `server/discover` から返す:
+
+```jsonc
+// クライアント → サーバー、タスクとして返される可能性のあるあらゆるリクエストで:
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "run_ci_pipeline",
+    "arguments": { "commit": "abc123" },
+    "_meta": {
+      "io.modelcontextprotocol/clientCapabilities": {
+        "extensions": {
+          "io.modelcontextprotocol/tasks": {}
+        }
+      }
+    }
+  }
+}
+```
+
+クライアントがサポートを宣言していない場合、サーバーは **タスクを返してはならない** — ブロックするか、エラーを返すか、操作を拒否するしかない。オプトインしていないクライアントに `CreateTaskResult` を送ってはならない。
+
+### 2. サーバーはタスクハンドルを返す
+
+通常の `CallToolResult` の代わりに、サーバーは `resultType: "task"` で応答する:
+
+```jsonc
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "resultType": "task",
+    "task": {
+      "taskId": "tsk_01HZY7...",
+      "status": "working",
+      "statusMessage": "Cloning repo",
+      "ttlMs": 3600000,
+      "pollIntervalMs": 2000
+    }
+  }
+}
+```
+
+タスクはサーバーがこの応答を送る *前* に **永続的に保存** されなければならない(Postgres、AOF付きRedis、DynamoDB — Pod再起動を生き延びるあらゆるもの)。サーバーがリクエストを受け入れてからタスクを永続化するまでの間にクラッシュした場合、クライアントは通常のエラーを受け取り、再試行できる。永続化後にクラッシュした場合、taskIdは任意のレプリカから解決可能である。
+
+### 3. クライアントは `tasks/get` をポーリング
+
+```jsonc
+// クライアント → サーバー、pollIntervalMsごと:
+{ "jsonrpc": "2.0", "id": 2, "method": "tasks/get", "params": { "taskId": "tsk_01HZY7..." } }
+
+// サーバー → クライアント、まだ実行中:
+{ "jsonrpc": "2.0", "id": 2, "result": { "taskId": "tsk_01HZY7...", "status": "working", "statusMessage": "Running tests (128/342)" } }
+
+// サーバー → クライアント、終端:
+{ "jsonrpc": "2.0", "id": 2, "result": { "taskId": "tsk_01HZY7...", "status": "completed", "result": { "content": [{ "type": "text", "text": "All 342 tests passed in 4m12s" }] } } }
+```
+
+`pollIntervalMs` は *提案* である — クライアントはそれを下限として尊重し、繰り返される `working` 応答ではバックオフし、サーバーが要求したよりも速くポーリングしてはならない。
+
+### 4. 実行中の入力
+
+ツールがユーザー確認を必要とする場合(「47個のファイルを削除します。続行しますか?」)、サーバーは `input_required` に切り替わり、`inputRequests` マップを添付する — これはステートレス以前の世界でelicitationが取っていたのと同じ形状である:
+
+```jsonc
+// tasks/get 応答:
+{
+  "taskId": "tsk_01HZY7...",
+  "status": "input_required",
+  "inputRequests": {
+    "confirm_delete": {
+      "type": "elicitation",
+      "message": "Delete 47 files matching *.tmp?",
+      "schema": { "type": "object", "properties": { "confirm": { "type": "boolean" } } }
+    }
+  }
+}
+```
+
+クライアントはプロンプトを表示し、`tasks/update` で答える:
+
+```jsonc
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tasks/update",
+  "params": {
+    "taskId": "tsk_01HZY7...",
+    "inputResponses": { "confirm_delete": { "confirm": true } }
+  }
+}
+```
+
+サーバーは空の結果でackし、状態は `working` に戻る。**未知の、または既に満たされたキーへの応答は無視されなければならない** — これにより再試行が安全になる。
+
+### 5. 協調的キャンセル
+
+```jsonc
+{ "jsonrpc": "2.0", "id": 9, "method": "tasks/cancel", "params": { "taskId": "tsk_01HZY7..." } }
+```
+
+サーバーは空の結果でackする。仕様書の文言に注意:キャンセルは **協調的** である — サーバーは意図を承認するが、作業を停止する義務はない。`completed` に到達寸前のタスクに対する `tasks/cancel` は、それでも `completed` として着地することがある。クライアントUIは「キャンセルされた」ではなく「キャンセル要求済み、確認待ち」の周りに設計せよ。これは移行中にユーザーに見えるバグの最も一般的な原因である。
+
+## ポーリングの代わりに通知
+
+ポーリングはデフォルトであり、常に機能する。サーバーが通知をサポートする *場合* 、クライアントは一度サブスクライブしてポーリングループを完全にスキップできる:
+
+```jsonc
+// クライアントはタスク変更イベントにサブスクライブする:
+{ "jsonrpc": "2.0", "id": 3, "method": "subscriptions/listen", "params": { "notifications": ["notifications/tasks"] } }
+
+// サーバーはすべての状態変更で完全なタスクスナップショットをプッシュする:
+{ "jsonrpc": "2.0", "method": "notifications/tasks", "params": { "task": { "taskId": "tsk_01HZY7...", "status": "completed", "result": { "..." : "..." } } } }
+```
+
+各プッシュは **完全な** タスク状態を運ぶ — クライアントは後続の `tasks/get` を必要としない。`subscriptions/listen` が「サポートされていない」を返すか、ストリームが切断された場合はポーリングにフォールバックする。
+
+## Tasksを使うタイミング(と使わないタイミング)
+
+<Steps items={[
+  {title: "Tasksを使う:クライアントのHTTPアイドルタイムアウトを超える可能性のあるツール", body: "CIパイプライン、バッチインポート、モデル訓練、ビデオエンコード、大規模リファクタリング、デプロイ。p99が約10秒を超えるならすでにTasksが欲しい。p99が30秒を超えるなら、Tasksなしですでに壊れている。"},
+  {title: "Tasksを使う:既にIDを持つジョブシステムをラップするツール", body: "AWS Batch、GitHub Actions、Kubernetes Jobs、Temporalワークフロー。ジョブが作成されたときにタスクを返し、ジョブが完了したときに解決する。taskIdは文字通り上流のジョブIDを埋め込める。"},
+  {title: "Tasksを使う:人間が関与する承認", body: "承認ゲート、レビューステップ、確認のために一時停止するあらゆるもの。「承認/拒否」ボタン付きのSlack通知が、タスクをinput_requiredまたは終端状態に切り替える形で自然に機能する。"},
+  {title: "Tasksを使う:信頼できないクライアント", body: "モバイル、タブレット、飛行機の中のラップトップ。クラッシュしたクライアントは永続的なtaskIdからポーリングを再開できる — クラッシュした同期呼び出しはすべてを失う。"},
+  {title: "サブ秒ツールにはTasksを使うな", body: "すべてのタスクはポーリングのラウンドトリップを伴う。天気予報や通貨変換は依然としてブロックして返すべきだ。Tasksは追加のレイテンシーを実際に稼ぐ呼び出しのために取っておけ。"},
+  {title: "TasksとMulti Round-Trip Requests(MRTR)を混同するな", body: "MRTR(SEP-2322)は現在の呼び出しを継続するために必要な入力をカバーする — 1つのラウンドトリップ、永続性なし。Tasksはリクエストより長生きする永続的な作業をカバーする。MRTRの2つのラウンドトリップ間の飛行機事故が部分的に入力されたフォームだけを失うなら、MRTRを使え。2時間のデプロイを失うなら、Tasksを使え。"},
+]} />
+
+## 2025-11-25の実験版Tasks APIからの移行
+
+旧来の `tasks/create` / `tasks/status` の形状(ステートレス前の仕様)はSEP-2663と **互換性がない** 。バージョンアップではなく書き直しとして扱え:
+
+<Callout type="warning" items={[
+  "旧:クライアントは明示的に tasks/create を呼び出した。新:あらゆる tools/call がタスクとして返される可能性がある — クライアントはすべてのリクエストで多相な結果を処理しなければならない。",
+  "旧:tasks/list はセッションのタスクを列挙した。新:tasks/list は意図的に削除された — ステートレスサーバーにはスコープするセッションがなく、テナントをまたいだ列挙はデータ漏洩である。自分の taskId をクライアント側や製品DBで追跡せよ。",
+  "旧:elicitation は独立したサーバー→クライアントプッシュだった。新:elicitation は input_required としてタスクに折り畳まれる — 一方的なプッシュは不要。",
+  "旧:ステータスは {pending, running, done, error} のいずれかだった。新:{working, input_required, completed, failed, cancelled}。error → failed にマッピングし、新しい input_required 分岐を追加せよ。",
+  "廃止クロック:実験版APIは少なくとも2027年7月28日まで動作し続ける。SEP-2663に対して書き直し、両エンドポイントを並行して実行し、自分のスケジュールで切り替えよ。",
+]} />
+
+## サーバー実装チェックリスト
+
+<Steps items={[
+  {title: "応答する前にtaskIdを永続化する", body: "CreateTaskResultはクライアントがポーリングできるという約束だ。DB書き込みがHTTP応答の後に発生すると、その間のクラッシュがその約束を破る。ライトスルー、それから応答。"},
+  {title: "現実的なpollIntervalMsを提案する", body: "100 msではない — レート制限される。60秒でもない — ユーザーはUIがフリーズしたと思う。ジョブの中央進捗ケイデンスに合わせよ:CIジョブ? 2-5秒。バッチインポート? 10-30秒。夜間訓練? 60秒。"},
+  {title: "実際のttlMsを設定し実施する", body: "仕様は完了したタスクをどれくらい保持しなければならないかについて何も言っていない。ポリシーを選び(24時間が一般的)、ttlMsで広告し、期限切れIDへのtasks/getを -32602 で拒否せよ。さもないと永遠にストレージが漏れる。"},
+  {title: "tasks/updateをキーごとに冪等にする", body: "クライアントは再試行する。同じinputResponseを2回受け入れ、既に満たされたキーを無視し、状態機械を二重に進めるな。"},
+  {title: "テナントをまたいでタスクを漏らすな", body: "taskIdは秘密ではない。すべてのtasks/get / tasks/update / tasks/cancelを呼び出し元の認証されたIDでスコープせよ — 別のユーザーに属するタスクを取得することは -32602 を返さなければならない(タスクでもなく、それが存在することを確認する認証エラーでもなく)。"},
+  {title: "できればキャンセルを迅速に尊重する", body: "協調的とは、終わっても良いということであり、終わるべきということではない。キャンセルフラグの約1秒ごとのチェックインは、UXを劇的に良くする。"},
+]} />
+
+## クライアント実装チェックリスト
+
+<Steps items={[
+  {title: "どこでも多相な tools/call 結果を処理する", body: "Tasksにオプトインした瞬間、あらゆるツールコールがタスクとして返る可能性がある。単一の無視された resultType: task 分岐は、静かに落とされた結果を意味する。"},
+  {title: "taskIdを永続的に保存する", body: "ブラウザではLocalStorage、CLIではsqlite、バックエンドでは製品DB。taskIdを失ったクラッシュしたクライアントは再開できない。"},
+  {title: "pollIntervalMsをジッター付きの下限として尊重する", body: "10-20%のランダムジッターを追加せよ。さもないと、同じ間隔で同じタスクをポーリングする1000のクライアントがサーバーを叩き潰す。"},
+  {title: "キャンセルを事実ではなく意図として表示する", body: "終端状態を待つ間は「キャンセル中…」をレンダリングせよ、「キャンセルされた」ではない。それでも completed として着地したら説明せよ。"},
+  {title: "サブスクリプションが失敗したらポーリングにフォールバックする", body: "notifications/tasksは最適化である。すべてのクライアントは依然としてポーリングパスを処理しなければならない — さもないと、サブスクリプションのしゃっくりで結果を失う。"},
+]} />
+
+## 実例:`run_migration` ツール
+
+<PromptCard title="サーバー疑似コード — 5〜30分のDBマイグレーションを実行するツール">
+{`// tools/call handler
+async function handleToolCall(req) {
+  const supportsTasks = req.params._meta
+    ?.["io.modelcontextprotocol/clientCapabilities"]
+    ?.extensions?.["io.modelcontextprotocol/tasks"];
+
+  if (req.params.name === "run_migration") {
+    if (!supportsTasks) {
+      return jsonRpcError(req.id, -32603, "run_migration requires Tasks extension");
+    }
+    const taskId = "tsk_" + ulid();
+    await db.tasks.insert({
+      id: taskId, tenant: req.auth.tenant, status: "working",
+      createdAt: Date.now(), ttlMs: 24 * 3600 * 1000,
+    });
+    // Kick off the actual work OUT OF BAND — do not await it here.
+    queue.enqueue({ taskId, migration: req.params.arguments.name });
+    return {
+      resultType: "task",
+      task: { taskId, status: "working", ttlMs: 24 * 3600 * 1000, pollIntervalMs: 5000 },
+    };
+  }
+}
+
+// tasks/get handler — scoped by authenticated tenant
+async function handleTasksGet(req) {
+  const t = await db.tasks.findOne({ id: req.params.taskId, tenant: req.auth.tenant });
+  if (!t) return jsonRpcError(req.id, -32602, "unknown taskId");
+  if (Date.now() > t.createdAt + t.ttlMs) return jsonRpcError(req.id, -32602, "task expired");
+  return { taskId: t.id, status: t.status, statusMessage: t.statusMessage,
+           ...(t.status === "completed" && { result: t.result }),
+           ...(t.status === "failed" && { error: t.error }) };
+}`}
+</PromptCard>
+
+## ほとんどのチームが最初の週に遭遇する落とし穴
+
+<Callout type="warning" items={[
+  "「tasks/listがない。」はい — 意図的に。スコープするセッションがない。自分の製品データベースでtaskIdを追跡せよ。",
+  "「私のキャンセルボタンは嘘をつく。」常にそうだ。「キャンセル要求」に名前を変えるか、サーバーの終端ackに状態変更をゲートせよ。",
+  "「ポーリングしたときだけ結果が来る。」その通り — notifications/tasks + subscriptions/listen も実装するまでは。両方のパス、常に。",
+  "「Python SDKにこのためのヘルパーがまだない。」一部のTier 1 SDKヘルパーはまだ安定化中だ。生のJSON-RPCを手で常に実装できる — ワイヤーフォーマットは完全に指定されている。",
+  "「ユーザーがIDを推測して別のユーザーのタスクを引っ張った。」なぜならtasks/getでテナントによるスコープを忘れたからだ。すべてのハンドラーは認証されたプリンシパルでフィルターしなければならない。",
+]} />
+
+## クイズ
+
+<Quiz questions={[
+  {
+    q: "あなたのクライアントは io.modelcontextprotocol/tasks をリクエストの _meta に含めなかった。呼び出したツールは20分かかる。サーバーは何をすべきか?",
+    options: [
+      "とにかくCreateTaskResultを返す — クライアントは何とかする",
+      "接続を20分間ブロックする",
+      "JSON-RPCエラーを返すか、独自のタイムアウト内でブロックして返すか、操作を拒否する — クライアントがオプトインしていないタスクを送るな",
+      "notifications/tasksに静かにダウングレードする"
+    ],
+    answer: 2,
+    explain: "Tasks拡張は双方で厳密にオプトインである。サポートを宣言していないクライアントに resultType: task を送るのは仕様違反であり、そのクライアントの応答ハンドラーを壊す。"
+  },
+  {
+    q: "ユーザーがタスクが完了する100 ms前に「キャンセル」を押す。サーバーはキャンセルと完了を同時に処理する。タスクは合法的にどの状態で終わることができるか?",
+    options: [
+      "常にcancelled — ユーザーが求めた",
+      "cancelledまたはcompletedのいずれか — キャンセルは協調的であり、仕様はタスクが依然としてキャンセル以外の終端状態に到達する可能性があると述べている",
+      "常にfailed — これは競合状態である",
+      "input_required — クライアントが決定する必要があるから"
+    ],
+    answer: 1,
+    explain: "SEP-2663はキャンセルを協調的として定義している。サーバーは意図を承認するが、作業を停止する必要はない。UIは「キャンセル中…」をレンダリングし、どんな終端状態になっても説明すべきだ。"
+  },
+  {
+    q: "2025-11-25の実験版Tasks APIから移行している。古いコードはキューを表示するために tasks/list を呼び出す。正しい修正は何か?",
+    options: [
+      "tasks/list を呼び続ける — 新仕様も維持した",
+      "ドロップイン置換はない — taskIdをクライアント側や製品DBで追跡せよ。セッションなしにサーバー側でタスクを列挙するとテナントをまたいで漏洩するからだ",
+      "代わりに server/discover を使って列挙する",
+      "subscriptions/listen を追加する — 接続時にすべての未処理タスクを返す"
+    ],
+    answer: 1,
+    explain: "tasks/listは意図的に削除された。ステートレスサーバーには列挙をスコープするクライアントごとのセッションがなく、テナントをまたいだ列挙はデータ漏洩である。アプリケーションが列挙を所有するようになった。"
+  },
+  {
+    q: "TasksではなくMRTR(SEP-2322)に手を伸ばす正しい理由はどれか?",
+    options: [
+      "操作が10分以上かかる",
+      "現在の呼び出しを継続するためにユーザーからの入力が必要であり、クラッシュでその部分状態を失っても再入力フォームだけしか失わない — 何時間もの作業ではない",
+      "ポーリングではなくプッシュ通知が欲しい",
+      "サーバーレスランタイム上にいる"
+    ],
+    answer: 1,
+    explain: "MRTRは同じ論理リクエスト内の単一のフォローアップラウンドトリップをカバーする。Tasksはリクエストより長生きする永続的な作業をカバーする。短いelicitationにはMRTRを使え。クラッシュで状態を失うことが実際に痛みになる瞬間からTasksを使え。"
+  }
+]} />
+
+## フラッシュカード
+
+<Flashcards cards={[
+  {front: "SEP-2663", back: "MCP Tasks拡張を定義するStandards Enhancement Proposal。2026-07-28仕様に含まれて出荷され、AWSが貢献した。リポジトリ:modelcontextprotocol/ext-tasks。"},
+  {front: "5つのタスク状態", back: "working、input_required、completed、failed、cancelled。最後の3つは終端 — 一度到達すると状態は変わらない。"},
+  {front: "CreateTaskResult", back: "tools/callがタスクになるときにサーバーが送る多相な応答。resultType: 'task'、taskId、初期ステータス、ttlMs、提案されたpollIntervalMsを含む。"},
+  {front: "tasks/get vs tasks/update vs tasks/cancel", back: "Get:最新の状態をポーリング。Update:タスクがinput_requiredに移行したときにinputResponsesを送信。Cancel:サーバーに中止を協調的に要求 — 保証されない。"},
+  {front: "notifications/tasks + subscriptions/listen", back: "ポーリングのプッシュ代替。クライアントはsubscriptions/listenで一度オプトインし、サーバーはすべての状態変更で完全なタスクスナップショットをプッシュする。サブスクリプションが失敗したら常にポーリングにフォールバックせよ。"},
+  {front: "なぜtasks/listがなくなったか", back: "ステートレスサーバーには列挙をスコープするセッションがなく、スコープなしにタスクを列挙するとテナントをまたいだデータ漏洩になる。アプリケーションが自分のtaskIdを追跡する。"},
+  {front: "協調的キャンセル", back: "サーバーはtasks/cancelをackするが停止する義務はない。タスクは依然としてcompletedまたはfailedに到達する可能性がある。UIは終端状態が着地するまで「キャンセル中…」と言うべきで、「キャンセルされた」ではない。"},
+  {front: "MRTR vs Tasks", back: "MRTR(SEP-2322)= 1つのフォローアップラウンドトリップ、永続性なし、短いelicitation用。Tasks(SEP-2663)= リクエストより長生きする永続的なリソース、クライアントクラッシュを生き延びるあらゆるもの用。"}
+]} />
+
+## ソースと参考文献
+
+- [MCP Tasks拡張概要 — modelcontextprotocol.io](https://modelcontextprotocol.io/extensions/tasks/overview) — 正典の仕様ページ、完全なライフサイクル図と各側の実装ガイド付き。
+- [ext-tasksリポジトリ(SEP-2663)](https://github.com/modelcontextprotocol/ext-tasks) — スキーマ、生成された型、動作する仕様テキスト。
+- [MCP 2026-07-28仕様発表](https://blog.modelcontextprotocol.io/posts/2026-07-28/) — TasksをAWS貢献のファーストパーティ拡張として名指ししたリリースブログ。
+- [Anthropic: MCP 2026-07-28をClaudeに導入](https://claude.com/blog/bringing-mcp-2026-07-28-to-claude) — Claudeホスト展開ノート。
+- [Composio: 2026-07-28アップデート、平易な言葉で](https://composio.dev/content/mcp-2026-07-28-update-statelessness-apps-auth) — TasksとMRTRのどちらに手を伸ばすかの実践的なフレーミング。
+- AILmanac関連:[MCP 2026-07-28: ステートレス仕様](/docs/api/mcp-2026-07-28-stateless)、[MCP Apps: インタラクティブUI](/docs/api/mcp-apps-interactive-uis)、[Managed Agents](/docs/api/managed-agents)、[長時間実行エージェントハーネス](/docs/frontiers/long-running-agent-harnesses)。
