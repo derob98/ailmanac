@@ -1,0 +1,339 @@
+---
+sidebar_position: 13.6
+title: "MCP Tasks: lavoro long-running senza sessione"
+description: "La spec stateless MCP del 2026-07-28 ha eliminato la sessione — e allora come modelli un job CI da 20 minuti, un import batch o un gate di approvazione umana? Con l'estensione ufficiale Tasks (SEP-2663). Lifecycle completo, protocollo wire, migrazione dalla vecchia Tasks API sperimentale e i pattern di polling/notifica che funzionano davvero in produzione."
+keywords: [MCP, Model Context Protocol, Tasks, SEP-2663, long-running, tasks/get, tasks/update, tasks/cancel, extensions, ext-tasks, 2026-07-28, migration, elicitation, human-in-the-loop, notifications/tasks, subscriptions/listen]
+---
+
+<LevelBadge level="advanced" />
+
+La [spec stateless MCP 2026-07-28](/docs/api/mcp-2026-07-28-stateless) ha risolto lo scaling orizzontale eliminando la sessione — ma ha anche eliminato la risposta facile alla domanda "e se il tool impiega 20 minuti?". La risposta è l'**estensione Tasks** (`io.modelcontextprotocol/tasks`, SEP-2663): il server restituisce un *task handle* durabile invece di bloccarsi, e il client guida il lavoro con `tasks/get`, `tasks/update` e `tasks/cancel`. Questo è il pattern con cui ogni server MCP long-running serio si distribuisce nella seconda metà del 2026.
+
+<Callout type="objectives" items={[
+  "Perché bloccare una richiesta smette di funzionare nel momento in cui il tuo server sta dietro a un load balancer o a un runtime serverless",
+  "I cinque stati del task — working, input_required, completed, failed, cancelled — e quali transizioni sono legali",
+  "Il protocollo wire: negoziazione delle capability, CreateTaskResult, polling con tasks/get e push con notifications/tasks",
+  "Come input_required sostituisce la vecchia elicitation senza una connessione persistente",
+  "Migrazione dalla Tasks API sperimentale del 2025-11-25 — perché è una riscrittura, non un upgrade",
+  "Le insidie: cancellazione cooperativa, tasks/list volutamente rimosso, scadenza TTL e leak cross-tenant",
+]} />
+
+<VerifyNote lastVerified="2026-08-05" source="https://modelcontextprotocol.io/extensions/tasks/overview">
+L'estensione Tasks è stata rilasciata dentro la release MCP **2026-07-28**, contribuita da AWS. Il [repository ext-tasks](https://github.com/modelcontextprotocol/ext-tasks) è ancora marcato come tracking di SEP-2663; i quattro SDK Tier 1 (TypeScript, Python, Go, C#) supportano la nuova spec ma le API helper per i Task si stanno ancora stabilizzando. Fissa la versione dell'SDK e controlla la client-matrix dell'estensione prima di rilasciare — Claude, Cursor e altri host optano indipendentemente.
+</VerifyNote>
+
+## La versione da un paragrafo
+
+Un server MCP stateless non può contare su una connessione tenuta aperta a lungo: gli intermediari HTTP la droppano, i load balancer rimescolano il client su una nuova istanza, le reti mobili si interrompono. I Task trasformano una tool call lunga in una **risorsa durabile** — un `taskId` che il tuo server persiste prima ancora di rispondere alla prima richiesta. Il client fa polling di `tasks/get(taskId)` all'intervallo suggerito dal server; quando lo status passa a `completed`, `failed` o `cancelled`, la risposta del poll trasporta lo stesso payload che avrebbe restituito una chiamata sincrona. A metà lavoro, il server può passare a `input_required` e fare una domanda — il client risponde con `tasks/update` e il polling riprende. Questo è tutto il modello.
+
+## Perché non bloccare e basta?
+
+Puoi tenere una connessione aperta finché il lavoro finisce. Il working group MCP l'ha considerato e rifiutato — per le ragioni che ogni sviluppatore serverless già conosce:
+
+<Callout type="warning" items={[
+  "Timeout. AWS API Gateway limita a 29 s. Cloudflare Workers a 30 s CPU + 6 min wall. Vercel Functions a 5 min. Fai long-poll di un import batch attraverso uno qualsiasi e prendi un 504 a metà strada.",
+  "Resilienza ai crash. Se la tab del client si ricarica o la rete cade, una chiamata bloccata perde il suo risultato. Un taskId è durabile — lo stesso client può riprendere il polling minuti dopo.",
+  "Stickiness del load balancer. Bloccare pinna la richiesta su una sola istanza del server. Ogni evento di scale-in durante l'operazione uccide la chiamata.",
+  "Visibilità del progresso. Una chiamata bloccata non ti dà niente finché non finisce. Un task porta uno status message che puoi renderizzare come progress bar.",
+  "Input a metà volo. Se il tool ha bisogno di una conferma utente, una chiamata bloccata non ha modo di chiedere senza messaggi non sollecitati server → client — che la spec stateless vieta.",
+]} />
+
+## Il lifecycle a cinque stati
+
+Ogni task vive in esattamente uno di questi stati. `completed`, `failed` e `cancelled` sono **terminali** — una volta raggiunti, lo stato non cambia:
+
+| Status           | Significato                                                                          | Popola          |
+| ---------------- | ------------------------------------------------------------------------------------ | --------------- |
+| `working`        | Operazione in corso. Il server aggiorna lo status message opzionale mentre procede.  | `statusMessage` |
+| `input_required` | Il server è bloccato in attesa di input dal client. Presenta la richiesta, invia via `tasks/update`. | `inputRequests` |
+| `completed`      | Operazione conclusa con successo. `result` contiene ciò che avrebbe restituito una chiamata sync. | `result`        |
+| `failed`         | Si è verificato un errore JSON-RPC durante l'esecuzione.                             | `error`         |
+| `cancelled`      | Il client ha richiesto la cancellazione e il server l'ha onorata. Non garantito su ogni richiesta. | —               |
+
+Transizioni legali: `working ↔ input_required`, `working → completed | failed | cancelled`, `input_required → working | failed | cancelled`. Qualsiasi altra cosa è un bug del server.
+
+## Il protocollo wire
+
+### 1. Entrambi i lati optano in
+
+Tasks è un'*estensione*, non parte del core — entrambi i lati devono dichiararla. Il client la mette nel `_meta` di ogni richiesta; il server la restituisce da `server/discover`:
+
+```jsonc
+// Client → server su qualsiasi richiesta che POTREBBE tornare come task:
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "run_ci_pipeline",
+    "arguments": { "commit": "abc123" },
+    "_meta": {
+      "io.modelcontextprotocol/clientCapabilities": {
+        "extensions": {
+          "io.modelcontextprotocol/tasks": {}
+        }
+      }
+    }
+  }
+}
+```
+
+Se il client non ha dichiarato supporto, il server **non deve** restituire un task — deve bloccare, restituire un errore o rifiutare l'operazione. Non inviare mai un `CreateTaskResult` a un client che non ha optato in.
+
+### 2. Il server restituisce un task handle
+
+Invece del normale `CallToolResult`, il server risponde con `resultType: "task"`:
+
+```jsonc
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "resultType": "task",
+    "task": {
+      "taskId": "tsk_01HZY7...",
+      "status": "working",
+      "statusMessage": "Cloning repo",
+      "ttlMs": 3600000,
+      "pollIntervalMs": 2000
+    }
+  }
+}
+```
+
+Il task deve essere **persistito durabilmente** (Postgres, Redis con AOF, DynamoDB — qualsiasi cosa sopravviva a un restart del pod) *prima* che il server invii questa risposta. Se il server crasha tra l'accettazione della richiesta e la persistenza del task, il client riceve un errore normale e può ritentare. Se crasha dopo, il taskId è ancora risolvibile da qualsiasi replica.
+
+### 3. Il client fa polling di `tasks/get`
+
+```jsonc
+// Client → server, ogni pollIntervalMs:
+{ "jsonrpc": "2.0", "id": 2, "method": "tasks/get", "params": { "taskId": "tsk_01HZY7..." } }
+
+// Server → client, ancora in volo:
+{ "jsonrpc": "2.0", "id": 2, "result": { "taskId": "tsk_01HZY7...", "status": "working", "statusMessage": "Running tests (128/342)" } }
+
+// Server → client, terminale:
+{ "jsonrpc": "2.0", "id": 2, "result": { "taskId": "tsk_01HZY7...", "status": "completed", "result": { "content": [{ "type": "text", "text": "All 342 tests passed in 4m12s" }] } } }
+```
+
+`pollIntervalMs` è un *suggerimento* — i client dovrebbero onorarlo come limite inferiore, fare backoff sulle risposte `working` che si ripetono e non fare mai polling più veloce di quanto il server abbia chiesto.
+
+### 4. Input a metà volo
+
+Se il tool ha bisogno di una conferma utente ("questo cancellerà 47 file, continuare?"), il server passa a `input_required` e allega una mappa `inputRequests` — la stessa forma che avrebbe avuto un'elicitation nel mondo pre-stateless:
+
+```jsonc
+// risposta tasks/get:
+{
+  "taskId": "tsk_01HZY7...",
+  "status": "input_required",
+  "inputRequests": {
+    "confirm_delete": {
+      "type": "elicitation",
+      "message": "Delete 47 files matching *.tmp?",
+      "schema": { "type": "object", "properties": { "confirm": { "type": "boolean" } } }
+    }
+  }
+}
+```
+
+Il client mostra il prompt, poi risponde con `tasks/update`:
+
+```jsonc
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tasks/update",
+  "params": {
+    "taskId": "tsk_01HZY7...",
+    "inputResponses": { "confirm_delete": { "confirm": true } }
+  }
+}
+```
+
+Il server risponde con un result vuoto; lo stato torna a `working`. Le risposte per **chiavi sconosciute o già soddisfatte devono essere ignorate** — questo rende i retry sicuri.
+
+### 5. Cancellazione cooperativa
+
+```jsonc
+{ "jsonrpc": "2.0", "id": 9, "method": "tasks/cancel", "params": { "taskId": "tsk_01HZY7..." } }
+```
+
+Il server risponde con un result vuoto. Nota la formulazione nella spec: la cancellazione è **cooperativa** — il server riconosce l'intento ma non è obbligato a fermare il lavoro. Un `tasks/cancel` su un task in procinto di arrivare a `completed` può comunque finire come `completed`. Disegna la UI del tuo client attorno a "cancellazione richiesta, in attesa di conferma", non "cancellato". Questa è la singola fonte più comune di bug visibili all'utente durante la migrazione.
+
+## Notifiche invece del polling
+
+Il polling è il default e funziona sempre. Quando un server *supporta* le notifiche, il client può iscriversi una volta e saltare completamente il loop di polling:
+
+```jsonc
+// Il client si iscrive agli eventi di cambio task:
+{ "jsonrpc": "2.0", "id": 3, "method": "subscriptions/listen", "params": { "notifications": ["notifications/tasks"] } }
+
+// Il server pusha uno snapshot completo del task a ogni cambio di stato:
+{ "jsonrpc": "2.0", "method": "notifications/tasks", "params": { "task": { "taskId": "tsk_01HZY7...", "status": "completed", "result": { "..." : "..." } } } }
+```
+
+Ogni push porta lo stato **intero** del task — i client non hanno mai bisogno di un `tasks/get` di follow-up. Ricadi sul polling se `subscriptions/listen` restituisce "not supported" o lo stream si disconnette.
+
+## Quando usare Tasks (e quando no)
+
+<Steps items={[
+  {title: "Usa Tasks: qualsiasi tool che potrebbe eccedere il timeout idle HTTP del client", body: "Pipeline CI, import batch, training di modelli, encoding video, refactor grandi, deployment. Se il p99 supera i ~10 secondi vuoi già Tasks; se il p99 supera i 30 secondi sei già rotto senza."},
+  {title: "Usa Tasks: qualsiasi tool che wrappa un job system che ha già ID", body: "AWS Batch, GitHub Actions, Kubernetes Jobs, workflow Temporal. Restituisci un task quando il job viene creato, risolvilo quando il job termina. Il taskId può letteralmente incorporare il job id upstream."},
+  {title: "Usa Tasks: approvazioni human-in-the-loop", body: "Gate di approvazione, step di revisione, qualsiasi cosa si metta in pausa per una conferma. Notifiche Slack con bottoni 'approve/reject' che flippano il task a input_required o a uno stato terminale funzionano naturalmente."},
+  {title: "Usa Tasks: client inaffidabili", body: "Mobile, tablet, laptop in aereo. Un client crashato può riprendere il polling da un taskId durabile — una chiamata sync crashata perde tutto."},
+  {title: "NON usare Tasks per tool sotto il secondo", body: "Ogni task porta un round-trip di polling. Un lookup meteo o una conversione valutaria dovrebbe ancora block-and-return. Riserva Tasks per le chiamate che si guadagnano davvero la latenza extra."},
+  {title: "NON confondere Tasks con Multi Round-Trip Requests (MRTR)", body: "MRTR (SEP-2322) copre l'input necessario per CONTINUARE la chiamata corrente — un round-trip, no durabilità. Tasks coprono lavoro durabile che sopravvive alla richiesta. Se un crash aereo tra i due round-trip di un MRTR farebbe perdere solo un form parzialmente digitato, usa MRTR. Se farebbe perdere un deployment di due ore, usa Tasks."},
+]} />
+
+## Migrazione dalla Tasks API sperimentale del 2025-11-25
+
+La vecchia forma `tasks/create` / `tasks/status` dalla spec pre-stateless **non è compatibile** con SEP-2663. Trattala come una riscrittura, non un version bump:
+
+<Callout type="warning" items={[
+  "Vecchio: il client chiamava esplicitamente tasks/create. Nuovo: qualsiasi tools/call PUÒ tornare come task — il client DEVE gestire un risultato polimorfico su ogni richiesta.",
+  "Vecchio: tasks/list enumerava i task per una sessione. Nuovo: tasks/list è volutamente rimosso — un server stateless non ha sessione con cui scoparlo, e listare tra i tenant è un data leak. Traccia i tuoi task ID lato client o nel tuo product database.",
+  "Vecchio: l'elicitation era un push server → client separato. Nuovo: l'elicitation si piega dentro il task come input_required — nessun push non sollecitato necessario.",
+  "Vecchio: lo status era uno tra {pending, running, done, error}. Nuovo: {working, input_required, completed, failed, cancelled}. Mappa error → failed e aggiungi il nuovo ramo input_required.",
+  "Deprecation clock: l'API sperimentale continua a funzionare fino ad almeno il 28 luglio 2027. Riscrivi su SEP-2663, fai girare entrambi gli endpoint in parallelo, taglia sul tuo schedule.",
+]} />
+
+## Checklist implementazione server
+
+<Steps items={[
+  {title: "Persisti il taskId PRIMA di rispondere", body: "Il CreateTaskResult è una promessa che il client potrà fare polling. Se la scrittura DB avviene dopo la risposta HTTP, un crash tra le due rompe quella promessa. Write-through, poi rispondi."},
+  {title: "Suggerisci un pollIntervalMs realistico", body: "Non 100 ms — ti prenderai rate-limit. Non 60 s — l'utente pensa che la UI sia congelata. Adegua alla cadenza mediana di progresso del tuo job: job CI? 2-5 s. Import batch? 10-30 s. Training overnight? 60 s."},
+  {title: "Imposta un vero ttlMs e applicalo", body: "La spec non dice nulla su quanto devi tenere un task completato. Scegli una policy (24 h è comune), dichiarala in ttlMs e rifiuta tasks/get su ID scaduti con -32602. Altrimenti leaki storage per sempre."},
+  {title: "Rendi tasks/update idempotente per chiave", body: "I client ritentano. Accetta la stessa inputResponse due volte, ignora chiavi già soddisfatte e non far mai avanzare due volte la macchina a stati."},
+  {title: "Non lasciare mai leakare task tra i tenant", body: "Un taskId non è un segreto. Scopa ogni tasks/get / tasks/update / tasks/cancel per l'identità autenticata del chiamante — pullare un task che appartiene a un altro utente deve restituire -32602 (non il task, non un errore di auth che ne confermi l'esistenza)."},
+  {title: "Onora rapidamente la cancellazione se puoi", body: "Cooperativa significa che ti è permesso finire, non che dovresti. Un check ogni ~1 s su un flag di cancellazione rende la UX enormemente migliore."},
+]} />
+
+## Checklist implementazione client
+
+<Steps items={[
+  {title: "Gestisci risultati tools/call polimorfici ovunque", body: "Nel momento in cui opti per Tasks, QUALSIASI tool call può tornare come task. Un singolo ramo resultType: task ignorato significa risultati silenziosamente droppati."},
+  {title: "Persisti i taskId durabilmente", body: "LocalStorage in un browser, sqlite in una CLI, il tuo product DB in un backend. Un client crashato che ha perso i suoi taskId non può riprendere."},
+  {title: "Rispetta pollIntervalMs come limite inferiore con jitter", body: "Aggiungi 10-20% di jitter random o mille client che fanno polling dello stesso task allo stesso intervallo martelleranno il tuo server."},
+  {title: "Mostra la cancellazione come intento, non come fatto", body: "Renderizza 'cancellando…' mentre aspetti lo stato terminale, non 'cancellato'. Spiega se atterra comunque come completed."},
+  {title: "Ricadi sul polling se le sottoscrizioni falliscono", body: "notifications/tasks è un'ottimizzazione. Ogni client deve comunque gestire il path di polling — o perdere risultati su qualsiasi singhiozzo della sottoscrizione."},
+]} />
+
+## Un esempio reale: un tool `run_migration`
+
+<PromptCard title="Pseudocodice server — un tool che esegue una migrazione DB da 5-30 minuti">
+{`// tools/call handler
+async function handleToolCall(req) {
+  const supportsTasks = req.params._meta
+    ?.["io.modelcontextprotocol/clientCapabilities"]
+    ?.extensions?.["io.modelcontextprotocol/tasks"];
+
+  if (req.params.name === "run_migration") {
+    if (!supportsTasks) {
+      return jsonRpcError(req.id, -32603, "run_migration requires Tasks extension");
+    }
+    const taskId = "tsk_" + ulid();
+    await db.tasks.insert({
+      id: taskId, tenant: req.auth.tenant, status: "working",
+      createdAt: Date.now(), ttlMs: 24 * 3600 * 1000,
+    });
+    // Kick off the actual work OUT OF BAND — do not await it here.
+    queue.enqueue({ taskId, migration: req.params.arguments.name });
+    return {
+      resultType: "task",
+      task: { taskId, status: "working", ttlMs: 24 * 3600 * 1000, pollIntervalMs: 5000 },
+    };
+  }
+}
+
+// tasks/get handler — scoped by authenticated tenant
+async function handleTasksGet(req) {
+  const t = await db.tasks.findOne({ id: req.params.taskId, tenant: req.auth.tenant });
+  if (!t) return jsonRpcError(req.id, -32602, "unknown taskId");
+  if (Date.now() > t.createdAt + t.ttlMs) return jsonRpcError(req.id, -32602, "task expired");
+  return { taskId: t.id, status: t.status, statusMessage: t.statusMessage,
+           ...(t.status === "completed" && { result: t.result }),
+           ...(t.status === "failed" && { error: t.error }) };
+}`}
+</PromptCard>
+
+## Insidie che quasi tutti i team incontrano nella prima settimana
+
+<Callout type="warning" items={[
+  "'tasks/list manca.' Sì — di proposito. Non c'è sessione con cui scoparlo. Traccia i task ID nel tuo product database.",
+  "'Il mio bottone di cancel mente.' Lo farà sempre. Rinominalo 'Richiedi cancellazione' o vincola il cambio di stato all'ack terminale del server.",
+  "'Ricevo risultati solo quando faccio polling.' Giusto — finché non implementi anche notifications/tasks + subscriptions/listen. Entrambi i path, sempre.",
+  "'L'SDK Python non ha ancora un helper per questo.' Alcuni helper degli SDK Tier 1 si stanno ancora stabilizzando. Puoi sempre implementare il JSON-RPC grezzo a mano — il formato wire è completamente specificato.",
+  "'Un utente ha pullato il task di un altro utente indovinando l'ID.' Perché hai dimenticato di scopare per tenant su tasks/get. Ogni handler DEVE filtrare per il principal autenticato.",
+]} />
+
+## Quiz
+
+<Quiz questions={[
+  {
+    q: "Il tuo client NON ha incluso io.modelcontextprotocol/tasks nel _meta della sua richiesta. Il tool che ha chiamato impiega 20 minuti. Cosa dovrebbe fare il server?",
+    options: [
+      "Restituire comunque un CreateTaskResult — il client si arrangerà",
+      "Bloccare la connessione per 20 minuti",
+      "Restituire un errore JSON-RPC, fare block-and-return entro il suo timeout, oppure rifiutare l'operazione — non inviare mai un task a cui il client non ha optato in",
+      "Fare downgrade silenzioso a notifications/tasks"
+    ],
+    answer: 2,
+    explain: "L'estensione Tasks è strettamente opt-in su entrambi i lati. Inviare un resultType: task a un client che non ha dichiarato supporto è una violazione della spec e romperà l'handler di risposta di quel client."
+  },
+  {
+    q: "Un utente preme 'Cancel' su un task 100 ms prima che completi. Il tuo server processa il cancel e il completion nello stesso istante. In quale stato può legalmente finire il task?",
+    options: [
+      "Sempre cancelled — l'utente l'ha chiesto",
+      "O cancelled O completed — la cancellazione è cooperativa, la spec dice che il task può ancora raggiungere uno stato terminale non-cancelled",
+      "Sempre failed — questa è una race condition",
+      "input_required — perché il client deve decidere"
+    ],
+    answer: 1,
+    explain: "SEP-2663 definisce la cancellazione come cooperativa. Il server riconosce l'intento ma non è tenuto a fermare il lavoro. Le UI dovrebbero renderizzare 'cancellando…' e spiegare lo stato terminale qualunque esso sia."
+  },
+  {
+    q: "Stai migrando dalla Tasks API sperimentale del 2025-11-25. Il tuo vecchio codice chiama tasks/list per mostrare una coda. Qual è il fix corretto?",
+    options: [
+      "Continua a chiamare tasks/list — la nuova spec l'ha mantenuto",
+      "Non c'è un rimpiazzo drop-in — traccia i task ID lato client o nel tuo product database, perché enumerare i task lato server senza una sessione leaka tra tenant",
+      "Usa server/discover per listarli",
+      "Aggiungi subscriptions/listen — restituisce tutti i task in sospeso al connect"
+    ],
+    answer: 1,
+    explain: "tasks/list è volutamente rimosso. Un server stateless non ha una sessione per-client con cui scopare la lista, e listare tra tenant è un data leak. Le applicazioni ora possiedono l'enumerazione."
+  },
+  {
+    q: "Quale di queste è la ragione GIUSTA per raggiungere MRTR (SEP-2322) invece di Tasks?",
+    options: [
+      "L'operazione impiega 10+ minuti",
+      "Hai bisogno di input dall'utente per CONTINUARE la chiamata corrente, e perdere quello stato parziale in un crash costerebbe solo un form da ridigitare — non ore di lavoro",
+      "Vuoi notifiche push invece del polling",
+      "Sei su un runtime serverless"
+    ],
+    answer: 1,
+    explain: "MRTR copre un singolo round-trip di follow-up all'interno della stessa richiesta logica. Tasks coprono lavoro durabile che sopravvive alla richiesta. Usa MRTR per elicitation brevi; usa Tasks nel momento in cui perdere stato in un crash sarebbe davvero doloroso."
+  }
+]} />
+
+## Flashcards
+
+<Flashcards cards={[
+  {front: "SEP-2663", back: "La Standards Enhancement Proposal che definisce l'estensione MCP Tasks. Rilasciata dentro la spec 2026-07-28, contribuita da AWS. Repo: modelcontextprotocol/ext-tasks."},
+  {front: "I cinque stati del task", back: "working, input_required, completed, failed, cancelled. Gli ultimi tre sono terminali — una volta raggiunti lo stato non cambia."},
+  {front: "CreateTaskResult", back: "La risposta polimorfica che un server invia quando una tools/call diventa un task. resultType: 'task', contenente taskId, status iniziale, ttlMs e pollIntervalMs suggerito."},
+  {front: "tasks/get vs tasks/update vs tasks/cancel", back: "Get: fa polling dell'ultimo stato. Update: invia inputResponses quando il task è andato in input_required. Cancel: richiede cooperativamente al server di abortire — non garantito."},
+  {front: "notifications/tasks + subscriptions/listen", back: "L'alternativa push al polling. Il client opta in con subscriptions/listen una volta; il server pusha snapshot completi del task a ogni cambio di stato. Ricadi sempre sul polling se la sottoscrizione fallisce."},
+  {front: "Perché tasks/list non c'è più", back: "Un server stateless non ha sessione con cui scopare la lista, e listare task senza scoping è un data leak cross-tenant. Le applicazioni tracciano i propri task ID."},
+  {front: "Cancellazione cooperativa", back: "Il server ack di tasks/cancel ma non è obbligato a fermarsi. Il task può ancora raggiungere completed o failed. Le UI dovrebbero dire 'cancellando…' non 'cancellato' finché non atterra lo stato terminale."},
+  {front: "MRTR vs Tasks", back: "MRTR (SEP-2322) = un round-trip di follow-up, no durabilità, per elicitation brevi. Tasks (SEP-2663) = risorsa durabile che sopravvive alla richiesta, per qualsiasi cosa sopravviva a un crash del client."}
+]} />
+
+## Fonti & letture ulteriori
+
+- [MCP Tasks extension overview — modelcontextprotocol.io](https://modelcontextprotocol.io/extensions/tasks/overview) — la pagina canonica della spec, con il diagramma completo del lifecycle e la guida di implementazione per lato.
+- [Repository ext-tasks (SEP-2663)](https://github.com/modelcontextprotocol/ext-tasks) — schema, tipi generati e testo della spec di lavoro.
+- [Annuncio della spec MCP 2026-07-28](https://blog.modelcontextprotocol.io/posts/2026-07-28/) — il blog di release che nomina Tasks come estensione first-party contribuita da AWS.
+- [Anthropic: Bringing MCP 2026-07-28 to Claude](https://claude.com/blog/bringing-mcp-2026-07-28-to-claude) — note di rollout dell'host Claude.
+- [Composio: l'update 2026-07-28, in linguaggio piano](https://composio.dev/content/mcp-2026-07-28-update-statelessness-apps-auth) — framing pratico di quando raggiungere Tasks vs MRTR.
+- Correlati su AILmanac: [MCP 2026-07-28: la spec stateless](/docs/api/mcp-2026-07-28-stateless), [MCP Apps: UI interattive](/docs/api/mcp-apps-interactive-uis), [Managed Agents](/docs/api/managed-agents), [Harness per agenti long-running](/docs/frontiers/long-running-agent-harnesses).
