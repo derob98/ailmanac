@@ -1,0 +1,248 @@
+---
+sidebar_position: 8.65
+title: "Kimi K3をローカルで動かす:vLLM、DSpark、そして本当のハードウェア請求書"
+description: "2026年、Moonshotの2.8Tオープンウェイト Kimi K3 をセルフホストするための決定版の実践ガイド。DSpark投機的デコードが実際に何をするか、最低限必要なハードウェア(1× DGX B300 または 16× DGX Spark)、正確なvLLMサーブコマンド、誰も警告しないプリフィル/デコードの非対称性、そしてホスト型推論が自分のラックより安くなるのはいつか。"
+keywords: [Kimi K3, vLLM, DSpark, 投機的デコード, DGX Spark, GB10, B300, LLMセルフホスト, MLA, MoE推論, ローカルフロンティアモデル, MXFP4, Kimi K3 ローカル実行]
+---
+
+<LevelBadge level="advanced" />
+
+Moonshotは **Kimi K3** — 2.8兆パラメータのMixture-of-Expertsモデル — を2026年7月27日にオープンソース化しました。数日以内に、r/LocalLLaMA の「16× DGX Spark クラスタで K3 フルモデルを自宅で動かした」というスレッドは 800+ upvotes を超えました。コメントは称賛とパニックが入り混じっており、それがスタントなのか、本物のレシピなのか、ハードウェアの罠なのか、誰も判断できませんでした。
+
+このページはそのレシピです。今日ローカルで動く唯一のサーブ経路(vLLM)、スループットを実用レベルにする投機的デコードのトリック(DSpark)、実際に必要な最低限のハードウェア、正確なサーブコマンド、初回で必ずハマる落とし穴、そしてMoonshotやRunpodのホスト型エンドポイントを呼ぶ場合との損益分岐計算を扱います。モデル自体 — アーキテクチャ、ベンチマーク、価格 — については、[Kimi K3: 世界最大のオープンウェイトモデル](/docs/models/kimi-k3-open-weight-frontier) を参照してください。
+
+<Callout type="objectives" items={[
+  "K3 フル版に最低限必要なハードウェアを知る(1× DGX B300 ノードまたは 16× B200 — これ以下の経路は今日時点で存在しない)",
+  "DSpark を1段落で理解する:ブロック拡散ドラフティング、約3.14倍高速化、1ステップあたり7投機的トークン",
+  "vLLM で K3 を2コマンドでサーブする — ほとんどのガイドが忘れるフラグ付きで",
+  "プリフィル/デコードの非対称性に向き合う:16× DGX Spark クラスタで読み込み750 tok/s vs 書き出し21 tok/s",
+  "損益分岐の計算をする:セルフホストが $0.95/M ホスト型に勝つのはいつか、そして絶対に勝てないのはいつか"
+]} />
+
+## 1段落バージョン
+
+今日 K3 で本番運用可能な唯一のサーブスタックは **vLLM** で、2026年7月27日に Day-0 対応が追加され、**DSpark** と呼ばれる新しい投機的デコーダも同時に登場しました。最低ハードウェアは 1× 8× B300 ノード(または 16× B200)。英雄的なコミュニティのセットアップでは、**16× DGX Spark (GB10) クラスタ** でフルモデルを自宅で動かし、BoMは約 $64k+、およそ **デコード21 tok/s、プリフィル750 tok/s** を達成します。ホスト型推論(Runpod、Moonshot自身のAPI)は入力 $0.95/M、出力 $4/M — ほとんどのチームにとって、これが正解です。ただし特にオンプレでウェイトが必要な場合を除きます。
+
+## ステップ1 — サイジングの壁を理解する
+
+K3 は2.8兆パラメータ。MXFP4 重み量子化(Moonshot が出荷する形式)でも、生重みだけで KV キャッシュを割り当てる前に **約 1.4 TB の VRAM アドレス可能メモリ** に達します。この数字がすべてを決めます。
+
+<Callout type="note" items={[
+  "K3 フルモデルを単一のコンシューマ GPU、Mac Studio、H100 が数枚のワークステーションで動かす方法はありません。サイジングは滑らかではなくステップ状です。",
+  "vLLM のガイドは明快です:少なくとも 1× 8× B300(または GB300 NVL72)ノードが必要、16× B200 もサポートされます。",
+  "量子化されたコミュニティ蒸留(Q2/Q3 やエキスパート剪定版)は時間とともにこの敷居を下げますが、2026年8月時点で動くレシピはすべてフロンティア級データセンターシリコン上でのフル精度 MXFP4 です。"
+]} />
+
+| ハードウェアプロファイル | 現実的な用途 | おおよその CapEx / OpEx |
+|---|---|---|
+| 1× DGX B300 (8× B300) | 本番セルフホスト、単一ノード | Runpod で約 $59/hr;購入価格 6桁 |
+| 16× B200 | 旧世代セルフホスト | Runpod で約 $94/hr |
+| 16× DGX Spark (GB10) クラスタ | 愛好家 / ラボ | 約 $64k–$75k CapEx + スイッチ + 2.3 kW ピーク |
+| これより下 | — | あなたはホスト API を呼んでいます |
+
+<VerifyNote lastVerified="2026-08-06" source="https://vllm-project.github.io/2026/07/27/k3.html" />
+
+## ステップ2 — DSpark を1段落で
+
+DSpark は K3 と同時にリリースされ vLLM にネイティブサポートされた **ブロック拡散型投機的デコーダ** です。MEDUSA や EAGLE のように投機的トークンを1つずつドラフトする代わりに、DSpark は 5層の非因果的注意バックボーンを使って **並列パスで7トークンをドラフト** し、K3 ターゲットに対してブロック単位で検証します。低ランクマルコフヘッドがブロック内依存性をモデル化し、信頼度ヘッドが受理可能性を予測するため、スケジューラはドラフティングが価値のあるタイミングを判断できます。
+
+vLLM ブログの具体的な数値:
+
+- **DSpark なし:** 118 tok/s(TP16)@ batch=1
+- **DSpark あり:** 370 tok/s(TP16)@ batch=1 — **3.14倍の高速化**
+- **平均受理長:** 3.85 トークン(14 ベンチマーク平均)、**コーディングでは4.73 トークン/ステップ** まで上昇、**創作では2.61** まで低下
+- **ドラフト-ターゲット互換性:** DSpark は K3 の1トークンあたり576要素の MLA 潜在を共有するため、ドラフトページはターゲット KV キャッシュと統合される — 別のページ形式なし、2つ目のキャッシュのVRAM税なし
+
+DSpark 投機的ウェイトは Hugging Face の [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark) にあり、vLLM の `--speculative-config` フラグでそのモデルを指定します。
+
+## ステップ3 — vLLM で K3 をサーブする
+
+vLLM ≥ 0.11.1 が必要です(K3 はこのリリースで Day-0 サポート)。コマンドは2つ:投機なし(可動部品が少なくスモークテストに便利)、DSpark あり(本番で実際に必要なもの)。
+
+### スモークテスト — プレーンな K3
+
+<PromptCard title="Serve K3 without DSpark (baseline)">{`vllm serve moonshotai/Kimi-K3 \\
+  --tensor-parallel-size 8 \\
+  --enable-prefix-caching \\
+  --trust-remote-code`}</PromptCard>
+
+見逃されがちな2つのフラグ:**`--enable-prefix-caching`** は vLLM でデフォルトオフで、K3 のワークロード(特にエージェント型コーディング)はキャッシュヒットに依存して初めて手頃になります — これをオフのままにすると、最初のプロンプトが毎ターン再処理されます。**`--trust-remote-code`** は K3 がまだ stock transformers にないカスタムモデルコード(KDA attention、LatentMoE ルーティング)を出荷しているため必須です。
+
+### 本番 — K3 + DSpark
+
+<PromptCard title="Serve K3 with DSpark speculative decoding">{`vllm serve moonshotai/Kimi-K3 \\
+  --tensor-parallel-size 16 \\
+  --enable-prefix-caching \\
+  --trust-remote-code \\
+  --speculative-config '{"method": "dspark", "model": "Inferact/Kimi-K3-DSpark", "num_speculative_tokens": 7, "attention_backend": "FLASHINFER_MLA", "draft_sample_method": "probabilistic", "rejection_sample_method": "block"}'`}</PromptCard>
+
+`num_speculative_tokens: 7` は DSpark 投機モデルの訓練済みブロックサイズと一致します — 下げないでください、ブロック拡散ドラフティングの本質を無駄にします。`attention_backend: FLASHINFER_MLA` は MLA ネイティブなドラフトがターゲットとキャッシュページを共有するために必要です。決定的サンプリングが必要な場合は、`draft_sample_method` を `"greedy"` に切り替え、クライアント側で temperature=0 を設定します。
+
+## ステップ4 — 誰も警告しないプリフィル/デコードの非対称性
+
+以下は、コミュニティのオペレータが **16× DGX Spark (GB10)** で DSpark を有効にし、MikroTik CRS804-4DDQ ネットワーキングと 4×400→4×100 Gb ブレイクアウトケーブル、ピーク2.3 kW で K3 フルモデルを動かした実測値です:
+
+| ワークロード | スループット | ピーク |
+|---|---|---|
+| プリフィル @ 4k コンテキスト | 655 tok/s | 8,288 tok/s |
+| デコード @ 4k コンテキスト | 21.7 tok/s | 37 tok/s |
+| プリフィル @ 16k コンテキスト | 759 tok/s | 21,457 tok/s |
+| デコード @ 16k コンテキスト | 25.4 tok/s | 38 tok/s |
+
+読み込みは書き出しより30〜40倍速い。実践的にはこう意味します:
+
+- **大規模コードリポジトリや研究コーパスに対する長文コンテキスト Q&A** は美しく動きます — 壁時計時間1分あたりほぼ100万トークンでコーパスを取り込みます。
+- **長文生成、ストリーミングアシスタント、チャット風UI** は遅く感じます — 25 tok/s は使えるレベルですが、ホスト型 Sonnet/Fable クラスのモデルより明らかに遅れます。
+- **モデルが長いツール呼び出しチェーンを生成するエージェント型ループ** はデコードのボトルネックを増幅します。より簡潔な推論スタイルと構造化出力を検討してください。
+- **バッチはプリフィルよりデコードに効きます** — 並行リクエストが増えると GPU秒あたりのスループットは急峻に上昇します(vLLM ブログは高並行時に GPU秒あたり2K+ トークンを報告)。
+
+<VerifyNote lastVerified="2026-08-06" source="https://forums.developer.nvidia.com/t/full-kimi-k3-running-on-16x-gb10-cluster/379174" />
+
+## ステップ5 — 初週の運用スレッドから見えた5つの落とし穴
+
+<Steps items={[
+  {
+    title: "プレフィックスキャッシュはデフォルトオフ",
+    body: "vLLM ブログ以外のすべてのサーブガイドがこれを忘れます。--enable-prefix-caching なしでは、K3 の 90%+ の実世界キャッシュヒット率が0%になり、毎ターン全プロンプトが再処理されます。コストとレイテンシの両方が爆発します。一度設定して、永遠にオン。"
+  },
+  {
+    title: "ツール呼び出しスキーマが静かに壊れる",
+    body: "K3 はツール使用向けに訓練されていますが、時折最初のトークンでパース不可能な JSON を生成したり、長い引数リストで閉じ括弧を落としたりします。ツール呼び出しパースをバリデータでラップし、1回のリトライを入れてください — vLLM チームはリリースノートでこれを既知の挙動として明示しています。"
+  },
+  {
+    title: "低い max_tokens で回答が切り詰められる",
+    body: "K3 は平均で K2.6 より約21%少ない出力トークンを使いますが、個別の応答は複雑な推論でまだ切り詰めに当たり得ます。max_tokens を寛大に上げ(推論トレース用に16k+)、切れた回答が見えたら推論エフォートを上げてください。"
+  },
+  {
+    title: "MoE ルーティングが高バッチサイズでメモリ圧を増幅する",
+    body: "K3 はトークンあたり896エキスパートのうち16をアクティブ化します — バースト的な並行負荷下では、エキスパート並列デプロイは多くのリクエストが重複するエキスパートサブセットにヒットしたときに VRAM をスパイクさせ得ます。ヘッドルームを確保するか並行数を制限してください;100% メモリ使用率で動かさないでください。"
+  },
+  {
+    title: "計算より先にネットワークがスループットを食いつぶす",
+    body: "マルチノード構成(16× GB10、16× B200)では、相互接続帯域が計算より遥かに先に天井になります。コミュニティの GB10 セットアップはノードあたり 4×400 Gb バックホールから 4×100 Gb を使います。スイッチをケチると、DSpark ドラフトが KV ページを待って停滞します。"
+  }
+]} />
+
+## ステップ6 — そもそもセルフホストすべきか?
+
+ほとんどのチームにとって正直な答えは「いいえ」です。ワークロードに応じて損益分岐計算をしてください:
+
+| 経路 | コスト | 勝つとき |
+|---|---|---|
+| **Moonshot API** | 入力 $3.00/M、キャッシュヒット $0.30/M、出力 $15/M | プロトタイピング、低ボリューム、非機密データ |
+| **Runpod ホスト K3** | 入力 $0.95/M、出力 $4/M | 中ボリューム定常、OpenAI 互換エンドポイントが必要、計算がどこで動くか気にしない |
+| **Runpod 8× B300 時間貸し** | $59.12/hr | バースト実行、サーブ設定を制御したい、それでも CapEx は嫌 |
+| **ハードウェアを所有** | $80k–$500k+ CapEx | 厳格なデータレジデンシー、24/7 飽和、または競合する推論プロダクトを構築中 |
+
+16× GB10 クラスタのデコード約21 tok/s では、1ノードで時間あたり約76k 出力トークンを生成します。Runpod-K3 ホスト価格ではそれは時間あたり $0.30 の出力トークンです。$59/hr のホスト料金に勝つには、高バッチで **約 1500万出力トークン/hr** に近いスループットと100%近い稼働率が必要です — 並行数で達成可能ですが、実際にそれだけの需要がある場合のみです。それ以下では、ホストが1桁勝ちます。
+
+2026年に K3 をセルフホストする正しい理由:
+
+- **データレジデンシー / 規制** — プロンプトと補完が VPC を離れられない。
+- **継続的飽和** — 24/7 で動くエージェント群があり、キャッシュヒット価格でも痛い。
+- **モデル変更** — カスタム DSpark 投機モデルを訓練中、MoE エキスパートに LoRA ファインチューンをしている、またはルーティング変更を実験中。
+- **学習価値** — フロンティア MoE サーブをメタルレベルで理解したいラボまたはチーム。
+
+これらのいずれも当てはまらない場合は、API を呼び、節約したエンジニアリング時間をより良いプロンプト、より良い評価、より良い [コンテキストエンジニアリング](/docs/frontiers/context-engineering) に回してください。
+
+## ステップ7 — どの経路を選んでも動く最小 Python クライアント
+
+vLLM は OpenAI 互換エンドポイントを公開しているため、同じクライアントが自前のラック、Runpod のホスト K3、Moonshot の API で動きます。
+
+<PromptCard title="Call your K3 endpoint with the OpenAI Python SDK">{`from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8000/v1",   # or Runpod / Moonshot base URL
+    api_key="EMPTY",                        # self-hosted vLLM ignores keys
+)
+
+resp = client.chat.completions.create(
+    model="moonshotai/Kimi-K3",
+    messages=[
+        {"role": "system", "content": "You are a terse coding assistant."},
+        {"role": "user",   "content": "Explain DSpark speculative decoding in three bullets."},
+    ],
+    max_tokens=8192,
+    temperature=0.2,
+)
+
+print(resp.choices[0].message.content)`}</PromptCard>
+
+## フラッシュカード — 覚えておくべき数字
+
+<Flashcards items={[
+  { front: "現時点で vLLM で K3 フルをサーブするための最低ハードウェア", back: "1× 8-B300 ノード、または 16× B200。まだサブフロンティア経路なし。" },
+  { front: "DSpark の高速化と投機的ブロックサイズ", back: "約3.14倍(TP16 batch=1 で 118→370 tok/s)、並列パスあたり7トークンをドラフト。" },
+  { front: "DSpark の平均受理長", back: "ベンチマーク平均で3.85トークン — コーディング4.73、創作2.61。" },
+  { front: "DSpark 投機モデルが継承する K3 の KV キャッシュ形式", back: "MLA、トークンあたり576要素の潜在 — ドラフトページはターゲットキャッシュと統合。" },
+  { front: "デフォルトで静かにオフの vLLM フラグ", back: "--enable-prefix-caching。K3 の 90%+ キャッシュヒットワークロードプロファイルを保つために必要。" },
+  { front: "16× DGX Spark 自宅クラスタでのデコードスループット", back: "平均約21 tok/s、ピーク38 tok/s — プリフィル約750 tok/s より30〜40倍遅い。" },
+  { front: "Runpod ホスト K3 の価格", back: "入力 $0.95/M、出力 $4/M — ほとんどのワークロードでハードウェア所有より1桁安い。" }
+]} />
+
+## クイズ
+
+<Quiz questions={[
+  {
+    q: "200kトークンの研究コーパスとアナリストがチャットできる社内ツールを設計中。最初のトークンのレイテンシが重要、ユーザーあたりのトークン量は少ない。K3 をセルフホストすべきか?",
+    options: [
+      "はい — コーパスのプライバシーが向上する",
+      "いいえ — ホスト API を呼ぶ;ワークロードはプリフィル重視・低スループットで、まさにホストが勝つ領域",
+      "はい — 16× GB10 リグはプリフィルでどんなホスト API にも勝つ",
+      "月の満ち欠けによる"
+    ],
+    answer: 1,
+    explain: "このワークロードはプリフィル支配的で低 QPS。クラスタの約750 tok/s プリフィルでもホスト価格で十分で、$59/hr ノードを飽和させることもない。セルフホストの正当化はプライバシー/レジデンシーが厳格要件のときだけ — 質問はそう述べていない。"
+  },
+  {
+    q: "初回の本番 K3 サーブに最も安全な vLLM フラグの組み合わせは?",
+    options: [
+      "--tensor-parallel-size 8 --trust-remote-code",
+      "--tensor-parallel-size 8 --enable-prefix-caching --trust-remote-code",
+      "--tensor-parallel-size 1 --enable-prefix-caching",
+      "--tensor-parallel-size 8 --enable-prefix-caching --disable-log-stats"
+    ],
+    answer: 1,
+    explain: "TP-1 では K3 を保持できない。--enable-prefix-caching をスキップするとモデルはコストの穴になる。--trust-remote-code は K3 のカスタムカーネルに必要。選択肢(2)が最小安全ベースライン。"
+  },
+  {
+    q: "DSpark は並列パスで7トークンをドラフトする。実際に K3 がステップあたり典型的にいくつを受理するか?",
+    options: [
+      "7全部、常に",
+      "ゼロ — 投機的デコードはフロンティアモデルではたいてい失敗する",
+      "平均約3.85、コーディングはより高く(約4.73)、創作はより低く(約2.61)",
+      "きっかり1 — 自己回帰と同じ"
+    ],
+    answer: 2,
+    explain: "vLLM DSpark ベンチマークはステップあたり平均受理長3.85トークンを報告。コーディングは高度に冗長(予測可能な構文)、創作はトークンあたりエントロピーが高い。"
+  },
+  {
+    q: "16× DGX Spark を机に置いた。ユーザーに期待させるべきスループットプロファイルは?",
+    options: [
+      "何でも速い — これは個人用スーパーコンピューター",
+      "読み込みは非常に速く(プリフィル約750 tok/s)、書き出しは遅い(デコード約21 tok/s)",
+      "読み込みが遅く、書き出しが速い",
+      "単一 DGX B300 と同じ"
+    ],
+    answer: 1,
+    explain: "GB10 ノードはコヒーレントな統合メモリを持つがノードあたりの帯域は控えめ。長文コンテキストの取り込みは非常に速いが、トークン単位の生成はプリフィルより30〜40倍遅く、ホスト API より物質的に遅い。"
+  }
+]} />
+
+## ホスト経路に切り替えるべきとき
+
+- **プロトタイピングとデモ** — Moonshot の API か Runpod を使う。レイテンシも価格もどちらも問題なし。
+- **コスト重視の大ボリューム** — Moonshot の $0.30/M キャッシュヒット入力価格は、実際にキャッシュされるワークロードでは無敵。
+- **Claude Code や他のハーネスでのエージェント型コーディング** — [AI ゲートウェイ (LiteLLM / OpenRouter / Portkey)](/docs/models/ai-gateways-litellm-openrouter-portkey) 経由で K3 を差し込み、ハーネスを変えずにモデルを切り替える。
+- **モデル比較作業** — K3 が正しい選択か Anthropic に留まるかについては、[モデルの選び方](/docs/models/choosing-a-model) と [Claude ユーザーのための Kimi K3](/docs/models/kimi-k2-for-claude-users) を参照。
+
+<VerifyNote lastVerified="2026-08-06" source="https://www.runpod.io/kimi-k3" />
+
+## ソースと参考文献
+
+- [Kimi K3 Is Here: Efficient Day-0 Support on vLLM — vLLM Blog (2026-07-27)](https://vllm-project.github.io/2026/07/27/k3.html) — 正典のサーブガイドと DSpark ベンチマーク。
+- [Inferact/Kimi-K3-DSpark — Hugging Face モデルカード](https://huggingface.co/Inferact/Kimi-K3-DSpark) — ドラフトモデルアーキテクチャ、レイヤー選択の詳細、サンプリングフラグ。
+- [Full Kimi K3 running on 16× GB10 cluster — NVIDIA Developer Forums](https://forums.developer.nvidia.com/t/full-kimi-k3-running-on-16x-gb10-cluster/379174) — 上記で引用したコミュニティのスループット数値とネットワーキングレシピ。
+- [Deploy Kimi K3 on Runpod](https://www.runpod.io/kimi-k3) — ホスト K3 価格と B300/B200 時間料金。
+- [Moonshot AI — Kimi K3 ブログ](https://www.kimi.com/blog/kimi-k3) — 公式モデルカード、MoE 構成、MXFP4 量子化ノート。
+- [Kimi K3: 世界最大のオープンウェイトモデル](/docs/models/kimi-k3-open-weight-frontier) — モデルのアーキテクチャ、ベンチマーク、価格計算をカバーする AILmanac 姉妹ページ。
