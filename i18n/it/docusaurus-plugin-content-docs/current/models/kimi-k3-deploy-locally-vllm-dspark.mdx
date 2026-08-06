@@ -1,0 +1,248 @@
+---
+sidebar_position: 8.65
+title: "Eseguire Kimi K3 in locale: vLLM, DSpark e il vero conto hardware"
+description: "La guida pratica definitiva per il self-hosting di Kimi K3, l'open-weight da 2.8T di Moonshot, nel 2026. Cosa fa davvero il speculative decoding DSpark, hardware minimo (1× DGX B300 o 16× DGX Spark), i comandi vLLM esatti, l'asimmetria prefill/decode di cui nessuno ti avverte, e quando l'inferenza hosted batte il tuo rack."
+keywords: [Kimi K3, vLLM, DSpark, speculative decoding, DGX Spark, GB10, B300, self host LLM, MLA, MoE inference, local frontier model, MXFP4, run Kimi K3 locally]
+---
+
+<LevelBadge level="advanced" />
+
+Moonshot ha rilasciato in open source **Kimi K3** — un Mixture-of-Experts da 2.800 miliardi di parametri — il 27 luglio 2026. In pochi giorni, il thread r/LocalLLaMA su "K3 completo in esecuzione su un cluster 16× DGX Spark a casa" ha superato gli 800 upvote. I commenti erano un misto di ammirazione e panico: nessuno riusciva a capire se fosse una trovata, una ricetta vera o una trappola hardware.
+
+Questa pagina è la ricetta. Copre l'unica via di serving locale funzionante oggi (vLLM), il trucco di speculative decoding (DSpark) che rende il throughput vivibile, l'hardware minimo che ti serve davvero, i comandi di serve esatti, le insidie che ti morderanno al primo tentativo e la matematica del breakeven rispetto a chiamare direttamente l'endpoint hosted di Moonshot o Runpod. Per il modello in sé — architettura, benchmark, pricing — vedi [Kimi K3: il più grande modello open-weight al mondo](/docs/models/kimi-k3-open-weight-frontier).
+
+<Callout type="objectives" items={[
+  "Conoscere l'hardware minimo praticabile per K3 completo (1× DGX B300 node o 16× B200 — oggi non esiste una via inferiore)",
+  "Capire DSpark in un paragrafo: drafting block-diffusion, ~3.14× di speedup, 7 token speculativi per step",
+  "Servire K3 con vLLM in due comandi — con i flag che la maggior parte delle guide dimentica",
+  "Affrontare l'asimmetria prefill/decode: 750 tok/s in lettura vs 21 tok/s in scrittura su un cluster 16× DGX Spark",
+  "Fare la matematica del breakeven: quando il self-hosting batte $0.95/M hosted, e quando decisamente no",
+]} />
+
+## La versione in un paragrafo
+
+L'unico stack di serving pronto per produzione per K3 oggi è **vLLM**, che ha aggiunto il supporto Day-0 il 27 luglio 2026, insieme a un decoder speculativo inedito chiamato **DSpark**. L'hardware minimo è un node 8× B300 (o 16× B200); una configurazione eroica della community esegue il modello completo su un cluster **16× DGX Spark (GB10)** a casa per un bill of materials di ~$64k+, restituendo circa **21 tok/s di decode e 750 tok/s di prefill**. L'inferenza hosted (Runpod, API di Moonshot stessa) costa $0.95/M input e $4/M output — per quasi ogni team, è la risposta giusta a meno che tu non abbia bisogno specifico dei pesi on-prem.
+
+## Passo 1 — Comprendere il muro del sizing
+
+K3 ha 2.800 miliardi di parametri. Anche in quantizzazione dei pesi MXFP4 (il formato che Moonshot distribuisce), i pesi grezzi occupano circa **~1.4 TB di memoria indirizzabile in VRAM** prima di allocare la KV cache. Quel numero decide tutto il resto.
+
+<Callout type="note" items={[
+  "Non c'è alcuna via per eseguire K3 completo su una singola GPU consumer, un Mac Studio o una workstation con un paio di H100. Il sizing è a gradini, non liscio.",
+  "La guida vLLM è inequivocabile: è richiesto almeno un node 8× B300 (o un GB300 NVL72); anche 16× B200 è supportato.",
+  "Distillazioni quantizzate della community (varianti Q2/Q3 o con expert pruning) abbasseranno l'asticella nel tempo — ma ad agosto 2026 le ricette funzionanti sono tutte MXFP4 a precisione piena su silicon frontier da data-center."
+]} />
+
+| Profilo hardware | Uso realistico | Capex / opex indicativi |
+|---|---|---|
+| 1× DGX B300 (8× B300) | Self-host in produzione, singolo node | ~$59/hr su Runpod; prezzo d'acquisto a 6 cifre |
+| 16× B200 | Self-host di generazione precedente | ~$94/hr su Runpod |
+| Cluster 16× DGX Spark (GB10) | Enthusiast / lab | ~$64k–$75k capex + switch + 2.3 kW di picco |
+| Nulla al di sotto | — | Stai chiamando l'API hosted |
+
+<VerifyNote lastVerified="2026-08-06" source="https://vllm-project.github.io/2026/07/27/k3.html" />
+
+## Passo 2 — DSpark, in un paragrafo
+
+DSpark è un **decoder speculativo block-diffusion** distribuito insieme a K3 e supportato nativamente in vLLM. Invece di draftare un token speculativo alla volta (come MEDUSA o EAGLE), DSpark usa un backbone di attention non causale a 5 layer per draftare **7 token in un unico passaggio parallelo**, poi li verifica un blocco alla volta contro il target K3. Una head Markov a basso rango modella la dipendenza intra-blocco, e una head di confidence predice la probabilità di accettazione così che lo scheduler possa decidere quando draftare vale la pena.
+
+Numeri concreti dal blog vLLM:
+
+- **Senza DSpark:** 118 tok/s (TP16) a batch=1
+- **Con DSpark:** 370 tok/s (TP16) a batch=1 — uno speedup di **3.14×**
+- **Lunghezza media di accettazione:** 3.85 token (su 14 benchmark), che sale a **4.73 token per step sul coding** e scende a **2.61 sulla scrittura creativa**
+- **Compatibilità draft-target:** DSpark condivide il latente MLA da 576 elementi per token di K3, così le pagine di draft si unificano con la KV cache del target — nessun formato di pagina separato, nessuna tassa VRAM per una seconda cache
+
+I pesi dello speculator DSpark si trovano su [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark) su Hugging Face; il flag vLLM `--speculative-config` punta a quel modello.
+
+## Passo 3 — Servire K3 con vLLM
+
+Ti serve vLLM ≥ 0.11.1 (K3 è arrivato con supporto Day-0 in quella release). Due comandi: uno senza speculazione (meno parti mobili, utile per uno smoke test), uno con DSpark (quello che vuoi davvero in produzione).
+
+### Smoke test — K3 base
+
+<PromptCard title="Servire K3 senza DSpark (baseline)">{`vllm serve moonshotai/Kimi-K3 \\
+  --tensor-parallel-size 8 \\
+  --enable-prefix-caching \\
+  --trust-remote-code`}</PromptCard>
+
+Due flag che tutti dimenticano: **`--enable-prefix-caching`** è disattivo di default in vLLM, e i workload K3 (specialmente coding agentico) contano su cache hit per essere sostenibili — lascialo spento e il tuo primo prompt viene rielaborato a ogni turno. **`--trust-remote-code`** è richiesto perché K3 distribuisce codice di modello custom (KDA attention, routing LatentMoE) che non è ancora nei transformers standard.
+
+### Produzione — K3 + DSpark
+
+<PromptCard title="Servire K3 con speculative decoding DSpark">{`vllm serve moonshotai/Kimi-K3 \\
+  --tensor-parallel-size 16 \\
+  --enable-prefix-caching \\
+  --trust-remote-code \\
+  --speculative-config '{"method": "dspark", "model": "Inferact/Kimi-K3-DSpark", "num_speculative_tokens": 7, "attention_backend": "FLASHINFER_MLA", "draft_sample_method": "probabilistic", "rejection_sample_method": "block"}'`}</PromptCard>
+
+Il `num_speculative_tokens: 7` combacia con la block size su cui lo speculator DSpark è stato addestrato — non abbassarlo, sprechi il punto intero del block-diffusion drafting. `attention_backend: FLASHINFER_MLA` è richiesto perché il draft MLA-nativo condivida le pagine di cache con il target. Se vuoi sampling deterministico, cambia `draft_sample_method` in `"greedy"` e imposta temperature=0 lato client.
+
+## Passo 4 — L'asimmetria prefill/decode di cui nessuno ti avverte
+
+Ecco i numeri reali che un operatore della community ha pubblicato eseguendo K3 completo su **16× DGX Spark (GB10)** con DSpark abilitato, usando networking MikroTik CRS804-4DDQ e cavi breakout 4×400→4×100 Gb a 2.3 kW di picco:
+
+| Workload | Throughput | Picco |
+|---|---|---|
+| Prefill @ contesto 4k | 655 tok/s | 8.288 tok/s |
+| Decode @ contesto 4k | 21.7 tok/s | 37 tok/s |
+| Prefill @ contesto 16k | 759 tok/s | 21.457 tok/s |
+| Decode @ contesto 16k | 25.4 tok/s | 38 tok/s |
+
+Leggere è 30–40× più veloce che scrivere. In pratica significa:
+
+- **Q&A a lungo contesto su grandi repo di codice o corpus di ricerca** funziona magnificamente — ingerisci il corpus a quasi un milione di token per minuto di wall time.
+- **Generazione lunga, assistenti streaming, UI chat-style** si sentono lenti — 25 tok/s è vivibile ma visibilmente in ritardo rispetto a un modello hosted class Sonnet/Fable.
+- **Loop agentici in cui il modello produce lunghe catene di tool-call** amplificano il collo di bottiglia del decode. Considera stili di reasoning più concisi e output strutturati.
+- **Il batching aiuta il decode più del prefill** — il throughput per GPU-secondo sale ripidamente all'aumentare delle richieste concorrenti (il blog vLLM riporta oltre 2K token per GPU-secondo ad alta concorrenza).
+
+<VerifyNote lastVerified="2026-08-06" source="https://forums.developer.nvidia.com/t/full-kimi-k3-running-on-16x-gb10-cluster/379174" />
+
+## Passo 5 — I cinque tranelli dai thread ops della prima settimana
+
+<Steps items={[
+  {
+    title: "Il prefix caching è disattivo di default",
+    body: "Ogni guida di serving tranne il blog vLLM lo dimentica. Senza --enable-prefix-caching, il 90%+ di cache hit rate reale di K3 diventa 0% e ogni turno rielabora il prompt intero. Costo e latenza esplodono entrambi. Impostalo una volta, per sempre."
+  },
+  {
+    title: "Gli schema di tool-calling si rompono in silenzio",
+    body: "K3 è addestrato per l'uso di tool ma occasionalmente produce JSON non parsabile sul primo token o dimentica una parentesi di chiusura su liste di argomenti lunghe. Avvolgi il parsing dei tool-call in un validatore con un singolo retry — il team vLLM segnala esplicitamente questo comportamento nelle note di release."
+  },
+  {
+    title: "Le risposte vengono troncate con max_tokens basso",
+    body: "K3 usa ~21% di token di output in meno rispetto a K2.6 in media, ma le singole risposte possono comunque colpire il troncamento su reasoning complesso. Alza generosamente max_tokens (16k+ per tracce di reasoning) e aumenta il reasoning effort se vedi risposte tagliate."
+  },
+  {
+    title: "Il routing MoE amplifica la pressione di memoria ad alti batch size",
+    body: "K3 attiva 16 esperti su 896 per token — sotto carico concorrente a raffica, i deployment expert-parallel possono far schizzare la VRAM man mano che molte richieste colpiscono sottoinsiemi di esperti sovrapposti. Prevedi headroom o metti un cap alla concorrenza; non far girare al 100% di utilizzo memoria."
+  },
+  {
+    title: "Il networking si mangia il tuo throughput prima del compute",
+    body: "Su setup multi-node (16× GB10, 16× B200), la banda di interconnect è il tetto molto prima del compute. Il setup GB10 della community usa 4×400 Gb di backhaul in 4×100 Gb per node. Se risparmi sullo switch, i draft DSpark si bloccheranno in attesa di pagine KV."
+  }
+]} />
+
+## Passo 6 — Dovresti proprio fare self-host?
+
+Per la maggior parte dei team la risposta onesta è no. Fai la matematica del breakeven sul tuo workload:
+
+| Via | Costo | Quando vince |
+|---|---|---|
+| **API Moonshot** | $3.00/M in, $0.30/M cache-hit, $15/M out | Prototipazione, volume basso, dati non sensibili |
+| **K3 hosted Runpod** | $0.95/M in, $4/M out | Volume medio costante, serve endpoint OpenAI-compatible, indifferente a dove gira il compute |
+| **Runpod 8× B300 a ore** | $59.12/hr | Run a raffica, serve controllo sulla config di serving, comunque niente capex |
+| **Possedere l'hardware** | $80k–$500k+ capex | Data-residency stretta, saturazione 24/7, o stai costruendo un prodotto di inferenza concorrente |
+
+Al decode del cluster 16× GB10 di ~21 tok/s, un node produce ~76k token di output/ora. Al pricing hosted Runpod-K3 sono $0.30 di output token per ora. Per battere una tariffa hosted di $59/hr avresti bisogno di un throughput più vicino a **~15M token di output/ora ad alto batch** e utilizzo vicino al 100% — raggiungibile con concorrenza, ma solo se davvero hai quella domanda. Sotto quella soglia, l'hosted vince di un ordine di grandezza.
+
+I motivi corretti per fare self-host di K3 nel 2026:
+
+- **Data residency / regolamentare** — i prompt e i completion non possono lasciare il tuo VPC.
+- **Saturazione continua** — hai una flotta di agenti che gira 24/7 e il pricing cache-hit fa comunque male.
+- **Modifica del modello** — stai addestrando uno speculator DSpark custom, facendo finetune LoRA sugli esperti MoE, o sperimentando cambi di routing.
+- **Valore di apprendimento** — un lab o un team che vuole specificamente capire il serving MoE frontier al metallo.
+
+Se nessuno di questi si applica, chiama l'API e reindirizza il tempo di ingegneria risparmiato verso prompt migliori, eval migliori e migliore [context engineering](/docs/frontiers/context-engineering).
+
+## Passo 7 — Un client Python minimo per la via che scegli
+
+vLLM espone un endpoint OpenAI-compatible, quindi lo stesso client funziona contro il tuo rack, il K3 hosted di Runpod o l'API di Moonshot.
+
+<PromptCard title="Chiamare il tuo endpoint K3 con l'SDK Python di OpenAI">{`from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8000/v1",   # or Runpod / Moonshot base URL
+    api_key="EMPTY",                        # self-hosted vLLM ignores keys
+)
+
+resp = client.chat.completions.create(
+    model="moonshotai/Kimi-K3",
+    messages=[
+        {"role": "system", "content": "You are a terse coding assistant."},
+        {"role": "user",   "content": "Explain DSpark speculative decoding in three bullets."},
+    ],
+    max_tokens=8192,
+    temperature=0.2,
+)
+
+print(resp.choices[0].message.content)`}</PromptCard>
+
+## Flashcard — i numeri che dovresti sapere a memoria
+
+<Flashcards items={[
+  { front: "Hardware minimo per servire K3 completo in vLLM oggi", back: "1× node 8-B300, oppure 16× B200. Nessuna via sub-frontier ancora." },
+  { front: "Speedup DSpark e block size speculativa", back: "~3.14× (118→370 tok/s a TP16, batch=1), drafta 7 token per passaggio parallelo." },
+  { front: "Lunghezza media di accettazione DSpark", back: "3.85 token sui benchmark — 4.73 sul coding, 2.61 sulla scrittura creativa." },
+  { front: "Formato della KV cache K3 che lo speculator DSpark eredita", back: "MLA con latente da 576 elementi per token — le pagine di draft si unificano con la cache del target." },
+  { front: "Il flag vLLM disattivo di default in silenzio", back: "--enable-prefix-caching. K3 ne ha bisogno perché il profilo di workload con 90%+ cache-hit regga." },
+  { front: "Throughput di decode sul cluster casalingo 16× DGX Spark", back: "~21 tok/s medio, 38 tok/s di picco — 30–40× più lento del suo prefill di ~750 tok/s." },
+  { front: "Pricing hosted Runpod K3", back: "$0.95/M input, $4/M output — un ordine di grandezza più economico che possedere hardware per la maggior parte dei workload." }
+]} />
+
+## Quiz
+
+<Quiz questions={[
+  {
+    q: "Stai draftando uno strumento interno che permette agli analisti di chattare con un corpus di ricerca da 200k token. La latenza del primo token conta, il volume di token per utente è basso. Dovresti fare self-host di K3?",
+    options: [
+      "Sì — ottieni miglior privacy per il corpus",
+      "No — chiama l'API hosted; il workload è prefill-heavy e a basso throughput, esattamente dove l'hosted vince",
+      "Sì — il rig 16× GB10 batterà qualsiasi API hosted sul prefill",
+      "Dipende dalla fase della luna"
+    ],
+    answer: 1,
+    explain: "Questo workload è dominato dal prefill e a bassa QPS. Anche il prefill del cluster di ~750 tok/s va bene ai prezzi hosted, e non saturi mai un node da $59/hr. Il self-hosting si giustifica solo se privacy/residency è un requisito duro — cosa che la domanda non afferma."
+  },
+  {
+    q: "Quale combinazione di flag vLLM è più sicura per una prima serve K3 in produzione?",
+    options: [
+      "--tensor-parallel-size 8 --trust-remote-code",
+      "--tensor-parallel-size 8 --enable-prefix-caching --trust-remote-code",
+      "--tensor-parallel-size 1 --enable-prefix-caching",
+      "--tensor-parallel-size 8 --enable-prefix-caching --disable-log-stats"
+    ],
+    answer: 1,
+    explain: "TP-1 non può contenere K3. Saltare --enable-prefix-caching trasforma il modello in un pozzo di costi. --trust-remote-code è richiesto per i kernel custom di K3. L'opzione (2) è la baseline minima sicura."
+  },
+  {
+    q: "DSpark drafta 7 token in un passaggio parallelo. In pratica, quanti di quei 7 vengono tipicamente accettati da K3 per step?",
+    options: [
+      "Tutti e 7, sempre",
+      "Zero — il speculative decoding di solito fallisce sui modelli frontier",
+      "Circa 3.85 in media, con il coding che va più alto (~4.73) e la scrittura creativa più basso (~2.61)",
+      "Esattamente 1 — come l'autoregressive"
+    ],
+    answer: 2,
+    explain: "Il benchmark DSpark di vLLM riporta una lunghezza media di accettazione di 3.85 token per step. Il coding è altamente ridondante (sintassi prevedibile) e la scrittura creativa ha più entropia per token."
+  },
+  {
+    q: "Metti 16× DGX Spark box sulla scrivania. Che profilo di throughput dovresti dire agli utenti di aspettarsi?",
+    options: [
+      "Veloce in tutto — è un supercomputer personale",
+      "Molto veloce in lettura (prefill ~750 tok/s), lento in scrittura (~21 tok/s decode)",
+      "Lento in lettura, veloce in scrittura",
+      "Identico a un singolo DGX B300"
+    ],
+    answer: 1,
+    explain: "I node GB10 hanno memoria unificata coerente ma banda per-node modesta. L'ingestione di contesti lunghi è molto veloce; la generazione token-per-token è 30–40× più lenta del prefill e sostanzialmente più lenta delle API hosted."
+  }
+]} />
+
+## Quando puntare invece su una via hosted
+
+- **Prototipazione e demo** — usa l'API di Moonshot o Runpod. Latenza e pricing vanno entrambi bene.
+- **Alto volume sensibile al costo** — il pricing input cache-hit di Moonshot a $0.30/M è imbattibile quando il tuo workload effettivamente cachea.
+- **Coding agentico con Claude Code o un altro harness** — collega K3 tramite un [AI gateway (LiteLLM / OpenRouter / Portkey)](/docs/models/ai-gateways-litellm-openrouter-portkey) e scambia modelli senza cambiare harness.
+- **Lavoro di comparazione modelli** — vedi [Scegliere un modello](/docs/models/choosing-a-model) e [Kimi K3 per utenti Claude](/docs/models/kimi-k2-for-claude-users) per capire quando K3 è la scelta giusta rispetto a restare con Anthropic.
+
+<VerifyNote lastVerified="2026-08-06" source="https://www.runpod.io/kimi-k3" />
+
+## Fonti e letture ulteriori
+
+- [Kimi K3 Is Here: Efficient Day-0 Support on vLLM — vLLM Blog (2026-07-27)](https://vllm-project.github.io/2026/07/27/k3.html) — guida canonica di serving e benchmark DSpark.
+- [Inferact/Kimi-K3-DSpark — Hugging Face model card](https://huggingface.co/Inferact/Kimi-K3-DSpark) — architettura draft-model, dettagli layer-selection, flag di sampling.
+- [Full Kimi K3 running on 16× GB10 cluster — NVIDIA Developer Forums](https://forums.developer.nvidia.com/t/full-kimi-k3-running-on-16x-gb10-cluster/379174) — i numeri di throughput della community e la ricetta di networking citati sopra.
+- [Deploy Kimi K3 on Runpod](https://www.runpod.io/kimi-k3) — pricing K3 hosted e tariffe orarie B300/B200.
+- [Moonshot AI — Kimi K3 blog](https://www.kimi.com/blog/kimi-k3) — model card ufficiale, configurazione MoE, note di quantizzazione MXFP4.
+- [Kimi K3: il più grande modello open-weight al mondo](/docs/models/kimi-k3-open-weight-frontier) — pagina AILmanac companion su architettura, benchmark e matematica di pricing del modello.
