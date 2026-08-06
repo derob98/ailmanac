@@ -1,0 +1,316 @@
+---
+sidebar_position: 13.7
+title: "Playwright MCP:深く実践的なガイド(2026)"
+description: "Microsoft の Playwright MCP は今や世界No.1 の MCP サーバー — GitHub や Figma を上回る。ほとんど誰も教えない部分:デフォルトのアクセシビリティスナップショットモードは vision より速いだけでなく、まったく別の自動化パラダイムだ。プロファイル、オプトインの機能パック、あなたの実 Chrome にアタッチするブラウザ拡張モード、Playwright-as-a-Skill とのトークンコスト対決、そして越えてはならないセキュリティの一線。"
+keywords: [Playwright MCP, playwright-mcp, ブラウザ自動化 MCP, アクセシビリティスナップショット, Claude Code Playwright, Cursor Playwright, Codex browser, MCP ブラウザ自動化, --caps=vision, ブラウザ拡張モード, isolated profile, storage state, Playwright CLI vs MCP, Playwright Skill, MCP tool token cost]
+---
+
+<LevelBadge level="intermediate" />
+
+Microsoft の [`playwright-mcp`](https://github.com/microsoft/playwright-mcp) は GitHub スター約35kを持ち、コミュニティが管理する MCP レジストリでは、公式 GitHub MCP や Figma MCP サーバーさえ超えて **地球上で最もインストールされている MCP サーバー** となっています。Claude Code、Cursor、Codex、Windsurf、Claude Desktop を使っていて、エージェントに「サイトをチェックして」「あのダッシュボードからデータを取ってきて」と一度でも頼んだことがあるなら、実際の作業をしているのはこのツールです。
+
+これに関するほとんどのガイドは2行のインストールで止まります。このページは、その後に本当に重要な部分:ツールが *フードの下で実際に何をしているか*、人々が気づかないモード、そして2週目に姿を現す鋭利な角 — トークンコスト、セキュリティ、ブラウザプロファイルのロック — です。
+
+<Callout type="objectives" items={[
+  "アクセシビリティスナップショットモード(デフォルト)が vision より速いだけでなく — LLM が決定論的に扱う別の自動化パラダイムである理由を理解する",
+  "3つのプロファイルモード — persistent、isolated、browser-extension — を知り、それぞれがいつ正しい選択かを知る",
+  "--caps でオプトインの機能パック(network、storage、devtools、vision、pdf、testing)を有効化し、なぜデフォルトオフなのかを理解する",
+  "Claude Code セッションでの Playwright MCP の実トークンコストを見て、Playwright-as-a-Skill が勝つのはいつかを知る",
+  "Playwright MCP をスタンドアロン HTTP/SSE サーバー、Docker、そして自律的な実行のために安全にデプロイする(シークレットマスキングは便利機能であって境界ではない)"
+]} />
+
+## なぜこのサーバーがエコシステムを制したか
+
+Playwright MCP は「LLM にブラウザを与える」の参照実装であり、正しかったと判明した2つの設計上の賭けをしました:
+
+1. **プライマリインターフェースとしての構造化アクセシビリティスナップショット** — スクリーンショットではなく。モデルは要素(role、name、ref)のコンパクトで決定論的なツリーを取得します。vision モデル不要、座標のハルシネーションなし、トークンはピクセルではなく *構造* に費やされます。
+2. **下層に本物の Playwright 自動化エンジン** — 同じ waits、同じ auto-actionability チェック、本番 QA で長年鍛えられた同じロケーターシステム。カスタム実装なし。
+
+結果:新規インストールで、ナビゲーション、フォーム入力、タブ、スナップショット、スクリーンショット、コンソールアクセス、ネットワーク検査、いくつかのオプトインカテゴリで **約50+ のツール** が手に入ります。それは *たくさんの* 表面積 — それが最初に人を驚かせる点にまっすぐつながります。
+
+## 実際に動いているモード
+
+デフォルトでは MCP サーバーは **アクセシビリティスナップショットモード** で動作します。エージェントが `browser_snapshot` を呼び出すとき、スクリーンショットを取得するのではなく — YAML 風のツリーを取得します:
+
+```yaml
+- Page URL: https://example.com/login
+- role: main
+  - role: form
+    - role: textbox, name: "Email", ref: e12
+    - role: textbox, name: "Password", ref: e13
+    - role: button, name: "Sign in", ref: e14
+```
+
+エージェントは次に `browser_click({ ref: "e14" })` を呼び出します — 発明した CSS セレクタなし、推測した座標なし。`ref` はサーバーが下層の Playwright ロケーターから鋳造したハンドルなので、クリックは手書きの `page.getByRole('button', { name: 'Sign in' }).click()` と同じくらい信頼できます。
+
+これが、LLM が書いた Selenium/Puppeteer スクリプトから来た人々が「AI によるブラウザ使用は壊れている」と思う理由です — 彼らはモデルに生の HTML やスクリーンショットを与えていました。**スナップショットモードにはその失敗モードがありません**、モデルが間違え得るセレクタを見ることがないためです。
+
+<Callout type="tip" items={[
+  "エージェントが CSS セレクタを推測しているなら、ほぼ確実に別のブラウザ MCP を使っているか — スナップショットを無効にしています。",
+  "スナップショットはページスコープです。iframe には iframe 内で browser_snapshot を明示的に呼びます;ツールは iframe ナビゲーションを公開します。",
+  "Ref は ephemeral です。次のページ変異までしか有効ではありません — React ファイバー ID のように扱ってください。"
+]} />
+
+## オプトインの機能パック(--caps)
+
+退屈で安全なツールだけが有効化されて出荷されます。強力なものは `--caps` フラグの後ろにあり、サーバーごとに有効化します:
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest", "--caps=network,storage,pdf"]
+    }
+  }
+}
+```
+
+| Cap | アンロックされるもの | なぜデフォルトオフか |
+|-----|-----------------|--------------------------|
+| `network` | リクエストのモック、オフライン設定、ルート傍受 | 静かにトラフィックを書き換え得る;意図が必要 |
+| `storage` | Cookie、localStorage、sessionStorage の読み書き | 有効化されると同一オリジンのデータ窃取が自明 |
+| `devtools` | トレーシング、ビデオ録画、要素ハイライト | 非常に大きなアーティファクト、ディスクコスト |
+| `vision` | ピクセル座標でのマウス操作 | 決定論的モデルをバイパス — 下記参照 |
+| `pdf` | 現在のページを PDF として保存 | 大丈夫、ほとんどのセッションでは単にノイズ |
+| `testing` | 要素/テキスト/値の検証、ロケーター生成 | テストオーサリングのニッチ、約1ダースのツールが追加 |
+| `config` | 解決済みサーバー設定を読み戻す | デバッグ専用 |
+
+**明らかでないのは `vision` です。** これを有効化するとモデルに `browser_mouse_move_at_coordinates` などが渡されます。また、セッション全体の失敗プロファイルを静かに変えます — エージェントはスナップショットが不便なときに座標クリックにフォールバックし、今やあなたは言語モデルがピクセル計算を行ってブラウザを駆動している状況です。canvas 要素や壊れた a11y ウィジェットが手を強いる場合にのみ有効化してください。
+
+## 3つのプロファイルモード
+
+ここに面白い設計が住んでいます。
+
+<Steps items={[
+  {
+    "title": "永続プロファイル(デフォルト)",
+    "body": "サーバーはワークスペースごとのユーザーデータディレクトリ(作業フォルダのハッシュから導かれるパス)に対して Chromium を起動します。Cookie、localStorage、保存されたパスワード、履歴はセッションをまたいで永続化されます。認証されたダッシュボードに最適。鋭利な角:プロファイルを保持できるのは同時に1インスタンスのみ — 同じフォルダに対する2つ目の Claude Code ウィンドウはエラーになります。--user-data-dir を共有場所に向けると、プロジェクトをまたいで状態を共有できます。"
+  },
+  {
+    "title": "Isolated モード(--isolated)",
+    "body": "毎セッションはメモリ上の空プロファイルから開始され、終了時に破棄されます。これは CI 風のタスクや、Cookie を残したくないものに対して正しい選択です。--storage-state <file.json> と組み合わせて Cookie/localStorage をプリロード — 古典的なパターンは「一度ログイン、状態を保存、以降永遠に isolated 実行に与える」です。"
+  },
+  {
+    "title": "ブラウザ拡張モード(extension: true)",
+    "body": "Playwright MCP の Chrome/Edge 拡張をインストールしてサーバー設定に { \"extension\": true } を設定します。新しいブラウザを起動する代わりに、サーバーはあなたの日常のブラウザですでに開いているタブにアタッチします — 実際のログイン、実際のセッションストレージ、実際の広告ブロッカー付きで。これは非常に異なるセキュリティモデル(最後のセクション参照)ですが、多くの個人生産性フローでは、これが動くエージェントとデモの差になります。"
+  }
+]} />
+
+## インストール:実際に欲しい4つの設定
+
+<PromptCard title="Standard local (Claude Desktop / Claude Code / Cursor)">{`{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    }
+  }
+}`}</PromptCard>
+
+<PromptCard title="Isolated + preloaded auth (CI-ish, reproducible)">{`{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--isolated",
+        "--storage-state", "/Users/me/.auth/github.json",
+        "--caps=network"
+      ]
+    }
+  }
+}`}</PromptCard>
+
+<PromptCard title="Attach to my real Chrome tab (browser extension)">{`{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest", "--extension"]
+    }
+  }
+}`}</PromptCard>
+
+<PromptCard title="Standalone HTTP server (share one browser across many agents)">{`# One-time on your workstation:
+npx @playwright/mcp@latest --port 8931
+
+# Then every client points at it:
+{
+  "mcpServers": {
+    "playwright": { "url": "http://localhost:8931/mcp" }
+  }
+}`}</PromptCard>
+
+HTTP モードは人々が見逃す1つです。同じマシンで4つのコーディングエージェントを実行すると、4つの別々の Playwright MCP の `npx` インストールがそれぞれ自分の Chromium を起動します。1つの共有 HTTP サーバーは単一のブラウザプールを保ち、より安価で観測もしやすい。
+
+## Docker:唯一サポートされている「ヘッドレスサーバー」レシピ
+
+```bash
+# One-shot (stdio):
+docker run -i --rm --init --pull=always mcr.microsoft.com/playwright/mcp
+
+# Long-lived HTTP server on port 8931:
+docker run -d -i --rm --init --pull=always \
+  --entrypoint node \
+  -p 8931:8931 \
+  mcr.microsoft.com/playwright/mcp \
+  /app/cli.js --headless --browser chromium --no-sandbox --port 8931 --host 0.0.0.0
+```
+
+ドキュメントが埋めている2つのこと:Docker イメージは **ヘッドレス Chromium のみ**(Firefox なし、WebKit なし、ヘッドモードなし)で、コンテナ内では `--no-sandbox` が必要。Firefox や実 GPU が必要なら、ホストでサーバーを実行してください。
+
+## トークンコスト対決:MCP vs Skill vs 生の CLI
+
+もう1つ誰も警告しないこと:**Playwright MCP は Claude Code にアタッチできる最も重い単一サーバー**で、セッションあたり約 3,500 トークンのツールスキーマオーバーヘッド — 1回の呼び出しをする前から。その数字は会話全体のコンテキストウィンドウに居座ります。
+
+コミュニティが報告した測定(下記リンク)によると、典型的な「このサイトをテスト」タスクは:
+
+| アプローチ | タスク用トークン | Sonnet コスト(概算) |
+|----------|---------------------|----------------------|
+| Playwright MCP(デフォルト caps) | 約114k | 約 $0.34 |
+| Playwright CLI + Skill ファイル | 約27k | 約 $0.08 |
+
+Skill アプローチは Playwright の CLI を文書化した小さな `SKILL.md` を出荷し、エージェントが `bash` でシェルアウトできるようにします。ツールスキーマは必要になるまでモデルのコンテキストに入らず、スキルファイル自体は1回読まれるだけです。最近の Playwright MCP バージョンは各呼び出しで完全なページ状態をストリーミングしなくなったことでこの差を狭めましたが、スキーマオーバーヘッドは依然としてスキーマオーバーヘッドです。
+
+**目安ルール:** モデルが DOM と会話的なやり取りを必要とするインタラクティブ/探索的作業には MCP。反復可能なジョブ — URL リストのスクリーンショット、テストスイートの実行、cron に入れるようなもの — には Skill/CLI。
+
+自分のセッションでこれを測る方法は Claude Code の [MCP トークンコスト](/docs/claude-code/mcp-token-cost) ページを参照してください。
+
+## シークレットマスキングは便利機能であって境界ではない
+
+Playwright MCP は設定で `secrets` マップをサポートします:
+
+```json
+{
+  "secrets": {
+    "OPENAI_API_KEY": "sk-real-key-here",
+    "GITHUB_TOKEN": "ghp_real"
+  }
+}
+```
+
+サーバーがツール応答内でこれらの正確な文字列を見ると、モデルに結果を転送する前にキー名を代入し直します。これは本当に有用です — API キーをエコーするページコンテンツがそれを LLM トランスクリプトに漏らすことはなくなります。
+
+しかしプロジェクトの README は明示的に、そして何度も繰り返します:**「Playwright MCP はセキュリティ境界ではない。」** 具体的には:
+
+- ページは `title` 属性や base64 でシークレットをレンダリングでき、マスカーはそれを捕まえません。
+- モデルがブラウザに頼むこと — フォームフィールドのトリック経由の `document.cookie` 読み取りを含む — は、依然としてあなたの実プロファイルの権限で実行されます。
+- 拡張モードはあなたの日常の Chrome にアタッチします。ログイン済みの各タブは原則として到達可能になります。
+
+Playwright MCP + 永続プロファイル付きのエージェントは、あなたの管理者 Cookie を持った新入社員と同じように扱ってください:狭く監督されたタスクには問題なし、`--dangerously-skip-permissions` には破滅的。より広い脅威モデルについては、[エージェント型ブラウザと同一オリジン信頼](/docs/security/agentic-browsers-same-origin) と [あなたのエージェントがアップロードするもの](/docs/security/what-your-agent-uploads) を参照。
+
+## 最近何が変わったか
+
+最近のリリース(v0.0.79 系)はデフォルトを変えるため知る価値があります:
+
+- **`--timeout-settle`** — サーバーは各アクションの後、トリガーされた作業が落ち着くのを設定可能なミリ秒数(デフォルト500)待ってから戻ります。遅い SPA には上げ、perf テストには下げてください。
+- **WebP スクリーンショット** — `browser_take_screenshot` は `type: "png" | "jpeg" | "webp"` を受け付け、ファイル名から推論します。WebP は同じ品質で PNG より約30〜50% 小さく、たくさんスクリーンショットを撮るなら変える価値あり。
+- **Python / Java / C# 向け Codegen 出力** — `testing` cap は TypeScript 以上でテストスケルトンを出せるようになりました。
+- **ダウンロードイベント検出** — 以前のエラーベース推論を置き換え;ダウンロードは実イベントをトリガーするようになり、エージェントは待機できます。
+- **ブラウザ拡張 CDP リレー** — WebSocket アップグレード時のヘッダ検証で強化。
+
+<VerifyNote lastVerified="2026-08-06" source="Playwright MCP releases: github.com/microsoft/playwright-mcp/releases" />
+
+## デバッグプレイブック
+
+<Steps items={[
+  {
+    "title": "エージェントが明らかなボタンを「見つけられない」。",
+    "body": "スナップショットが古い。ナビゲーションやフォーム送信のたびに browser_snapshot を再度呼び出させてください — 前のスナップショットの ref は死んでいます。それでも要素が見つからない場合は、ボタンが iframe か Shadow DOM 内かもしれません;スナップショットスコープを拡張してください。"
+  },
+  {
+    "title": "2つ目の Claude Code ウィンドウが Chromium を起動できない。",
+    "body": "永続プロファイルは単一ライター。どちらか片方に --isolated を使うか、--port 8931 で1つの共有スタンドアロン HTTP サーバーを実行し、両クライアントをそこに向けます。"
+  },
+  {
+    "title": "すべてが遅い。",
+    "body": "使っていない caps を切ってください — 不要な各ツールがコンテキストトークンを食います。必要でなければ devtools と testing を落としてください。バッチジョブを実行しているなら Skill/CLI アプローチを検討してください。"
+  },
+  {
+    "title": "CI 内で Chromium ダウンロードが失敗する。",
+    "body": "Docker イメージ(mcr.microsoft.com/playwright/mcp)を使ってください。Chromium がプリインストールされて出荷され、ネットワーク制限 CI 問題の90%を1コマンドで解決します。"
+  },
+  {
+    "title": "エージェントがまだ座標クリックを書く。",
+    "body": "vision cap を有効にしています。--caps=vision を削除するか、CLAUDE.md / AGENTS.md にスナップショット+ref が唯一許可される操作経路であるという指示を追加してください。"
+  }
+]} />
+
+## 明確にしておくべき関連概念
+
+<Flashcards />
+
+## クイックチェック
+
+<Quiz questions={[
+  {
+    "q": "デフォルトで、エージェントが browser_click を呼び出すとき、対象要素を識別するものは?",
+    "options": [
+      "モデルが書いた CSS セレクタ",
+      "モデルがスクリーンショットから計算したスクリーン座標",
+      "最新のアクセシビリティスナップショットからサーバーが鋳造した短い ref 文字列",
+      "要素の innerText"
+    ],
+    "answer": 2,
+    "explain": "Playwright MCP はスナップショット内の各要素に e14 のような ref を鋳造し、エージェントはそれを直接参照します。これがスナップショットモードがセレクタ推測型ブラウザに対して決定論的である理由です。"
+  },
+  {
+    "q": "同じリポジトリに対して2つの Claude Code ウィンドウを持ち、両方がログイン済みプロファイルで Playwright MCP を使いたい。正しい手は?",
+    "options": [
+      "両方に --isolated を追加",
+      "1つのスタンドアロン HTTP サーバー(--port 8931)を実行し、両クライアントをそこに向ける",
+      "永続プロファイルディレクトリを複製",
+      "両方で --extension を使う"
+    ],
+    "answer": 1,
+    "explain": "永続プロファイルは単一ライター — 2つ目の Chromium はロック取得に失敗します。共有スタンドアロン HTTP サーバーは両クライアントが共有する1つのブラウザプールを保ちます。"
+  },
+  {
+    "q": "セッションの安全プロファイルを最も変える --caps 値はどれか?",
+    "options": [
+      "pdf",
+      "network",
+      "testing",
+      "config"
+    ],
+    "answer": 1,
+    "explain": "network はリクエストモック、オフラインモード、ルート傍受をアンロック — サーバーはブラウザが見る応答を静かに書き換えられます。それは「このページを PDF として保存」とは非常に異なる信頼の物語です。"
+  },
+  {
+    "q": "反復可能なバッチジョブ(毎晩200 URL のスクリーンショット)に、通常正しいツールは?",
+    "options": [
+      "永続プロファイル付きの Playwright MCP",
+      "HTTP 経由の Playwright MCP + --caps=devtools",
+      "CLI にシェルアウトする Playwright Skill",
+      "ブラウザ拡張モード"
+    ],
+    "answer": 2,
+    "explain": "反復可能な非インタラクティブ作業には、各セッションで MCP ツールスキーマのオーバーヘッドは不要。Skill ファイル + CLI はトークンで約4倍安く、スケジュールしやすい。"
+  },
+  {
+    "q": "secrets マップに GITHUB_TOKEN=ghp_xxx を設定した。ページが隠しフィールドで base64 エンコードされたトークンを含む。何が起きる?",
+    "options": [
+      "サーバーがデコードしてマスクする",
+      "サーバーはそれを見ず、トークンがモデルに届く",
+      "サーバーは応答を返すことを拒否する",
+      "トークンは network cap では編集されるがスナップショットではされない"
+    ],
+    "answer": 1,
+    "explain": "マスキングはリテラル文字列置換です。Base64、分割文字列、エンコード変種はすべて通過します。README は明示的:Playwright MCP はセキュリティ境界ではない。"
+  }
+]} />
+
+## Playwright MCP が間違ったツールであるとき
+
+- **進行中の人間のブラウジングセッションとログインを共有する必要がある。** [ログインを継承するブラウザエージェント](/docs/models/browser-agents-shared-login) でカバーされているような共有ログイン型エージェントブラウザを検討 — Playwright MCP の拡張モードは近づきますが、承認や Spaces まわりの UX は違います。
+- **本番コードパスをテストしていて、実際の Playwright テストランナーが欲しい。** `@playwright/test` を直接使う;MCP はエージェント型探索に最適化されており、CI テストオーサリング向けではありません。
+- **ワークロードが100% ヘッドレスな静的 HTML スクレイピング。** プレーンな `fetch` + パーサーは桁違いに安い。ブラウザは実際に JavaScript 実行を必要とするページに取っておきましょう。
+- **ブラウザ状態の漏れをまったく許容できない。** `--isolated` と実行ごとにフレッシュな `--storage-state` スナップショットを使う。日常の Chrome に対して拡張モードは使わないこと。
+
+## ソースと参考文献
+
+- [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp) — 正典のリポジトリ、README、上で引用したバージョン番号のリリースノート。
+- [microsoft/playwright-mcp/releases](https://github.com/microsoft/playwright-mcp/releases) — WebP スクリーンショットサポート、`--timeout-settle`、拡張 CDP 強化。
+- [MCP Server Token Costs in Claude Code](https://www.jdhodges.com/blog/claude-code-mcp-server-token-costs/) — 約3,500トークンのオーバーヘッド数値とツールごとの数値の出所。
+- [Playwright CLI vs Playwright MCP](https://dev.to/aswani25/playwright-cli-vs-playwright-mcp-which-should-you-use-with-claude-code-1olh) — 4倍の Skill vs MCP コスト差の裏にあるコミュニティベンチマーク。
+- 関連 AILmanac ページ:[Claude Code MCP トークンコスト](/docs/claude-code/mcp-token-cost) · [MCP: ステートレスモード](/docs/api/mcp-2026-07-28-stateless) · [エージェントスキルの精査](/docs/security/vetting-agent-skills) · [エージェント型ブラウザと同一オリジン信頼](/docs/security/agentic-browsers-same-origin)。
