@@ -1,0 +1,116 @@
+---
+sidebar_position: 13.7
+title: "セッション間メッセージング"
+description: "2つのClaude Codeターミナルを、あなたがコピー＆ペーストで橋渡しをせずに会話させる方法 — 現在利用可能な3つのピア間セッションメッセージングパターンと、絶対に省略してはいけない信頼境界。"
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-08-07" source="https://github.com/anthropics/claude-code/issues/36181">
+セッション間メッセージングは、依然として**コミュニティが構築した**機能です — Claude Codeにはネイティブのエージェント間バスは同梱されていません。以下のプロジェクトは毎週進化しており、公式の機能リクエスト（issue #36181）はクローズされていますが、まだ実装されていません。インストールする前に、バージョンとライセンス条項を再確認してください。
+</VerifyNote>
+
+<Callout type="objectives" items={["同じマシン上の2つのClaude Codeセッションが標準では会話できない理由 — そしてあなたが依然としてコピー＆ペーストの橋渡し役であり続ける理由","ピア間セッションメッセージングのための現行の3つのパターン: ファイルシステム、ローカルWebSocketバス、およびMCPチャネル","動作するプラグインを2分以内にエンドツーエンドでインストールして使用する方法","設定すべき信頼境界 — ピアのメッセージは指示として届く任意のテキストである","このパターンをサブエージェント、共有ワークツリー、または単一セッションでのすべての実行と比較して、いつ選択すべきか"]} />
+
+## 問題: あなたが橋渡し役である
+
+**ターミナルA**で`libfoo/`のClaude Codeを開き、**ターミナルB**で`app-that-uses-libfoo/`を開きます。ターミナルBがライブラリから型エラーを受け取ります。今日、あなた — 人間 — がルーティングを行います: エラーを読み、ターミナルを切り替え、Aに貼り付け、修正を待ち、切り替えて戻り、ビルドを再実行します。各コンテキストスイッチは両側で状態を失います。
+
+これはまさに、クローズされたAnthropic RFE [claude-code#36181](https://github.com/anthropics/claude-code/issues/36181)（2026年3月にオープン）の痛点です: *「複数のターミナルにまたがる相互依存プロジェクトで作業する場合、ユーザーは現在、セッション間で手動でコンテキストを切り替える必要があります。」* このissueはクローズされていますが — Claude Codeにはまだネイティブのセッション間チャネルはありません。そのため、コミュニティが独自のものを構築しました。
+
+## 3つのパターン
+
+3つの独立したオープンソースプロジェクトが、2026年初頭に同じ問題に収束し、それぞれ異なるトランスポートを選択しました。トレードオフはトランスポートの選択に組み込まれており、特定のプロジェクトに組み込まれているわけではないため、これらは重要です。
+
+| パターン | トランスポート | 提供形式 | レイテンシ | マルチマシン | デバッグ性 |
+| --- | --- | --- | --- | --- | --- |
+| **ファイルベースの受信箱** | `~/.claude/session-bridge/sessions/<id>/{inbox,outbox}/`配下のJSONファイル | 9つのbashスクリプト + `jq` | 約5〜10秒（3秒ポーリング） | ❌ 単一マシン | ✅ `cat message.json` |
+| **ローカルWebSocketバス** | localhost WebSocket、セッションデーモン | Claude Codeプラグイン | ミリ秒レベル | ❌ 単一マシン | ⚠️ バスダンプが必要 |
+| **MCPチャネル** | Slack風チャネル + セマンティック検索を備えたMCPサーバー | `npx claude-slack` | ネットワークホップ | ✅ ネットワーク経由で動作 | ✅ MCPをクエリ |
+
+すでにデバッグしている方法と、実際にエージェントを実行しているマシン数に一致するトランスポートを選択してください。
+
+### 1. ファイルベースの受信箱 — [`PatilShreyas/claude-code-session-bridge`](https://github.com/PatilShreyas/claude-code-session-bridge)（MIT、65★）
+
+各セッションにはディレクトリがあります: `~/.claude/session-bridge/sessions/<6文字ID>/`。メッセージは`status`フィールドを持つJSONファイルで、原子的に`pending → read`に反転します。受信者は3秒ごとに受信箱をポーリングします。作者自身がWebSocketとMCPをスキップした理由: *「デバッグ可能だから。文字通り`cat`メッセージができる。」*
+
+<PromptCard title="セッションAがリスナーになり、セッションBが質問する">{`# In session A (the library repo)
+/bridge listen
+# → prints A's 6-char session id, e.g. a1b2c3
+
+# In session B (the app that consumes the library)
+/bridge connect a1b2c3
+/bridge ask "Which version of libfoo exports the parseDate() helper, and did its signature change?"`}</PromptCard>
+
+セッションAは*ライブコンテキストから*答えます — 読み込まれたファイル、最近のツール結果、そのプランモードから。セッションBは、信頼できる人間に類する入力として扱うメッセージとして返信を受け取ります。その最後の文がこのパターンにおけるセキュリティの全体像です。読み続けてください。
+
+### 2. ローカルWebSocketバス — [`yilunzhang/claude-code-inter-session`](https://github.com/yilunzhang/claude-code-inter-session)（MIT、27★）
+
+ローカルデーモンがループバックインターフェイスでWebSocketをバインドします。接続された各セッションは名前を登録し、`send`、`broadcast`（ペイロード上限256 KB）、または`list`ピアが可能です。配信にはClaude CodeのMonitorツールを使用するため、アイドルセッションはトークンを消費せず、ポーリングループも実行されません。Claude Code **≥ 2.1.105**とPython **≥ 3.10**が必要です。
+
+プラグインマーケットプレイスとしてインストールし、そのスラッシュコマンドを使用します:
+
+<PromptCard title="セッション間プラグインをインストールして2つのターミナルを接続する">{`# In any Claude Code session (run once per machine)
+/plugin marketplace add https://github.com/yilunzhang/claude-code-inter-session
+/plugin install inter-session
+
+# Terminal A
+/inter-session:inter-session connect libfoo
+
+# Terminal B
+/inter-session:inter-session connect app
+/inter-session:inter-session send libfoo "Does parseDate() still accept a string?"
+
+# Broadcast to everyone
+/inter-session:inter-session broadcast "About to bump libfoo to 2.0 — hold merges."`}</PromptCard>
+
+### 3. MCPチャネル — [`theo-nash/claude-slack`](https://github.com/theo-nash/claude-slack)（MIT、8★）
+
+Slack風の抽象化を公開する完全なMCPサーバー: `#general`、プロジェクトごとのチャネル、DM、およびQdrantを基盤とするセマンティック検索の知識層。メッセージは再起動をまたいで永続化されます — 他の2つはそうではありません。トレードオフ: ネットワークサービスとその依存関係を実行するようになり、メッセージは各ターンでツール呼び出しの往復を経由しなければなりません。
+
+<PromptCard title="MCPサーバーを起動し、エージェントのターンから使用する">{`# Start once (in its own terminal)
+npx claude-slack
+
+# In any Claude Code session, once claude-slack is added to your MCP config:
+Post to #libfoo-consumers that parseDate() moved from utils to date-helpers in v2.0.
+Then search the channel for prior questions about parseDate to make sure I answered them.`}</PromptCard>
+
+**永続性**が必要な場合（明日開始したセッションが昨日のセッションが言ったことを検索できる）や、ピアが異なるマシン上に存在する場合はMCPチャネルを使用してください — 他の2つは単一マシンのみです。
+
+## 適切なトランスポートを選択する
+
+<Steps items={[{title: "自問する: クロスマシンが必要か？", body: "セッションが異なるノートパソコンやリモートボックスで実行される場合、MCPチャネルパターンのみが機能します。ファイル受信箱とローカルWebSocketバスは、設計上単一マシンです。"},{title: "自問する: セッションを越えた永続性が必要か？", body: "MCPチャネルはメッセージを保存するため、明日開始したセッションが昨日のコンテキストを検索できます。他の2つはメッセージを一時的なものとして扱います。"},{title: "自問する: どのようにデバッグしたいか？", body: "catとgrepでトランスクリプトを読むのが好きなら、ファイルベースの受信箱を選択してください。サブ秒配信が重要なら、WebSocketバスを選択してください。すでにMCPサーバーを実行しているなら、claude-slackを選択してください。"},{title: "自問する: サブエージェントで実際に十分か？", body: "ピアセッションはそれぞれ独自のライブなプロジェクト状態を持ちます — 読み込まれたファイル、プランモード、最近の編集。1つの集中したタスクを実行して戻るスコープされたワーカーが必要なだけなら、代わりにサブエージェントを生成してください; よりシンプルでネイティブです。"},{title: "最小の表面積から始めてインストールする", body: "デーモンやMCPサーバーを導入する前に、2リポジトリの痛点でファイルベースのブリッジを試してください。ポーリングレイテンシが許容できるなら、それで完了です。"}]} />
+
+## 絶対に省略してはいけない信頼境界
+
+これは誰も明確に語っていない部分です。上記のすべてのパターンで、メッセージは受信セッションに**デフォルトでエージェントが指示として扱うテキスト**として届きます。つまり、別のセッション — またはあなたのマシン上で受信箱/ソケット/MCPに書き込めるあらゆるもの — があなたのエージェントにプロンプトを注入できるということです。
+
+<Callout type="warning" items={["ピアメッセージは信頼できない入力であり、ユーザーのターンではありません。自分のマシン上でも、送信者は別の自律エージェントであり、それ自体が読んだファイルによってプロンプト注入されている可能性があります。","広く開かれたツールセットでセッション間メッセージングを実行しないでください。破壊的なシェル、任意のWebフェッチ、シークレットパスをブロックするClaude Codeの権限プロファイルと組み合わせてください。","WebSocketとファイルベースのパターンには、デフォルトで送信者の認証がありません。ループバックソケットにバインドできる、または~/.claude/session-bridge/に書き込めるローカルプロセスは、ピアを装うことができます。","ブロードキャストを爆発半径として扱ってください。接続された5つのセッションへの毒された1つのメッセージは、5つの侵害されたエージェントであり、1つではありません。","疑問がある場合は、仲介してください: 受信セッションに、行動する前に受信メッセージを承認のためにあなたに要約させてください — 軽量なフックやプラグインのフロントマターにおけるプロンプトガードレールが仕事をします。"]} />
+
+これが当てはまる一般的な脅威モデルについては、[プロンプトインジェクション](/docs/security/prompt-injection)と[エージェントのセキュリティ確保](/docs/security/securing-agents)を参照してください。MCP固有のバスリスクについては、[不可視コメントMCP攻撃](/docs/security/invisible-comment-mcp-attacks)が直接関連しています — 「メッセージが隠された指示とともに届く」バグの同じクラスが、ツール結果と同じようにSlack風チャネルにも当てはまります。
+
+## サブエージェントに勝る場合 — と勝らない場合
+
+ピアセッションとサブエージェントは*異なる*問題を解決します。[サブエージェント](/docs/claude-code/subagents)は、メインコンテキストを保護するかタスクを専門化するために生成する、スコープされたツールセットを持つ新鮮なClaudeです; 空で始まり、結果を返します。ピアセッションは、独自のファイルが読み込まれ、プランモードがアクティブで、状態の会話全体を持つ*長時間実行される、人間主導の*Claude Codeインスタンスです — あなたはそのコンテキストを借りているのであって、新しいものを作成しているのではありません。
+
+価値が**他のセッションのライブ状態**にある場合は、セッション間メッセージングを検討してください: それがすでに推論しているライブラリ、実行したばかりの失敗したテスト、ステージしたばかりのコミット。価値が**分離して1つの制限されたタスクを実行すること**にある場合は、サブエージェントを検討してください。ピアのコンテキストに依存しないワンショットの質問を発火するためにセッション間メッセージングを使用している自分に気付いた場合、おそらくサブエージェント — または共有ワークツリー — が必要です。
+
+両方のパターンを超える長期間の複数エージェントワークフローについては、[長時間実行エージェントハーネス](/docs/frontiers/long-running-agent-harnesses)と[ネイティブマルチエージェントAPI](/docs/models/native-multi-agent-apis)を参照してください。
+
+## よくある間違い
+
+<Flashcards title="落とし穴 — 各カードをめくって修正を確認" cards={[{front: "受信メッセージを自分のプロンプトであるかのように信頼する", back: "ピアメッセージは信頼できない入力です。厳格な権限プロファイルで受信セッションを制限し、リスクの高いタスクの場合は、受信メッセージに基づく行動を人間の確認の背後にゲートしてください。"},{front: "1台のマシン上の2ターミナル問題にMCPチャネルを選択する", back: "ファイル受信箱が9つのbashスクリプトで処理する仕事のために、ネットワークサービス、ベクトルDB、ツール呼び出しの往復を導入したことになります。トランスポートを実際のスコープに一致させてください。"},{front: "サブエージェントで足りるところでセッション間メッセージングを使用する", back: "新鮮なClaudeが1つの制限されたタスクを実行して結果を返す必要があるだけなら、サブエージェントの方がシンプルで、ネイティブで、別のライブターミナルがオンラインである必要もありません。"},{front: "完全には信頼していないエージェントからブロードキャストする", back: "5つのピアにブロードキャストする毒された1つのエージェント = 5つの侵害されたエージェントであり、1つではありません。指定送信を優先し、ブロードキャストは人間主導の低リスクな告知のために予約してください。"},{front: "送信者にアイデンティティがないことを忘れる", back: "ファイルベースとWebSocketパターンは送信者を認証しません。受信箱に書き込めるか、ループバックソケットに到達できる任意のローカルプロセスは、ピアを偽装できます。"}]} />
+
+<Quiz title="理解度チェック" questions={[{q: "同じノートパソコン上の2つのClaude Codeセッションがメッセージを交換する必要があり、明日開いたセッションが昨日のコンテキストを検索できるように保存したいと考えています。どのパターンが適していますか？", options: ["ファイルベースの受信箱（session-bridge）", "ローカルWebSocketバス（inter-session）", "MCPチャネル（claude-slack）"], answer: 2, explain: "実行中のセッションを超えてメッセージを永続化し、以前の会話に対するセマンティック検索をサポートするのはMCPチャネルパターンのみです。他の2つは設計上一時的です。"}, {q: "ファイルベースの受信箱とローカルWebSocketバスの両方で、デフォルトで真であるセキュリティ前提はどれですか？", options: ["送信者は暗号学的に認証される", "人間のユーザーのみがメッセージを投稿できる", "送信者の認証はない — 受信箱に書き込めるか、ループバックソケットに到達できる任意のローカルプロセスは、ピアを偽装できる"], answer: 2, explain: "どちらのパターンもデフォルトで送信者を認証しません。適切なファイルシステムまたはネットワークアクセスを持つ任意のローカルプロセスがピアとして振る舞えるため、受信エージェントの権限プロファイルが唯一の実際の境界です。"}, {q: "スコープされたツールセットを持つ新鮮なClaudeを1つの制限されたタスクを実行して結果を返すために生成する必要があります。何を使用すべきですか？", options: ["セッション間メッセージング", "サブエージェント", "MCPチャネル"], answer: 1, explain: "それはまさにサブエージェントのユースケースです: 新鮮なコンテキスト、スコープされたツール、結果を返す。セッション間メッセージングは、別の人間主導のセッションのライブ状態を借りるためのものです — 別の仕事です。"}]} />
+
+<Callout type="takeaways" items={["Claude Codeはネイティブのセッション間メッセージングをまだ提供していません; 3つのコミュニティプロジェクトが異なるトランスポートを使用してギャップを埋めています。","デバッグ性のためにはファイルベース、1台のマシン上でのサブ秒レイテンシのためにはWebSocket、永続性またはクロスマシンピアが必要な場合にのみMCPチャネルを選択してください。","ピアセッションからのメッセージは信頼できない入力です — 他のプロンプトインジェクションの表面と同様に扱い、バスを厳格な権限プロファイルと組み合わせてください。","1つのタスクのためのスコープされたワーカーが必要なだけなら、代わりにサブエージェントを使用してください; ピアセッションは別のセッションのライブ状態を借りるためのものです。","公式のRFE（claude-code#36181）はクローズされていますが実装されていません — ネイティブバージョンについてはリポジトリを監視し、それが登場したらコミュニティプロジェクトが収束するか消滅すると予想してください。"]} />
+
+## ソースと参考文献
+
+- [claude-code#36181 — Cross Session Messaging for Multi Project Coordination](https://github.com/anthropics/claude-code/issues/36181) — 痛点を名指しし、望ましい機能セットの概要を示す公式のRFE。
+- [`PatilShreyas/claude-code-session-bridge`](https://github.com/PatilShreyas/claude-code-session-bridge) — MIT、ファイルベース、9つのbashスクリプト + `jq`; 作者の根拠は以下のブログ記事にあります。
+- [Shreyas Patil — *session-bridge: I Made Two Claude Code Sessions Talk to Each Other* (2026-03-20)](https://blog.shreyaspatil.dev/session-bridge-i-made-two-claude-code-sessions-talk-to-each-other/) — この作者にとってなぜファイルシステムがWebSocketとMCPを打ち負かしたかを説明するトランスポート選択の書き上げ。
+- [`yilunzhang/claude-code-inter-session`](https://github.com/yilunzhang/claude-code-inter-session) — MIT、WebSocketバス、Claude Codeプラグインとしてインストール; Claude Code ≥ 2.1.105が必要。
+- [`theo-nash/claude-slack`](https://github.com/theo-nash/claude-slack) — MIT、Slack風チャネル、DM、以前のメッセージに対するセマンティック検索を備えたMCPサーバー。
+- [サブエージェント & 並列エージェント](/docs/claude-code/subagents) — ライブピアではなく、新鮮なスコープされたワーカーが必要な場合の代替。
+- [プロンプトインジェクション](/docs/security/prompt-injection) & [不可視コメントMCP攻撃](/docs/security/invisible-comment-mcp-attacks) — このバスを横断するすべてのメッセージを支配する脅威モデル。
