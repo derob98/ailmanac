@@ -1,0 +1,316 @@
+---
+sidebar_position: 13.7
+title: "Playwright MCP : le guide pratique approfondi (2026)"
+description: "Le Playwright MCP de Microsoft est maintenant le serveur MCP n°1 au monde — devant GitHub et Figma. Le bit que presque personne n'enseigne : le mode snapshot d'accessibilité par défaut n'est pas juste plus rapide que la vision, c'est un paradigme d'automatisation complètement différent. Profils, caps opt-in, mode extension navigateur qui s'attache à votre vrai Chrome, la bataille du coût en tokens contre Playwright-comme-Skill, et la ligne de sécurité à ne pas franchir."
+keywords: [Playwright MCP, playwright-mcp, browser automation MCP, accessibility snapshot, Claude Code Playwright, Cursor Playwright, Codex browser, MCP browser automation, --caps=vision, browser extension mode, isolated profile, storage state, Playwright CLI vs MCP, Playwright Skill, MCP tool token cost]
+---
+
+<LevelBadge level="intermediate" />
+
+Le [`playwright-mcp`](https://github.com/microsoft/playwright-mcp) de Microsoft est à ~35k étoiles GitHub et — selon les registres MCP maintenus par la communauté — est actuellement le **serveur MCP le plus installé de la planète**, classé devant même les serveurs MCP officiels GitHub et Figma. Si vous utilisez Claude Code, Cursor, Codex, Windsurf ou Claude Desktop et que vous avez déjà demandé à votre agent de « vérifier le site » ou « attraper des données de ce dashboard », c'est cet outil qui fait le vrai travail.
+
+Presque tous les guides s'arrêtent à l'installation en deux lignes. Cette page est la partie qui compte après : ce que l'outil fait *vraiment* sous le capot, les modes que les gens ne réalisent pas exister, et les bords tranchants — coût en tokens, sécurité, verrouillage de profil de navigateur — qui apparaissent vers la deuxième semaine.
+
+<Callout type="objectives" items={[
+  "Comprendre pourquoi le mode snapshot d'accessibilité (défaut) n'est pas juste plus rapide que la vision — c'est un paradigme d'automatisation différent que le LLM traite déterministiquement",
+  "Connaître les trois modes de profil — persistant, isolé, extension navigateur — et quand chacun est le bon choix",
+  "Activer les packs de capacités opt-in (network, storage, devtools, vision, pdf, testing) avec --caps et comprendre pourquoi ils sont désactivés par défaut",
+  "Voir le vrai coût en tokens de Playwright MCP dans une session Claude Code et savoir quand Playwright-comme-Skill gagne à la place",
+  "Déployer Playwright MCP comme serveur HTTP/SSE standalone, en Docker, et en sécurité pour des runs autonomes (le masquage de secrets est une commodité, pas une frontière)",
+]} />
+
+## Pourquoi ce serveur a mangé l'écosystème
+
+Playwright MCP est l'implémentation de référence de « donner un navigateur à un LLM », et il a fait deux paris de design qui se sont avérés corrects :
+
+1. **Snapshots d'accessibilité structurés comme interface primaire** — pas des captures d'écran. Le modèle obtient un arbre compact et déterministe d'éléments (rôles, noms, refs). Pas de modèle vision requis, pas d'hallucination de coordonnées, tokens dépensés sur la *structure* plutôt que sur les pixels.
+2. **Le vrai moteur d'automatisation de Playwright dessous** — mêmes attentes, mêmes vérifications d'auto-actionnabilité, même système de locators qui a durci pendant des années de QA en production. Rien de bespoke.
+
+Résultat : sur une installation fraîche, vous obtenez environ **50+ outils** à travers navigation, remplissage de formulaires, onglets, snapshots, captures d'écran, accès console, inspection réseau, et quelques catégories opt-in. C'est *beaucoup* de surface — ce qui nous amène droit à la première chose qui surprend les gens.
+
+## Le mode que vous faites vraiment tourner
+
+Par défaut, le serveur MCP tourne en **mode snapshot d'accessibilité**. Quand votre agent appelle `browser_snapshot`, il n'obtient pas une capture d'écran — il obtient un arbre façon YAML :
+
+```yaml
+- Page URL: https://example.com/login
+- role: main
+  - role: form
+    - role: textbox, name: "Email", ref: e12
+    - role: textbox, name: "Password", ref: e13
+    - role: button, name: "Sign in", ref: e14
+```
+
+L'agent appelle ensuite `browser_click({ ref: "e14" })` — pas de sélecteurs CSS qu'il aurait inventés, pas de coordonnées qu'il aurait devinées. `ref` est un handle que le serveur a frappé depuis le locator Playwright sous-jacent, donc le clic est aussi fiable qu'un `page.getByRole('button', { name: 'Sign in' }).click()` écrit à la main.
+
+C'est pourquoi les gens qui viennent des scripts Selenium/Puppeteer écrits par un LLM pensent « l'usage du navigateur par l'IA est cassé » — ils nourrissaient le modèle avec du HTML brut ou des captures d'écran. **Le mode snapshot n'a pas ce mode d'échec**, parce que le modèle ne voit jamais un sélecteur qu'il pourrait rater.
+
+<Callout type="tip" items={[
+  "Si votre agent devine des sélecteurs CSS, vous utilisez presque certainement un MCP navigateur différent — ou vous avez désactivé les snapshots.",
+  "Les snapshots sont page-scoped. Pour les iframes, utilisez browser_snapshot dans l'iframe explicitement ; l'outil expose la navigation iframe.",
+  "Les refs sont éphémères. Elles ne sont valides que jusqu'à la prochaine mutation de page — traitez-les comme des IDs fiber React.",
+]} />
+
+## Packs de capacités opt-in (--caps)
+
+Seuls les outils ennuyeux et sûrs sont livrés activés. Les puissants vivent derrière le flag `--caps` et vous les activez par serveur :
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest", "--caps=network,storage,pdf"]
+    }
+  }
+}
+```
+
+| Cap | Ce que ça débloque | Pourquoi c'est désactivé par défaut |
+|-----|-----------------|--------------------------|
+| `network` | Mock des requêtes, mode offline, interception de route | Peut réécrire silencieusement le trafic ; a besoin d'intention |
+| `storage` | Lecture/écriture cookies, localStorage, sessionStorage | Le vol de données same-origin est trivial une fois activé |
+| `devtools` | Tracing, enregistrement vidéo, mise en surbrillance d'élément | Artefacts très grands, coût disque |
+| `vision` | Actions souris à coordonnées pixel | Contourne le modèle déterministe — voir plus bas |
+| `pdf` | Sauver la page courante en PDF | OK, juste du bruit pour la plupart des sessions |
+| `testing` | Vérification élément/texte/valeur, génération de locator | Niche de test-authoring, ajoute ~une douzaine d'outils |
+| `config` | Relire la config serveur résolue | Debug-only |
+
+**Le non évident est `vision`.** L'activer donne au modèle `browser_mouse_move_at_coordinates` et amis. Ça change aussi silencieusement le profil d'échec de toute la session, parce que l'agent basculera sur le clic par coordonnées quand les snapshots sont inconvénients — et maintenant vous avez un navigateur conduit par un modèle de langue qui fait des maths de pixels. Activez-le seulement quand un élément canvas ou un widget cassé côté a11y vous force la main.
+
+## Les trois modes de profil
+
+C'est là où vit le design intéressant.
+
+<Steps items={[
+  {
+    "title": "Profil persistant (défaut)",
+    "body": "Le serveur lance Chromium contre un répertoire user-data par workspace (chemin dérivé d'un hash de votre dossier de travail). Cookies, localStorage, mots de passe sauvegardés, historique persistent à travers les sessions. Super pour les dashboards authentifiés. Bord tranchant : une seule instance peut tenir le profil à la fois — une seconde fenêtre Claude Code contre le même dossier échouera. Pointez --user-data-dir sur un emplacement partagé et vous pouvez partager l'état à travers les projets."
+  },
+  {
+    "title": "Mode isolé (--isolated)",
+    "body": "Chaque session démarre d'un profil vierge en mémoire et est détruite à la sortie. C'est le bon choix pour les tâches CI-like et pour tout ce derrière quoi vous ne voudriez pas laisser de cookies. Appariez-le avec --storage-state <file.json> pour précharger cookies/localStorage — le pattern classique est 'connectez-vous une fois, sauvez l'état, nourrissez-le aux runs isolés pour toujours'."
+  },
+  {
+    "title": "Mode extension navigateur (extension: true)",
+    "body": "Vous installez l'extension Playwright MCP Chrome/Edge et mettez { \"extension\": true } dans la config serveur. Au lieu de lancer un nouveau navigateur, le serveur s'attache à un onglet déjà ouvert dans votre navigateur de tous les jours — avec vos vrais logins, votre vrai stockage de session, vos vrais bloqueurs de pub. C'est un modèle de sécurité très différent (voir la dernière section), mais pour beaucoup de flux de productivité personnelle c'est la différence entre un agent qui fonctionne et une démo."
+  }
+]} />
+
+## Installation : les quatre configs que vous voulez vraiment
+
+<PromptCard title="Standard local (Claude Desktop / Claude Code / Cursor)">{`{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    }
+  }
+}`}</PromptCard>
+
+<PromptCard title="Isolé + auth préchargée (CI-ish, reproductible)">{`{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--isolated",
+        "--storage-state", "/Users/me/.auth/github.json",
+        "--caps=network"
+      ]
+    }
+  }
+}`}</PromptCard>
+
+<PromptCard title="S'attacher à mon vrai onglet Chrome (extension navigateur)">{`{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest", "--extension"]
+    }
+  }
+}`}</PromptCard>
+
+<PromptCard title="Serveur HTTP standalone (partager un navigateur entre plusieurs agents)">{`# One-time on your workstation:
+npx @playwright/mcp@latest --port 8931
+
+# Then every client points at it:
+{
+  "mcpServers": {
+    "playwright": { "url": "http://localhost:8931/mcp" }
+  }
+}`}</PromptCard>
+
+Le mode HTTP est celui que les gens ratent. Si vous faites tourner quatre agents de code sur la même machine, quatre installations `npx` séparées de Playwright MCP lancent chacune leur propre Chromium. Un serveur HTTP partagé garde une seule pool de navigateurs, ce qui est à la fois moins cher et plus facile à observer.
+
+## Docker : la seule recette « serveur headless » supportée
+
+```bash
+# One-shot (stdio):
+docker run -i --rm --init --pull=always mcr.microsoft.com/playwright/mcp
+
+# Long-lived HTTP server on port 8931:
+docker run -d -i --rm --init --pull=always \
+  --entrypoint node \
+  -p 8931:8931 \
+  mcr.microsoft.com/playwright/mcp \
+  /app/cli.js --headless --browser chromium --no-sandbox --port 8931 --host 0.0.0.0
+```
+
+Deux choses que les docs enterrent : l'image Docker est **Chromium headless seulement** (pas de Firefox, pas de WebKit, pas de mode headed), et `--no-sandbox` est requis dans le conteneur. Si vous avez besoin de Firefox ou d'un vrai GPU, faites tourner le serveur sur l'hôte.
+
+## La bataille du coût en tokens : MCP vs Skill vs CLI brut
+
+L'autre chose dont personne ne vous prévient : **Playwright MCP est le serveur unique le plus lourd que vous puissiez attacher à Claude Code**, à environ 3 500 tokens d'overhead de schéma d'outil par session — avant d'avoir fait un seul appel. Ce chiffre vit dans votre fenêtre de contexte pour toute la conversation.
+
+Les mesures rapportées par la communauté (lien plus bas) placent une tâche typique « teste ce site » à :
+
+| Approche | Tokens pour la tâche | Coût Sonnet (approx) |
+|----------|---------------------|----------------------|
+| Playwright MCP (caps défaut) | ~114k | ~0,34 $ |
+| Playwright CLI + un fichier Skill | ~27k | ~0,08 $ |
+
+L'approche Skill livre un petit `SKILL.md` qui documente le CLI de Playwright et laisse l'agent shell-out avec `bash`. Le schéma d'outil reste hors du contexte du modèle jusqu'à ce qu'il soit nécessaire, et le fichier skill lui-même est lu une fois. Les versions récentes de Playwright MCP ont réduit cet écart en ne streamant plus l'état complet de la page à chaque appel, mais l'overhead de schéma reste l'overhead de schéma.
+
+**Règle du pouce :** MCP pour du travail interactif/exploratoire où le modèle a besoin d'un aller-retour conversationnel avec le DOM. Skill/CLI pour des jobs répétables — capturer une liste d'URLs, faire tourner une suite de tests, ou tout ce que vous mettriez dans un cron.
+
+Voir la page Claude Code sur [coût en tokens MCP](/docs/claude-code/mcp-token-cost) pour comment mesurer ça dans votre propre session.
+
+## Le masquage de secrets est une commodité, pas une frontière
+
+Playwright MCP supporte une map `secrets` dans sa config :
+
+```json
+{
+  "secrets": {
+    "OPENAI_API_KEY": "sk-real-key-here",
+    "GITHUB_TOKEN": "ghp_real"
+  }
+}
+```
+
+Quand le serveur voit ces chaînes exactes dans une réponse d'outil, il substitue le nom de la clé avant de forwarder le résultat au modèle. C'est vraiment utile — le contenu de page qui echo votre clé API ne le fuitera plus dans la transcription LLM.
+
+Mais le README du projet est explicite et le répète plusieurs fois : **« Playwright MCP n'est pas une frontière de sécurité. »** Concrètement :
+
+- Une page peut rendre votre secret dans un attribut `title` ou en base64 et le masker ne l'attrapera pas.
+- Tout ce que le modèle demande au navigateur de faire — y compris des lectures `document.cookie` via un truc de champ de formulaire — s'exécute toujours avec l'autorité de votre vrai profil.
+- Le mode extension s'attache à votre Chrome de tous les jours. Chaque onglet connecté devient joignable en principe.
+
+Traitez un agent avec Playwright MCP + profil persistant comme vous traiteriez un nouvel employé avec vos cookies admin : bien pour des tâches étroites et supervisées, catastrophique en `--dangerously-skip-permissions`. Voir [Navigateurs agentiques & confiance same-origin](/docs/security/agentic-browsers-same-origin) et [Ce que votre agent upload](/docs/security/what-your-agent-uploads) pour le modèle de menace plus large.
+
+## Ce qui a changé récemment
+
+Les releases récentes (ligne v0.0.79) valent la peine d'être connues parce qu'elles changent les défauts :
+
+- **`--timeout-settle`** — le serveur attend maintenant un nombre configurable de ms (défaut 500) après chaque action pour que le travail déclenché se stabilise avant de retourner. Élevez pour les SPAs lentes, baissez pour les tests de perf.
+- **Captures d'écran WebP** — `browser_take_screenshot` accepte `type: "png" | "jpeg" | "webp"` et infère depuis le nom de fichier. WebP est environ 30–50 % plus petit que PNG pour la même qualité, ça vaut le coup de changer si vous capturez beaucoup.
+- **Sortie codegen pour Python / Java / C#** — la cap `testing` peut maintenant émettre des squelettes de test dans plus que TypeScript.
+- **Détection d'événement de téléchargement** — remplace l'inférence basée sur erreur précédente ; les téléchargements déclenchent maintenant un vrai événement pour que les agents puissent les attendre.
+- **Relais CDP extension navigateur** — durci avec validation d'en-tête sur l'upgrade WebSocket.
+
+<VerifyNote lastVerified="2026-08-06" source="Playwright MCP releases: github.com/microsoft/playwright-mcp/releases" />
+
+## Playbook de débogage
+
+<Steps items={[
+  {
+    "title": "L'agent 'ne trouve pas' un bouton évident.",
+    "body": "Le snapshot est périmé. Faites appeler l'agent browser_snapshot à nouveau après chaque navigation ou soumission de formulaire — les refs du snapshot précédent sont mortes. S'il ne peut toujours pas trouver l'élément, le bouton peut être dans une iframe ou un Shadow DOM ; élargissez le scope du snapshot."
+  },
+  {
+    "title": "Une seconde fenêtre Claude Code échoue à lancer Chromium.",
+    "body": "Les profils persistants sont single-writer. Soit utilisez --isolated pour une des sessions, soit faites tourner un serveur HTTP standalone partagé avec --port 8931 et pointez les deux clients dessus."
+  },
+  {
+    "title": "Tout est lent.",
+    "body": "Désactivez les caps que vous n'utilisez pas — chaque outil inutile mange des tokens de contexte. Enlevez devtools et testing sauf si vous en avez besoin. Envisagez l'approche Skill/CLI si vous faites tourner des jobs batch."
+  },
+  {
+    "title": "Le téléchargement de Chromium échoue dans votre CI.",
+    "body": "Utilisez l'image Docker (mcr.microsoft.com/playwright/mcp). Elle vient avec Chromium préinstallé et corrige 90 % des problèmes de CI réseau-restreint en une commande."
+  },
+  {
+    "title": "Votre agent écrit toujours des clics par coordonnées.",
+    "body": "Vous avez la cap vision activée. Enlevez --caps=vision, ou ajoutez une instruction dans CLAUDE.md / AGENTS.md que snapshot+ref est le seul chemin d'interaction autorisé."
+  }
+]} />
+
+## Concepts liés à garder droits
+
+<Flashcards />
+
+## Vérification rapide
+
+<Quiz questions={[
+  {
+    "q": "Par défaut, quand votre agent appelle browser_click, qu'est-ce qui identifie l'élément cible ?",
+    "options": [
+      "Un sélecteur CSS que le modèle a écrit",
+      "Des coordonnées d'écran que le modèle a calculées depuis une capture d'écran",
+      "Une courte chaîne ref frappée par le serveur depuis le dernier snapshot d'accessibilité",
+      "Le innerText de l'élément"
+    ],
+    "answer": 2,
+    "explain": "Playwright MCP frappe une ref comme e14 pour chaque élément du snapshot et l'agent la référence directement. C'est pourquoi le mode snapshot est déterministe là où les navigateurs qui devinent des sélecteurs ne le sont pas."
+  },
+  {
+    "q": "Vous voulez deux fenêtres Claude Code contre le même repo, les deux utilisant Playwright MCP avec votre profil connecté. Quel est le bon geste ?",
+    "options": [
+      "Ajouter --isolated aux deux",
+      "Faire tourner un serveur HTTP standalone (--port 8931) et pointer les deux clients dessus",
+      "Dupliquer le répertoire du profil persistant",
+      "Utiliser --extension dans les deux"
+    ],
+    "answer": 1,
+    "explain": "Les profils persistants sont single-writer — le second Chromium échouera à acquérir le verrou. Un serveur HTTP standalone partagé garde une pool de navigateurs que les deux clients partagent."
+  },
+  {
+    "q": "Quelle valeur --caps change le plus le profil de sécurité de votre session ?",
+    "options": [
+      "pdf",
+      "network",
+      "testing",
+      "config"
+    ],
+    "answer": 1,
+    "explain": "network débloque le mock de requêtes, le mode offline, et l'interception de route — le serveur peut réécrire silencieusement les réponses que le navigateur voit. C'est une histoire de confiance très différente de 'sauver cette page en PDF'."
+  },
+  {
+    "q": "Pour un job batch répétable (capturer 200 URLs chaque nuit), quel est habituellement le bon outil ?",
+    "options": [
+      "Playwright MCP avec profil persistant",
+      "Playwright MCP sur HTTP + --caps=devtools",
+      "Un Skill Playwright qui shell-out vers le CLI",
+      "Le mode extension navigateur"
+    ],
+    "answer": 2,
+    "explain": "Le travail répétable non-interactif n'a pas besoin de l'overhead de schéma d'outil MCP dans chaque session. Un fichier Skill + CLI est environ 4× moins cher en tokens et plus facile à planifier."
+  },
+  {
+    "q": "Vous configurez la map secrets avec GITHUB_TOKEN=ghp_xxx. Une page inclut le token encodé en base64 dans un champ caché. Que se passe-t-il ?",
+    "options": [
+      "Le serveur le décode et le masque",
+      "Le serveur ne le voit pas et le token atteint le modèle",
+      "Le serveur refuse de retourner la réponse",
+      "Le token est masqué dans la cap network mais pas le snapshot"
+    ],
+    "answer": 1,
+    "explain": "Le masquage est une substitution de chaîne littérale. Base64, chaînes splittées, et variantes encodées passent toutes à travers. Le README est explicite : Playwright MCP n'est pas une frontière de sécurité."
+  }
+]} />
+
+## Quand Playwright MCP est le mauvais outil
+
+- **Vous avez besoin de login partagé avec une session de navigation humaine en cours.** Envisagez un navigateur agent à login partagé comme celui couvert dans [Agents navigateurs qui héritent de vos logins](/docs/models/browser-agents-shared-login) — le mode extension de Playwright MCP s'en approche, mais l'UX autour des approbations et des Spaces est différente.
+- **Vous testez des chemins de code de production et voulez le vrai test runner Playwright.** Utilisez `@playwright/test` directement ; le MCP est optimisé pour l'exploration agentique, pas pour l'authoring de tests CI.
+- **La charge est 100 % scraping headless de HTML statique.** Un simple `fetch` + parser est des ordres de grandeur moins cher. Gardez le navigateur pour les pages qui ont vraiment besoin d'exécution JavaScript.
+- **Vous ne pouvez risquer aucune fuite d'état navigateur.** Utilisez `--isolated` avec un snapshot `--storage-state` frais par run. N'utilisez pas le mode extension contre votre Chrome de tous les jours.
+
+## Sources et lectures complémentaires
+
+- [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp) — repo canonique, README, et notes de release pour les numéros de version cités ci-dessus.
+- [microsoft/playwright-mcp/releases](https://github.com/microsoft/playwright-mcp/releases) — support captures WebP, `--timeout-settle`, durcissement CDP extension.
+- [MCP Server Token Costs in Claude Code](https://www.jdhodges.com/blog/claude-code-mcp-server-token-costs/) — d'où viennent le chiffre d'overhead ~3 500 tokens et les numéros par outil.
+- [Playwright CLI vs Playwright MCP](https://dev.to/aswani25/playwright-cli-vs-playwright-mcp-which-should-you-use-with-claude-code-1olh) — le benchmark communautaire derrière la différence de coût 4× Skill-vs-MCP.
+- Pages AILmanac liées : [Coût en tokens MCP Claude Code](/docs/claude-code/mcp-token-cost) · [MCP : mode sans état](/docs/api/mcp-2026-07-28-stateless) · [Auditer les skills d'agents](/docs/security/vetting-agent-skills) · [Navigateurs agentiques & confiance same-origin](/docs/security/agentic-browsers-same-origin).
