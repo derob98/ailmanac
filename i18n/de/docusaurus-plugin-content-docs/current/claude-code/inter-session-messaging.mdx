@@ -1,0 +1,116 @@
+---
+sidebar_position: 13.7
+title: "Kommunikation zwischen Sitzungen"
+description: "Zwei Claude-Code-Terminals miteinander sprechen lassen, ohne dass du kopierst und einfügst — die drei ausgelieferten Muster für Peer-to-Peer-Sitzungsmessaging und die Vertrauensgrenze, die du nicht überspringen darfst."
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-08-07" source="https://github.com/anthropics/claude-code/issues/36181">
+Kommunikation zwischen Sitzungen ist immer noch eine **community-gebaute** Fähigkeit — Claude Code liefert keinen nativen Agent-zu-Agent-Bus aus. Die unten genannten Projekte entwickeln sich wöchentlich weiter und die offizielle Feature-Anfrage (Issue #36181) ist geschlossen, aber noch nicht implementiert. Prüfe Versionen und Lizenzbedingungen erneut, bevor du eines davon installierst.
+</VerifyNote>
+
+<Callout type="objectives" items={["Warum zwei Claude-Code-Sitzungen auf derselben Maschine standardmäßig nicht kommunizieren können — und warum du immer wieder die Kopier-Einfüge-Brücke bist","Die drei ausgelieferten Muster für Peer-to-Peer-Sitzungsmessaging: Dateisystem, lokaler WebSocket-Bus und MCP-Kanäle","Wie du in unter zwei Minuten ein funktionierendes Plugin durchgängig installierst und nutzt","Die Vertrauensgrenze, die du setzen musst — die Nachricht eines Peers ist beliebiger Text, der als Anweisung ankommt","Wann du zu diesem Muster greifst statt zu einem Subagenten, einem geteilten Worktree oder einfach alles in einer Sitzung laufen zu lassen"]} />
+
+## Das Problem: du bist die Brücke
+
+Öffne Claude Code in **Terminal A** auf `libfoo/` und **Terminal B** auf `app-that-uses-libfoo/`. Terminal B stößt auf einen Typfehler aus der Bibliothek. Heute übernimmst du — der Mensch — das Routing: Fehler lesen, Terminals wechseln, in A einfügen, auf den Fix warten, zurückwechseln, Build erneut ausführen. Jeder Kontextwechsel verliert Zustand auf beiden Seiten.
+
+Genau das ist der Schmerz aus dem geschlossenen Anthropic-RFE [claude-code#36181](https://github.com/anthropics/claude-code/issues/36181), eröffnet März 2026: *"Bei der Arbeit an voneinander abhängigen Projekten über mehrere Terminals hinweg müssen Benutzer derzeit manuell zwischen Sitzungen wechseln."* Das Issue ist geschlossen — aber ein nativer Kanal zwischen Sitzungen ist noch nicht in Claude Code. Also hat die Community selbst geliefert.
+
+## Die drei Muster
+
+Drei unabhängige Open-Source-Projekte konvergierten Anfang 2026 auf dasselbe Problem, jedes wählte einen anderen Transport. Sie sind wichtig, weil die Kompromisse in die Transportwahl eingebacken sind — nicht in irgendein einzelnes Projekt.
+
+| Muster | Transport | Wird ausgeliefert als | Latenz | Mehrere Maschinen | Debuggbar |
+| --- | --- | --- | --- | --- | --- |
+| **Datei-basierter Posteingang** | JSON-Dateien unter `~/.claude/session-bridge/sessions/<id>/{inbox,outbox}/` | 9 Bash-Skripte + `jq` | ~5–10s (3s Polling) | ❌ eine Maschine | ✅ `cat message.json` |
+| **Lokaler WebSocket-Bus** | Localhost-WebSocket, Sitzungs-Daemon | Claude-Code-Plugin | Millisekunden | ❌ eine Maschine | ⚠️ braucht Bus-Dump |
+| **MCP-Kanäle** | MCP-Server mit Slack-artigen Kanälen + semantischer Suche | `npx claude-slack` | Netzwerk-Hop | ✅ funktioniert über Netzwerk | ✅ MCP abfragen |
+
+Wähle den Transport, der zu deiner Debug-Gewohnheit passt und zu der Anzahl Maschinen, auf denen du Agenten tatsächlich laufen lässt.
+
+### 1. Datei-basierter Posteingang — [`PatilShreyas/claude-code-session-bridge`](https://github.com/PatilShreyas/claude-code-session-bridge) (MIT, 65★)
+
+Jede Sitzung hat ein Verzeichnis: `~/.claude/session-bridge/sessions/<6-Zeichen-ID>/`. Nachrichten sind JSON-Dateien mit einem `status`-Feld, das atomar von `pending → read` umschaltet. Der Empfänger pollt seinen Posteingang alle 3 Sekunden. Der eigene Grund des Autors, WebSockets und MCP zu überspringen: *"Sie sind debuggbar. Du kannst eine Nachricht buchstäblich mit `cat` anschauen."*
+
+<PromptCard title="Sitzung A wird zum Zuhörer; Sitzung B stellt eine Frage">{`# In session A (the library repo)
+/bridge listen
+# → prints A's 6-char session id, e.g. a1b2c3
+
+# In session B (the app that consumes the library)
+/bridge connect a1b2c3
+/bridge ask "Which version of libfoo exports the parseDate() helper, and did its signature change?"`}</PromptCard>
+
+Sitzung A antwortet *aus ihrem lebendigen Kontext heraus* — den geladenen Dateien, den letzten Tool-Ergebnissen, ihrem Plan-Modus. Sitzung B empfängt die Antwort als Nachricht und behandelt sie als vertrauenswürdige, menschenähnliche Eingabe. Dieser letzte Satz ist die ganze Sicherheitsgeschichte dieses Musters; lies weiter.
+
+### 2. Lokaler WebSocket-Bus — [`yilunzhang/claude-code-inter-session`](https://github.com/yilunzhang/claude-code-inter-session) (MIT, 27★)
+
+Ein lokaler Daemon bindet einen WebSocket auf deinem Loopback-Interface. Jede verbundene Sitzung registriert einen Namen und kann `send`, `broadcast` (Payload-Limit 256 KB) oder `list` von Peers ausführen. Die Zustellung nutzt Claude Codes Monitor-Tool, sodass ruhende Sitzungen keine Tokens verbrennen und keine Polling-Schleife läuft. Erfordert Claude Code **≥ 2.1.105** und Python **≥ 3.10**.
+
+Als Plugin-Marketplace installieren, dann die Slash-Befehle nutzen:
+
+<PromptCard title="Inter-Session-Plugin installieren und zwei Terminals verbinden">{`# In any Claude Code session (run once per machine)
+/plugin marketplace add https://github.com/yilunzhang/claude-code-inter-session
+/plugin install inter-session
+
+# Terminal A
+/inter-session:inter-session connect libfoo
+
+# Terminal B
+/inter-session:inter-session connect app
+/inter-session:inter-session send libfoo "Does parseDate() still accept a string?"
+
+# Broadcast to everyone
+/inter-session:inter-session broadcast "About to bump libfoo to 2.0 — hold merges."`}</PromptCard>
+
+### 3. MCP-Kanäle — [`theo-nash/claude-slack`](https://github.com/theo-nash/claude-slack) (MIT, 8★)
+
+Ein vollwertiger MCP-Server, der Slack-artige Abstraktionen bereitstellt: `#general`, projektbezogene Kanäle, DMs und eine semantische Suchschicht auf Qdrant-Basis. Nachrichten bleiben über Neustarts hinweg erhalten, was die anderen beiden nicht tun. Der Kompromiss: du betreibst nun einen Netzwerkdienst mit seinen Abhängigkeiten, und Nachrichten müssen bei jedem Turn durch einen Tool-Call-Roundtrip fließen.
+
+<PromptCard title="MCP-Server starten und aus einem Agent-Turn nutzen">{`# Start once (in its own terminal)
+npx claude-slack
+
+# In any Claude Code session, once claude-slack is added to your MCP config:
+Post to #libfoo-consumers that parseDate() moved from utils to date-helpers in v2.0.
+Then search the channel for prior questions about parseDate to make sure I answered them.`}</PromptCard>
+
+Nutze MCP-Kanäle, wenn du **Persistenz** brauchst (spätere Sitzungen können durchsuchen, was frühere gesagt haben) oder wenn die Peers auf verschiedenen Maschinen leben — die anderen beiden funktionieren nur auf einer Maschine.
+
+## Wähle den richtigen Transport
+
+<Steps items={[{title: "Frage: brauche ich Maschinen-übergreifend?", body: "Wenn Sitzungen auf verschiedenen Laptops oder einer Remote-Kiste laufen, funktioniert nur das MCP-Kanal-Muster. Der Datei-Posteingang und der lokale WebSocket-Bus sind per Design auf eine Maschine beschränkt."},{title: "Frage: brauche ich Persistenz über die Sitzung hinaus?", body: "MCP-Kanäle speichern Nachrichten, sodass eine morgen gestartete Sitzung den gestrigen Kontext durchsuchen kann. Die anderen beiden behandeln Nachrichten als flüchtig."},{title: "Frage: wie will ich debuggen?", body: "Wenn du gern Transkripte mit cat und grep liest, wähle den datei-basierten Posteingang. Wenn Sub-Sekunden-Latenz zählt, wähle den WebSocket-Bus. Wenn du bereits MCP-Server betreibst, wähle claude-slack."},{title: "Frage: würde ein Subagent nicht reichen?", body: "Peer-Sitzungen tragen jeweils ihren eigenen lebendigen Projektzustand — geladene Dateien, Plan-Modus, letzte Edits. Wenn du nur einen begrenzten Worker brauchst, der eine fokussierte Aufgabe erledigt und zurückkommt, spawne stattdessen einen Subagenten; das ist einfacher und nativ."},{title: "Mit der kleinsten Angriffsfläche zuerst installieren", body: "Probiere die datei-basierte Bridge an einem Zwei-Repo-Schmerzpunkt, bevor du einen Daemon oder einen MCP-Server einführst. Wenn Polling-Latenz okay ist, bist du fertig."}]} />
+
+## Die Vertrauensgrenze, die du nicht überspringen darfst
+
+Hier ist der Teil, über den niemand klar spricht. In jedem der obigen Muster kommt eine Nachricht bei der empfangenden Sitzung **als Text an, den der Agent standardmäßig als Anweisung behandelt**. Das heißt: eine andere Sitzung — oder irgendetwas auf deiner Kiste, das in den Posteingang/Socket/MCP schreiben kann — kann Prompts in deinen Agenten injizieren.
+
+<Callout type="warning" items={["Eine Peer-Nachricht ist nicht vertrauenswürdige Eingabe, kein Nutzer-Turn. Selbst auf deiner eigenen Maschine ist der Absender ein anderer autonomer Agent, der selbst durch eine gelesene Datei prompt-injiziert worden sein kann.","Betreibe Kommunikation zwischen Sitzungen niemals mit einem weit offenen Tool-Set. Kombiniere sie mit einem Claude-Code-Berechtigungsprofil, das destruktive Shell, beliebige Web-Fetches und Geheimnispfade blockiert.","Die WebSocket- und Datei-basierten Muster haben standardmäßig KEINE Authentifizierung des Absenders. Jeder lokale Prozess, der sich an den Loopback-Socket binden oder in ~/.claude/session-bridge/ schreiben kann, kann sich als Peer ausgeben.","Behandle Broadcasts als Explosionsradius. Eine einzige vergiftete Nachricht an 5 verbundene Sitzungen ergibt 5 kompromittierte Agenten, nicht 1.","Im Zweifel vermittle: lass die empfangende Sitzung die eingehende Nachricht zusammenfassen und dich zur Freigabe fragen, bevor sie darauf reagiert — ein leichter Hook oder ein Prompt-Guardrail im Frontmatter des Plugins erledigt den Job."]} />
+
+Für das allgemeine Bedrohungsmodell, in das das passt, siehe [Prompt Injection](/docs/security/prompt-injection) und [Agenten absichern](/docs/security/securing-agents). Für MCP-spezifische Bus-Risiken ist [Invisible-Comment-MCP-Angriffe](/docs/security/invisible-comment-mcp-attacks) direkt relevant — dieselbe Klasse des "Nachricht kommt mit versteckten Anweisungen an"-Bugs gilt für einen Slack-artigen Kanal genauso wie für ein Tool-Ergebnis.
+
+## Wann das einem Subagenten überlegen ist — und wann nicht
+
+Peer-Sitzungen und Subagenten lösen *verschiedene* Probleme. Ein [Subagent](/docs/claude-code/subagents) ist ein frischer Claude mit begrenztem Tool-Set, den du spawnst, um den Hauptkontext zu schützen oder eine Aufgabe zu spezialisieren; er startet leer und liefert ein Ergebnis. Eine Peer-Sitzung ist eine *langlaufende, menschengetriebene* Claude-Code-Instanz mit ihren eigenen geladenen Dateien, aktivem Plan-Modus und einem ganzen Gespräch voller Zustand — du leihst dir ihren Kontext, du erzeugst keinen neuen.
+
+Greife zur Kommunikation zwischen Sitzungen, wenn der Wert **im lebendigen Zustand der anderen Sitzung** liegt: die Bibliothek, über die sie bereits nachdenkt, der fehlgeschlagene Test, den sie gerade ausgeführt hat, der Commit, den sie gerade gestaged hat. Greife zu einem Subagenten, wenn der Wert in **einer begrenzten Aufgabe isoliert ausgeführt** liegt. Wenn du Kommunikation zwischen Sitzungen dafür verwendest, Einmalfragen ohne Abhängigkeit vom Peer-Kontext abzufeuern, willst du wahrscheinlich einen Subagenten — oder einen geteilten Worktree.
+
+Für langlaufende Multi-Agent-Workflows, die über beide Muster hinauswachsen, siehe [Langlaufende Agenten-Harnessing](/docs/frontiers/long-running-agent-harnesses) und [Native Multi-Agent-APIs](/docs/models/native-multi-agent-apis).
+
+## Häufige Fehler
+
+<Flashcards title="Fallen — dreh jede Karte um für den Fix" cards={[{front: "Eingehende Nachrichten so vertrauen, als wären es deine eigenen Prompts", back: "Eine Peer-Nachricht ist nicht vertrauenswürdige Eingabe. Beschränke die empfangende Sitzung mit einem engen Berechtigungsprofil und schalte bei kritischen Aufgaben das Handeln auf eingehende Nachrichten hinter eine menschliche Bestätigung."},{front: "MCP-Kanäle für ein Zwei-Terminal-Problem auf einer Maschine wählen", back: "Du hast gerade einen Netzwerkdienst, eine Vektor-DB und einen Tool-Call-Roundtrip für einen Job eingeführt, den der Datei-Posteingang in 9 Bash-Skripten erledigt. Passe den Transport an den tatsächlichen Umfang an."},{front: "Kommunikation zwischen Sitzungen nutzen, wo ein Subagent reichen würde", back: "Wenn du nur einen frischen Claude brauchst, um eine begrenzte Aufgabe zu erledigen und ein Ergebnis zurückzugeben, ist ein Subagent einfacher, nativ und braucht kein weiteres lebendiges Terminal, das online sein muss."},{front: "Broadcasten von einem Agenten, dem du nicht voll vertraust", back: "Ein vergifteter Agent, der an fünf Peers broadcastet = fünf kompromittierte Agenten, nicht einer. Bevorzuge gerichtetes Senden; halte Broadcast für menschengetriebene, risikoarme Ankündigungen reserviert."},{front: "Vergessen, dass der Absender keine Identität hat", back: "Die datei-basierten und WebSocket-Muster authentifizieren den Absender nicht. Jeder lokale Prozess, der in den Posteingang schreiben oder den Loopback-Socket erreichen kann, kann einen Peer imitieren."}]} />
+
+<Quiz title="Prüfe dich selbst" questions={[{q: "Zwei Claude-Code-Sitzungen auf demselben Laptop müssen Nachrichten austauschen, und du willst sie so speichern, dass eine morgen geöffnete Sitzung den gestrigen Kontext durchsuchen kann. Welches Muster passt?", options: ["Datei-basierter Posteingang (session-bridge)", "Lokaler WebSocket-Bus (inter-session)", "MCP-Kanäle (claude-slack)"], answer: 2, explain: "Nur das MCP-Kanal-Muster speichert Nachrichten über die laufende Sitzung hinaus und unterstützt semantische Suche über vorherige Gespräche. Die anderen beiden sind per Design flüchtig."}, {q: "Welche Sicherheitsannahme ist standardmäßig im Datei-Posteingang und lokalen WebSocket-Bus WAHR?", options: ["Der Absender ist kryptografisch authentifiziert", "Nur der menschliche Benutzer kann Nachrichten posten", "Es gibt KEINE Absender-Authentifizierung — jeder lokale Prozess, der in den Posteingang schreiben oder den Loopback-Socket erreichen kann, kann einen Peer imitieren"], answer: 2, explain: "Keines der Muster authentifiziert den Absender standardmäßig. Jeder lokale Prozess mit dem richtigen Dateisystem- oder Netzwerkzugriff kann sich als Peer ausgeben, also ist das Berechtigungsprofil des empfangenden Agenten die einzige echte Grenze."}, {q: "Du musst einen frischen Claude mit begrenztem Tool-Set spawnen, um EINE begrenzte Aufgabe zu erledigen und ein Ergebnis zurückzugeben. Was solltest du nutzen?", options: ["Kommunikation zwischen Sitzungen", "Einen Subagenten", "Einen MCP-Kanal"], answer: 1, explain: "Das ist genau der Subagent-Anwendungsfall: frischer Kontext, begrenzte Tools, gibt ein Ergebnis zurück. Kommunikation zwischen Sitzungen dient dazu, sich den LEBENDIGEN Zustand einer anderen menschengetriebenen Sitzung auszuleihen — anderer Job."}]} />
+
+<Callout type="takeaways" items={["Claude Code liefert (noch) keine native Kommunikation zwischen Sitzungen aus; drei Community-Projekte füllen die Lücke mit unterschiedlichen Transports.","Wähle datei-basiert für Debuggbarkeit, WebSocket für Sub-Sekunden-Latenz auf einer Maschine, und MCP-Kanäle nur, wenn du Persistenz oder Peers über Maschinen hinweg brauchst.","Eine Nachricht von einer Peer-Sitzung ist nicht vertrauenswürdige Eingabe — behandle sie wie jede andere Prompt-Injection-Angriffsfläche und kombiniere den Bus mit einem engen Berechtigungsprofil.","Wenn du nur einen begrenzten Worker für eine Aufgabe brauchst, nutze stattdessen einen Subagenten; Peer-Sitzungen sind dafür da, sich den lebendigen Zustand einer anderen Sitzung auszuleihen.","Der offizielle RFE (claude-code#36181) ist geschlossen, aber nicht implementiert — behalte das Repo im Auge für eine native Version und erwarte, dass die Community-Projekte konvergieren oder aussterben, sobald sie landet."]} />
+
+## Quellen & weiterführende Literatur
+
+- [claude-code#36181 — Cross Session Messaging for Multi Project Coordination](https://github.com/anthropics/claude-code/issues/36181) — der offizielle RFE, der den Schmerz benennt und die gewünschten Fähigkeiten umreißt.
+- [`PatilShreyas/claude-code-session-bridge`](https://github.com/PatilShreyas/claude-code-session-bridge) — MIT, datei-basiert, 9 Bash-Skripte + `jq`; die Begründung des Autors steht im Blogpost unten.
+- [Shreyas Patil — *session-bridge: I Made Two Claude Code Sessions Talk to Each Other* (2026-03-20)](https://blog.shreyaspatil.dev/session-bridge-i-made-two-claude-code-sessions-talk-to-each-other/) — die Aufbereitung der Transportwahl, die erklärt, warum Dateisystem WebSockets und MCP für diesen Autor geschlagen hat.
+- [`yilunzhang/claude-code-inter-session`](https://github.com/yilunzhang/claude-code-inter-session) — MIT, WebSocket-Bus, als Claude-Code-Plugin installiert; erfordert Claude Code ≥ 2.1.105.
+- [`theo-nash/claude-slack`](https://github.com/theo-nash/claude-slack) — MIT, MCP-Server mit Slack-artigen Kanälen, DMs und semantischer Suche über frühere Nachrichten.
+- [Subagenten & Parallele Agenten](/docs/claude-code/subagents) — die Alternative, wenn du einen frischen begrenzten Worker brauchst, keinen lebendigen Peer.
+- [Prompt Injection](/docs/security/prompt-injection) & [Invisible-Comment-MCP-Angriffe](/docs/security/invisible-comment-mcp-attacks) — das Bedrohungsmodell, das jede über diesen Bus gesendete Nachricht regiert.
