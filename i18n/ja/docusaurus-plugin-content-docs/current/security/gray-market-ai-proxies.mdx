@@ -1,0 +1,216 @@
+---
+sidebar_position: 4.7
+title: "グレーマーケットの AI プロキシ(「Poison Claude」)"
+description: "組織の誰かが Claude Opus を定価の10%でこっそり支払っている。落とし穴:すべてのプロンプトはまず見知らぬ他人のサーバーを経由する。手口の仕組みと検知方法を解説する。"
+---
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={[
+  "Poison Claude の実態 — なぜ割引は本物であり、おとり商法ではないのか",
+  "Claude Code をデータ漏洩パイプに変えてしまう、たった一行の環境変数変更",
+  "同僚(または過去の自分)がすでにプロンプトをそこ経由に流していないか検知する方法",
+  "正当な AI ゲートウェイとグレーマーケットの再販業者を区別するシグナル",
+  "「プロンプトに秘密は入れていない」がなぜここでは防御にならないのか"
+]} />
+
+**2026年8月4日**、Okta Threat Intelligence が *Free tokens for sale: How fake signups drive AI fraud*(売り出し中の無料トークン:偽装サインアップが AI 詐欺を駆動する仕組み)を公開し、**Poison Claude** という実稼働サービスが Anthropic の Opus 4.8、Opus 4.7、Opus 4.6、Sonnet 4.6 へのアクセスを地下フォーラムで転売していることを記録した — **公式トークン単価の 5〜15%** で、暗号通貨払い。露出した `/api/status` エンドポイントは 2026年7月3日時点で **881 ユーザー、うち 872 がアクティブ** と表示していた。
+
+面白いのは詐欺そのものではなく、その設計だ。Poison Claude は本物の Anthropic 互換 API キーを渡してくれるし、そこに向けて設定すれば Claude Code は普通に動く。ただ、プロンプト、ツール呼び出し、ファイル、出力が Anthropic へ届く途中で運営者のサーバーを寄り道するだけである。運営者にはすべてが見える。
+
+このページは、[エージェントスキルの検証](/docs/security/vetting-agent-skills) と [サードパーティコードのレビュー](/docs/security/reviewing-third-party-code) の姉妹編で、別のサプライチェーン経路を扱う:インストールするコードではなく、話しかける相手のエンドポイントの話である。
+
+<VerifyNote lastVerified="2026-08-07" source="https://www.okta.com/blog/threat-intelligence/free_tokens_for_sale/">
+ドメイン、ユーザー数、トークン単価はこの話の「傷みやすい」部分だ。*パターン* — ボーナスクレジットの裁定取引 + プロキシ可視性リスク — が「日持ちする」部分である。数字を引用する前に Okta の投稿とゲートウェイベンダーのステータスを再確認すること。
+</VerifyNote>
+
+## 割引はどこから来ているのか
+
+Poison Claude は API キーを盗んでいるわけではない — それは語りやすいストーリーだが間違っている。実態は **クラウドプロバイダーの新規アカウントクレジットを大規模に裁定取引**しているのだ。Okta の記事はその仕組みを記録している:
+
+- 新規 AWS アカウントには Bedrock(Claude を仲介する)で使える **約 US$100** のクレジットが付与される。運営者は合成 ID で使い捨て AWS アカウントのプールを作る。
+- サインアップは **レバノン、インドネシア、タイ** のプロキシ/VPN ネットワークから、`dakaka.org`、`emailinbo.live`、`ratixq.com` などの使い捨てメールドメインを用いて行われていた。
+- 有料顧客からのプロンプトは、試用アカウントのプール全体にロードバランスされる。各顧客リクエストは AWS の無料クレジットで賄われた本物の Bedrock 呼び出し — AWS が検知して失効させるまで。
+- 運営者は差額を懐に入れる。入力側の大半が補助されているので、**定価の 5〜15%** でも十分なマージンになる。
+
+並行サービスの **Ecomagent**(ecomagent.in、約 1,000 ユーザー)は同じパターンを Opus 4.8、Opus 4.6、Sonnet 4.6、GPT Codex 5.5 に対して用いており、Google Vertex AI が混在している痕跡もあった。
+
+要点:割引は *技術的には* 本物である。誰も *あなたを* お金で騙してはいない。詐欺は二次的な効果にある。
+
+## プロキシ可視性の問題はバグではない
+
+クライアントが `https://poison-claude.bitsender.top`(Cloudflare で前面配置、API パスは Hostinger ムンバイの `api.claudeopus.shop` にあった)を向いているとき、リクエストはそのサーバーが読める形でなければ Anthropic へ転送できない。TLS は Anthropic ではなく *プロキシで終端* する。これは Poison Claude の欠陥ではなく、ゲートウェイプロキシの定義そのものだ:
+
+> 「サービスがゲートウェイプロキシとして構成されている場合、そのプロンプトはモデルへ転送されなければならないため、サービス提供者はプロンプトを完全に可視化できる。」
+> — Okta Threat Intelligence、2026年8月
+
+つまり運営者は平文で以下を見ることができる:
+
+| データの種類 | なぜリクエストに含まれるのか | ログ化された場合の影響 |
+|---|---|---|
+| システムプロンプト | あなたの `CLAUDE.md`、組織のプレイブック、社内用語 | アーキテクチャ、プロンプトエンジニアリングの IP、従業員名を暴露 |
+| ファイル内容 | エージェントが読むコード、渡すドキュメント、スクリーンショット | ソースコード全体の流出、1 PR ずつ |
+| ツール引数 | DB クエリ、cURL コマンド、ファイル名、パス | 内部 URL、テーブル名、クラウドリソース ID |
+| 長期メモリ | Claude に「覚えて」と頼んだすべて | 永続的な漏洩 — 何年分ものコンテキストが一度に流出 |
+| モデル出力 | Claude が返すすべて | 生成されたコード、意思決定、下書き |
+
+「プロンプトに秘密は入れていない」は防御にならない。興味深いデータは API キーではなく — エージェントの一日を流れるコード、意思決定、社内コンテキストなのだ。
+
+## 一行のピボット:`ANTHROPIC_BASE_URL`
+
+Claude Code(および基盤の Anthropic SDK)は意図的にゲートウェイフレンドリーに設計されている — 企業の可観測性レイヤー、地域ブリッジ、LiteLLM/Portkey/OpenRouter でのルーティングといった正当な用途はすべてこれに依存している。つまみは:
+
+```sh
+export ANTHROPIC_BASE_URL="https://gateway.example/anthropic"
+export ANTHROPIC_AUTH_TOKEN="sk-…"
+```
+
+設定されると、CLI が発する **すべての** リクエスト — メイン会話、サブエージェント、バックグラウンド圧縮、ツール呼び出し — がその base URL に送られる。単一の `.envrc`、`~/.zshrc` の一行、あるいは「親切な」チュートリアルに勧められて誰かがシェルプロファイルに貼り付けた一行があれば十分だ。値は **プロセス開始時に** 読まれ、以降再チェックされないので、セッションの途中で見直しを促すものは何もない。全リストは [Claude Code の環境変数](/docs/claude-code/settings) を参照。
+
+同等の変数は他クライアントにも存在する(OpenAI 形状の SDK は `OPENAI_BASE_URL` を読む、Google クライアントはリージョンオーバーライドを読む)。この攻撃ベクトルは汎用的である。
+
+<PromptCard title="ステルスな base-URL 上書きを grep する — マシンごとに一度実行">
+{`# what environment variables are actively pointing your AI clients elsewhere?
+env | grep -Ei 'ANTHROPIC_|OPENAI_|GOOGLE_|GEMINI_|BASE_URL|_ENDPOINT|AUTH_TOKEN'
+
+# where are they SET? — check the usual suspects
+grep -RIn --color \\
+  -e 'ANTHROPIC_BASE_URL' -e 'ANTHROPIC_AUTH_TOKEN' \\
+  -e 'OPENAI_BASE_URL' -e 'OPENAI_BASE_API' \\
+  ~/.zshrc ~/.bashrc ~/.profile ~/.zshenv ~/.envrc \\
+  ~/.config/fish/config.fish ~/.config/claude 2>/dev/null
+
+# any project-level overrides?
+find ~ -name '.envrc' -o -name '.env' -o -name '.env.local' 2>/dev/null \\
+  | xargs grep -l 'BASE_URL\\|AUTH_TOKEN' 2>/dev/null`}
+</PromptCard>
+
+## 確認すべき IOC(2026年8月時点)
+
+監査を行う場合、Okta が公開した具体的な指標は以下の通り。これらのドメインは訪問しないこと。
+
+<Steps items={[
+  {title: "Poison Claude インフラで名指しされたドメイン", body: "poison-claude.bitsender.top(Cloudflare 前面配置、後日 Cloudflare がフィッシング警告を出した);api.claudeopus.shop(Hostinger ムンバイ、Cloudflare はこの API サブドメインへの対応を拒否)。関連サービス:ecomagent.in。"},
+  {title: "プロキシ設定とシェル履歴を検索する", body: "上記ホスト名 — および文字列 'claudeopus'、'poison-claude'、'bitsender'、'ecomagent' を、~/.zsh_history、~/.bash_history、.env* ファイル、そして CI 環境シークレットで grep する。~/.config/claude/settings.json も確認する。"},
+  {title: "アウトバウンドネットワークフローを確認する", body: "ファイアウォール / EDR のログで、小規模ホスター(Hostinger、Contabo、専用サーバー業者)に解決される *かつ* Anthropic Messages API のトラフィックを受け付ける HTTPS を探す。api.anthropic.com へのトラフィックは直接であるべき;不慣れなホストの /v1/messages に向かうトラフィックが手がかりである。"},
+  {title: "試用サインアップをホストしているなら身元詐称の指標を探す", body: "レバノン/インドネシア/タイの VPN ノードからのサインアップ、使い捨てメールドメイン(dakaka.org、emailinbo.live、ratixq.com)、同じ請求カードフィンガープリントによる大量アカウント作成が、Okta が挙げる中核シグナルだ。試用クレジット付きの AI プロダクトを運営しているなら、あなたが上流のターゲットである。"}
+]} />
+
+## 正当なゲートウェイ vs グレーマーケットの再販業者
+
+企業向け AI ゲートウェイは、可観測性、DLP、コスト管理、複数プロバイダーのルーティングといった正当な理由で存在する。この二つを混同させることこそ、グレーマーケットサービスを成立させている。区別のシグナル:
+
+| シグナル | 正当なゲートウェイ(LiteLLM、Portkey、OpenRouter、企業内) | グレーマーケットの再販業者 |
+|---|---|---|
+| **価格** | 上流の定価以上、多くの場合マージン込み | 定価の 5〜15% — 合法的にプロンプトを10倍安くする方法はない |
+| **会社** | 法人格、公開住所、資金調達歴、LinkedIn のチーム | 匿名、暗号通貨のみ、Telegram/フォーラムのみのサポート |
+| **支払い** | カード / 請求書 / SSO 課金 | Monero、USDT、暗号通貨のみ |
+| **利用規約** | 明記された DPA、データ処理付帯合意、リージョン制御 | DPA なし、保持ポリシーなし、インシデント対応の約束なし |
+| **配布** | ベンダー公式サイトのドキュメント、npm/pip パッケージ、Claude Code への PR | 地下フォーラム、招待制チャネル、ミラーされたインストールスクリプト |
+| **ドメインの年齢と姿勢** | 複数年、HSTS、一致する WHOIS、MX レコード | 新しい TLD(`.shop`、`.top`、動的 DNS サフィックス)、CDN で類似名を覆う |
+
+切り替える理由が「怪しいくらい安いから」なら、答えは出ている。運営者が復号できるすべてのプロンプトには、トークン以外の収益化経路がある — 安価なモデルのファインチューニング用コーパスもその一つだ。
+
+## 今週やるべきこと
+
+<Steps items={[
+  {title: "承認済みゲートウェイのリストを公表する", body: "明示的な許可対象:api.anthropic.com、加えて調達したゲートウェイ(LiteLLM インスタンス、企業プロキシ、自社アカウント配下の Bedrock エンドポイント)。それ以外はすべて拒否。Claude Code / Cursor / Codex のチームドキュメントで、新入社員が実際に目にする場所に置くこと。"},
+  {title: "開発マシン全体で環境変数とシェル rc ファイルを監査する", body: "上記の grep を MDM またはチームチャネルのワンライナー経由で実行する。許可リストの外を指しているものは、ローテート&削除の対象だ。"},
+  {title: "可能なところで AI クライアントの egress ロギングを有効化する", body: "マネージドエンドポイント、ファイアウォール、または EDR で。各エージェントプロセスがどのホストと話したかの永続的な記録が欲しい。今なら安く、境界の外へ何も出ていないことを証明する必要が生じたときには計り知れない価値になる。"},
+  {title: "プロキシ使用が確認されたら侵害と仮定する", body: "その期間のプロンプトはすべて開示されたものとして扱う。エージェントが読み得た長期資格情報(デプロイトークン、DB クレデンシャル、リポジトリから取り出した SSH キー)をローテートする。その期間に書かれたエージェントメモリファイルを消去する。"},
+  {title: "*動機* を教育する", body: "これらを使っている人は悪意があるわけではない — 深夜2時にレート制限にぶつかったか、予算なしで Opus を試したかっただけだ。合法的な経路(共有の組織キー、予算増枠、セルフサービスのゲートウェイ)を与えなければ、また怪しい経路を見つけてくるだろう。"}
+]} />
+
+<PromptCard title="エージェントに、実効設定を許可リストと照らし合わせて差分を出してもらう">
+{`Read all of the following and tell me if any AI client on this machine is
+pointed at a base URL, endpoint, or auth token that is NOT one of:
+  - https://api.anthropic.com
+  - <PASTE YOUR CORPORATE GATEWAY URL(S) HERE>
+
+Sources to check:
+  1. \`env | grep -Ei 'ANTHROPIC|OPENAI|GEMINI|BASE_URL|AUTH_TOKEN'\`
+  2. ~/.zshrc, ~/.bashrc, ~/.profile, ~/.zshenv, ~/.envrc
+  3. ~/.config/claude/settings.json and any project .claude/settings.json
+  4. .env, .env.local, .envrc in any repo under ~/code (or your work dir)
+  5. Shell history: grep 'BASE_URL\\|claudeopus\\|bitsender\\|poison' ~/.*history
+
+For each finding: full path, exact line, and whether the target host is in
+the allow-list. Do NOT contact any of the URLs. Report only.`}
+</PromptCard>
+
+## 理解度チェック
+
+<Quiz questions={[
+  {
+    q: "Poison Claude はなぜ Claude アクセスを定価の 5〜15% で合法的に販売できるのか?",
+    options: [
+      "Anthropic の課金 API をクラックした",
+      "詐欺的に作成したクラウドアカウントのプールで、新規アカウントプロモクレジット(AWS Bedrock のサインアップクレジット約 100 ドルなど)を裁定取引している",
+      "偽のモデルを訓練し、実際にどれと話しているか嘘をついている",
+      "Anthropic が卸価格を提供している"
+    ],
+    answer: 1,
+    explain: "Okta は、レバノン/インドネシア/タイの VPN ノードと使い捨てメールドメインを用いた大規模なサインアップ詐欺で、新規アカウントクレジットを刈り取っていることを記録した。上流呼び出しは本物で、その支払いが補助されている。"
+  },
+  {
+    q: "プロンプトに API キーやパスワードを入れたことがない。それでもグレーマーケットプロキシが深刻なデータ漏洩リスクである理由は?",
+    options: [
+      "リスクではない — シークレットがなければ漏洩もない",
+      "興味深いデータは、コード、システムプロンプト、ツール引数、メモリ、出力 — すべてプロキシには平文であり、すべて収益化可能だ",
+      "Claude がレスポンスにシークレットを幻覚するかもしれないから",
+      "レスポンスだけが漏れ、リクエストは漏れない"
+    ],
+    answer: 1,
+    explain: "TLS は定義上プロキシで終端する。エージェントが見たり出したりするすべて — ソースコード、内部 URL、DB クエリ、意思決定 — が運営者に可視化される。シークレットは目立つケース;ソースコードは静かで、より大きなケースだ。"
+  },
+  {
+    q: "開発マシンで設定されると、Claude Code のすべてのリクエスト — メインループ、サブエージェント、バックグラウンド呼び出し — を密かに攻撃者のエンドポイントへリダイレクトする単一の環境変数はどれか?",
+    options: [
+      "CLAUDE_PROXY",
+      "HTTPS_PROXY",
+      "ANTHROPIC_BASE_URL(ANTHROPIC_AUTH_TOKEN と組み合わせて)",
+      "ANTHROPIC_API_KEY 単独"
+    ],
+    answer: 2,
+    explain: "ANTHROPIC_BASE_URL はプロセス開始時に一度読まれ、バックグラウンドおよびサブエージェント呼び出しを含むすべてのトラフィックに適用される。ANTHROPIC_AUTH_TOKEN と組み合わせれば、CLI は任意の Anthropic 形状エンドポイントに対して普通に動作する。"
+  },
+  {
+    q: "あるノート PC が 2 週間 Poison Claude 経由でルーティングしていたことを確認した。正しい対応範囲は?",
+    options: [
+      "環境変数を削除 — 以上",
+      "環境変数を削除し、プロキシに対して使用した AUTH トークンをローテートする",
+      "その期間にエージェントが見たり生成したりしたすべてを開示されたものとして扱う:読み得た長期資格情報をローテートし、その期間のエージェントメモリファイルを消去し、ソースコード露出を仮定する",
+      "何もしない — HTTPS のためプロキシはトラフィックを見られない"
+    ],
+    answer: 2,
+    explain: "TLS はプロキシで終端する。エージェントがリポジトリから読んだもの、メモリに書いたもの、ツールに出したものはすべて平文で可視化された。2 週間分のエージェント活動コーパスが露出させ得るものを、プロキシ資格情報だけでなくローテートすること。"
+  }
+]} />
+
+<Flashcards cards={[
+  {front: "Poison Claude — 一言要約", back: "Claude Opus 4.6〜4.8 と Sonnet 4.6 のアクセスを定価の 5〜15% で転売する地下サービス。AWS Bedrock での新規アカウントクレジット詐欺で資金供給される。すべてのプロンプトが運営者に可視化される。Okta Threat Intelligence が 2026年8月4日に文書化。"},
+  {front: "10倍の割引の出どころ", back: "価格の詐欺ではない — 合成 ID のクラウドアカウントプール全体で新規アカウントプロモクレジット(AWS Bedrock のサインアップクレジット約 100 ドル)を裁定取引している。"},
+  {front: "プロキシ可視性の不変条件", back: "ゲートウェイプロキシは転送のためリクエストを読めなければならない。TLS はプロキシで終端する。プロンプト、コード、ツール引数、メモリ、出力は設計上運営者に平文である — バグではない。"},
+  {front: "一変数のピボット", back: "ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN は Claude Code の全トラフィック(メイン、サブエージェント、バックグラウンド)を任意の Anthropic 形状エンドポイントへリダイレクトする。プロセス開始時に読まれ、以降再チェックされない。"},
+  {front: "IOC(2026年8月時点)", back: "poison-claude.bitsender.top、api.claudeopus.shop、ecomagent.in。シェル rc ファイル、env、プロジェクトの .env*、シェル履歴を、これらの文字列と迷い込んだ BASE_URL / AUTH_TOKEN の上書きについて grep する。"},
+  {front: "正当なゲートウェイ vs グレーマーケット — 素早い見分け方", back: "価格。正当なゲートウェイは上流以上のコストになる。定価の 5〜15% のものは、補助されているか(Bedrock 無料クレジットの大規模利用、つまり詐欺)、モデルについて嘘をついているかのどちらかしかない。"},
+  {front: "侵害時の対応", back: "その期間の全プロンプトが開示されたと仮定する。エージェントが読み得た長期資格情報をローテートする;期間中に書かれたメモリファイルを消去する;ソースコードは露出したものとして扱う。"}
+]} />
+
+## 関連
+
+- [インストールするエージェントスキルの検証](/docs/security/vetting-agent-skills) — インストールするコードのサプライチェーン問題
+- [サードパーティコードのレビュー](/docs/security/reviewing-third-party-code) — 一般的な「実行され得る」チェックリスト
+- [エージェントがアップロードするもの](/docs/security/what-your-agent-uploads) — プロンプトがマシンを離れるとき実際に含まれているもの
+- [MCP サーバーのセキュリティ確保](/docs/security/securing-mcp-servers) — ツールの信頼境界、エンドポイント問題と鏡合わせ
+- [AI ゲートウェイ:LiteLLM、OpenRouter、Portkey](/docs/models/ai-gateways-litellm-openrouter-portkey) — 同じルーティング機構の正当な用途
+- [Claude Code 設定](/docs/claude-code/settings) — Claude がどこと話すかを制御する環境変数
+
+## 出典と参考文献
+
+- Okta Threat Intelligence — [Free tokens for sale: How fake signups drive AI fraud](https://www.okta.com/blog/threat-intelligence/free_tokens_for_sale/)(Jeremy Kirk & Mathew Woodyard、2026年8月4日) — IOC、ユーザー数、詐欺手法を含む一次資料
+- The Hacker News — [Poison Claude Sells Discounted Claude Access While Its Operator Sees Every Customer Prompt](https://thehackernews.com/2026/08/poison-claude-sells-discounted-claude.html)(2026年8月)
+- Cyberpress — [Poison Claude Abuses Fake Accounts and Free Credits to Sell Discounted AI Access Tokens](https://cyberpress.org/free-oauth-tokens-fuel-account-takeovers/)
+- GBHackers — [Hackers Abuse Cloud Startup Credits to Resell Claude and Gemini AI Access](https://gbhackers.com/hackers-abuse-cloud-startup-credits/)
+- Anthropic — [Claude Code settings reference](https://docs.claude.com/en/docs/claude-code/settings) — `ANTHROPIC_BASE_URL` と関連環境変数に関する公式ドキュメント
+- AWS — [Free tier & new-account credits for Amazon Bedrock](https://aws.amazon.com/bedrock/pricing/) — 裁定取引されている補助金
