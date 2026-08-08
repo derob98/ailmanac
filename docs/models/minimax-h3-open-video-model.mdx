@@ -1,0 +1,247 @@
+---
+sidebar_position: 9.1
+title: "MiniMax H3 (Hailuo 3.0): The Open-Weight Omni Video Model"
+description: "MiniMax open-sourced a 33B single-stream transformer that generates 4–15s of 2K video with native stereo audio in one pass. The license quietly blocks self-hosting in the US/EU/UK/Korea, the open base is 768p (not 2K), and ~13B of 33B params are AdaLN branches you can skip at inference. What H3 actually is, what it costs, and when it beats the closed video APIs."
+keywords: [MiniMax H3, Hailuo 3.0, MiniMax-H3, open weight video, generative video AI, ComfyUI H3, H3-VAE, MM-RoPE, video-to-video with audio, MiniMax Community License, open source video model, self-host video AI, H3 API pricing, MiniMax vs Kling, MiniMax vs Sora, MiniMax vs Veo]
+---
+
+<LevelBadge level="intermediate" />
+
+On **August 3, 2026** MiniMax pushed the weights of **MiniMax-H3** (consumer name: **Hailuo 3.0**) to Hugging Face — a **33-billion-parameter, single-stream Transformer** that turns text, images, video and audio references into **4–15 second clips at up to 2K/24fps with native stereo audio**, all generated in one pass. That last part is the interesting one: there is no separate TTS stage, no bolted-on SFX pipeline. Dialogue, room tone and picture come out together, from the same model.
+
+Three days earlier the paid API had opened at **$0.1625/second** for 2K (~$9.75/minute of video), roughly **half the cost of Kling 3.0 or Seedance 2.0** at comparable resolution. On the Artificial Analysis leaderboards single-run scores put H3 **#1 in video editing with audio**, top-three in text-to-video and image-to-video. That combination — frontier-tier video quality, open weights, and honest sub-$10/minute pricing — is what put H3 on every generative-media feed this week.
+
+This page is what most other write-ups miss: the parts that determine whether H3 is actually useful to *you*.
+
+<Callout type="objectives" items={[
+  "Understand the H3 architecture — single-stream Transformer, H3-VAE, MM-RoPE — and why it produces video and audio in one forward pass",
+  "Know the three self-hosting gotchas nobody puts on the landing page: the geo-restricted license, the 768p ceiling on the open base, and the AdaLN parameter-skip trick",
+  "Get a working self-hosted path: minimum 42.5 GB of weights, quantization choices, and how a 12 GB card runs it with offloading",
+  "Try H3 from the API with a real cURL you can copy, and know the input-shape limits (12 files max, ≤64 MB body, public URLs only)",
+  "Pick between H3 and the closed alternatives (Kling 3.0, Seedance 2.0, Veo, Sora) with clear tie-breakers on price, control and licensing"
+]} />
+
+<VerifyNote lastVerified="2026-08-08" source="https://huggingface.co/MiniMaxAI/MiniMax-H3">
+Video-model prices, license terms and quantized checkpoints churn weekly in this space. Anything with a dollar sign, a GB count or a benchmark rank on this page is a snapshot — re-check the official model card and the vendor's pricing page before you commit. The architecture facts (33B / single-stream / MM-RoPE / native audio) are the durable part.
+</VerifyNote>
+
+## Three things about H3 that aren't obvious from the headlines
+
+### 1. The Community License blocks self-hosting in the US, EU, UK and South Korea
+
+The Hugging Face model card links a **MiniMax H3 Community License Agreement** whose text is application-gated for four regions: **the United States, the European Union, the United Kingdom and the Republic of Korea**. In practice that means: if you or your organisation is in any of those places and you want to run H3 on your own hardware (or serve it to your users), you need to complete the H3 licence application at `platform.minimax.io/h3-license` first. The restriction extends to **outputs**, not just the weights — a detail most reblog posts skip.
+
+If you are outside those regions the standard Community License applies. If you are in them, treat the API as your default path until your application clears, or use the license reviewer at your org before shipping anything that touches the weights. This is a real, enforceable restriction — not the usual "please don't do bad things" clause.
+
+### 2. The open base tops out at 768p — 2K only exists inside the API
+
+Every "up to 2K" headline about H3 elides a key detail: the open-weight base models (`Base FL2VA` for text-to-video / first-last-frame, `Base Ref2VA` for multi-reference) generate at **768p**. The 2K output people are marveling at on the Hailuo app comes from **H3-Regenerate-2K**, an in-context upsampler that runs *after* the base model and that MiniMax has **not** open-sourced. `H3-Context-IR`, the multimodal instruction preprocessor, is also API-only.
+
+The consequence for self-hosters is simple: you get the same generation quality the frontier system is built on, but **you top out at 768p unless you chain your own upscaler** (Topaz, ESRGAN, a diffusion upsampler) after the fact. This is fine for many use cases — 768p at 24fps is more than enough for social clips, storyboards, and rapid iteration — but it's not the same product as the paid tier.
+
+### 3. About 13 B of the 33 B parameters are AdaLN branches you can precompute and skip
+
+The model card breaks the H3-Omni-Transformer down as a **33 B dense** single-stream Transformer of which **roughly 13 B parameters live in AdaLN-related branches**. AdaLN (Adaptive Layer Norm) is how diffusion-style transformers absorb conditioning signals (timestep, class, text embedding) — and its outputs, per conditioning slot, are **precomputable**. That's how third-party providers hit **a minimum 42.5 GB working configuration** even though naive BF16 weights are much larger: they combine a pruned INT8 checkpoint (~20 GB) with an NVFP4 AWQ text encoder (~16 GB) and both VAEs (~5.8 GB), and skip the cached-branch weights at inference time.
+
+The rule of thumb from the ComfyUI ecosystem: **a 12 GB card can run H3 with CPU/RAM offloading**, at the cost of longer render times per clip. If you have 24 GB or more, offload isn't needed.
+
+## What H3 actually is (the architecture in one page)
+
+H3 is a **single-stream, modality-agnostic Transformer**. There is one attention stack, one FFN stack, and video/audio/text tokens all pass through it. The four components you actually load are:
+
+| Component | Role | Open-sourced? |
+|---|---|---|
+| **H3-Omni-Transformer** | 33 B dense generator (video + audio) | ✅ (BF16, INT8, pruned INT8) |
+| **H3-Encoder** | Multimodal text/vision encoder — reuses **Qwen3-VL-32B** layer-50 hidden states | ✅ |
+| **H3-VisualVAE** | Temporal-causal video autoencoder, **f16t4d24** compression | ✅ |
+| **H3-AudioVAE** | Stereo audio, **32 kHz** output, 40 Hz temporal rate | ✅ |
+| **H3-Context-IR** | Multimodal instruction preprocessor | ❌ API-only |
+| **H3-Regenerate-2K** | In-context upscaler to 2K | ❌ API-only |
+
+Two design choices are worth calling out for anyone comparing H3 to other video models:
+
+- **3-D MM-RoPE positional embeddings.** Rotary positions are extended to three axes (spatial x, spatial y, time), so temporal coherence is baked into the attention pattern rather than added by a separate temporal module. This is one of the main reasons H3 keeps subject identity and lighting stable across 15-second clips.
+- **H3-VAE gives a 4× effective sequence-length gain.** The custom tokenizer packs more pixels per token than the standard VAEs used by prior open video models — that's what makes 2K output tractable at all in this parameter class.
+
+The **native audio pass** is the other differentiator. Because dialogue, SFX and room tone are generated in the same forward pass as picture, lip-sync and diegetic audio come out coherent by default. Reference audio (WAV/MP3, 2–15s per clip, up to 3 clips) enables voice cloning; but audio references **must accompany an image or video reference** — the API rejects audio-only inputs.
+
+## The self-hosting math
+
+If you're planning to run H3 locally, these are the numbers that determine what fits:
+
+| Checkpoint | Diffusion model | Text encoder | Both VAEs | Minimum working total |
+|---|---|---|---|---|
+| BF16 (reference) | 61.7 GB | 48.0 GB | 5.82 GB | ~115 GB |
+| INT8 | 31.7 GB | 25.3 GB | 5.82 GB | ~63 GB |
+| **Pruned INT8 + NVFP4 AWQ TE** | **19.5 GB** | **14.6 GB** | **5.82 GB** | **~42.5 GB** |
+
+VRAM: **24 GB comfortably**, **12 GB with offload** (slower per clip). SGLang example configs use **4 GPUs** for serving.
+
+<Steps items={[
+  {
+    title: "Update ComfyUI to a version that includes PR #15224",
+    body: "Native H3 support was merged into ComfyUI on the same day the weights dropped (August 3, 2026). Pull the latest and the new H3 nodes appear automatically."
+  },
+  {
+    title: "Pick a checkpoint that fits your VRAM",
+    body: "24 GB+ card → INT8 or BF16. 12–16 GB card → pruned INT8 + NVFP4 AWQ text encoder + CPU offload. Below 12 GB, use the API — you won't have a good time."
+  },
+  {
+    title: "Load one of the six official workflow templates",
+    body: "Three local (text-to-video, image-to-video, reference-to-video) and three API-backed (text-to-video, reference-to-video, first/last-frame-to-video) ship in ComfyUI's built-in gallery. Start from a template rather than wiring nodes yourself."
+  },
+  {
+    title: "Confirm licensing status for your region",
+    body: "If your organisation is in the US, EU, UK or South Korea, complete the application at platform.minimax.io/h3-license before you deploy H3 to anything user-facing."
+  }
+]} />
+
+## Calling H3 through the API
+
+The API is REST + polling. You post a job, receive a `task_id`, and poll a query endpoint until `status == "succeeded"`. Only public URLs work — Base64 payloads are rejected, and the total request body is capped at **64 MB**. Reference limits: **≤9 images, ≤3 video clips, ≤3 audio clips, 12 files total, ≤7 000-character prompt**.
+
+<PromptCard title="H3 text-to-video with a voice reference (Python)">
+{`import os, time, requests
+
+headers = {"Authorization": f"Bearer {os.environ['MINIMAX_API_KEY']}"}
+
+payload = {
+    "model": "MiniMax-H3",
+    "content": [
+        {"type": "text",
+         "text": "Wide shot: a lighthouse keeper walks onto the balcony and says, 'Follow the wind, live free.' Voice follows reference audio 1."},
+        {"type": "audio_url",
+         "audio_url": {"url": "https://example.com/voice-ref.mp3"},
+         "role": "reference_audio"},
+        {"type": "image_url",
+         "image_url": {"url": "https://example.com/lighthouse.jpg"},
+         "role": "reference_image"},
+    ],
+    "resolution": "2K",   # 2K is the only value the API accepts right now
+    "duration": 8,        # seconds, 4–15
+    "ratio": "16:9",
+}
+
+task_id = requests.post(
+    "https://api.minimax.io/v2/video_generation",
+    headers=headers, json=payload,
+).json()["task_id"]
+
+while True:
+    time.sleep(10)
+    task = requests.get(
+        f"https://api.minimax.io/v2/query/video_generation/{task_id}",
+        headers=headers,
+    ).json()["task"]
+    if task["status"] == "succeeded":
+        print(task["video_url"])
+        break
+    if task["status"] == "failed":
+        raise RuntimeError(task)`}
+</PromptCard>
+
+<PromptCard title="H3 locally via diffusers (self-host, 768p)">
+{`from diffusers import DiffusionPipeline
+import torch
+
+pipe = DiffusionPipeline.from_pretrained(
+    "MiniMaxAI/MiniMax-H3",
+    dtype=torch.bfloat16,
+    device_map="cuda",
+)
+
+video, audio = pipe(
+    prompt="Slow dolly-in on a neon-lit ramen shop at night; steam rising; jazz sax outside.",
+    num_frames=24 * 8,   # 8 seconds at 24 fps
+    height=768, width=1344,
+    generator=torch.manual_seed(42),
+)
+video.save("ramen.mp4"); audio.save("ramen.wav")`}
+</PromptCard>
+
+## H3 vs the closed video APIs — when each one wins
+
+| | **MiniMax H3** | **Kling 3.0** | **Dreamina Seedance 2.0** | **Sora / Veo (frontier closed)** |
+|---|---|---|---|---|
+| Max resolution (API) | 2K/24fps | 1080p | 1080p | 1080p–4K (variant) |
+| Native audio | ✅ dialogue + SFX + room tone | Separate stage | Separate stage | ✅ (Sora 2), ✅ (Veo) |
+| Open weights | ✅ (Community, geo-restricted) | ❌ | ❌ | ❌ |
+| Cost per minute (comparable tier) | **~$9.75** (2K + audio) | ~$20 (1080p) | ~$22 (1080p) | Higher & rate-limited |
+| Reference control | ≤9 images, ≤3 video, ≤3 audio | Similar | Fewer slots | Fewer slots |
+| Best for | Highest-fidelity output at lowest $/min; on-prem/self-host if outside restricted regions | Style stability across long shots | Cinematic look, prompt fidelity | When you can't leak prompts to a Chinese vendor and need frontier polish |
+
+**Reach for H3 when** you need audio-in-the-frame at 2K, when your cost/minute matters and the closed APIs would blow your budget, or when compliance forces you to keep generation on-prem *and* your legal situation clears the Community License. **Skip H3 when** your team lives in one of the restricted regions and you haven't cleared the application, when your workflow depends on native 4K, or when you can't send prompts to a mainland-China API (the paid tier is hosted by MiniMax; there are no US-region mirrors at launch).
+
+## Quiz
+
+<Quiz questions={[
+  {
+    q: "The open-weight base H3 checkpoints on Hugging Face generate video at what maximum resolution?",
+    options: [
+      "2K — the same as the paid API",
+      "1080p, matching Kling 3.0",
+      "768p — the 2K output is produced by H3-Regenerate-2K, which is not open-sourced",
+      "Whatever resolution you request; there is no cap"
+    ],
+    answer: 2,
+    explain: "The open Base FL2VA and Base Ref2VA models run at 768p. The 2K output people quote from the Hailuo app is produced by H3-Regenerate-2K, an in-context upscaler that MiniMax has not released. Self-hosters need their own upscaler if they want higher than 768p."
+  },
+  {
+    q: "According to the MiniMax H3 Community License, which regions currently require an application to self-host the weights?",
+    options: [
+      "China, Russia and Iran",
+      "The United States, the European Union, the United Kingdom and South Korea",
+      "Nowhere — the licence is MIT",
+      "Only the United States"
+    ],
+    answer: 1,
+    explain: "The model card links an application form gated to the US, EU, UK and South Korea, and the restriction extends to model outputs, not just the weights. If your org is in any of those regions, the API is the safe default until the application clears."
+  },
+  {
+    q: "The H3-Omni-Transformer has 33 B parameters. What is special about roughly 13 B of them?",
+    options: [
+      "They are inactive and never used",
+      "They live in AdaLN branches, whose outputs can be precomputed and cached for inference-only deployments",
+      "They are the audio tower and are only used for TTS",
+      "They are a separate mixture-of-experts layer"
+    ],
+    answer: 1,
+    explain: "About 13 B of the 33 B parameters sit in AdaLN-related branches. Because AdaLN outputs depend only on conditioning signals, they can be precomputed and cached — which is how quantized deployments squeeze into a 42.5 GB working footprint."
+  },
+  {
+    q: "Which of these is a real limit of the paid H3 API today?",
+    options: [
+      "Requests are unlimited in size and format",
+      "Base64 payloads are supported for both video and audio references",
+      "You can attach at most 12 files total (≤9 images, ≤3 videos, ≤3 audio) and the request body must be under 64 MB, with public URLs only — no Base64",
+      "It generates only silent video; audio is a separate paid add-on"
+    ],
+    answer: 2,
+    explain: "The API rejects Base64, caps the body at 64 MB, and only accepts a total of 12 reference files (9 images + 3 videos + 3 audio maximum). It generates video and stereo audio together in the same call."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "What is MiniMax H3?", back: "A 33 B-parameter, single-stream, modality-agnostic Transformer from MiniMax that generates 4–15 s of 24 fps video with native stereo audio in one pass. Open weights released 2026-08-03 as MiniMaxAI/MiniMax-H3." },
+  { front: "What is 'Hailuo 3.0'?", back: "The consumer product name for H3 on MiniMax's Hailuo app and marketing site. Same model, different label." },
+  { front: "What is H3-VAE?", back: "MiniMax's custom video autoencoder for H3. Provides a ~4× gain in effective sequence length compared with prior open video VAEs — the reason 2K output at this parameter class is tractable at all." },
+  { front: "What is MM-RoPE?", back: "3-D Multimodal Rotary Position Embedding: rotary positions extended to spatial x, spatial y and time. Baking temporal position into attention is why H3 keeps identity and lighting stable across a 15 s clip." },
+  { front: "What is H3-Regenerate-2K?", back: "An in-context upscaler that turns H3's 768p base output into 2K video. It is API-only — not open-sourced — so self-hosted H3 tops out at 768p unless you chain your own upscaler." },
+  { front: "What are the H3 API request limits?", back: "≤9 images + ≤3 video refs + ≤3 audio refs, 12 files max, ≤64 MB body, public URLs only (no Base64), ≤7 000-char prompt, 4–15 s duration, 2K resolution parameter is the only currently accepted value." },
+  { front: "What is the H3 Community License geo restriction?", back: "The US, EU, UK and South Korea require an application at platform.minimax.io/h3-license to self-host the weights. The restriction extends to outputs, not just weights." },
+  { front: "What is the minimum working weight footprint for self-hosted H3?", back: "~42.5 GB total: pruned INT8 diffusion model (~19.5 GB) + NVFP4 AWQ text encoder (~14.6 GB) + both VAEs (~5.82 GB). Runs on a 12 GB card with CPU/RAM offloading; comfortable on 24 GB." },
+  { front: "How much does the H3 API cost?", back: "$0.1625 per second of 2K video (~$9.75/minute). Roughly half the per-minute cost of Kling 3.0 or Dreamina Seedance 2.0 at their 1080p tiers." },
+]} />
+
+## Sources & further reading
+
+- [MiniMax-H3 on Hugging Face](https://huggingface.co/MiniMaxAI/MiniMax-H3) — the model card, component list, licence and download counts
+- [Open General Intelligence: MiniMax H3 is Now Open Source — MiniMax News](https://www.minimax.io/news/minimax-h3-open-source) — the official launch post with architecture details and system components
+- [ComfyUI Wiki: MiniMax H3 open weights & ComfyUI](https://comfyui-wiki.com/en/news/2026-08-03-minimax-h3-open-weights-comfyui) — the six official workflow templates and the diffusion / text-encoder file sizes across BF16, INT8, pruned INT8 and NVFP4 AWQ
+- [AtlasCloud: MiniMax H3 open source weights — 42.5 GB and 4 excluded countries](https://www.atlascloud.ai/blog/guides/minimax-h3-open-source-weights) — the licence-region breakdown and the pruned-INT8 + AdaLN cache reasoning
+- [ExplainX: MiniMax H3 open weights — license excludes US/EU/UK/SK](https://explainx.ai/blog/minimax-h3-open-video-model-hailuo-july-2026) — independent read of the geo restriction and licence text
+- [Hugging Face community blog: What is MiniMax H3?](https://huggingface.co/blog/ResterChed/minimax-h3-hailuo-3-0) — independent overview of API shape, input limits, and pricing math against Kling / Seedance
+- [Segmind blog: H3 release, open weights and API pricing](https://blog.segmind.com/minimax-h3-release-date-open-weights-and-api-pricing-explained/) — the July 30–31 teaser vs launch timeline
+- Related: [Generative Media: Image, Audio & Video AI](/docs/models/generative-media-image-audio-video) — where H3 sits in the wider media-AI map
+- Related: [DeepSeek, Qwen & the Open-Weight Wave](/docs/models/deepseek-qwen-open-models) — companion overview of the open-weight text/coding wave
+- Related: [Kimi K3: World's Largest Open-Weight Model](/docs/models/kimi-k3-open-weight-frontier) — parallel open-weight frontier release from the same month
