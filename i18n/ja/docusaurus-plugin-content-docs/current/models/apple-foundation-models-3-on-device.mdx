@@ -1,0 +1,216 @@
+---
+sidebar_position: 4.7
+title: "Apple Foundation Models 3 と Claude ユーザーのためのオンデバイス LLM スタック"
+description: "Apple の第3世代 Foundation Models(AFM 3)が WWDC 2026 で登場。3B のオンデバイス密モデル、iPhone で動作する 20B のスパース MoE、そして独自の LLM プロバイダ(Claude を含む)を持ち込める Swift ネイティブなフレームワークが揃った。実際に出荷されたもの、目立たない仕組み、そして Claude アプリを出荷する開発者にとってオンデバイスの物語がどう変わるかを解説する。"
+keywords: [Apple Foundation Models, AFM 3, AFM 3 Core, AFM 3 Core Advanced, on-device LLM, Foundation Models framework, iOS 26, Swift, Generable, guided generation, LanguageModel protocol, on-device AI, Private Cloud Compute, Claude on Apple Silicon]
+---
+
+<LevelBadge level="intermediate" />
+
+**WWDC 2026(2026年6月8日発表)** で Apple は Foundation Models の第3世代 —— **AFM 3** —— を出荷し、さらに **Foundation Models フレームワーク** を、Swift を一切書かない人にも意味のある方向へ拡張した。フレームワークは *第三者の LLM プロバイダ* を受け入れるようになり(Anthropic Claude と Google Gemini が Swift パッケージとして提供される)、*オンデバイス* の経路は玩具のような 3B モデルにとどまらず、**200 億パラメータのスパース MoE** が Apple Silicon 上で動作するようになった。ほとんどのエキスパートを NAND に保持し、プロンプトが必要とするぶんだけを RAM にスワップする方式だ。Claude アプリを作っていて「オンデバイス」を API ワークフローとは別世界だと扱ってきた人にとって、その隔たりは今年で埋まりつつある。このページでは、実際に出荷されたもの、目立たない仕組み、そしていま利用できる具体的な移行と互換性の選択肢を解きほぐす。
+
+<Callout type="objectives" items={[
+  "AFM 3 の 4 モデル —— Core(3B)、Core Advanced(20B スパース)、Cloud、Cloud Pro —— を名指しでき、それぞれがどこで動くかを説明できる",
+  "20B モデルを iPhone に収めるための「フラッシュ + DRAM」エキスパートルーティングの仕掛けを理解する",
+  "Foundation Models フレームワークの @Generable / @Guide マクロを使って制約付きデコーディングを行う —— モデルは文字通り不正な JSON を出力できない",
+  "WWDC26 で何が変わったかを知る:LanguageModel / LanguageModelExecutor プロトコルにより、Claude や任意の LLM を同じ Swift セッション API に接続できるようになった",
+  "オンデバイスの 3B に手を伸ばすとき、Private Cloud Compute に切り替えるとき、そしてワークロードを Claude API に残すべきときを判断できる"
+]} />
+
+<VerifyNote lastVerified="2026-08-09" source="Apple ML Research 'Introducing the third generation of Apple's foundation models'(2026年6月8日)+ Apple Developer WWDC26 セッション 339『Bring an LLM provider to the Foundation Models framework』。" />
+
+## 一文で言うと
+
+**AFM 3** はオンデバイス LLM における Apple の2度目の本格的な挑戦だ。再構築された **3B の密モデル(Core)**、iPhone 上で動作する新しい **20B のスパース MoE(Core Advanced)**(大半のエキスパートをフラッシュストレージに保持)、Apple Silicon と Google Cloud 上の NVIDIA GPU で稼働する **Cloud** と **Cloud Pro** の対、そして Anthropic Claude と Google Gemini を同じ `LanguageModel` プロトコルの背後で交換可能なファーストクラスのプロバイダとして扱う **フレームワーク** から成る。開発者はオンデバイス呼び出しを無料で利用でき、App Store Small Business Program に参加している 200 万初回ダウンロード未満の開発者は Private Cloud Compute も無料で使える。
+
+## AFM 3 について、あまり語られない 3 つのこと
+
+誰もが「Apple はオンデバイスの 3B モデルを出した」という見出しを書いている。ここでは、多くの記事が飛ばす仕掛けを取り上げる。
+
+### 1. 20B モデルが iPhone に収まるのは、大半が RAM ではなく NAND に住んでいるからだ
+
+「200 億パラメータのモデルを iPhone に」という言葉を素直に読むと不可能だ。4-bit にしても 20B の重みは約 10 GB あり、iPhone が RAM に保持できる量をはるかに超える。WWDC 2026 の発表によれば、Apple の仕掛けは **AFM 3 Core Advanced モデルの全体をフラッシュメモリ(NAND)に格納** し、推論時には **入力に応じてルーティングされたエキスパートだけを DRAM にスワップ** することだ。アーキテクチャには常駐する *共有エキスパート* と、ルータがプロンプトごとに選ぶ *ルーティング対象のエキスパート* があり(20B 全体ではなく **一度に 1〜4B のパラメータ** を活性化する)、**Quantization Aware Training** と組み合わせることで、実用 RAM が約 8 GB のデバイスで 20B クラスのモデルを出荷できている。結果として iPhone 側のレイテンシは、行列積よりも NAND の読み出し帯域幅とルータの選択に支配されるようになる —— 3B の密モデルとは大きく異なる性能プロファイルだ。
+
+### 2. 制約付きデコーディングはランタイムではなく Swift コンパイラに組み込まれている
+
+フレームワークの `@Generable` マクロはよく「構造化出力」と説明されるが、それでは過小評価だ。`@Generable` は *コンパイル時* に動作し、Swift 型に対して JSON スキーマとパーサを生成する。フレームワークはそのスキーマを **制約付きデコーディング** に使う —— つまりオンデバイスモデルはトークンレベルで、あなたの Swift 構造体にパースし直せる出力しか生成できない。「JSON として妥当であることを祈って、駄目なら再試行」という手はない。`@Guide` アノテーション(`.anyOf(["PG", "PG-13", "R", "G"])`、範囲、説明など)を付ければ、それらもデコード時に強制される。Claude のツール使用ループの周りで JSON 修復のフォールバックを書いてきた人は、アプリのオンデバイス 3B 側からその再試行層を丸ごと落とせる。
+
+### 3. フレームワークは任意の LLM —— Claude や Gemini を含めて —— を一つの Swift API の背後で受け入れる
+
+WWDC 2026 のセッション **「Bring an LLM provider to the Foundation Models framework」** では 2 つの新しいプロトコルが出荷された:**`LanguageModel`**(能力とエグゼキュータ構成を宣言)と **`LanguageModelExecutor`**(実際の生成、KV キャッシュ、ストリーミングを扱う)。誰でもこれらに準拠した Swift パッケージを出荷できる —— Apple は launch time のプロバイダとして Anthropic Claude と Google Gemini を明示的に挙げた。結果として、アプリの側から見れば、同じ `LanguageModelSession`、同じ `@Generable` 型、同じツール呼び出しコントラクト、同じトランスクリプトモデルが、背後のモデルがオンデバイスの 3B であれ、Private Cloud Compute であれ、Anthropic API 上の Claude であれ、Google Cloud 上の Gemini であれ、Hugging Face からの MLX 重みファイルであれ、そのまま適用される。モデル選定は SDK の書き直しではなく Swift パッケージの依存関係になる。
+
+## AFM 3 を俯瞰する
+
+<Flashcards cards={[
+  { front: "AFM 3 Core", back: "3B パラメータの密なオンデバイスモデル。第2世代の 3B から再構築、ネイティブにマルチモーダル(テキスト + 画像 + 音声)、25 言語対応。Apple Intelligence 対応の全デバイスで動作。オンデバイス呼び出しは無料。" },
+  { front: "AFM 3 Core Advanced", back: "20B のスパース MoE。全重みが NAND に住み、ルータが入力依存のエキスパートを DRAM にスワップする。プロンプトあたり 1〜4B のパラメータを活性化。Apple の最新シリコンが必要で、古い Apple Intelligence デバイスは Core にフォールバックする。" },
+  { front: "AFM 3 Cloud", back: "Private Cloud Compute(PCC)内の Apple Silicon で稼働するサーバ側の主力モデル。オンデバイス経路と同じプライバシー契約:サーバ側に永続的な状態を残さず、監査できないログも取らない。" },
+  { front: "AFM 3 Cloud Pro", back: "最も高性能なサーバモデル。Parallel-Track Mixture-of-Experts(PT-MoE)を使う。PCC 境界を維持したまま Google Cloud の NVIDIA GPU にも拡張される。Claude Opus / GPT-5 Sol クラスのタスクを狙う。" },
+  { front: "ADM 3 Cloud", back: "画像生成・編集モデル(Apple Diffusion Model 3)。AFM 3 と同じ PCC 境界内に共存する。Image Playground や Genmoji のサーバ側を動かす。" },
+  { front: "無料枠のサプライズ", back: "App Store Small Business Program のメンバーで初回ダウンロードが 200 万未満なら、Private Cloud Compute の呼び出しをクラウド API 料金なしで利用できる。これはトライアルクレジットではなく、本物の補助だ。" }
+]} />
+
+## 実際にはどこで動くのか
+
+<Steps items={[
+  { title: "AFM 3 Core(3B)—— 常にオンデバイス", body: "任意の Apple Intelligence デバイスで動作。API キーもネットワークもトークン課金もなしに、Foundation Models フレームワーク経由で Swift から無料で呼び出せる。分類、抽出、要約、オンデバイスの書き換え、そして機内モードでも動く必要のあるすべてをここに置く。" },
+  { title: "AFM 3 Core Advanced(20B)—— 新しい iPhone のみ", body: "Apple の最新シリコンで動作、古い Apple Intelligence デバイスは透過的に Core にフォールバックする。3B が拒否したり幻覚を起こしたりするタスクで、要求がエキスパートスワップのレイテンシを許容できるがオンデバイスに留めなければならない場合(例:プライベートな医療・金融の推論)に使う。" },
+  { title: "AFM 3 Cloud / Cloud Pro —— Private Cloud Compute", body: "フレームワークは、デバイスモデルでは不十分なときに PCC へルーティングする。特定のサーバ SKU は選べない —— 推論レベルを要求し、Apple が選ぶ。オンデバイスと同じプライバシー契約:PCC のノード認証により Apple のスタッフでもリクエストを読めない。" },
+  { title: "第三者プロバイダ —— Swift パッケージ経由", body: "LanguageModel + LanguageModelExecutor に準拠したパッケージを追加する(Anthropic Claude と Google Gemini が launch time の例)。セッション API から見ればコードは同一で、モデル選定はパッケージの依存関係になる。" }
+]} />
+
+## オンデバイス呼び出しの最小例
+
+フレームワークの目玉機能は、オンデバイスの 3B から、ほとんど儀式なしに型付き・スキーマ検証済みの出力を得られることだ。
+
+<PromptCard title="@Generable の構造化出力を用いたオンデバイス 3B 呼び出し(Swift)">
+{`import FoundationModels
+
+@Generable
+struct TripIdea {
+    @Guide(description: "Short, evocative title")
+    let title: String
+
+    @Guide(description: "One-paragraph pitch, 40–80 words")
+    let summary: String
+
+    @Guide(.range(1...14))
+    let estimatedDays: Int
+
+    @Guide(.anyOf(["easy", "moderate", "hard"]))
+    let difficulty: String
+}
+
+let session = LanguageModelSession()   // defaults to on-device Core
+let idea = try await session.respond(
+    to: "Suggest a shoulder-season trip in Puglia for a family with a 6-year-old.",
+    generating: TripIdea.self          // constrained decoding
+)
+
+print(idea.title, idea.difficulty, idea.estimatedDays)
+`}
+</PromptCard>
+
+実行時、モデルはトークンレベルで、走行中のテキストが `TripIdea` としてパース可能であり続けるトークンだけを出力するよう強制される。JSON 文字列を目にすることはなく、`TripIdea` 値を受け取る。これはセッションがオンデバイスの 3B、PCC、あるいは Swift パッケージとして接続した第三者プロバイダのいずれと話していても同じ契約だ。
+
+## Claude を同じ Swift セッションに持ち込む
+
+WWDC 2026 の「Bring an LLM provider」セッションはこれを具体化した:`LanguageModel` と `LanguageModelExecutor` を実装し、git タグ付き Swift パッケージとして公開すれば、すでにオンデバイス 3B を使っていたアプリコードはイニシャライザを 1 つ変えるだけで自分のプロバイダを呼び出せる。
+
+<PromptCard title="LanguageModel に準拠した第三者プロバイダのスケッチ">
+{`import FoundationModels
+
+public struct ClaudeSonnet5: LanguageModel {
+    public let capabilities = LanguageModelCapabilities(capabilities: [
+        .toolCalling, .guidedGeneration, .reasoning
+    ])
+    public var executorConfiguration: ClaudeExecutor.Configuration
+}
+
+public final class ClaudeExecutor: LanguageModelExecutor {
+    public struct Configuration: Hashable {   // hashable = KV-cache key
+        public var modelID: String
+        public var tokenProvider: TokenProvider   // NOT a plain API key string
+    }
+
+    public required init(configuration: Configuration) throws { /* … */ }
+
+    public func respond(
+        to request: LanguageModelExecutorGenerationRequest,
+        model: Model,
+        streamingInto channel: LanguageModelExecutorGenerationChannel
+    ) async throws {
+        // 1. Map Foundation Models transcript → Anthropic /messages payload
+        // 2. Stream deltas back via channel.send(.response(action: .appendText(...)))
+        // 3. Surface tool calls / reasoning via the same transcript entry types
+    }
+}
+`}
+</PromptCard>
+
+API が意図的に押しつけてくる、2 つの微妙な点がある。第一に、**`Configuration` はわざと `Hashable`** だ:フレームワークは構成をキーにエグゼキュータをキャッシュするため、*同じ構成 = 同じエグゼキュータ = ターンを跨いで保持される KV キャッシュ* となる。第二に、ガイダンスはイニシャライザ内での **素の API キー文字列** を明確に非推奨としている —— `TokenProvider` やサインインフローを使い、トークンをキーチェーンに保存し、クラウド呼び出しには App Attest を使って、改ざんされたビルドが外部からエンドポイントを叩くのを防ぐことを推奨している。
+
+## 何をいつ使うか —— Claude ビルダー向けの判断表
+
+<Callout type="tip" items={[
+  "オンデバイス AFM 3 Core(3B)を選ぶ:要約、分類、エンティティ抽出、オンデバイスの書き換え、キーボード候補 —— 有界なプロンプトと型付き出力がネットワーク往復に勝るものすべて。無料。",
+  "AFM 3 Core Advanced(20B)を選ぶ:デバイスから出せないプライベートな推論(医療、金融、未公開文書)で、3B ではさばけないもの。NAND のエキスパートスワップにより変動レイテンシがあることを想定する。",
+  "Private Cloud Compute(Cloud / Cloud Pro)を選ぶ:大きなコンテキスト、長い推論、あるいは 20B のオンデバイスでは追いつかないマルチモーダルだが、プライバシー上、第三者 API は依然として使えないケース。",
+  "Anthropic API(または新しい Swift パッケージのプロバイダ)経由で Claude に残る:長時間のエージェント実行、拡張思考、大規模コンテキストのコードベース作業、そして同一モデルを Android と Web でも必要とするクロスプラットフォームアプリ。「Claude 対他社」の基礎ページを参照。",
+  "オンデバイス 3B を JSON 修復ループで包まないこと:制約付きデコーディングがある。出力がパースできないなら、スキーマが誤っているか、@Generable を飛ばしている。"
+]} />
+
+## 相互リンク
+
+- オンデバイスは、[ローカル AI エージェント](/docs/models/local-ai-agents) と [Ollama でモデルをローカル実行する](/docs/models/run-models-locally-ollama) で扱うローカルエージェント話の対極にある。Apple の切り口はそれとは違って *ファーストパーティの OS 統合* であり、独立したローカルサーバではない。
+- Apple のオンデバイスモデルと Claude を並走させるどちらを選ぶかで悩むなら、設計パターンは [Claude + ローカルモデル:ハイブリッドパターン](/docs/models/claude-plus-local-models) と [ローカルか Claude のエージェントか](/docs/models/local-or-claude-agent) にある。
+- 「これらのモデルはどう違い、どれを選ぶべきか」というより広い枠組みには、[モデルの選び方](/docs/models/choosing-a-model) と [モデル間でプロンプトを移植する](/docs/models/porting-prompts-across-models) を参照。
+- ローカル + クラウドのハイブリッドを出荷することのセキュリティ的含意は [ローカルとハイブリッドエージェントのセキュリティ](/docs/models/securing-local-and-hybrid-agents) にある。
+
+## 簡単なチェック
+
+<Quiz questions={[
+  {
+    q: "AFM 3 Core Advanced はどのようにして 200 億パラメータのモデルを iPhone に収めているか?",
+    options: [
+      "縮小・蒸留した 3B バージョンを走らせ、マーケティング上 20B と呼んでいる",
+      "全重みを NAND フラッシュに格納し、入力依存のルーティング対象エキスパートだけを DRAM にスワップして、プロンプトあたり 1〜4B のパラメータを活性化する",
+      "すべてのトークンを Private Cloud Compute からストリーミングし、ローカルにキャッシュする",
+      "RAM に収めるためモデルを縮める新しい 1-bit 量子化を使う"
+    ],
+    answer: 1,
+    explain: "AFM 3 Core Advanced はスパース MoE だ。モデル全体はフラッシュに住み、ルータがプロンプトごとにエキスパートを選び、そのエキスパートだけが DRAM にスワップされる。だからこそ活性化パラメータ数は 20B ではなくプロンプトあたり 1〜4B になる。"
+  },
+  {
+    q: "@Generable マクロは、手書きの JSON プロンプティングにはないものを何をもたらすか?",
+    options: [
+      "不正な JSON を自動修正する再試行ループ",
+      "モデルの生出力の見やすい表示",
+      "コンパイル時のスキーマ生成とトークンレベルの制約付きデコーディングにより、出力が Swift 型にパースされることが保証される",
+      "トークナイザを回避することによる速度向上"
+    ],
+    answer: 2,
+    explain: "@Generable はスキーマとパーサを生成するコンパイル時マクロだ。そのうえでフレームワークはトークンレベルでデコードを制約するため、モデルは走行中のテキストがあなたの型としてパース可能であり続けるトークンしか出力できない。"
+  },
+  {
+    q: "すでに Foundation Models フレームワークをオンデバイス要約に使っている iOS アプリから Claude Sonnet 5 を呼び出したい。WWDC26 で示されたネイティブな経路は何か?",
+    options: [
+      "アプリを Anthropic SDK 中心に書き換える —— フレームワークは Apple モデルしかサポートしない",
+      "LanguageModel + LanguageModelExecutor に準拠した Swift パッケージを追加し、セッションのモデルを 1 行で切り替える",
+      "すべての Claude 呼び出しを Private Cloud Compute 経由でプロキシする",
+      "Claude の重みを Core ML パッケージに変換し、アプリバンドルに同梱する"
+    ],
+    answer: 1,
+    explain: "まさに WWDC26 の『Bring an LLM provider』セッションが出荷したものだ。Anthropic Claude と Google Gemini は、同じセッション API で公開される第三者プロバイダの launch time の例として明示された。"
+  },
+  {
+    q: "フレームワーク経由で Private Cloud Compute の呼び出しを無料で使える開発者グループはどれか?",
+    options: [
+      "無料枠のすべての Apple Developer Program アカウント",
+      "初回ダウンロード 200 万未満の App Store Small Business Program のメンバー",
+      "Apple 自身のファーストパーティアプリだけ",
+      "Enterprise Developer Program に加入している任意の開発者"
+    ],
+    answer: 1,
+    explain: "Apple 自身の開発者ページが、初回ダウンロード 200 万未満の App Store Small Business Program メンバー向けの「クラウド料金無料」枠を明文化している。それ以外は標準の PCC 料金を支払う。"
+  },
+  {
+    q: "エグゼキュータの `Configuration` 型が `Hashable` であることが要件になっているのはなぜか?",
+    options: [
+      "Swift 並行性の境界を越えて送信できるようにするため",
+      "フレームワークが構成をキーにエグゼキュータをキャッシュできるようにするため —— 同じ構成ならターンを跨いで KV キャッシュを温かく保つ",
+      "コンパイル時のスキーマ生成器を満たすため",
+      "Swift 6 がすべてのプロトコル型に Hashable を要求しているから"
+    ],
+    answer: 1,
+    explain: "フレームワークは Configuration をエグゼキュータインスタンスのハッシュ可能なルックアップキーとして使う。同じ構成 → 同じエグゼキュータ → KV キャッシュ保持。異なる構成 → 別キャッシュ。"
+  }
+]} />
+
+## 出典と参考文献
+
+- [Introducing the third generation of Apple's foundation models](https://machinelearning.apple.com/research/introducing-third-generation-of-apple-foundation-models) —— Apple Machine Learning Research(2026年6月8日):AFM 3 Core / Core Advanced / Cloud / Cloud Pro のアーキテクチャ、NAND + エキスパートスワップの解説、25 言語対応、Quantization Aware Training、PT-MoE のサーバアーキテクチャ。
+- [Bring an LLM provider to the Foundation Models framework —— WWDC26 セッション 339](https://developer.apple.com/videos/play/wwdc2026/339/) —— `LanguageModel` / `LanguageModelExecutor` プロトコルの設計、ストリーミング/トランスクリプトモデル、カスタムセグメント、第三者プロバイダ。
+- [Apple Intelligence for developers](https://developer.apple.com/apple-intelligence/) —— Foundation Models フレームワークの概観、動的プロファイル、評価、App Store Small Business の PCC 無料料金メモ。
+- [Meet the Foundation Models framework —— WWDC25 セッション 286](https://developer.apple.com/videos/play/wwdc2025/286/) と [Deep dive into the Foundation Models framework —— WWDC25 セッション 301](https://developer.apple.com/videos/play/wwdc2025/301/) —— WWDC26 が土台とする元の `@Generable` / `@Guide` / ツール呼び出し API。
+- [Apple Intelligence Foundation Language Models: Technical Report (arXiv 2507.13575)](https://arxiv.org/pdf/2507.13575) —— オンデバイスアーキテクチャの物語を裏付けるのに有用な、前世代の技術的詳細。
