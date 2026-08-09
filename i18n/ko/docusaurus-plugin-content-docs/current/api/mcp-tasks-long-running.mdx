@@ -1,0 +1,339 @@
+---
+sidebar_position: 13.6
+title: "MCP Tasks: 세션 없이 장기 실행 작업 처리하기"
+description: "2026-07-28 stateless MCP 스펙이 세션을 없애버렸습니다 — 그렇다면 20분짜리 CI 작업, 배치 임포트, 사람 승인 게이트는 어떻게 모델링할까요? 공식 Tasks 확장(SEP-2663)으로 해결합니다. 전체 라이프사이클, 와이어 프로토콜, 기존 실험적 Tasks API에서의 마이그레이션, 그리고 프로덕션에서 실제로 작동하는 폴링/알림 패턴."
+keywords: [MCP, Model Context Protocol, Tasks, SEP-2663, long-running, tasks/get, tasks/update, tasks/cancel, extensions, ext-tasks, 2026-07-28, migration, elicitation, human-in-the-loop, notifications/tasks, subscriptions/listen]
+---
+
+<LevelBadge level="advanced" />
+
+stateless [MCP 2026-07-28 스펙](/docs/api/mcp-2026-07-28-stateless)은 세션을 없애 수평 확장 문제를 해결했지만, "도구 실행에 20분이 걸리면 어떡하지?"라는 쉬운 답도 함께 사라졌습니다. 그 답이 바로 **Tasks 확장**(`io.modelcontextprotocol/tasks`, SEP-2663)입니다: 서버는 블로킹 대신 지속 가능한 *태스크 핸들*을 반환하고, 클라이언트가 `tasks/get`, `tasks/update`, `tasks/cancel`로 작업을 주도합니다. 2026년 후반기에 진지한 장기 실행 MCP 서버라면 모두 이 패턴을 채택합니다.
+
+<Callout type="objectives" items={[
+  "서버가 로드 밸런서나 서버리스 런타임 뒤에 배치되는 순간 요청 블로킹이 왜 무너지는가",
+  "다섯 가지 태스크 상태 — working, input_required, completed, failed, cancelled — 그리고 어떤 전환이 합법인가",
+  "와이어 프로토콜: 기능 협상, CreateTaskResult, tasks/get 폴링, notifications/tasks 푸시",
+  "input_required가 지속 연결 없이 어떻게 구식 elicitation을 대체하는가",
+  "2025-11-25 실험적 Tasks API에서 마이그레이션 — 왜 업그레이드가 아니라 재작성인가",
+  "함정들: 협력적 취소, 의도적으로 사라진 tasks/list, TTL 만료, 크로스 테넌트 누출",
+]} />
+
+<VerifyNote lastVerified="2026-08-05" source="https://modelcontextprotocol.io/extensions/tasks/overview">
+Tasks 확장은 AWS가 기여한 **2026-07-28** MCP 릴리스에 포함되어 출시되었습니다. [ext-tasks 저장소](https://github.com/modelcontextprotocol/ext-tasks)는 여전히 SEP-2663을 추적하는 것으로 표시되어 있으며, 4개 Tier 1 SDK(TypeScript, Python, Go, C#)가 새 스펙을 지원하지만 Task 헬퍼 API는 아직 안정화 중입니다. 배포 전 SDK 버전을 고정하고 확장 클라이언트 매트릭스를 확인하세요 — Claude, Cursor 등 호스트는 각자 독립적으로 옵트인합니다.
+</VerifyNote>
+
+## 한 문단 요약
+
+stateless MCP 서버는 오래 유지되는 연결에 의존할 수 없습니다: HTTP 중간 장치가 끊고, 로드 밸런서가 클라이언트를 새 인스턴스로 재배치하고, 모바일 네트워크가 깜빡입니다. Tasks는 장기 도구 호출을 **지속 가능한 리소스**로 바꿉니다 — 서버가 첫 요청에 답하기도 전에 지속화하는 `taskId`입니다. 클라이언트는 서버가 제안한 간격으로 `tasks/get(taskId)`를 폴링합니다; 상태가 `completed`, `failed`, `cancelled`로 뒤집히면 폴링 응답은 동기 호출이 반환했을 것과 동일한 페이로드를 담고 있습니다. 실행 중, 서버는 `input_required`로 이동해 질문할 수 있습니다 — 클라이언트는 `tasks/update`로 응답하고 폴링이 재개됩니다. 이것이 전체 모델입니다.
+
+## 왜 그냥 블록하지 않는가?
+
+작업이 끝날 때까지 연결을 열어둘 수 있습니다. MCP 워킹 그룹은 이를 고려했지만 거부했습니다 — 모든 서버리스 개발자가 이미 알고 있는 이유로:
+
+<Callout type="warning" items={[
+  "타임아웃. AWS API Gateway는 29초에서 끊깁니다. Cloudflare Workers는 CPU 30초 + 벽시계 6분. Vercel Functions는 5분. 어떤 것을 통해서든 배치 임포트를 롱 폴링하면 도중에 504를 받습니다.",
+  "크래시 복원력. 클라이언트 탭이 다시 로드되거나 네트워크가 끊기면 블록된 호출은 결과를 잃습니다. taskId는 지속적입니다 — 같은 클라이언트가 몇 분 후에 폴링을 재개할 수 있습니다.",
+  "로드 밸런서 스티키니스. 블로킹은 요청을 하나의 서버 인스턴스에 고정합니다. 작업 중의 모든 스케일-인 이벤트가 호출을 죽입니다.",
+  "진행 가시성. 블록된 호출은 끝날 때까지 아무것도 주지 않습니다. 태스크는 진행률 표시줄로 렌더링할 수 있는 상태 메시지를 담고 있습니다.",
+  "실행 중 입력. 도구에 사용자 확인이 필요하다면, 블록된 호출은 요청되지 않은 서버 → 클라이언트 메시지 없이 물어볼 방법이 없습니다 — stateless 스펙이 금지하는 바로 그것입니다.",
+]} />
+
+## 다섯 가지 상태 라이프사이클
+
+모든 태스크는 이 상태들 중 정확히 하나에 속합니다. `completed`, `failed`, `cancelled`는 **종단**입니다 — 한 번 도달하면 상태가 변하지 않습니다:
+
+| 상태             | 의미                                                                                 | 채우는 필드      |
+| ---------------- | ------------------------------------------------------------------------------------ | --------------- |
+| `working`        | 작업 진행 중. 서버가 진행에 따라 선택적 상태 메시지를 업데이트합니다.                | `statusMessage` |
+| `input_required` | 서버가 클라이언트 입력을 기다리며 블록됨. 요청을 표시하고 `tasks/update`로 제출.     | `inputRequests` |
+| `completed`      | 작업이 성공적으로 완료됨. `result`가 동기 호출이 반환했을 값을 담음.                 | `result`        |
+| `failed`         | 실행 중 JSON-RPC 오류 발생.                                                          | `error`         |
+| `cancelled`      | 클라이언트가 취소를 요청했고 서버가 이를 수용함. 모든 요청에서 보장되지 않음.       | —               |
+
+합법적인 전환: `working ↔ input_required`, `working → completed | failed | cancelled`, `input_required → working | failed | cancelled`. 그 외에는 서버 버그입니다.
+
+## 와이어 프로토콜
+
+### 1. 양쪽 모두 옵트인
+
+Tasks는 코어가 아닌 *확장*입니다 — 양쪽 모두 이를 알려야 합니다. 클라이언트는 모든 요청의 `_meta`에 이를 넣고; 서버는 `server/discover`에서 이를 반환합니다:
+
+```jsonc
+// 클라이언트 → 서버, 태스크로 돌아올 수 있는 모든 요청에서:
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "run_ci_pipeline",
+    "arguments": { "commit": "abc123" },
+    "_meta": {
+      "io.modelcontextprotocol/clientCapabilities": {
+        "extensions": {
+          "io.modelcontextprotocol/tasks": {}
+        }
+      }
+    }
+  }
+}
+```
+
+클라이언트가 지원을 선언하지 않았다면, 서버는 태스크를 반환해서는 **안 됩니다** — 블록하거나, 오류를 반환하거나, 작업을 거부해야 합니다. 옵트인하지 않은 클라이언트에게 `CreateTaskResult`를 절대 보내지 마세요.
+
+### 2. 서버가 태스크 핸들을 반환
+
+일반적인 `CallToolResult` 대신, 서버는 `resultType: "task"`로 응답합니다:
+
+```jsonc
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "resultType": "task",
+    "task": {
+      "taskId": "tsk_01HZY7...",
+      "status": "working",
+      "statusMessage": "Cloning repo",
+      "ttlMs": 3600000,
+      "pollIntervalMs": 2000
+    }
+  }
+}
+```
+
+태스크는 서버가 이 응답을 보내기 *전에* **지속적으로 저장**되어야 합니다(Postgres, AOF가 있는 Redis, DynamoDB — pod 재시작을 견디는 무엇이든). 서버가 요청 수락과 태스크 지속화 사이에 크래시하면, 클라이언트는 정상적인 오류를 받고 재시도할 수 있습니다. 그 이후에 크래시하면, taskId는 여전히 모든 복제본에서 해석 가능합니다.
+
+### 3. 클라이언트가 `tasks/get`을 폴링
+
+```jsonc
+// 클라이언트 → 서버, 매 pollIntervalMs마다:
+{ "jsonrpc": "2.0", "id": 2, "method": "tasks/get", "params": { "taskId": "tsk_01HZY7..." } }
+
+// 서버 → 클라이언트, 아직 진행 중:
+{ "jsonrpc": "2.0", "id": 2, "result": { "taskId": "tsk_01HZY7...", "status": "working", "statusMessage": "Running tests (128/342)" } }
+
+// 서버 → 클라이언트, 종단:
+{ "jsonrpc": "2.0", "id": 2, "result": { "taskId": "tsk_01HZY7...", "status": "completed", "result": { "content": [{ "type": "text", "text": "All 342 tests passed in 4m12s" }] } } }
+```
+
+`pollIntervalMs`는 *제안*입니다 — 클라이언트는 이를 하한으로 존중하고, 반복되는 `working` 응답에서는 백오프해야 하며, 서버가 요청한 것보다 빠르게 폴링해서는 안 됩니다.
+
+### 4. 실행 중 입력
+
+도구에 사용자 확인이 필요하다면("47개 파일을 삭제합니다, 계속할까요?"), 서버는 `input_required`로 뒤집고 `inputRequests` 맵을 첨부합니다 — pre-stateless 세계에서 elicitation이 취했을 것과 같은 형태입니다:
+
+```jsonc
+// tasks/get 응답:
+{
+  "taskId": "tsk_01HZY7...",
+  "status": "input_required",
+  "inputRequests": {
+    "confirm_delete": {
+      "type": "elicitation",
+      "message": "Delete 47 files matching *.tmp?",
+      "schema": { "type": "object", "properties": { "confirm": { "type": "boolean" } } }
+    }
+  }
+}
+```
+
+클라이언트가 프롬프트를 표시한 다음 `tasks/update`로 응답합니다:
+
+```jsonc
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tasks/update",
+  "params": {
+    "taskId": "tsk_01HZY7...",
+    "inputResponses": { "confirm_delete": { "confirm": true } }
+  }
+}
+```
+
+서버는 빈 결과로 ack합니다; 상태가 `working`으로 다시 이동합니다. 알 수 없거나 이미 만족된 키에 대한 응답은 **무시되어야 합니다** — 이렇게 하면 재시도가 안전합니다.
+
+### 5. 협력적 취소
+
+```jsonc
+{ "jsonrpc": "2.0", "id": 9, "method": "tasks/cancel", "params": { "taskId": "tsk_01HZY7..." } }
+```
+
+서버는 빈 결과로 ack합니다. 스펙의 문구에 주의하세요: 취소는 **협력적**입니다 — 서버는 의도를 인정하지만 작업을 멈출 의무는 없습니다. `completed`에 도달하려는 태스크에 대한 `tasks/cancel`은 여전히 `completed`로 착륙할 수 있습니다. 클라이언트 UI를 "취소됨"이 아니라 "취소 요청됨, 확인 대기 중"으로 설계하세요. 이는 마이그레이션 중 사용자에게 보이는 버그의 가장 흔한 단일 원인입니다.
+
+## 폴링 대신 알림
+
+폴링은 기본값이며 항상 작동합니다. 서버가 알림을 지원할 *때*, 클라이언트는 한 번 구독하고 폴링 루프를 완전히 건너뛸 수 있습니다:
+
+```jsonc
+// 클라이언트가 태스크 변경 이벤트를 구독:
+{ "jsonrpc": "2.0", "id": 3, "method": "subscriptions/listen", "params": { "notifications": ["notifications/tasks"] } }
+
+// 서버가 매 상태 변경마다 전체 태스크 스냅샷을 푸시:
+{ "jsonrpc": "2.0", "method": "notifications/tasks", "params": { "task": { "taskId": "tsk_01HZY7...", "status": "completed", "result": { "..." : "..." } } } }
+```
+
+각 푸시는 **전체** 태스크 상태를 담습니다 — 클라이언트는 후속 `tasks/get`이 절대 필요 없습니다. `subscriptions/listen`이 "not supported"를 반환하거나 스트림이 끊어지면 폴링으로 폴백하세요.
+
+## Tasks를 언제 사용할까 (그리고 언제 사용하지 말아야 할까)
+
+<Steps items={[
+  {title: "Tasks 사용: 클라이언트의 HTTP idle 타임아웃을 초과할 수 있는 모든 도구", body: "CI 파이프라인, 배치 임포트, 모델 훈련, 비디오 인코딩, 대규모 리팩터, 배포. p99이 ~10초를 넘으면 이미 Tasks를 원하는 것이며; p99이 30초를 넘으면 Tasks 없이는 이미 망가진 것입니다."},
+  {title: "Tasks 사용: 이미 ID가 있는 작업 시스템을 감싸는 모든 도구", body: "AWS Batch, GitHub Actions, Kubernetes Jobs, Temporal 워크플로. 작업이 생성될 때 태스크를 반환하고, 작업이 완료될 때 이를 해결합니다. taskId는 문자 그대로 업스트림 작업 id를 포함할 수 있습니다."},
+  {title: "Tasks 사용: 사람이 개입하는 승인", body: "승인 게이트, 리뷰 단계, 확인을 위해 일시 정지하는 모든 것. 태스크를 input_required 또는 종단 상태로 뒤집는 '승인/거부' 버튼이 있는 Slack 알림이 자연스럽게 작동합니다."},
+  {title: "Tasks 사용: 불안정한 클라이언트", body: "모바일, 태블릿, 비행기의 노트북. 크래시한 클라이언트는 지속 가능한 taskId에서 폴링을 재개할 수 있습니다 — 크래시한 동기 호출은 모든 것을 잃습니다."},
+  {title: "Tasks 사용 금지: 1초 미만의 도구", body: "모든 태스크는 폴링 왕복을 수반합니다. 날씨 조회나 통화 변환은 여전히 block-and-return이어야 합니다. 추가 지연 시간을 실제로 벌어들이는 호출에 Tasks를 아껴두세요."},
+  {title: "Tasks 사용 금지: Multi Round-Trip Requests (MRTR)와 혼동하지 마세요", body: "MRTR (SEP-2322)은 현재 호출을 계속하는 데 필요한 입력을 다룹니다 — 한 번의 왕복, 지속성 없음. Tasks는 요청보다 오래 지속되는 지속 가능한 작업을 다룹니다. MRTR의 두 왕복 사이의 비행기 크래시가 부분적으로 입력된 폼만 잃는다면 MRTR을 사용하세요. 두 시간짜리 배포를 잃는다면 Tasks를 사용하세요."},
+]} />
+
+## 2025-11-25 실험적 Tasks API에서 마이그레이션
+
+pre-stateless 스펙의 옛 `tasks/create` / `tasks/status` 형태는 SEP-2663과 **호환되지 않습니다**. 버전 업이 아니라 재작성으로 취급하세요:
+
+<Callout type="warning" items={[
+  "옛것: 클라이언트가 명시적으로 tasks/create를 호출. 새것: 어떤 tools/call도 태스크로 돌아올 수 있음 — 클라이언트는 매 요청마다 다형적 결과를 처리해야 함.",
+  "옛것: tasks/list가 세션의 태스크를 열거. 새것: tasks/list는 의도적으로 제거됨 — stateless 서버는 범위를 지정할 세션이 없고, 테넌트를 넘나드는 목록화는 데이터 누출임. 자체 태스크 ID를 클라이언트 측이나 제품 데이터베이스에서 추적하세요.",
+  "옛것: elicitation은 별도의 서버 → 클라이언트 푸시였음. 새것: elicitation이 태스크의 input_required로 접혀 들어감 — 요청되지 않은 푸시가 필요 없음.",
+  "옛것: 상태는 {pending, running, done, error} 중 하나. 새것: {working, input_required, completed, failed, cancelled}. error → failed로 매핑하고 새 input_required 분기를 추가.",
+  "폐기 시계: 실험적 API는 최소 2027년 7월 28일까지 계속 작동함. SEP-2663에 맞춰 재작성하고, 두 엔드포인트를 병렬로 실행하고, 자신의 일정으로 컷오버하세요.",
+]} />
+
+## 서버 구현 체크리스트
+
+<Steps items={[
+  {title: "응답하기 전에 taskId를 지속화하세요", body: "CreateTaskResult는 클라이언트가 폴링할 수 있다는 약속입니다. DB 쓰기가 HTTP 응답 이후에 일어난다면, 둘 사이의 크래시는 그 약속을 깹니다. Write-through 후 응답하세요."},
+  {title: "현실적인 pollIntervalMs를 제안하세요", body: "100ms는 안 됩니다 — 레이트 리미트에 걸립니다. 60초도 안 됩니다 — 사용자가 UI가 멈췄다고 생각합니다. 작업의 중간 진행 속도에 맞추세요: CI 작업? 2-5초. 배치 임포트? 10-30초. 밤샘 훈련? 60초."},
+  {title: "실제 ttlMs를 설정하고 강제하세요", body: "스펙은 완료된 태스크를 얼마나 오래 유지해야 하는지 아무 말도 하지 않습니다. 정책을 정하고(24시간이 흔함), ttlMs에 알리고, 만료된 ID에 대한 tasks/get을 -32602로 거부하세요. 그렇지 않으면 저장소를 영원히 누출합니다."},
+  {title: "tasks/update를 키별로 멱등하게 만드세요", body: "클라이언트는 재시도합니다. 같은 inputResponse를 두 번 수락하고, 이미 만족된 키는 무시하고, 상태 머신을 이중으로 진전시키지 마세요."},
+  {title: "테넌트를 넘나 태스크를 누출하지 마세요", body: "taskId는 비밀이 아닙니다. 모든 tasks/get / tasks/update / tasks/cancel을 호출자의 인증된 신원으로 범위 지정하세요 — 다른 사용자에게 속한 태스크를 가져오는 것은 -32602를 반환해야 합니다(태스크도 아니고, 존재를 확인하는 인증 오류도 아닙니다)."},
+  {title: "가능하다면 취소를 신속하게 존중하세요", body: "협력적이라는 것은 끝낼 수 있다는 뜻이지, 끝내야 한다는 뜻이 아닙니다. 취소 플래그에 대한 ~1초마다의 체크인은 UX를 훨씬 좋게 만듭니다."},
+]} />
+
+## 클라이언트 구현 체크리스트
+
+<Steps items={[
+  {title: "다형적 tools/call 결과를 모든 곳에서 처리하세요", body: "Tasks에 옵트인하는 순간, 모든 도구 호출이 태스크로 돌아올 수 있습니다. 단 하나의 무시된 resultType: task 분기가 결과를 조용히 떨어뜨립니다."},
+  {title: "taskId를 지속적으로 저장하세요", body: "브라우저의 LocalStorage, CLI의 sqlite, 백엔드의 제품 DB. taskId를 잃은 크래시한 클라이언트는 재개할 수 없습니다."},
+  {title: "pollIntervalMs를 지터가 있는 하한으로 존중하세요", body: "10-20% 무작위 지터를 추가하지 않으면 같은 태스크를 같은 간격으로 폴링하는 수천 개의 클라이언트가 서버를 두들깁니다."},
+  {title: "취소를 사실이 아니라 의도로 표시하세요", body: "종단 상태를 기다리는 동안 '취소됨'이 아니라 '취소 중...'을 렌더링하세요. 어쨌든 completed로 착륙하면 설명하세요."},
+  {title: "구독이 실패하면 폴링으로 폴백하세요", body: "notifications/tasks는 최적화입니다. 모든 클라이언트는 여전히 폴링 경로를 처리해야 합니다 — 그렇지 않으면 구독 문제가 있을 때마다 결과를 잃습니다."},
+]} />
+
+## 실제 예시: `run_migration` 도구
+
+<PromptCard title="서버 의사 코드 — 5-30분 DB 마이그레이션을 실행하는 도구">
+{`// tools/call handler
+async function handleToolCall(req) {
+  const supportsTasks = req.params._meta
+    ?.["io.modelcontextprotocol/clientCapabilities"]
+    ?.extensions?.["io.modelcontextprotocol/tasks"];
+
+  if (req.params.name === "run_migration") {
+    if (!supportsTasks) {
+      return jsonRpcError(req.id, -32603, "run_migration requires Tasks extension");
+    }
+    const taskId = "tsk_" + ulid();
+    await db.tasks.insert({
+      id: taskId, tenant: req.auth.tenant, status: "working",
+      createdAt: Date.now(), ttlMs: 24 * 3600 * 1000,
+    });
+    // Kick off the actual work OUT OF BAND — do not await it here.
+    queue.enqueue({ taskId, migration: req.params.arguments.name });
+    return {
+      resultType: "task",
+      task: { taskId, status: "working", ttlMs: 24 * 3600 * 1000, pollIntervalMs: 5000 },
+    };
+  }
+}
+
+// tasks/get handler — scoped by authenticated tenant
+async function handleTasksGet(req) {
+  const t = await db.tasks.findOne({ id: req.params.taskId, tenant: req.auth.tenant });
+  if (!t) return jsonRpcError(req.id, -32602, "unknown taskId");
+  if (Date.now() > t.createdAt + t.ttlMs) return jsonRpcError(req.id, -32602, "task expired");
+  return { taskId: t.id, status: t.status, statusMessage: t.statusMessage,
+           ...(t.status === "completed" && { result: t.result }),
+           ...(t.status === "failed" && { error: t.error }) };
+}`}
+</PromptCard>
+
+## 대부분의 팀이 첫 주에 부딪히는 함정들
+
+<Callout type="warning" items={[
+  "'tasks/list가 없다.' 네 — 의도적으로. 범위를 지정할 세션이 없습니다. 자체 제품 데이터베이스에서 태스크 ID를 추적하세요.",
+  "'내 취소 버튼이 거짓말을 한다.' 항상 그럴 겁니다. '취소 요청'으로 이름을 바꾸거나 상태 변경을 서버의 종단 ack에 게이팅하세요.",
+  "'폴링할 때만 결과를 얻는다.' 맞습니다 — notifications/tasks + subscriptions/listen도 구현할 때까지는요. 두 경로 모두, 항상.",
+  "'Python SDK에는 아직 이를 위한 헬퍼가 없다.' 일부 Tier 1 SDK 헬퍼는 아직 안정화 중입니다. 원시 JSON-RPC를 손으로 구현할 수도 있습니다 — 와이어 포맷은 완전히 명시되어 있습니다.",
+  "'한 사용자가 ID를 추측해서 다른 사용자의 태스크를 가져왔다.' tasks/get에서 테넌트로 범위를 지정하는 걸 잊었기 때문입니다. 모든 핸들러는 반드시 인증된 주체로 필터링해야 합니다.",
+]} />
+
+## 퀴즈
+
+<Quiz questions={[
+  {
+    q: "당신의 클라이언트가 요청 _meta에 io.modelcontextprotocol/tasks를 포함하지 않았습니다. 호출된 도구는 20분이 걸립니다. 서버는 무엇을 해야 하나요?",
+    options: [
+      "그래도 CreateTaskResult를 반환한다 — 클라이언트가 알아서 처리할 것이다",
+      "20분 동안 연결을 블록한다",
+      "JSON-RPC 오류를 반환하거나, 자체 타임아웃 내에서 block-and-return 하거나, 작업을 거부한다 — 클라이언트가 옵트인하지 않은 태스크를 절대 보내지 않는다",
+      "조용히 notifications/tasks로 다운그레이드한다"
+    ],
+    answer: 2,
+    explain: "Tasks 확장은 양쪽 모두 엄격한 옵트인입니다. 지원을 선언하지 않은 클라이언트에게 resultType: task를 보내는 것은 스펙 위반이며 그 클라이언트의 응답 핸들러를 깨뜨립니다."
+  },
+  {
+    q: "사용자가 태스크 완료 100ms 전에 '취소'를 눌렀습니다. 서버가 취소와 완료를 동시에 처리합니다. 태스크는 합법적으로 어떤 상태로 끝날 수 있나요?",
+    options: [
+      "항상 cancelled — 사용자가 요청했으니까",
+      "cancelled 또는 completed 둘 다 — 취소는 협력적이며, 스펙은 태스크가 여전히 cancelled가 아닌 종단 상태에 도달할 수 있다고 말한다",
+      "항상 failed — 이것은 경쟁 조건이다",
+      "input_required — 클라이언트가 결정해야 하기 때문"
+    ],
+    answer: 1,
+    explain: "SEP-2663은 취소를 협력적으로 정의합니다. 서버는 의도를 인정하지만 작업을 멈출 필요는 없습니다. UI는 '취소 중...'을 렌더링하고 종단 상태가 무엇이든 설명해야 합니다."
+  },
+  {
+    q: "2025-11-25 실험적 Tasks API에서 마이그레이션 중입니다. 옛 코드는 큐를 보여주기 위해 tasks/list를 호출합니다. 올바른 수정은 무엇인가요?",
+    options: [
+      "tasks/list를 계속 호출한다 — 새 스펙이 유지했다",
+      "드롭인 대체가 없다 — 클라이언트 측이나 제품 데이터베이스에서 태스크 ID를 추적한다. 세션 없이 서버 측에서 태스크를 열거하는 것은 테넌트를 넘나 누출되기 때문이다",
+      "대신 server/discover를 사용해 나열한다",
+      "subscriptions/listen을 추가한다 — 연결 시 모든 미결 태스크를 반환한다"
+    ],
+    answer: 1,
+    explain: "tasks/list는 의도적으로 제거되었습니다. stateless 서버는 목록의 범위를 지정할 클라이언트별 세션이 없으며, 테넌트를 넘나 나열하는 것은 데이터 누출입니다. 이제 애플리케이션이 열거를 소유합니다."
+  },
+  {
+    q: "다음 중 Tasks 대신 MRTR (SEP-2322)에 손을 뻗어야 하는 옳은 이유는 무엇인가요?",
+    options: [
+      "작업이 10분 이상 걸린다",
+      "현재 호출을 계속하기 위해 사용자의 입력이 필요하고, 크래시로 그 부분 상태를 잃어도 다시 입력한 폼만 잃을 뿐 — 몇 시간의 작업이 아닌 경우",
+      "폴링 대신 푸시 알림을 원한다",
+      "서버리스 런타임에 있다"
+    ],
+    answer: 1,
+    explain: "MRTR은 같은 논리적 요청 내의 단일 후속 왕복을 다룹니다. Tasks는 요청보다 오래 지속되는 지속 가능한 작업을 다룹니다. 짧은 elicitation에는 MRTR을 사용하고; 크래시로 상태를 잃는 것이 실제로 고통스러운 순간에는 Tasks를 사용하세요."
+  }
+]} />
+
+## 플래시카드
+
+<Flashcards cards={[
+  {front: "SEP-2663", back: "MCP Tasks 확장을 정의하는 Standards Enhancement Proposal입니다. AWS가 기여한 2026-07-28 스펙에 포함되어 출시되었습니다. Repo: modelcontextprotocol/ext-tasks."},
+  {front: "다섯 가지 태스크 상태", back: "working, input_required, completed, failed, cancelled. 마지막 세 개는 종단입니다 — 한 번 도달하면 상태가 변하지 않습니다."},
+  {front: "CreateTaskResult", back: "tools/call이 태스크가 될 때 서버가 보내는 다형적 응답입니다. resultType: 'task'이며, taskId, 초기 상태, ttlMs, 제안된 pollIntervalMs를 포함합니다."},
+  {front: "tasks/get vs tasks/update vs tasks/cancel", back: "Get: 최신 상태를 폴링. Update: 태스크가 input_required로 갔을 때 inputResponses를 제출. Cancel: 서버가 중단하도록 협력적으로 요청 — 보장되지 않음."},
+  {front: "notifications/tasks + subscriptions/listen", back: "폴링에 대한 푸시 대안입니다. 클라이언트는 subscriptions/listen으로 한 번 옵트인하고; 서버는 매 상태 변경마다 전체 태스크 스냅샷을 푸시합니다. 구독이 실패하면 항상 폴링으로 폴백하세요."},
+  {front: "tasks/list가 사라진 이유", back: "stateless 서버는 목록의 범위를 지정할 세션이 없으며, 범위 지정 없이 태스크를 나열하는 것은 크로스 테넌트 데이터 누출입니다. 애플리케이션이 자체 태스크 ID를 추적합니다."},
+  {front: "협력적 취소", back: "서버는 tasks/cancel을 ack하지만 중단할 의무가 없습니다. 태스크는 여전히 completed나 failed에 도달할 수 있습니다. UI는 종단 상태가 착륙할 때까지 '취소됨'이 아니라 '취소 중...'을 말해야 합니다."},
+  {front: "MRTR vs Tasks", back: "MRTR (SEP-2322) = 한 번의 후속 왕복, 지속성 없음, 짧은 elicitation용. Tasks (SEP-2663) = 요청보다 오래 지속되는 지속 가능한 리소스, 클라이언트 크래시를 견디는 모든 것에 사용."}
+]} />
+
+## 출처 및 추가 자료
+
+- [MCP Tasks extension overview — modelcontextprotocol.io](https://modelcontextprotocol.io/extensions/tasks/overview) — 정식 스펙 페이지, 전체 라이프사이클 다이어그램과 양쪽 구현 가이드 포함.
+- [ext-tasks 저장소 (SEP-2663)](https://github.com/modelcontextprotocol/ext-tasks) — 스키마, 생성된 타입, 그리고 작업 중인 스펙 텍스트.
+- [MCP 2026-07-28 스펙 발표](https://blog.modelcontextprotocol.io/posts/2026-07-28/) — Tasks를 AWS가 기여한 퍼스트파티 확장으로 명명한 릴리스 블로그.
+- [Anthropic: Bringing MCP 2026-07-28 to Claude](https://claude.com/blog/bringing-mcp-2026-07-28-to-claude) — Claude 호스트 롤아웃 노트.
+- [Composio: The 2026-07-28 update, plain-language](https://composio.dev/content/mcp-2026-07-28-update-statelessness-apps-auth) — Tasks vs MRTR을 언제 선택할지에 대한 실용적 프레이밍.
+- AILmanac 관련 문서: [MCP 2026-07-28: The Stateless Spec](/docs/api/mcp-2026-07-28-stateless), [MCP Apps: Interactive UIs](/docs/api/mcp-apps-interactive-uis), [Managed Agents](/docs/api/managed-agents), [Long-running agent harnesses](/docs/frontiers/long-running-agent-harnesses).

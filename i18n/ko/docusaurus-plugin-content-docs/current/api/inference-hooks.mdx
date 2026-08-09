@@ -1,0 +1,368 @@
+---
+sidebar_position: 19
+title: "Inference Hooks: Claude Enterprise용 인라인 DLP"
+description: "Claude Enterprise Inference Hooks에 대한 운영자 가이드 — DLP 서버가 모델이 보기 전에 chat, Claude Code, Cowork 전반의 모든 프롬프트를 허용하거나 거부할 수 있게 해주는 HTTPS 웹훅. 전체 스펙, 판정 스키마, 서명, 롤아웃 플레이북."
+keywords: [claude inference hooks, claude enterprise dlp, anthropic inference hooks, standard webhooks, ai security server, claude compliance, prompt firewall, dlp claude code, claude cowork governance, whsec_ signing]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={[
+  "Inference Hooks가 실제로 무엇인지 — WebSocket도 온디바이스 에이전트도 아닌, Anthropic에서 여러분이 운영하는 서버로 보내는 HTTPS POST",
+  "프롬프트 프레임 스키마 — 여러분의 AI 보안 서버가 정확히 무엇을 보는지(그리고 절대로 보지 못하는 것: 시스템 프롬프트, 숨겨진 추론, 원시 바이트)",
+  "판정 JSON: allow, deny_reason이 포함된 deny, 그리고 오늘날 의도적으로 redact 액션이 없는 이유",
+  "서명 모델 — Standard Webhooks HMAC-SHA256, 모든 첫 통합에서 걸리는 두 가지 검증 버그, 그리고 whsec_ 시크릿 형식",
+  "사용자가 차단될지 아니면 모델이 검사되지 않은 트래픽을 받게 될지 결정하는 세 가지 운영 레버: 판정 타임아웃, 실패 처리, 서킷 브레이커",
+  "첫날에 폭발하지 않는 롤아웃 플레이북 — shadow 모드 → 비율 롤아웃 → 역할 제외 → 강제 적용, 이 순서대로",
+]} />
+
+<VerifyNote lastVerified="2026-08-06" source="https://claude.com/blog/claude-enterprise-inference-hooks">
+베타는 **2026년 8월 5일** 출시. 필드 이름, 요청 형태, 헤더는 일반 공급(GA) 전에 변경될 수 있음 — 하드 컷오버를 배포하기 전에 항상 [Inference Hooks 엔드포인트 레퍼런스](https://platform.claude.com/docs/en/manage-claude/inference-hooks-endpoint)를 교차 확인하세요. 베타 범위는 claude.ai의 Claude Enterprise, Cowork, Claude Code이며, Claude Platform, Bedrock, Google Cloud 또는 음성 모드를 통한 API 액세스에는 **사용 불가**.
+</VerifyNote>
+
+2026년 8월 5일 발표된 **Inference Hooks**는 Claude Enterprise 좌석을 배포한 후 모든 보안 팀이 묻는 질문에 대한 Anthropic의 퍼스트파티 답변입니다: *규제 데이터가 포함된 프롬프트가 모델에 도달하는 것을 어떻게 막을 수 있는가?* 지금까지의 답은 `claude.ai`로 향하는 TLS 트래픽을 가로채는 기업용 프록시였습니다 — 취약하고, 불완전하며, Claude Code CLI에는 눈이 멀었죠. Inference Hooks는 시행 지점을 Anthropic의 경계 안으로 이동시킵니다: 거버넌스가 적용되는 모든 프롬프트에 대해 Anthropic은 추론을 일시 중지하고, 대화록을 여러분의 조직이 운영하는 서버로 POST하며, 모델이 아무것도 보기 전에 `allow` 또는 `deny`를 기다립니다.
+
+## 한 단락 요약
+
+여러분의 조직은 HTTPS 엔드포인트를 세웁니다. Anthropic은 거버넌스가 적용되는 모든 프롬프트를 서명된 `POST`(Standard Webhooks HMAC-SHA256)로 보냅니다. 여러분의 서버는 `{"action": "allow"}`를 반환해 추론을 진행시키거나, `{"action": "deny", "deny_reason": "..."}`을 반환해 사용자가 이유를 보고 모델에는 절대 도달하지 못하게 합니다. 엔드포인트는 하나의 구성으로 Claude Enterprise chat, Claude Code, Cowork를 모두 커버합니다. 서버가 타임아웃되거나 500을 반환하면, **실패 처리** 설정이 요청을 차단할지 아니면 검사 없이 진행시킬지 결정합니다. **판정 강제 적용**을 켜기 전에 shadow 모드 + 비율 롤아웃 + 역할 제외로 점진적으로 롤아웃하세요.
+
+## Inference Hooks 대 Compliance API
+
+둘 다 동일한 대상 — Claude Enterprise 보안, 법무, 컴플라이언스 팀 — 을 위해 존재하지만, 요청 라이프사이클의 정반대 끝에서 작동합니다.
+
+|                | Inference Hooks                                             | [Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api) |
+| -------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **언제**       | 인라인, 추론 실행 전                                        | 사후                                                                               |
+| **하는 일** | 거버넌스가 적용되는 각 요청을 실시간으로 허용 또는 거부       | 감사 및 내보내기를 위한 활동, 채팅, 파일, 프로젝트, 사용자 조회                     |
+| **방향**  | Anthropic → 여러분의 서버                                     | 여러분 → Anthropic                                                                    |
+| **용도**  | 유출 차단                                                 | 발생한 일 증명                                                                |
+
+대부분의 기업은 둘 다 운영할 것입니다. Hooks는 트립와이어이고, Compliance API는 감사 로그입니다.
+
+## 판정 왕복 작동 방식
+
+<Steps items={[
+  {title: "사용자가 거버넌스가 적용되는 표면에서 프롬프트를 제출", body: "claude.ai chat, Claude Code(웹, 데스크톱, CLI) 또는 Claude Cowork입니다. 대화 제목 생성과 같은 부수적인 요청은 전송되지 않습니다. 음성 모드는 베타 범위에서 제외됩니다."},
+  {title: "Anthropic이 추론을 일시 중지하고 대화록을 여러분의 엔드포인트에 POST", body: "관리자가 구성한 URL로 하나의 HTTPS POST. 헤더에는 Content-Type: application/json, User-Agent: anthropic-dlp/1, 그리고 세 개의 Standard Webhooks 서명 헤더(webhook-id, webhook-timestamp, webhook-signature)가 포함됩니다."},
+  {title: "여러분의 AI 보안 서버가 서명을 검증하고 대화록을 평가", body: "base64로 디코딩한 whsec_ 시크릿으로 `{webhook-id}.{webhook-timestamp}.{원시 본문 바이트}`에 대한 HMAC-SHA256을 계산합니다. 시계에서 5분 이상 벗어나거나 서명이 일치하지 않는 것은 거부하세요."},
+  {title: "여러분의 서버가 HTTP 200과 함께 JSON 판정 반환", body: "{\"action\": \"allow\"} 또는 {\"action\": \"deny\", \"deny_reason\": \"...\"} 중 하나입니다. Anthropic은 응답 본문을 최대 64 KiB까지만 읽으며 리다이렉트를 따르지 않습니다."},
+  {title: "Anthropic이 판정을 시행", body: "allow의 경우 추론이 정상적으로 진행됩니다. deny의 경우 사용자는 여러분의 deny_reason과 그 뒤에 관리자가 구성한 상시 메시지를 보게 되며, 모델은 프롬프트를 절대 보지 못합니다. 모든 거부는 조직의 Activity Feed에 기록됩니다."},
+]} />
+
+사용자 기기가 아닌 Anthropic 서버에서 실행되는 것의 핵심은 *균일성*입니다: 하나의 구성, 하나의 서버, 그리고 모든 표면의 거버넌스가 적용되는 모든 요청이 동일한 방식으로 검사됩니다. 직원 노트북에 설치할 것이 없고, 동기화를 유지해야 하는 앱별 통합도 없습니다.
+
+## 프롬프트 프레임
+
+모든 요청은 다음 최상위 필드가 포함된 JSON 본문입니다:
+
+| 필드        | 유형          | 설명                                                                                                                                                                                                                                     |
+| ------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`       | string        | 오늘은 항상 `"prompt"`. 새로운 이벤트 유형이 나타날 것입니다 — 서킷 브레이커를 작동시키지 않도록 인식되지 않은 값에는 `allow`를 반환하세요.                                                                                              |
+| `request_id` | string        | 추론 호출별 불투명 식별자. `webhook-id` 헤더와 같습니다 — 멱등성 키로 사용하세요.                                                                                                                                                        |
+| `tenant_id`  | string \| null | 조직에 대한 불투명 식별자.                                                                                                                                                                                                              |
+| `actor`      | object        | `type`으로 구별됨(`"user"`가 오늘의 유일한 값). 사용자의 요청 전반에 걸쳐 안정적인 태그된 `id`와 가능한 경우 `email_address`를 담고 있습니다. 두 필드 모두 null일 수 있습니다.                                                          |
+| `source`     | object        | `{"application": "..."}`. 알려진 값: `claude-ai`, `claude-code`, `config-test`(관리자 "Test connection" 버튼에서 사용). 열린 열거형 — 새 값이 나타날 것입니다.                                                                          |
+| `session_id` | string \| null | 불투명한 대화 식별자. 파싱하지 마세요. Claude Code에서는 최선 노력.                                                                                                                                                                     |
+| `model`      | string \| null | 가능한 경우 이 요청의 공개 모델 식별자.                                                                                                                                                                                                 |
+| `messages`   | array         | 추론 시점까지의 대화 대화록 — [Content blocks](#content-blocks) 참조.                                                                                                                                                                    |
+| `metadata`   | object        | 예약된 확장 맵. 오늘은 비어 있음. 알지 못하는 키는 관용하세요.                                                                                                                                                                          |
+
+최소한의 실제 요청은 다음과 같습니다:
+
+```json
+{
+  "type": "prompt",
+  "request_id": "req_abc123",
+  "tenant_id": "11111111-1111-1111-1111-111111111111",
+  "actor": {
+    "type": "user",
+    "id": "user_01AbCdEfGhIjKlMnOpQrStUv",
+    "email_address": "alice@example.com"
+  },
+  "source": { "application": "claude-ai" },
+  "session_id": "22222222-2222-2222-2222-222222222222",
+  "model": "claude-sonnet-5",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "Summarize the attached report." },
+        {
+          "type": "attachment",
+          "file_name": "q2-report.pdf",
+          "media_type": "application/pdf",
+          "size_bytes": 48213,
+          "text": "Q2 revenue grew 14% quarter over quarter..."
+        }
+      ]
+    }
+  ],
+  "metadata": {}
+}
+```
+
+### Content blocks
+
+각 `messages[].content[]` 항목에는 `type`이 있으며 공개 Messages API 콘텐츠 모델과 일치합니다. 도구 결과는 `user` 역할 아래에 나타납니다.
+
+| 블록 `type`  | 필드                                                                                                                                             |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `text`        | `text`                                                                                                                                             |
+| `tool_use`    | `id`, `tool_name`, `input`                                                                                                                         |
+| `tool_result` | `content`(텍스트, 개행으로 결합, 바이너리 부분은 자리 표시자 마커), `is_error`, `tool_name`, `tool_use_id`                                       |
+| `attachment`  | `file_name`, `media_type`, `size_bytes`, `text`(추출된 텍스트, 대화록 또는 링크 메타데이터)                                                       |
+
+### 대화록에 절대 포함되지 않는 것
+
+이것이 프라이버시 검토에서 걸리는 부분입니다.
+
+- **시스템 프롬프트 없음.** Anthropic의 것, 여러분의 것(projects/skills를 통한), 또는 모델의 constitution — 그 어느 것도 전송되지 않습니다.
+- **숨겨진 추론 없음.** Claude의 extended-thinking 체인은 여러분의 서버가 보는 대화록의 일부가 아닙니다.
+- **도구 정의 없음.** 호출과 그 결과만.
+- **원시 바이트 없음.** 파일과 이미지는 메타데이터와 추출된 텍스트로 표현됩니다. 이미지 전용 콘텐츠(문서의 스크린샷)는 검사되지 않습니다.
+- **Anthropic 내부 컨텍스트** 또는 신뢰 경계 없음.
+
+대화록은 *최종 사용자가 보는 대로*의 대화와 도구 추적입니다. 콘텐츠가 모두 제외된 블록이나 턴은 완전히 삭제되므로, 파싱할 때 **엄격한 user/assistant 교대를 가정하지 마세요**.
+
+### 크기 관련 함정 하나
+
+대화록은 잘리지 않고 **10 MB** 상한까지 전송됩니다. 일반적인 기본값은 훨씬 작습니다 — nginx `client_max_body_size`는 **1 MB**, Express `express.json()`은 **100 kB**, 대부분의 PaaS 리버스 프록시는 몇 MB에서 제한됩니다. 여러분의 서버가 거부하는 본문은 웹훅 실패이며, **Allow the request** 실패 처리 하에서는 초과 크기의 프롬프트가 **검사되지 않고** 모델에 도달한다는 의미입니다. 강제 적용 전에 본문 제한을 올리세요.
+
+## 판정 스키마
+
+두 결과 모두에 대해 HTTP 200으로 응답하세요. `action` 필드가 구별합니다.
+
+Allow:
+
+```json
+{ "action": "allow" }
+```
+
+Deny:
+
+```json
+{
+  "action": "deny",
+  "deny_reason": "This prompt appears to contain customer payment card data, which your organization's policy does not allow.",
+  "reference_id": "scan_01HXPT4R9V"
+}
+```
+
+| 필드          | 유형 및 제한                                                    | 의미                                                                                                                                                                                                                                     |
+| -------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `action`       | `"allow"` 또는 `"deny"`; 필수                                 | `allow`는 추론을 진행시킵니다. `deny`는 요청을 거부합니다.                                                                                                                                                                                    |
+| `deny_reason`  | string 또는 null; **최대 500자, 더 긴 값은 잘림**  | 최종 사용자에게 표시되며, 관리자가 구성한 상시 메시지에 추가됩니다. 사용자를 위해 작성하세요 — 여러분의 스캐너 규칙 이름이 무엇이었는지가 아니라 무엇을 바꿔야 하는지 알려주세요.                                                                        |
+| `reference_id` | string 또는 null; **`[A-Za-z0-9._:/-]`에서 최대 50자**    | 이 평가에 대한 여러분 자신의 식별자. 거부의 `inference_hooks_request_denied` Activity Feed 항목에 기록되며, 최종 사용자에게는 절대 표시되지 않습니다. 불투명하게 유지하세요 — 요청 콘텐츠 없음, 개인 데이터 없음.                                    |
+
+### redact 액션이 없는 이유
+
+판정은 의도적으로 이진법입니다. Anthropic은 `{"action": "redact", "rewritten_prompt": "..."}`을 추가하여 DLP 서버가 대화록을 실시간으로 정화하도록 할 수도 있었겠지만 — 그렇게 하면 Anthropic이 여러분의 상자가 반환하는 것은 무엇이든 조직의 권한으로 모델에 보내야 한다는 의미가 됩니다. 이 설계는 신뢰 경계를 뚜렷하게 유지합니다: 여러분의 서버는 콘텐츠를 *평가*하지, *작성*하지 않습니다. 편집이 필요하면, 사용자가 전송하기 전에 클라이언트에서 하세요.
+
+### deny는 형식 때문에 절대 폐기되지 않음
+
+초과 크기의 `deny_reason`은 잘립니다; 잘못된 형식의 `reference_id`는 조용히 삭제됩니다; `action`은 여전히 준수됩니다. 그 반대는 성립하지 않습니다: 파싱 가능한 판정을 가진 HTTP 200이 아닌 어떤 것도 **웹훅 실패**이지, deny가 아닙니다. `HTTP 403`으로 차단을 신호로 보내면 여러분의 deny는 조용히 fail-open allow(또는 실패 처리에 따라 차단)로 바뀌며, 그 모든 것이 서킷 브레이커에 반영됩니다.
+
+## 가장 작은 작동 서버
+
+<PromptCard title="12줄의 Python으로 만든 모두 허용 AI 보안 서버">
+{`# Run with: python server.py — expose on an https:// URL your admin configures.
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+class VerdictHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # keep the connection open between verdicts
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        verdict = b'{"action": "allow"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(verdict)))
+        self.end_headers()
+        self.wfile.write(verdict)
+
+ThreadingHTTPServer(("", 8000), VerdictHandler).serve_forever()`}
+</PromptCard>
+
+이것을 443 포트의 TLS 종료 리버스 프록시 뒤에 두고, 엔드포인트로 구성하고, 관리자 콘솔에서 **Test connection**을 누르세요 — allow 판정이 보일 것입니다. 이것은 정확히 아카이브 전용 통합의 형태입니다: 무조건 `allow`를 반환하고, 응답 후 프레임을 유지하여, Compliance API를 폴링하는 대신 푸시로 대체합니다. 이것은 강제 적용에 사용할 형태가 **아닙니다** — 서명되지 않은 것을 포함하여 모든 요청을 수락합니다. **판정 강제 적용**을 켜기 전에 서명 검증을 추가하세요.
+
+## 서명 검증
+
+서명은 [Standard Webhooks](https://www.standardwebhooks.com/) 스펙을 따릅니다. Anthropic이 보내는 대로는 소문자이지만 조회 시 대소문자 구분 없음(프록시가 재대소문자 처리)인 세 개의 헤더.
+
+| 헤더              | 내용                                                                                                                                                                                                                       |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `webhook-id`        | 전달별 고유. 본문의 `request_id`와 같음. 멱등성 키로 사용.                                                                                                                                                                    |
+| `webhook-timestamp` | 초 단위 Unix 시간, 10진수 문자열. 시계에서 어느 방향으로든 **5분** 이상 벗어나면 거부 — 그것이 리플레이 윈도우.                                                                                                              |
+| `webhook-signature` | 공백으로 구분된 `v1,<base64>` 값들. 각각은 바이트 문자열 `{webhook-id}.{webhook-timestamp}.{원시 본문 바이트}`에 대한 HMAC-SHA256. 어느 값이든 여러분 것과 일치하면 요청을 수락 — 상수 시간 비교를 사용하세요.                  |
+
+### 모든 첫 통합에서 걸리는 두 가지 버그
+
+<Callout type="warning" items={[
+  "재인코딩된 JSON이 아니라, 원시 바이트를 검증하세요. 파싱이나 재직렬화 전에 수신된 대로의 본문에 대해 HMAC을 계산하세요. json.loads() → json.dumps() 왕복은 공백을 바꾸고 여기서 실패합니다.",
+  "시크릿은 URL-safe가 아닌 STANDARD base64 디코더로 디코딩하세요. 서명 시크릿은 whsec_ 접두사 뒤의 값이며, 표준 알파벳(+와 /)으로 인코딩됩니다. URL-safe 디코더는 시크릿에 +나 /가 포함될 때마다 잘못된 키 바이트를 도출하며, 그것은 대부분의 경우입니다 — 그리고 실패는 조용한 상수 시간 불일치입니다."
+]} />
+
+참조 Python 구현(Anthropic 문서에서 압축):
+
+```python
+import base64, hashlib, hmac, time
+
+TOLERANCE_SECONDS = 300
+
+def verify(secret: str, headers: dict[str, str], body: bytes) -> bool:
+    h = {k.lower(): v for k, v in headers.items()}
+    try:
+        msg_id, ts, sigs = h["webhook-id"], h["webhook-timestamp"], h["webhook-signature"]
+    except KeyError:
+        return False  # unsigned, not from Anthropic
+    try:
+        signed_at = int(ts)
+    except ValueError:
+        return False
+    if abs(time.time() - signed_at) > TOLERANCE_SECONDS:
+        return False  # replayed, or clocks disagree
+    try:
+        key = base64.b64decode(secret.removeprefix("whsec_"), validate=True)
+    except ValueError:
+        return False  # misconfigured secret
+    payload = f"{msg_id}.{ts}.".encode() + body
+    expected = b"v1," + base64.b64encode(hmac.new(key, payload, hashlib.sha256).digest())
+    return any(hmac.compare_digest(expected, s.encode()) for s in sigs.split())
+```
+
+### 시크릿 로테이션
+
+로테이션은 관리자 측에서 즉시 컷오버이지만, **이전 시크릿으로 서명된 요청은 이후 약 1분 동안 계속 도착할 수 있으며**, 이미 진행 중인 것도 마찬가지입니다. 그러한 낙오자들이 서명되지 않은 것으로 거부되지 않도록 로테이션 윈도우 동안 서버가 이전 시크릿과 새 시크릿 모두의 서명을 수락하도록 하세요.
+
+### 일회성 예외
+
+**조직의 첫 저장 이전에** 전송된 연결 테스트는 서명 시크릿이 아직 존재하지 않으므로 서명되지 않은 채로 도착합니다. 관리자가 시크릿이 존재함을 확인할 때까지 서명되지 않은 요청을 수락하고, 그 후에는 거부하세요.
+
+## 운영 의미론
+
+### 타임아웃
+
+관리자는 **1 ~ 10,000 ms** 사이의 판정 타임아웃을 설정하며, 기본값은 **5,000 ms**입니다. 그 예산은 전체 왕복을 포함합니다: 연결, TLS 핸드셰이크, 요청 본문 업로드, 응답 본문 다운로드.
+
+### 재시도
+
+Anthropic은 **정확히 한 번, 100 ms 지연 후, 연결 시도가 실패할 때만** 재시도합니다. 500에서는 아님. 타임아웃에서는 아님. 파싱 오류에서는 아님. 여러분의 서버가 응답한 후에는 — 무엇이든 간에 — 교환이 끝납니다. 재시도는 동일한 타임아웃 예산을 공유하고 동일한 `webhook-id`와 서명을 전달하므로, `webhook-id`에 중복 제거 키를 두는 것이 안전합니다.
+
+### 실패 처리
+
+깨끗한 200-with-verdict가 아닌 다른 모든 것은 **웹훅 실패**입니다: 타임아웃, 200이 아닌 상태(리다이렉트 포함), 파싱 불가능하거나 초과 크기의 응답 본문, 도달 불가능한 엔드포인트. 실패 시, 조직의 설정이 결정합니다:
+
+- **Block the request.** 고규제 환경의 안전한 기본값. DLP 서버가 다운되면 사용자는 차단됩니다. Claude의 가용성이 여러분의 스캐너의 가용성이 됩니다.
+- **Allow the request.** 서버가 복구되는 동안 사용자는 계속 작업합니다. 중단 동안 프롬프트는 검사 없이 흐릅니다 — 많은 조직에게 받아들여지는 트레이드오프이지만, 감사 추적의 공백을 어떻게 조정할지 계획하세요.
+
+### 서킷 브레이커
+
+여러분의 AI 보안 서버에 기인하는 지속적인 웹훅 실패는 시행을 중지시키는 **서킷 브레이커를 작동**시킵니다: Anthropic이 여러분의 서버 호출을 중지하고, 실패 처리가 모든 요청에 적용됩니다. 복구는 자동이 아닙니다 — 서버를 고치고, 관리자가 **판정 강제 적용**을 다시 켜야 합니다. 실제로 이는: **알 수 없는 최상위 `type`은 HTTP 500이 아니라 `{"action": "allow"}`를 반환해야 함**을 의미합니다 — 그렇지 않으면 향후의 새 이벤트 유형이 롤아웃 당일에 여러분을 서킷 브레이커 영역으로 몰아넣을 것입니다.
+
+### 지연 시간
+
+조직의 거버넌스가 적용되는 모든 요청은 여러분의 AI 보안 서버의 왕복을 추가 지연 시간으로 지불합니다. 대규모 조직에 롤아웃하기 전에 부하 테스트를 하세요; 4초 스캐너는 채팅 프롬프트에서는 보이지 않지만 연속으로 많은 요청을 발동시키는 Claude Code 도구 루프에서는 악몽입니다.
+
+### 소스 IP 허용 목록
+
+요청은 `160.79.106.0/24`에서 시작되며, 이는 Anthropic의 게시된 [아웃바운드 IP 범위](https://platform.claude.com/docs/en/api/ip-addresses)의 일부입니다. 그 블록을 허용 목록에 추가하되, 같은 페이지의 인바운드 범위는 **아닙니다** — 다른 목록입니다. 그리고 허용 목록은 서명 검증의 대체가 아닙니다: 그 블록은 Inference Hooks를 넘어 Anthropic 이그레스를 전달합니다.
+
+## 롤아웃 플레이북
+
+<Steps items={[
+  {title: "Shadow 모드 — 판정 관찰, 아무것도 차단하지 않음", body: "가장 먼저 켜는 것. 서버가 모든 요청을 평가하지만 어떠한 deny도 시행되지 않습니다. 단 한 명의 사용자도 차단되기 전에 일주일 분량의 실제 트래픽에 대해 규칙을 조정할 수 있습니다."},
+  {title: "비율 롤아웃 — 일부만 검사", body: "시행을 켤 때 (가령) 10%에서 시작하여 올립니다. 스캐너에 오탐 급증이 있는 경우 폭발 반경을 줄여줍니다."},
+  {title: "역할 기반 제외 — 반드시 필요한 것은 면제", body: "스캐너가 따라갈 수 있는 것보다 프롬프트를 더 빨리 처리할 것을 알고 있는 역할(선임 엔지니어링, 대기 중인 SRE)은 조정하는 동안 면제할 수 있습니다. 영원히는 아니고 — 램프업 중에 유용합니다."},
+  {title: "판정 강제 적용 — 실제로 거부", body: "설정한 소크 기간 동안 이전 세 가지가 깨끗하게 실행된 후에만. 이때가 여러분의 deny_reason 문자열이 마침내 사용자에게 도달하기 시작하는 시점이므로, 스위치를 켜기 전에 한 번 더 검토하세요."},
+]} />
+
+Anthropic 문서는 명료하게 표현합니다: *첫날에 직원을 차단하는 것은 DLP 프로그램이 죽는 방법이다.* Shadow 모드가 존재하는 데는 이유가 있습니다.
+
+## 통합 설계
+
+<Callout type="tip" items={[
+  "webhook-id로 중복을 제거하세요. 전달별 고유이며 본문의 request_id와 일치합니다. 연결 실패 재시도는 이를 재사용하므로 깨끗한 멱등성 키입니다.",
+  "모든 판정을 reference_id와 함께 저장하세요. Anthropic은 각 거부에 대해 Activity Feed 항목에 reference_id를 기록하므로, 거부를 여러분 자신의 시스템에서 정확한 스캔 결정으로 조인할 수 있습니다.",
+  "항상 허용하는 아카이브 통합의 경우, 먼저 응답하고 그 다음에 유지하세요. 쓰기 전에 답변하면 왕복이 사용자의 임계 경로에서 벗어나게 됩니다 — 여러분의 저장 시스템은 핫 경로에 있지 않습니다.",
+  "deny_reason은 SIEM이 아니라 사람을 위해 작성하세요. '프롬프트에서 신용카드 번호를 제거하고 다시 제출하세요'가 'PCI_REGEX_2A 발동, 참조 4471'을 이깁니다. 사용자는 전자에 따라 행동할 것입니다."
+]} />
+
+## 커버리지 매트릭스
+
+| 표면 / 액세스                             | Inference Hooks로 검사됨?                                     |
+| -------------------------------------------- | ----------------------------------------------------------------- |
+| claude.ai (웹, 데스크톱, 모바일)             | 예                                                             |
+| Claude Code (웹, 데스크톱, CLI)              | 예 (`session_id`는 최선 노력, 클라이언트 주장)              |
+| Claude Cowork                                | 예                                                             |
+| 음성 모드                                   | 베타에서 아님                                                 |
+| 대화 제목 생성, 기타 부수 | 전송되지 않음                                                      |
+| 시스템 프롬프트, 도구 정의              | 절대 전송되지 않음                                                      |
+| 원시 파일 / 이미지 바이트                       | 절대 전송되지 않음(추출된 텍스트는 전송됨)                                   |
+| 이미지 전용 콘텐츠 (예: 문서 스크린샷)  | 검사되지 않음                                                    |
+| Claude Platform API 키 (개발자 액세스)  | Inference Hooks 범위 외 (Platform 조직이지, Enterprise가 아님) |
+| Amazon Bedrock / Google Cloud 배포    | 해당 플레인에서 사용 불가                                    |
+
+## 흔한 실수
+
+<Callout type="warning" items={[
+  "HTTP 403으로 차단을 신호로 보내기. 그것은 deny가 아니라 웹훅 실패입니다 — 여러분의 정책 판정이 버려지고 실패 처리가 대신 실행됩니다.",
+  "'allow' 또는 'deny' 이외의 action을 반환하기. 같은 이야기: 웹훅 실패. 세 번째 상태를 추가하고 싶다면, 판정이 아니라 여러분 자신의 감사 로그에서 하세요.",
+  "작은 기본 본문 제한 (Express 100 kB, nginx 1 MB). 큰 PDF의 추출된 텍스트가 있는 3 MB 대화록은 여러분의 리버스 프록시에서 413을 반환할 것입니다. 10 MB 상한을 수용하도록 제한을 올리세요.",
+  "whsec_ 시크릿의 URL-safe base64 디코드. 여러분의 모든 요청이 '서명되지 않았음'을 알아차릴 때까지 모든 요청에서 조용한 상수 시간 불일치.",
+  "HMAC 전에 본문을 재직렬화. 수신된 대로 정확한 원시 바이트를 검증하세요. json.loads + json.dumps는 공백을 바꾸고 서명을 깨뜨립니다.",
+  "알 수 없는 최상위 `type`을 500으로 거부. Anthropic이 새 이벤트 유형을 출시하는 날 서킷 브레이커를 작동시킵니다. 알 수 없는 유형에는 `allow`를 반환하세요.",
+  "인식되지 않는 `source.application` 값을 거부. 그것은 열린 열거형입니다. 새 값이 나타날 것이며 오래된 통합이 그 위에서 브릭되어서는 안 됩니다.",
+  "user/assistant 교대를 가정. 블록이 모두 제외된 턴은 `messages`에서 삭제됩니다. 방어적으로 파싱하세요."
+]} />
+
+## Inference Hooks 대 클라이언트 측 프록시를 언제 사용할지
+
+일부 조직은 여전히 직원들이 온라인에서 하는 *모든 것*의 커버리지를 위해 TLS 가로채기 프록시를 실행합니다. Inference Hooks는 프록시 대체가 아닙니다 — 그것은 Anthropic 경계 *내부*에 위치하고 전선의 암호화된 바이트만 보는 프록시보다 대화에 대한 더 풍부하고 구조화된 뷰를 보는 Claude 특정 시행 지점입니다.
+
+- 모델이 실제로 볼 것(도구 호출, 첨부 파일, 대화록)에 대한 구조화된 액세스, chat + Code + Cowork 전반의 균일한 커버리지, 그리고 기기별 설치가 없는 것을 원할 때 **Inference Hooks**를 사용하세요.
+- 상자의 다른 모든 것에 대해서는 **네트워크 DLP**를 유지하세요: Claude 이외 서비스로의 파일 업로드, claude.ai 외부의 브라우저 트래픽, 이메일 첨부 파일. 두 가지는 겹치지 않습니다.
+- 사후 감사 및 내보내기를 위해 **[Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api)**를 추가하세요.
+
+## 퀴즈
+
+<Quiz questions={[
+  {
+    q: "Anthropic은 여러분의 AI 보안 서버에 어떻게 연락합니까?",
+    options: [
+      "서명된 WebSocket, 조직당 단일 지속 연결",
+      "Standard Webhooks에 따라 서명된, 거버넌스가 적용되는 요청당 HTTPS POST",
+      "mTLS가 있는 gRPC 스트림",
+      "폴링 루프 — 여러분의 서버가 대기 중인 판정을 가져옴"
+    ],
+    answer: 1,
+    explain: "거버넌스가 적용되는 요청당 하나의 HTTPS POST. HMAC-SHA256을 사용하여 세 개의 Standard Webhooks 헤더(webhook-id, webhook-timestamp, webhook-signature)로 서명됨."
+  },
+  {
+    q: "여러분의 DLP 스캐너가 정책 위반을 감지했습니다. 어떤 응답이 옳습니까?",
+    options: [
+      "HTTP 403과 { \"error\": \"blocked\" }",
+      "HTTP 200과 { \"action\": \"deny\", \"deny_reason\": \"...\" }",
+      "HTTP 200과 { \"action\": \"redact\", \"rewritten_prompt\": \"...\" }",
+      "HTTP 451과 헤더에 이유"
+    ],
+    answer: 1,
+    explain: "Deny는 항상 HTTP 200과 { \"action\": \"deny\", \"deny_reason\": \"...\" }입니다. HTTP 403은 웹훅 실패입니다 — 여러분의 판정은 버려지고 실패 처리가 대신 실행됩니다. 오늘날 redact 액션은 없습니다; 판정은 의도적으로 이진법입니다."
+  },
+  {
+    q: "여러분의 AI 보안 서버가 롤링 배포를 위해 다운되어 90초 동안 500을 반환합니다. 그 윈도우 동안 사용자 프롬프트에는 무슨 일이 일어납니까?",
+    options: [
+      "Anthropic 측에서 큐잉되었다가 서버가 복구되면 처리됨",
+      "여러분의 실패 처리 설정이 결정 — 차단되거나 검사 없이 진행됨",
+      "항상 차단; 실패는 fail-closed로 기본 설정됨",
+      "항상 진행; 실패는 fail-open으로 기본 설정됨"
+    ],
+    answer: 1,
+    explain: "500은 웹훅 실패입니다. 조직의 실패 처리 설정(Block the request 대 Allow the request)이 어느 쪽 트레이드에 있을지 선택합니다. 지속적인 실패도 서킷 브레이커를 작동시키며, 그 시점에서 관리자가 시행을 다시 활성화할 때까지 실패 처리가 모든 요청에 적용됩니다."
+  }
+]} />
+
+## 다음
+
+- [The Admin API: automate your Claude org](/docs/api/admin-api) — hooks와 자연스럽게 짝을 이루는 Enterprise 사용자 관리 및 RBAC 엔드포인트.
+- [MCP 2026-07-28: The Stateless Spec](/docs/api/mcp-2026-07-28-stateless) — hooks가 `tool_use` 및 `tool_result` 블록에서 볼 도구 호출 측.
+- [Refusals & Safety](/docs/api/refusals-and-safety) — 여러분의 hook이 프롬프트를 통과시킨 *후에* 발동하는 Claude 자체의 모델 내 거부 신호.
+- [Current Models & Pricing](/docs/whats-new/models-and-pricing)

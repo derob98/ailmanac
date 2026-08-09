@@ -1,0 +1,394 @@
+---
+sidebar_position: 14.5
+title: "서버 사이드 폴백 및 폴백 크레딧"
+description: "Fable 5 / Opus 5 거부를 단일 API 호출 내에서 정상 응답으로 변환하는 Opus 5 베타 — 그리고 재시도에서 프롬프트 캐시 비용을 두 번 지불하지 않게 해주는 크레딧 토큰."
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-07-30" source="https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback">
+베타 헤더 이름(`server-side-fallback-2026-07-01`, `fallback-credit-2026-07-01`), `"default"` 모드, 5분 크레딧 토큰 TTL, 그리고 약 1시간의 스티키 라우팅 창은 모두 베타이며 GA 이전에 변경될 수 있습니다. 각 모델에 대해 허용되는 폴백 대상은 [Models API](https://platform.claude.com/docs/en/api/models/list)의 `allowed_fallback_models`에 있으며 이것이 권위 있는 출처입니다 — 배포 전에 다시 확인하세요.
+</VerifyNote>
+
+Opus 5 이전에는 Claude 거부가 **당신의** 문제였습니다. 분류기가 거절하면 즐거운 HTTP 200과 함께 `stop_reason: "refusal"`이 돌아오고, 이제 재시도는 당신의 몫이었습니다: 다른 모델을 선택하고, 전체 히스토리를 다시 보내고, 새 모델이 다른 캐시 네임스페이스를 갖고 있어서 프롬프트 캐시가 녹아내리는 것을 지켜보고, 재무 팀에 같은 대화가 왜 두 번 청구되었는지 설명해야 했습니다.
+
+Opus 5 출시(2026년 7월 24일)는 이 모든 것을 하나의 API 호출로 축약하는 **두 개의 관련 베타**를 배포했습니다:
+
+1. **서버 사이드 폴백**(`server-side-fallback-2026-07-01`) — `fallbacks: "default"`를 설정하면 API가 거부 카테고리에 대해 *Anthropic*이 선택한 모델에서 같은 왕복으로 거부된 요청을 재시도합니다. 직접 최대 세 개의 대상을 지정할 수도 있습니다.
+2. **폴백 크레딧**(`fallback-credit-2026-07-01`) — 모든 거부에 첨부된 일회성 크레딧 토큰으로, 재시도 시 이를 반향하면 마치 대화가 처음부터 폴백 모델에서 진행된 것처럼 재시도가 재가격됩니다. 새 모델에서의 캐시 쓰기가 캐시 읽기가 됩니다.
+
+두 베타는 독립적입니다 — 이미 클라이언트 사이드 재시도 로직이 있다면 폴백 크레딧만 사용할 수 있습니다 — 하지만 이 릴리스의 요점은 거의 그럴 필요가 없어야 한다는 것입니다. 이 페이지는 복사-붙여넣기 원라이너부터 프로덕션을 물어뜯는 코너 케이스(스트리밍 중 `tool_use` 중간, 스티키 라우팅, 연속형 형태를 잠그는 `output_config.format`)까지 두 가지를 모두 안내합니다.
+
+<Callout type="objectives" items={["거부가 실제로 와이어상에서 어떻게 보이는지 (JSON, 다섯 가지 정지 카테고리, 토큰 청구 시점)","폴백하는 세 가지 방법(서버 사이드 / SDK 미들웨어 / 수동 원시 HTTP)과 각각이 적절한 경우","원라이너: fallbacks: 'default'와 베타 헤더, 응답 형태에 추가되는 것","명시적 목록 대 기본 모드, allowed_fallback_models, 그리고 순서가 중요한 이유","폴백 크레딧이 프롬프트 캐시를 두 번 지불하지 않게 하는 방법 — 토큰, 두 가지 재시도 본문 형태, usage.iterations가 보여줘야 하는 것","모든 수동 재시도가 구현해야 하는 3단계 거부 사다리 (연속형 → 변경 없는 본문 → 토큰 포기)","작동하지 않는 곳: Message Batches, Bedrock/GCP/Foundry 갭, Sonnet 5, tool_use 중간 스트리밍 거부, output_config.format + 서버 도구"]} />
+
+`★ Insight ─────────────────────────────────────`
+여기서 내재화할 가치가 있는 두 가지 Anthropic 특유의 지문이 있습니다. **첫째**, 분류기 거부는 `4xx`가 아니라 **`stop_reason: "refusal"`이 있는 200**입니다. 오류 핸들러가 2xx가 아닌 것을 "재시도"로 처리한다면 거부를 조용히 무시하게 됩니다; 200을 "성공"으로 처리한다면 빈 콘텐츠를 조용히 표시하게 됩니다. 둘 다 원하는 바가 아닙니다. **둘째**, 프롬프트 캐시는 **모델별**이므로, 다른 Claude 모델에서의 순진한 재시도는 대화 접두어가 바이트 단위로 동일하더라도 항상 처음부터 캐시 쓰기 비용을 지불합니다. 크레딧 토큰은 그 구멍을 메우는 조각이며 — `fallback-credit`가 서버 사이드 폴백과 별개 베타로 존재하는 이유입니다.
+`─────────────────────────────────────────────────`
+
+## 거부가 실제로 어떻게 보이는지
+
+분류기 거부는 빈 `content` 배열과 `stop_reason: "refusal"`을 가진 정상적인 메시지 응답입니다:
+
+```json
+{
+  "id": "msg_01XFUDYJgAACzvnptvVoYEL",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-fable-5",
+  "content": [],
+  "stop_reason": "refusal",
+  "stop_details": {
+    "type": "refusal",
+    "category": "cyber",
+    "explanation": "This request was declined because it could enable cyber harm."
+  },
+  "usage": {
+    "input_tokens": 412,
+    "output_tokens": 0
+  }
+}
+```
+
+`stop_details.category`는 다섯 가지 값 중 하나입니다. 두 개는 거부가 명명된 카테고리에 매핑되지 않을 때 `null`입니다(자리표시자가 아닌 영구 null):
+
+| `category`               | 무엇이 이를 발동시켰는가 |
+|---|---|
+| `"cyber"`                | 요청이 사이버 피해(악성코드, 익스플로잇 개발)를 가능하게 할 수 있음. 무해한 사이버 보안 작업도 이를 발동시킬 수 있음. |
+| `"bio"`                  | 요청이 생물학적 피해를 가능하게 할 수 있음. 유익한 생명과학 작업도 이를 발동시킬 수 있음. |
+| `"frontier_llm"`         | 요청이 경쟁 AI 모델 개발을 도울 수 있으며, Anthropic의 상업 약관에 의해 제한됨. |
+| `"reasoning_extraction"` | 요청이 모델에게 내부 추론을 응답 텍스트로 재현하도록 요청함. 구조화된 형태로 추론을 얻으려면 [적응형 사고](/docs/api/thinking-and-effort)를 사용하세요. |
+| `"general_harms"`        | 잡다한 피해 영역; 무해한 작업이 가끔 이를 발동시킴. |
+
+**어떤 출력 이전에** 도착하는 거부는 청구되지 않습니다(토큰은 `usage`에 표시되지만 청구되지 않음); 여전히 속도 제한에는 계산됩니다. **스트림 중간 거부**는 입력과 이미 스트리밍된 출력을 정상 요율로 청구합니다. 어느 쪽이든, 부분 출력은 불완전한 것으로 취급하고 폐기하세요 — 안전 분류기가 모델 자체의 궤적에서 발동되었습니다.
+
+`explanation` 문자열은 버전 간에 안정적이지 않습니다. **표시하되, 파싱하지 마세요.**
+
+## 폴백 접근 방식 선택
+
+세 가지 종류가 있습니다. 자신에게 맞는 행을 선택하세요:
+
+| 당신의 상황 | 사용할 것 | 이유 |
+|---|---|---|
+| Claude API, 가장 간단한 것을 원함 | `fallbacks: "default"`가 있는 **서버 사이드 폴백** | 하나의 요청, 하나의 응답. API가 폴백을 선택하고 크레딧을 적용합니다. |
+| 모든 플랫폼(Bedrock, Vertex, Foundry), Anthropic SDK 사용 | **SDK 미들웨어**(`BetaRefusalFallbackMiddleware`) | 클라이언트에 한 번 구성. 재시도 + 크레딧이 자동. 이것이 오늘 Bedrock / Vertex / Foundry에서 유일한 경로입니다. |
+| 원시 HTTP, 사용자 정의 재시도 로직, 또는 비-Anthropic SDK | `fallback-credit-2026-07-01` 헤더가 있는 **수동 재시도** | 완전한 제어. 3단계 사다리를 직접 구현합니다. |
+
+서버 사이드 폴백과 SDK 미들웨어는 폴백 크레딧을 자동으로 적용합니다. 재시도를 직접 구축하는 경우에만 크레딧 토큰 절차를 생각해야 합니다.
+
+## 원라이너: `fallbacks: "default"`
+
+전체 기능을 하나의 요청으로:
+
+<PromptCard title="기본 모드의 서버 사이드 폴백">
+{`curl https://api.anthropic.com/v1/messages \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: server-side-fallback-2026-07-01" \\
+  -H "content-type: application/json" \\
+  -d '{
+    "model": "claude-fable-5",
+    "max_tokens": 1024,
+    "fallbacks": "default",
+    "messages": [{"role": "user", "content": "Hello, Claude"}]
+  }'`}
+</PromptCard>
+
+Fable 5가 거절하고 거부 카테고리에 Anthropic이 권장하는 폴백이 있는 경우, API는 같은 호출에서 해당 모델로 동일한 요청을 실행합니다. 하나의 응답을 받게 되며 최상위 `model` 필드는 실제로 응답한 모델을 명명합니다. 카테고리에 권장 폴백이 *없으면*, 거부가 유지되고 `fallbacks`를 설정하지 않은 것처럼 정확히 거부를 되돌려받습니다.
+
+**"default"가 실제로 하는 일**: API는 요청된 모델의 서버 정의 라우팅 테이블을 읽고 거부 카테고리에 따라 폴백을 선택합니다. Anthropic이 해당 테이블을 업데이트하면(카테고리에 새 폴백 추가, Opus 5를 Fable 5의 기본 대상으로 승격 등) 무료로 새 라우팅을 얻게 됩니다. 이것이 요점입니다: **한 달 후에는 틀리게 될 폴백 모델 목록을 유지하는 것을 멈추세요**.
+
+## 명시적 목록, 고정이 필요할 때
+
+라우팅을 직접 제어하려면 `"default"` 대신 목록을 전달하세요. 최대 3개 항목, 순서대로 시도됩니다:
+
+```python
+response = client.beta.messages.create(
+    model="claude-fable-5",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello, Claude"}],
+    fallbacks=[
+        {"model": "claude-opus-5"},        # try Opus 5 first
+        {"model": "claude-opus-4-8"},      # then Opus 4.8
+    ],
+    betas=["server-side-fallback-2026-07-01"],
+)
+```
+
+읽지 않으면 걸려 넘어질 규칙들:
+
+- **모든 대상은 요청된 모델에 대해 허용된 폴백이어야 합니다.** 허용된 대상 목록은 `server-side-fallback-2026-07-01` 베타 헤더가 설정될 때 [Models API](https://platform.claude.com/docs/en/api/models/list)의 각 모델 항목에 `allowed_fallback_models`로 게시됩니다. (Claude Fable 5의 경우, 작성 시점에 그 목록은 `claude-opus-4-8`과 `claude-opus-5`입니다.)
+- **항목은 서로 그리고 요청된 모델과 구별되어야 합니다.**
+- **각 항목은** 해당 시도에 대해서만 `max_tokens`, `thinking`, `output_config`, `speed`를 **재정의할 수 있습니다.** 이것이 주 요청을 건드리지 않고 "폴백에서는 낮은 노력으로 실행"이라고 말하는 방법입니다.
+- **요청은 명명된 모든 모델에 대한 직접 요청으로 유효해야 합니다.** 폴백이 요청이 사용하는 기능(예: 폴백 모델이 수락하지 않는 베타)을 지원하지 않는 경우, API는 폴백 시도만이 아니라 전체 요청을 사전에 거부합니다.
+- **분류기 거부만 폴백을 발동시킵니다.** 요청된 모델의 속도 제한, 과부하, 서버 오류는 그대로 표면화됩니다.
+
+`"default"` 모드는 `server-side-fallback-2026-07-01` 하에서만 작동합니다. 명시적 목록 형태는 이전 `server-side-fallback-2026-06-01` 헤더 하에서도 작동합니다.
+
+## 응답에 포함되는 것
+
+응답은 두 가지 추가 사항이 있는 정상적인 메시지입니다:
+
+- 최상위 `model` 필드는 반환된 메시지를 생성한 모델(요청됨 또는 폴백)을 명명합니다.
+- `fallback` 콘텐츠 블록은 한 모델의 출력이 다음으로 넘어가는 각 지점을 표시합니다: `{"type": "fallback", "from": {"model": ...}, "to": {"model": ...}}`. 출력 전 거부에서는 이 블록이 **첫 번째** 콘텐츠 블록입니다; 스트림 중간 폴백에서는 인계 지점에 나타납니다.
+- `usage.iterations`는 모든 시도를 기록합니다. 거절한 모델은 `message` 항목으로 표시됩니다(토큰이 보고되지만 청구되지 않음); 턴을 서비스한 모델은 `fallback_message` 항목으로 표시됩니다.
+
+출력 이전 거부 후 기본 라우팅이 Opus 4.8을 선택한 경우의 예:
+
+```json
+{
+  "id": "msg_01XFUDYJgAACzvnptvVoYEL",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-8",
+  "content": [
+    { "type": "fallback", "from": { "model": "claude-fable-5" }, "to": { "model": "claude-opus-4-8" } },
+    { "type": "text", "text": "Hi! How can I help you today?" }
+  ],
+  "stop_reason": "end_turn",
+  "stop_details": null,
+  "usage": {
+    "input_tokens": 412,
+    "output_tokens": 264,
+    "iterations": [
+      { "type": "message",          "model": "claude-fable-5",  "input_tokens": 535, "output_tokens": 0   },
+      { "type": "fallback_message", "model": "claude-opus-4-8", "input_tokens": 412, "output_tokens": 264 }
+    ]
+  }
+}
+```
+
+체인의 모든 모델이 거부하면, 응답은 마지막 모델의 거부이며, 각 이전 홉에 대한 `message` 항목과 마지막 항목에 대한 `fallback_message` 항목이 있습니다.
+
+## 대화 계속하기
+
+다음 턴에서는 어시스턴트 콘텐츠를 **받은 그대로** 반향하세요. 출력 중간 폴백 후, 받은 `content`에는 인계 전에 거절한 모델이 생성한 블록이 포함될 수 있습니다. 무엇을 유지하고 무엇을 삭제할지:
+
+| 블록 유형 | 다음 턴에서 |
+|---|---|
+| `fallback` | 나타난 위치에 정확히 **유지**하세요. 그 위치는 주변의 thinking 블록을 검증하는 데 사용됩니다. 이동하거나 삭제하면 → 400. |
+| `text` | 유지. |
+| 최종 `fallback` 블록 **이후**의 모든 블록 | 유지. |
+| 최종 `fallback` **이전**의 `thinking`, `redacted_thinking`, `connector_text` | 삭제. |
+| 최종 `fallback` **이전**의 클라이언트 사이드 `tool_use` | 삭제. |
+| 최종 `fallback` **이전**의 `server_tool_use` | 결과와 짝을 이루면 유지. 일치하는 결과가 없으면 삭제. |
+
+정신적 모델: 폴백 모델에서 실행된 모든 것은 남고; 거절한 모델의 확인되지 않은 중간 작업은 사라집니다.
+
+## 스티키 라우팅
+
+대화가 폴백된 후, API는 이를 기억합니다. `fallbacks` 매개변수도 포함하는 해당 대화에 대한 이후 요청은 요청된 모델을 완전히 건너뛰고 **직접** 폴백 모델로 갑니다. 이는 항상 다시 거부할 세션의 모든 후속 요청마다 거부 세금을 지불하는 것을 막습니다.
+
+알아야 할 속성:
+
+- **약 1시간 동안 유지되며**, 조직 범위입니다.
+- **대화 접두어 + 이를 서비스한 모델의 콘텐츠 해시**로 저장됩니다. 메시지 콘텐츠 자체는 서버 측에 저장되지 않습니다.
+- **최선의 노력** — 코드는 여전히 요청된 모델이 언제든지 다시 시도될 수 있음을 처리해야 합니다.
+- 스티키가 서비스한 턴은 **`fallback` 콘텐츠 블록이 없습니다**(해당 턴에 아무것도 거절하지 않음). `usage.iterations`에 `fallback_message`가 있고, 요청된 모델에 대한 `message` 항목이 없으며, 응답 `model` 필드로 식별하세요.
+
+스트리밍에서는 라우팅 결정이 스트림이 열리기 전에 이루어지므로, `message_start`는 이미 폴백 모델의 ID를 전달합니다.
+
+## 스트리밍 동작
+
+재시도는 **같은 스트림**에서 발생합니다 — 이미 받은 것은 무효화되지 않습니다.
+
+**출력 전 거부**
+- `message_start`가 폴백 모델을 명명합니다.
+- `fallback` 블록이 첫 번째 콘텐츠 블록입니다.
+- 첫 바이트 시간은 거절된 시도를 포함합니다(왜냐하면 `message_start`가 폴백이 시작되기를 기다리기 때문).
+
+**출력 중간 거부**
+- 현재 열려 있는 콘텐츠 블록이 닫힙니다.
+- `fallback` 블록(`content_block_start` + `content_block_stop`, 델타 없음)이 경계를 표시합니다.
+- 폴백 모델이 부분 출력에서 계속합니다. 부분 출력의 **`text` 블록만** 폴백 모델에 컨텍스트로 전달됩니다; 다른 블록 유형은 `content`에 남지만 폴백에는 보이지 않습니다.
+- `message_start`가 이미 요청된 모델을 명명했으므로, `fallback` 블록의 `to.model`과 최종 `message_delta`의 `usage.iterations`에 있는 `fallback_message` 항목에서 서비스 모델을 읽으세요.
+
+**비스트리밍, 출력 중간 거부**: 응답은 거절된 모델의 부분 출력을 *생략*하고 폴백이 처음부터 응답합니다. 결과는 출력 전 거부처럼 보입니다 — `fallback` 블록이 먼저 — 거절된 시도의 토큰은 여전히 `usage.iterations`에 기록됩니다. 이것은 스트리밍과의 실제 동작 차이입니다; 스트림에서 수행된 크기 조정 테스트는 비스트리밍으로 전환할 때 비용을 과소 예측할 수 있습니다.
+
+## 폴백 크레딧: 보이지 않는 재가격
+
+프롬프트 캐시는 모델별입니다. Fable 5가 대화 접두어의 400k 토큰을 캐시했고 거부한 경우, Opus 5에서의 순진한 재시도는 400k 전체를 처음부터 Opus 5의 캐시에 써야 합니다 — 그리고 **캐시 쓰기는 캐시 읽기보다 비쌉니다**. 폴백 크레딧은 그 추가 비용을 제거합니다. 거부는 **일회성 크레딧 토큰**을 전달하고, 재시도에서 토큰을 반향하면, 재시도는 마치 대화가 처음부터 폴백 모델에 있었던 것처럼 청구됩니다.
+
+서버 사이드 폴백과 SDK 미들웨어는 크레딧을 자동으로 적용합니다. 원시 HTTP 위에 재시도를 구축하는 경우에만 토큰을 직접 생각해야 합니다.
+
+### 4단계 수동 흐름
+
+<Steps items={[
+  {"title": "베타 헤더로 옵트인", "body": "첫 번째 요청을 anthropic-beta: fallback-credit-2026-07-01과 함께 보내세요. (server-side-fallback-2026-07-01은 동일한 필드를 부여하며, 이전 fallback-credit-2026-06-01 헤더도 여전히 수락됩니다.)"},
+  {"title": "거부에서 두 필드 읽기", "body": "거부 시 stop_details에는 fallback_credit_token(불투명 문자열)과 fallback_has_prefill_claim(불리언)이 포함됩니다. 거부에 대해 크레딧이 없으면 둘 다 null입니다."},
+  {"title": "올바른 본문 형태로 재시도 구축", "body": "거부된 요청 본문에서 시작하세요. model을 폴백 모델로 설정하고, 최상위 fallback_credit_token으로 토큰을 추가하세요. fallback_has_prefill_claim이 false가 아니면, 거부된 응답의 콘텐츠를 반향하는 하나의 어시스턴트 메시지를 추가하세요 — 재시도는 거부된 모델이 멈춘 곳에서 계속되며, 완료된 서버 도구 호출은 다시 실행되지 않습니다. false이면, 변경되지 않은 본문을 다시 보내세요."},
+  {"title": "동일한 헤더로 전송", "body": "재시도는 토큰을 상환하기 위해 fallback-credit-2026-07-01 헤더를 가지고 있어야 합니다. 베타 헤더는 두 요청 간에 일치해야 합니다(아래 엄격 일치 규칙 참조)."}
+]} />
+
+### 모든 수동 재시도에 필요한 거부 사다리
+
+대부분의 재시도는 첫 시도에서 상환됩니다. 그렇지 않을 때, API는 다음에 무엇을 시도해야 하는지 알려주는 400을 반환합니다. 세 단계 모두 구현하세요:
+
+<Steps items={[
+  {"title": "연속형 형태 거부됨 → 변경되지 않은 본문 재전송, 토큰은 여전히 포함", "body": "가장 흔한 원인은 output_config.format 또는 도구 사용을 강제하는 tool_choice가 연속형 형태를 배제하기 때문입니다. 추가된 어시스턴트 메시지를 삭제하되; 토큰은 유지하세요."},
+  {"title": "fallback_credit_token을 명명하는 메시지와 함께 변경되지 않은 본문 거부됨 → 토큰 삭제", "body": "토큰 자체가 거부되었습니다. 토큰 없이 재시도하세요. 크레딧은 포기됩니다; 재시도 자체는 통과합니다."},
+  {"title": "거부된 요청이 서버 도구를 실행했다면, 토큰을 조용히 삭제하지 마세요 — 400을 표면화하세요", "body": "토큰 없는 재시도는 해당 도구를 재실행하고 재청구합니다. 비용이나 오류를 호출자에게 표면화하세요."}
+]} />
+
+<Callout type="warning" items={["\"redemption temporarily unavailable\"는 일시적 오류이며, 재시도 형태에 대한 판결이 아닙니다. 5분 창 내에 동일한 요청을 동일한 토큰으로 재시도하세요. 사다리를 내려가지 마세요."]} />
+
+### 정확히 일치해야 하는 필드(엄격 일치 규칙)
+
+상환은 재시도를 거부된 요청과 비교합니다. 프롬프트를 형성하는 모든 필드는 일치해야 합니다:
+
+| 규칙 | 필드 |
+|---|---|
+| **정확히 일치해야 함** | `system`, `messages`, `tools`, `tool_choice`, `thinking`, `cache_control`, 그리고 (사용될 때) `output_config`, `mcp_servers`, `context_management`, `container` |
+| **재시도에서 변경 가능** | `model`, `max_tokens`, `stop_sequences`, `temperature`, `top_p`, `top_k`, `stream`, `metadata`, `service_tier` |
+
+연속형 형태는 `messages` 일치의 한 가지 예외입니다: `messages` 끝에 정확히 하나의 어시스턴트 메시지를 추가합니다.
+
+**두 가지 미묘한 함정:**
+
+1. **베타 헤더도 일치해야 합니다.** 두 요청 중 하나에는 있지만 다른 하나에는 없는 베타 헤더는 본문이 동일해도 일치를 실패시킬 수 있습니다. 400은 `request body ... does not match`라고 말하는데, 이는 본문 차이처럼 읽히지만 헤더 차이입니다. 두 가족이 면제됩니다: `server-side-fallback-*`(`fallbacks` 매개변수와 함께 재시도에서 삭제), 그리고 `fallback-credit-*`(양쪽에 유지).
+2. **일반 토큰 없는 재시도가 보통 그렇게 하더라도, 재시도에서 이전 턴의 `thinking` 또는 `redacted_thinking` 블록을 벗기지 마세요.** 본문은 거부된 요청과 일치해야 합니다; 서버가 해당 블록을 자체적으로 처리합니다.
+
+### 크레딧이 실제로 적용되었는지 확인
+
+환불은 재시도의 `usage`에서 볼 수 있습니다. 토큰 없이 동일한 요청이 보고할 것과 비교하여, `cache_creation_input_tokens`는 **더 낮고**, `cache_read_input_tokens`는 **동일한 양만큼 더 높습니다**. 0의 이동은 토큰이 존중되었지만 재가격할 것이 없었음을 의미합니다(예: 재시도 모델의 캐시가 이미 따뜻함).
+
+### 토큰 범위 및 수명
+
+- **거부를 받은 조직 및 워크스페이스에서만 상환됩니다**(Foundry에서도). 워크스페이스가 없는 Bedrock 및 Vertex에서는 토큰이 플랫폼의 호출자 신원에 바인딩됩니다.
+- **거부 후 5분에 만료됩니다.** 그 이후에는 토큰 없이 재시도하세요.
+- **무상태** — 서버는 이에 대해 아무것도 저장하지 않으며, 검사하거나 취소할 엔드포인트가 없습니다.
+
+## 작동하지 않는 곳 (또는 다르게 작동)
+
+<Steps items={[
+  {"title": "Message Batches는 작동하지 않음", "body": "fallbacks 매개변수는 Message Batches API에서 지원되지 않습니다(이를 포함하는 배치 항목은 오류 결과로 돌아옵니다). Message Batches의 거부도 크레딧 토큰을 발행하지 않으며, 배치 요청에서 전달된 토큰은 수락되지만 무시됩니다. 배치가 해결된 후 클라이언트 사이드 재시도로 폴백하세요."},
+  {"title": "Bedrock, Vertex, Foundry: 폴백 크레딧은 가능, 서버 사이드 폴백은 불가", "body": "fallbacks 매개변수는 Amazon Bedrock, Google Cloud, 또는 Microsoft Foundry에서 사용할 수 없습니다 — 대신 SDK 미들웨어를 사용하세요. 폴백 크레딧 자체는 네 플랫폼 모두에서 작동합니다."},
+  {"title": "Sonnet 5는 폴백 배관이 없음", "body": "현재 Fable 5와 Opus 5만이 분류기 거부를 생성하는 분류기를 포함합니다. Sonnet 5 거부는 stop_reason: 'refusal' 없이 정상 end-turn 응답으로 도착하며, 폴백할 것이 없습니다."},
+  {"title": "tool_use가 여전히 열려 있는 동안 발동된 스트리밍 거부", "body": "그 특정 하나의 경우(스트리밍, 완료되지 않은 클라이언트 / 서버 / MCP 도구 호출 중 거부)는 서버 사이드에서 재시도되지 않습니다. 거부가 직접 반환됩니다. fallback-credit-2026-07-01이 설정된 경우, 여전히 부분 응답을 계속함으로써 상환 가능한 크레딧 토큰을 전달합니다. 비스트리밍 요청은 영향을 받지 않습니다."},
+  {"title": "output_config.format 또는 강제 tool_choice + 서버 도구가 실행된 후 거부", "body": "이것은 크레딧 토큰이 두 본문 형태 어느 것으로도 상환될 수 없는 유일한 조합입니다: 연속형 형태는 format/tool_choice에 의해 배제되고, 변경되지 않은 본문은 완료된 서버 도구가 실행되고 다시 청구되기 때문에 배제됩니다. 토큰을 폐기하세요; 토큰 없이 재시도하고 비용을 호출자에게 표면화하세요."},
+  {"title": "속도 제한된 폴백 = 거부 승리", "body": "폴백 모델이 속도 제한되거나 과부하되면, 폴백 시도는 이루어지지 않고 이전 거부가 대신 반환됩니다. stop_details.recommended_model은 직접 재시도할 모델을 명명합니다(힌트이며 보장이 아님; 사용할 수 없을 때 null). 예상 거부 볼륨에 맞게 폴백 속도 제한을 크기 조정하세요, 아니면 폴백은 부하 하에서 거부로 저하됩니다."}
+]} />
+
+## 프로덕션 Claude 앱을 위한 실용적 설정
+
+<Steps items={[
+  {"title": "모든 Fable 5 / Opus 5 요청에서 fallbacks: 'default' + 베타 헤더로 시작", "body": "Anthropic이 폴백을 권장한 카테고리에 대한 노력 없는 보호. 라우팅 테이블이 자동으로 업데이트되기 때문에 수동 접근 방식의 상위 집합입니다."},
+  {"title": "Bedrock / Vertex / Foundry에서는 SDK 미들웨어 사용", "body": "폴백 목록으로 클라이언트에 BetaRefusalFallbackMiddleware를 한 번 설정하세요. 후속 요청이 수락한 모델에 고정되도록 동일 대화의 요청 간에 하나의 BetaFallbackState를 공유하세요. 미들웨어는 처리하는 모든 요청에 fallback-credit-2026-07-01을 보냅니다."},
+  {"title": "모든 응답에서 stop_reason뿐만 아니라 model 필드를 로깅", "body": "스티키 라우팅은 세션의 턴 N+1이 턴 N과 다른 모델에서 조용히 실행될 수 있음을 의미합니다. 분석에서 요청된 모델에 비용이나 품질을 귀속시키면 틀릴 것입니다. response.model을 읽고, usage.iterations에 fallback_message 항목이 포함되어 있으면 그것도 로깅하세요."},
+  {"title": "거부 카테고리를 제품 측 텔레메트리에 연결", "body": "stop_details.category 필드는 사용자가 정책 벽에 부딪히고 있다는 신호에 가장 가까운 것입니다. 상승하는 'cyber' 카테고리가 반드시 악의적 사용자를 의미하지는 않습니다 — 사이버 보안 작업이 합법적으로 이를 발동시킵니다 — 하지만 UI 참고 사항이나 카테고리별 폴백을 어디에 둘지 알려줍니다."},
+  {"title": "토큰 없는 재시도가 서버 도구를 조용히 재실행하지 않도록", "body": "이를 강타하는 하나의 400 케이스: 서버 도구가 이미 실행된 후 거부 + output_config.format 또는 강제 tool_choice. 토큰이 상환 불가하고 순진한 재시도는 web_search / code_execution / MCP 도구 호출을 재실행(그리고 재청구)합니다. 오류를 표면화하세요."}
+]} />
+
+## 다른 공급자가 하는 것과 비교
+
+| 공급자 | 한 API 호출에서 자동 거부 → 폴백? |
+|---|---|
+| **Anthropic Claude Fable 5 / Opus 5** | 예 — `fallbacks: "default"` + 크레딧 토큰. 스티키 라우팅이 후속 요청을 전달합니다. |
+| **Anthropic Claude Opus 4.8** | 크레딧 토큰 전용 변형의 대상 모델이었습니다(2026년 6월 베타). 서버 사이드 기본 모드는 Opus 5와 함께 출시되었습니다. |
+| **OpenAI GPT-5 / 6** | 서버 사이드 폴백은 1차 지원이 없습니다. `refusal` finish_reason을 직접 감지하고 클라이언트 사이드에서 다른 모델로 재시도합니다; Responses API는 `allowed_fallback_models`에 해당하는 것을 게시하지 않습니다. |
+| **Google Gemini 3** | 거부는 `SAFETY` 블록 이유로 표면화됩니다; 재시도는 계열의 다른 모델에 대해 클라이언트 사이드입니다. |
+| **AI 게이트웨이 (LiteLLM, Portkey, OpenRouter)** | 공급자에 무관한 라우터 수준 폴백이 존재하지만 각 시도마다 독립적으로 청구됩니다 — 공급자별 캐시 크레딧에 해당하는 것이 없습니다. [AI 게이트웨이](/docs/models/ai-gateways-litellm-openrouter-portkey)를 참조하세요. |
+
+교차 모델 하네스는 여전히 크레딧 토큰을 사용할 수 있습니다: 모델별이지만 *개념*(재시도에서 불투명 토큰 반향, 재가격됨)은 공급자별로 기능 감지될 수 있습니다.
+
+## 일반적인 실패 모드와 그 의미
+
+- **빈 `content` 배열을 받고 UI에 빈 메시지가 표시됩니다.** 렌더링 전에 `stop_reason: "refusal"`을 확인하는 것을 잊었습니다. 이를 감지하고 카테고리별 메시지를 표시하거나 폴백을 연결하세요.
+- **재시도가 `request body ... does not match`로 계속 400을 반환합니다.** 헤더 불일치일 가능성이 큽니다. 본문이 아니라 두 요청 간의 모든 `anthropic-beta` 헤더를 차이 비교하세요.
+- **SDK 미들웨어를 사용하고 같은 모델이 두 번 청구되는 것을 봅니다.** 동일 대화의 요청 간에 `BetaFallbackState`를 공유하는 것을 잊었습니다. 스티키 라우팅은 후속 요청을 고정하는 데 상태가 필요합니다.
+- **Fable 5에 있다고 생각했는데도 비용 보고서에 Opus 4.8에서 큰 점프가 보입니다.** 스티키 라우팅이 거부 후 후속 요청을 전달했습니다. `response.model`과 `usage.iterations`를 로깅하여 분할을 확인하세요.
+- **재시도에서 베타 헤더를 잊어서** 상환 실패가 발생했습니다. 재시도는 토큰을 상환하기 위해 `fallback-credit-2026-07-01`이 필요합니다.
+- **배치 작업이 폴백을 조용히 삭제합니다.** 배치는 `fallbacks`와 크레딧 토큰을 무시합니다. 배치 완료 후 재시도를 수행하세요.
+
+<Flashcards />
+
+<Quiz questions={[
+  {
+    "q": "Claude Fable 5 요청이 HTTP 200과 `stop_reason: 'refusal'`, 빈 콘텐츠 배열을 반환합니다. 얼마가 청구됩니까?",
+    "options": [
+      "usage에 표시된 전체 입력 및 출력 토큰 — 200은 항상 청구합니다",
+      "응답이 비어 있었으므로 아무것도",
+      "출력 이전에 도착하는 거부에 대해서는 아무것도(토큰은 보고되지만 청구되지 않음). 속도 제한은 여전히 계산됩니다.",
+      "입력이 이미 캐시되었으므로 출력 토큰만"
+    ],
+    "answer": 2,
+    "explain": "출력 이전 거부는 콘텐츠가 비어 있고 토큰이 usage에 나타나지만 청구되지 않습니다. 속도 제한 카운터는 여전히 증가합니다. 스트림 중간 거부는 입력과 이미 스트리밍된 출력에 대해 청구됩니다."
+  },
+  {
+    "q": "Fable 5 요청에 `server-side-fallback-2026-07-01` 헤더와 함께 `fallbacks: 'default'`를 보내고 카테고리 `reasoning_extraction`으로 거부됩니다. 어떻게 됩니까?",
+    "options": [
+      "API는 항상 Opus 4.8을 폴백으로 선택합니다",
+      "API는 해당 거부 카테고리에 대한 요청된 모델의 서버 정의 라우팅을 적용합니다. 카테고리에 권장 폴백이 있으면, 그 모델이 같은 호출에서 응답합니다; 없으면, 거부가 유지됩니다.",
+      "'default' 모드가 reasoning_extraction과 호환되지 않으므로 API는 400을 반환합니다",
+      "API는 폴백 목록을 지정할 때까지 기다립니다"
+    ],
+    "answer": 1,
+    "explain": "\"default\" 모드는 서버 정의 라우팅 테이블을 읽으며, 이는 모델별 및 카테고리별입니다. 권장 폴백이 없는 카테고리는 거부를 변경 없이 표면화합니다."
+  },
+  {
+    "q": "거부된 요청과 크레딧 토큰 재시도 간에 정확히 일치해야 하는 Claude API 필드는 무엇입니까?",
+    "options": [
+      "`messages`만 — 나머지는 변경 가능",
+      "system, messages, tools, tool_choice, thinking, cache_control(사용될 때 output_config, mcp_servers, context_management, container 포함). model, max_tokens, 샘플링 매개변수, stream, metadata는 변경 가능.",
+      "model을 제외한 모든 필드 — 요점은 모델을 변경하는 것",
+      "베타 헤더만; 본문은 자유롭게 변경 가능"
+    ],
+    "answer": 1,
+    "explain": "상환은 재시도를 거부된 요청과 비교합니다. 프롬프트 형성 필드는 일치해야 합니다; 런타임 조정 필드는 변경 가능합니다. 그리고 베타 헤더도 일치해야 합니다 — 실제로는 헤더 차이인 '본문이 일치하지 않음' 400의 흔한 원인."
+  },
+  {
+    "q": "출력 중간에 발동된 거부에서 `stop_details.fallback_has_prefill_claim: true`를 얻었습니다. 어떤 재시도 본문을 구축해야 합니까?",
+    "options": [
+      "거부된 요청 본문, 변경되지 않음, 토큰 추가",
+      "거부된 요청 본문, 변경되지 않음, 콘텐츠가 거부된 응답의 콘텐츠를 반향하는 하나의 추가된 어시스턴트 메시지(최종 텍스트 블록의 후행 공백 제거, 일치하는 tool_result가 없는 클라이언트 사이드 tool_use 블록 삭제)",
+      "마지막 사용자 턴만 있는 완전히 새로운 요청 — 어시스턴트 히스토리는 유효하지 않음",
+      "거부된 요청 본문이지만 이전 턴의 모든 thinking 블록이 벗겨짐"
+    ],
+    "answer": 1,
+    "explain": "prefill_claim: true는 폴백이 부분 출력에서 계속할 수 있음을 의미합니다. 거부된 응답의 콘텐츠를 반향하는 하나의 어시스턴트 턴을 추가합니다. 최종 텍스트 블록의 후행 공백을 제거하고; 일치하는 tool_results가 없는 tool_use 블록을 삭제합니다. 이전 턴의 thinking 블록을 절대 벗기지 마세요."
+  },
+  {
+    "q": "스트리밍 Fable 5 요청이 스트림에서 `tool_use` 블록이 여전히 열려 있는 동안 거부합니다. API는 무엇을 합니까?",
+    "options": [
+      "평소대로 폴백 모델에서 재시도",
+      "도구가 완료되기를 기다린 다음 재시도",
+      "서버 사이드 재시도 없이 거부를 직접 반환 — 하지만 fallback-credit-2026-07-01이 설정되면 거부는 여전히 부분 응답을 계속함으로써 상환 가능한 크레딧 토큰을 전달합니다",
+      "500 오류 반환"
+    ],
+    "answer": 2,
+    "explain": "서버 사이드에서 재시도되지 않는 한 경우: 어떤 tool_use 블록(클라이언트, 서버, 또는 MCP)이 여전히 열려 있는 동안의 스트리밍 거절. 비스트리밍 요청은 부분 작업을 지우고 재시도합니다; 스트리밍에서는 크레딧 토큰을 사용하여 재시도를 직접 처리합니다."
+  },
+  {
+    "q": "청구서에 하나의 거부된 턴 후 며칠 동안 Fable 5로 갈 것이라고 생각한 턴에 Opus 4.8 요금이 표시됩니다. 무슨 일이 일어나고 있습니까?",
+    "options": [
+      "청구 버그 — 지원 티켓을 제출하세요",
+      "스티키 라우팅이 활성화되었습니다: 거부 후, 동일 대화에서 `fallbacks`를 전달하는 이후 요청은 서비스한 모델로 직접 라우팅됩니다(~1시간, 최선의 노력, 조직 범위). 로그에서 이를 확인하려면 response.model / usage.iterations를 읽으세요.",
+      "폴백 목록은 API 키에 대해 영구적입니다",
+      "Fable 5가 조용히 폐기되었습니다"
+    ],
+    "answer": 1,
+    "explain": "스티키 라우팅은 항상 거부할 세션의 모든 후속 요청마다 거부 세금을 지불하는 것을 방지합니다. 약 1시간 동안 유지되며, 조직 범위이고, 최선의 노력입니다. response.model을 로깅하지 않으면 대시보드가 잘못 귀속시킵니다."
+  },
+  {
+    "q": "강력한 클라이언트 사이드 재시도를 구축했으므로 서버 사이드 폴백을 사용하지 않기를 원합니다. 여전히 캐시 크레딧 절약을 얻을 수 있습니까?",
+    "options": [
+      "아니오 — 크레딧 토큰은 fallbacks: 'default'와만 작동합니다",
+      "예 — 초기 요청에서 anthropic-beta: fallback-credit-2026-07-01을 보내고, 거부에서 stop_details.fallback_credit_token을 읽고, 재시도에서 최상위 fallback_credit_token 매개변수로 전달하세요",
+      "예 — 하지만 Bedrock과 Vertex에서만",
+      "엔터프라이즈 티어를 구독한 경우에만"
+    ],
+    "answer": 1,
+    "explain": "fallback-credit는 정확히 이 이유로 server-side-fallback과 별개 베타입니다. 초기 요청에서 헤더로 옵트인하고, 재시도에서 토큰을 반향하면, 재시도는 마치 대화가 항상 폴백 모델에 있었던 것처럼 재가격됩니다."
+  }
+]} />
+
+## 출처 및 추가 읽기
+
+- [Refusals and fallback — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback) (`fallbacks`, `"default"` 모드, 스티키 라우팅, 스트리밍 동작에 대한 확정적 참조; 전체 8-SDK 코드 샘플 포함)
+- [Fallback credit — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/fallback-credit) (크레딧 토큰 흐름, 두 가지 본문 형태, 거부 사다리, 엄격 일치 규칙, 5분 TTL)
+- [What's new in Claude Opus 5](https://platform.claude.com/docs/en/about-claude/models/whats-new-opus-5) (`"default"` 모드와 thinking-on-by-default를 배포한 2026년 7월 24일 출시)
+- [Claude Platform release notes](https://platform.claude.com/docs/en/release-notes/overview) (`server-side-fallback-*` 및 `fallback-credit-*` 베타 헤더의 릴리스 히스토리)
+- [Prompt caching — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) (캐시 쓰기가 읽기보다 더 비싼 이유, 그리고 모델별 캐시 네임스페이스가 크레딧 토큰을 필요하게 만드는 이유)
+- [Stop reasons and fallback — Claude Platform Docs](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons) (`"refusal"`이 그 중 하나인 `stop_reason` 값의 전체 목록)
+- [Fallback and billing cookbook](https://platform.claude.com/cookbook/fable-5-fallback-billing-guide) (비용 회계를 포함한 엔드투엔드 작업 예제)
+- [Models API — `allowed_fallback_models`](https://platform.claude.com/docs/en/api/models/list) (모델당 허용된 폴백 대상의 정식 출처; 필드를 보려면 베타 헤더를 설정하세요)
+- 이 사이트의 관련 항목: [안전, 거부 및 폴백](/docs/api/refusals-and-safety), [프롬프트 캐싱](/docs/api/prompt-caching), [오류 및 속도 제한](/docs/api/errors-and-rate-limits), [AI 게이트웨이: LiteLLM, OpenRouter, Portkey](/docs/models/ai-gateways-litellm-openrouter-portkey)
