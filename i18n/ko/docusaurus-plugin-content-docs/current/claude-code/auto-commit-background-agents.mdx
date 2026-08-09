@@ -1,0 +1,191 @@
+---
+sidebar_position: 15.5
+title: "자동 커밋 백그라운드 에이전트: 드래프트 PR 핸드오프"
+description: "2026년 7월 1일 Claude Code v2.1.198은 백그라운드 에이전트가 스스로 커밋, 푸시하고 드래프트 PR을 열 수 있게 했다. 5주 뒤 v2.1.221이 기본값을 조정했다. 이 흐름이 실제로 무엇을 하는지, 어떤 알림 훅을 발동시키는지, 왜 커뮤니티가 오프 스위치를 원했는지, 그리고 여전히 유효한 propose-only 패턴을 소개한다."
+keywords: [Claude Code, background agents, /background, /fork, /resume, /subtask, auto-commit, draft PR, worktree, propose-only, v2.1.198, v2.1.221, Notification hook, agent_completed]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-08-04" source="https://code.claude.com/docs/en/changelog">
+백그라운드 에이전트의 기본값은 5주 사이에 두 번(v2.1.198 → v2.1.221) 바뀌었고 여전히 조정되고 있습니다. 이를 기반으로 정책을 구성하기 전에 Claude Code 체인지로그에서 현재 commit/push/PR 동작을 확인하세요.
+</VerifyNote>
+
+**2026년 7월 1일** Claude Code는 `v2.1.198`을 배포하며 에이전트 루프의 마지막 수동 단계를 조용히 없앴습니다. **`claude agents`에서 시작된 백그라운드 에이전트가 워크트리에서 코드 작업을 마치면 자동 커밋, 자동 푸시, 자동 드래프트 PR 열기를 시작했습니다.** "여기 작업이 있다"에서 곧바로 "여기 리뷰 가능한 드래프트가 있다"로 넘어가게 되었습니다 — 중간에 키 입력이 필요 없었습니다.
+
+반응은 즉각적이었고 반으로 갈렸습니다. 어떤 사용자들은 좋아했고, 다른 사용자들은 다음 날 `anthropics/claude-code#73197`을 열어 자신들의 **propose-only 워크플로**(에이전트가 제안하고, 사람이 커밋함)가 계속 작동하도록 오프 스위치를 요청했습니다. 5주 뒤 **2026년 8월 4일**, `v2.1.221`은 기본값을 한 발 물렸습니다. 백그라운드 세션은 이제 **작업을 보존하기 위해 항상 커밋하고 푸시하지만, 작업이 필요로 할 때만 드래프트 PR을 엽니다**. 동일한 프리미티브, 더 부드러운 기본값.
+
+만약 무인 상태로 에이전트를 운영한다면 — 야간 트리아지, `/code-review`의 `/loop`, `/fork`된 세션 함대 — 이것이 바로 당신이 이미 안에 있는 워크플로입니다. 아래는 그것이 처음부터 끝까지 무엇을 하는지, 무엇이 언제 발동되는지, 그리고 팀의 신뢰 기준에 맞게 어떻게 형태를 잡을지에 대한 내용입니다.
+
+<Callout type="objectives" items={[
+  "`claude agents` 시작부터 드래프트 PR까지의 정확한 종단 간 흐름 — 커밋, 푸시, 알림 전부",
+  "v2.1.198이 무엇을 배포했고, v2.1.221이 무엇을 조정했으며, 왜 기본값이 완화되었는지",
+  "`/fork`, `/resume`, `/background`, 그리고 (v2.1.221에서 신설된) `/subtask`가 auto-PR 흐름 주위에 어떻게 맞춰지는지",
+  "Notification 훅 페이로드 — `agent_needs_input` vs `agent_completed` — 그리고 Claude 대신 자신에게 알림을 보내는 방법",
+  "설정이 아니라 권한을 강제 지점으로 사용해 모든 릴리스에서 살아남는 propose-only 패턴"
+]} />
+
+## 순서대로, 네 개의 배포 이벤트
+
+auto-PR 흐름은 완성된 형태로 도착하지 않았습니다 — 6주에 걸쳐 다섯 개의 릴리스에 걸쳐 도착했습니다. 순서대로 읽으면 현재 동작의 각 계층이 실제로 무엇을 위한 것인지 알 수 있습니다.
+
+| 날짜 | 버전 | 변경 |
+|---|---|---|
+| 2026-07-01 | `v2.1.198` | 서브에이전트가 **기본적으로** 백그라운드에서 실행됨. `claude agents`에서 시작된 백그라운드 에이전트가 완료 시 **자동 커밋, 자동 푸시, 자동 드래프트 PR 열기**. `Notification` 훅이 백그라운드 세션에 대해 `agent_needs_input`과 `agent_completed`를 발동. |
+| 2026-07-15 (근사) | `v2.1.212` | `/fork`가 대화를 새로운 **백그라운드** 세션(자체 `claude agents` 행)으로 복사하고 사용자는 계속 작업 가능. `/resume`은 삭제된 세션을 포함한 과거 세션의 선택기를 엶. |
+| 2026-07-20 (근사) | `v2.1.216` | 수정: 재개된 백그라운드 세션이 기본 에이전트로 떨어지지 않고 **에이전트의 프롬프트와 도구 제한을 복원함**. |
+| 2026-07-22 (근사) | `v2.1.218` | `/code-review`가 기본적으로 **백그라운드 서브에이전트**로 실행됨 — 리뷰가 더 이상 대화를 채우지 않음. |
+| 2026-08-04 | `v2.1.221` | 기본값 조정: 백그라운드 세션은 작업 보존을 위해 **항상 커밋하고 푸시**하지만, **작업이 필요로 할 때만 드래프트 PR을 엶**. `/fork`가 시작하던 세션 내 서브에이전트는 이제 `/subtask`. |
+
+이 궤적에서 주목할 만한 두 가지가 있습니다:
+
+1. **모든 단계는 더 적은 자율성이 아니라 더 많은 자율성입니다.** v2.1.221은 자동 커밋이나 자동 푸시를 비활성화하지 않았습니다 — 단지 드래프트 PR을 항상-켜짐 대신 작업당-옵트인으로 만들었을 뿐입니다. 런타임은 여전히 잊혀지기 전에 작업을 일시적인 워크트리에서 브랜치로 옮기고 싶어 합니다.
+2. **`/fork`와 auto-PR 흐름은 조합됩니다.** 포크가 `claude agents`의 자체 행이 되면 백그라운드 세션이 됩니다 — 이는 그것이 끝날 때 동일한 커밋 → 푸시 → 어쩌면-PR 순서가 발동됨을 의미합니다. 점심에 시작한 단일 `/fork`가 오후에 `origin`의 브랜치로 돌아올 수 있습니다.
+
+## 백그라운드 에이전트가 끝날 때 실제로 일어나는 일
+
+`v2.1.221`에서 `claude agents` 백그라운드 세션의 종단 간 순서, 마지막 도구 호출이 반환된 후:
+
+<Steps items={[
+  { title: "변경사항이 있으면 워크트리 유지", body: "런타임은 작업 트리가 dirty한 한 격리된 워크트리(기본 위치는 `~/.claude/worktrees/` 아래)를 살려둡니다. 에이전트가 변경사항을 전혀 만들지 않았다면 워크트리는 자동으로 정리됩니다 — 유령 브랜치 없음." },
+  { title: "커밋 — 항상, 에이전트의 메시지로", body: "에이전트는 작업을 요약하는 커밋 메시지를 작성하고 자신이 손댄 모든 파일을 커밋합니다. 이것은 fixup이 아닙니다 — 이것은 작업의 완성된 상태입니다." },
+  { title: "푸시 — 항상, 새로운 브랜치로", body: "런타임은 (워크트리가 만들어졌을 때 부모 HEAD에서 생성된) 브랜치로 푸시합니다. 이것이 v2.1.221이 조정 후에도 유지한 단계입니다: 요점은 제안을 발행하는 것이 아니라 로컬 머신 밖으로 작업을 보존하는 것입니다." },
+  { title: "드래프트 PR — 작업이 필요로 할 때만", body: "v2.1.221 이전에는 PR이 항상 열렸습니다. 이제 런타임은 작업 자체가 리뷰 가능한 변경(수정, 기능, 리팩터링)을 짜냈을 때만 드래프트 PR을 엽니다. `/subtask`가 생성한 탐색적 작업이나 리서치는 푸시하지만 PR하지 않습니다." },
+  { title: "Notification 훅 발동", body: "`agent_completed`가 `Notification` 훅을 통해 발동됩니다 — `agent_needs_input`과 같은 채널이며, 페이로드로 구분됩니다. 이것이 여러분의 웹훅, Slack ping, 책상 부저의 순간입니다." },
+  { title: "`claude agents`에서 세션 행 업데이트", body: "세션이 `claude agents` 목록에서 Running에서 Complete로 이동하며, 브랜치 이름과 (열렸다면) PR 링크를 가지고 있습니다. `/resume`은 나중에 프롬프트와 도구 제한이 손상되지 않은 채로 이를 집어들 수 있습니다 — v2.1.216 수정." }
+]} />
+
+이 순서는 절대 롤백하지 않습니다. 푸시가 실패하면(인증, 보호된 브랜치), 런타임은 로컬 커밋을 유지하고 동일한 알림을 통해 실패를 표면화합니다 — 하지만 작업을 삭제하지는 않습니다.
+
+## Notification 훅 — Claude가 아니라 자신에게 페이지
+
+`v2.1.198`이 `Notification` 훅에 추가한 두 이벤트는, 세션에 참석하지 않으면서도 인간을 루프에 유지하는 이음새입니다.
+
+<PromptCard title="같은 훅의 두 가지 페이로드 모양">{`# agent_needs_input — session paused waiting for approval or clarification
+{ "event": "agent_needs_input", "session_id": "...", "agent": "code-review", "reason": "..." }
+
+# agent_completed — session finished; branch pushed, PR maybe opened
+{ "event": "agent_completed", "session_id": "...", "agent": "feature-x",
+  "branch": "claude/feature-x-2026-08-04", "pr_url": "https://github.com/..." /* or null */ }`}</PromptCard>
+
+`pr_url` 필드는 단일 가장 유용한 부분입니다: 런타임이 푸시했지만 PR하지 않은 경우(탐색적 작업에 대한 v2.1.221 기본값) `null`이고, PR한 경우 채워집니다. 그 필드에서 라우팅하는 것이 두 번째 설정 계층 없이 "리뷰 가능한 작업에 대해서만 페이지 보내기"를 구축하는 방법입니다.
+
+PR을 생성한 완료에 대해서만 Slack 채널에 ping하는 최소 훅:
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "agent_completed",
+        "hooks": [
+          { "type": "command", "command": "jq -e '.pr_url' >/dev/null && jq -r '\"<\" + .pr_url + \"|Draft PR ready> — \" + .agent' | curl -X POST -H 'content-type: application/json' -d @- $SLACK_WEBHOOK_URL" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`jq -e '.pr_url'` 게이트가 전체 트릭입니다: `-e`는 필드가 없거나 `null`일 때 0이 아닌 값으로 종료되어 파이프라인의 나머지를 단락시킵니다. 커밋과 푸시만 한 세션은 페이지를 보내지 않습니다. PR을 연 세션은 페이지를 보냅니다.
+
+## `#73197`이 왜 중요했는지 — 그리고 왜 수정이 설정 키가 아니었는지
+
+이슈 [`anthropics/claude-code#73197`](https://github.com/anthropics/claude-code/issues/73197)는 **2026년 7월 2일**, `v2.1.198`이 나온 지 하루 만에 등록되어 `settings.json`에 `backgroundAgents.autoCreatePr: false`를, 아니면 최소한 commit / push / PR을 위한 별도의 다이얼을 요청했습니다. 이유는 합리적이었습니다: "propose-only" 워크플로에서는 사람이 `origin`으로 푸시하거나 PR을 열 수 있는 유일한 존재이므로, 기본-켜짐 발행 단계에는 오프 스위치가 필요합니다.
+
+Anthropic의 답변은 형태가 달랐습니다. 새로운 설정 대신 `v2.1.221`은 **기본값 자체를 조정했고**(작업이 필요로 할 때만 PR) 기존의 권한 시스템을 가리켰습니다: `Bash(git push:*)` deny 규칙이 푸시를 차단하고, `Bash(gh pr create:*)` deny 규칙이 PR을 차단합니다. 권한 계층은 인터랙티브 및 백그라운드 세션 모두에 대해 권위적입니다 — 이는 런타임이 에이전트가 마지막에 무엇을 하기로 결정하든 관계없이 금지를 강제하는 방식입니다.
+
+<Callout type="warning" items={[
+  "`settings.json`에는 여전히 `backgroundAgents.autoCreatePr` 키가 없습니다 — '기능을 비활성화'는 설정이 아니라 권한으로 표현됩니다.",
+  "`Bash(git push:*)`에 대한 권한 거부는 인터랙티브 푸시뿐만 아니라 최종 자동 푸시도 차단합니다. PR만 걱정된다면 대신 `Bash(gh pr create:*)`를 거부하고 푸시는 통과시켜 `/resume`이 브랜치를 깨끗하게 집어들 수 있게 하세요.",
+  "v2.1.221이 *오늘*의 기본값입니다. 이전 Claude Code(2.1.198 – 2.1.220)를 고정하면 항상-PR 동작을 얻게 되고 — 권한 게이트가 유일한 실제 방어입니다."
+]} />
+
+## 모든 릴리스에서 살아남는 propose-only 패턴
+
+정책을 설정 계층이 아니라 권한 계층에 구축하세요. 그러면 모든 세션(포어그라운드, 백그라운드, `/fork`, `/subtask`, `/loop`)에 적용되며 `v2.1.x`의 어느 버전에 있든 상관없습니다.
+
+<PromptCard title="settings.json — propose-only project policy">{`{
+  "permissions": {
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr edit:*)"
+    ],
+    "allow": [
+      "Bash(git commit:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}`}</PromptCard>
+
+이 정책 하에서:
+
+- 백그라운드 에이전트는 여전히 자신의 워크트리 내에서 커밋합니다 — 당신의 리뷰는 에이전트가 만든 그대로의 diff를 갖습니다.
+- 세션 종료 시 푸시가 실패합니다. 런타임은 `pr_url: null`이 있는 `agent_completed`를 통해 실패를 표면화합니다.
+- 알림이 건네준 워크트리 경로에서 당신이 브랜치를 직접 `git push`할 때까지 아무것도 `origin`에 도달하지 않습니다.
+
+이것이 커뮤니티가 `#73197`에서 요청한 패턴이며, 이미 존재하는 도구로 표현되었습니다. 또한 v2.1.221 기본값이 수렴하고 있는 형태이기도 합니다 — 런타임은 단지 어떤 에이전트가 발행할 수 있는지에 대한 권한의 원천으로 당신을 받아들일 뿐입니다.
+
+## `/fork`, `/subtask`, `/resume` — 어디에 맞춰지는가
+
+`v2.1.212`와 `v2.1.221`은 이 세 명령이 auto-PR 흐름 주위에서 무엇을 하는지 재구성했습니다. 함께 읽으세요:
+
+| 명령 | 무엇을 시작하나 | 어디서 실행되나 | Auto-PR 흐름이 적용되나? |
+|---|---|---|---|
+| `/background` | 새 백그라운드 세션 | `claude agents`의 자체 행 | 예 |
+| `/fork` (v2.1.212+) | 현재 대화를 새로운 백그라운드 세션으로 복사 | `claude agents`의 자체 행 | 예 |
+| `/subtask` (v2.1.221+, 세션 내에서는 `/fork`였음) | 현재 세션 내부의 일시적 서브에이전트 | 대화 내부 | 아니오 — 부모가 결과를 소유 |
+| `/resume` | `claude agents`의 이전 세션에 재연결 | 원래 있던 곳 | 그 세션의 구성이 무엇이었든 |
+| `/code-review` (v2.1.218+) | 백그라운드 서브에이전트로 리뷰 | 자체 행 | 예 — 하지만 리뷰는 PR을 거의 생성하지 않으므로 v2.1.221은 보통 PR 없이 푸시함 |
+
+v2.1.221의 이름 변경(`/fork` → 세션 내 경우에 대해 `/subtask`)이 중요한 정리입니다: `/fork`는 이제 "이 대화를 새로운 백그라운드 워커에게 넘기고 내 앞에서 사라져라"를 의미하며, 이것이 auto-PR 흐름이 설계된 형태입니다. `/subtask`는 기존 세션에 범위 지정된 도우미를 원하고 완료-후-발행 순서가 발동되기를 원하지 않을 때 사용하는 것입니다.
+
+## 비용, 경쟁 조건, 그리고 아무도 문서화하지 않는 두 가지 함정
+
+릴리스 노트에 나오지 않는 세 가지 실제 세부사항:
+
+- **백그라운드 에이전트는 동시성 상한에 계산됩니다.** `v2.1.198` 이후 서브에이전트는 기본적으로 백그라운드이므로 — 25개의 실행 중인 세션이 있는 `claude agents` 목록은 `Concurrent subagent limit reached`로 새 스폰을 거부하기 시작합니다. 네 개의 환경 변수는 [Subagent Fleet Limits](/docs/claude-code/subagent-fleet-limits)를 참조하세요.
+- **자동 커밋은 amend-안전하지 않습니다.** 동일한 대화에서 두 개의 `/fork`가 모두 끝나고 각자의 브랜치로 푸시하면, 두 개의 브랜치, 두 개의 커밋, 그리고 (v2.1.198 – v2.1.220에서) 두 개의 PR을 얻게 됩니다. 경주로 의도했다면 괜찮고, 하나만 이길 것이라고 생각했다면 괜찮지 않습니다. 직렬화가 필요하다면 에이전트 프롬프트에 계획 단계를 넣으세요.
+- **자동 커밋하는 워처는 이중 커밋할 수 있습니다.** 리포지토리 워처(디스크에서 본 변경사항을 자동 커밋하는 일반적인 스크립트)도 실행하면 에이전트 자체의 세션 종료 커밋과 경주할 수 있습니다 — 빈 커밋이나 푸시 시 병합 충돌로 끝날 수 있습니다. 안전한 토폴로지는: 에이전트가 워크트리를 소유하고, 워처가 메인 클론을 소유하며, 절대로 둘이 만나지 않는 것입니다.
+
+<Quiz title="스스로 확인" questions={[
+  { q: "v2.1.221 기본값에서, 백그라운드 에이전트가 `/subtask`로 리서치 작업을 마칩니다. 완료 시 무엇이 일어나나요?", options: ["아무것도 아님 — `/subtask`는 대화 내에서 실행되므로 부모가 결과를 소유하고 별도의 커밋/푸시가 발동되지 않음", "자동 커밋, 자동 푸시, 자동 드래프트-PR — 다른 백그라운드 세션과 동일", "자동 커밋과 자동 푸시, 하지만 리서치는 탐색적이므로 PR 없음"], answer: 0, explain: "`/subtask`(v2.1.221에서 신설, 세션 내 `/fork`의 이름 변경)는 현재 세션 내부의 일시적 서브에이전트입니다. 완료-후-발행 순서는 독립 실행형 백그라운드 세션 — `claude agents`에 자체 행이 있는 것 — 에 대해서만 발동됩니다." },
+  { q: "드래프트-PR 생성은 차단하되 `/resume`이 브랜치를 집어들 수 있도록 푸시는 유지하고 싶습니다. 무엇을 구성하나요?", options: ["`settings.json`에서 `backgroundAgents.autoCreatePr: false` 설정", "`settings.json` permissions에서 `Bash(gh pr create:*)` 거부", "`settings.json` permissions에서 `Bash(git push:*)` 거부"], answer: 1, explain: "`backgroundAgents.autoCreatePr` 키는 없습니다. `git push`를 거부하면 유용한 브랜치 보존도 차단됩니다. `gh pr create`를 거부하면 PR만 차단됩니다 — 푸시와 커밋은 여전히 실행되므로 `/resume`은 브랜치를 찾습니다." },
+  { q: "`Notification` 훅이 `pr_url: null`로 `agent_completed`를 발동합니다. v2.1.221에서 이는 무엇을 의미하나요?", options: ["푸시가 실패했고 `origin`에 브랜치가 없음", "런타임이 커밋하고 푸시했지만 작업이 드래프트 PR을 필요로 하지 않는다고 판단함", "에이전트가 끝나기 전에 동시성 상한에 도달함"], answer: 1, explain: "완료 페이로드의 `pr_url: null`은 v2.1.221의 '푸시했지만 PR하지 않음' 신호입니다 — 탐색적 작업, 리서치, 또는 런타임이 리뷰 가능한 변경으로 판단하지 않는 것 무엇이든. 푸시 실패는 페이로드에서 다르게 표면화됩니다." }
+]} />
+
+<Flashcards title="Auto-PR 흐름 — 각 카드 뒤집기" cards={[
+  { front: "자동 커밋 + 자동 푸시 + 자동 드래프트-PR을 도입한 버전", back: "v2.1.198, 2026년 7월 1일. `claude agents`를 통해 시작된 백그라운드 에이전트에 적용됨." },
+  { front: "기본값을 조정한 버전", back: "v2.1.221, 2026년 8월 4일. 이제: 항상 커밋 + 푸시, 작업이 필요로 할 때만 드래프트 PR." },
+  { front: "백그라운드 세션에 대한 Notification 훅 이벤트", back: "`agent_needs_input`(일시 중지, 승인 원함)과 `agent_completed`(완료, 브랜치 푸시됨, `pr_url` 어쩌면 채워짐). 둘 다 기존 `Notification` 훅을 통해 흐름." },
+  { front: "`/resume`을 깨뜨리지 않고 드래프트 PR을 비활성화하는 방법", back: "`settings.json` permissions에서 `Bash(gh pr create:*)`를 거부. 푸시는 여전히 실행되므로 브랜치는 `origin`에서 사용 가능하고 `/resume`은 깨끗하게 찾음." },
+  { front: "v2.1.221에서 세션 내 서브에이전트 명령", back: "`/subtask`. 이전 이름 `/fork`는 '이 대화를 새로운 백그라운드 세션으로 복사'를 의미하도록 재할당됨 — auto-PR 흐름을 발동시키는 버전." },
+  { front: "워크트리는 기본적으로 어디에 있나", back: "`~/.claude/worktrees/`. 변경사항이 없는 워크트리는 세션 종료 시 자동으로 정리됨; dirty 워크트리는 `/resume`이 찾을 수 있도록 유지됨." }
+]} />
+
+<Callout type="takeaways" items={[
+  "auto-PR 흐름은 설정 계층이 아니라 런타임 계층에 있습니다 — `backgroundAgents.autoCreatePr` 키는 없으며 앞으로도 없을 것입니다. 권한을 사용하세요.",
+  "v2.1.221(오늘의 기본값)은 항상 커밋하고 푸시합니다; 작업이 리뷰 가능한 변경을 짜냈을 때만 드래프트 PR을 엽니다. 알림의 `pr_url` 필드를 읽어 어떤 일이 일어났는지 판단하세요.",
+  "`/fork`는 이제 '이 대화를 백그라운드 워커에게 넘기기'를 의미합니다; `/subtask`는 완료-후-발행 순서 없이 대화 내 도우미를 원할 때 손을 뻗는 것입니다.",
+  "propose-only 패턴은 `Bash(gh pr create:*)`에 대한 권한 거부입니다. 이는 v2.1.x의 모든 버전과 백그라운드 세션을 생성하는 모든 명령에서 살아남습니다.",
+  "백그라운드 에이전트는 여전히 `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`에 계산됩니다. `claude agents`에서 25개의 반쯤 완료된 세션의 함대는 새 스폰을 거부하기 시작합니다."
+]} />
+
+## 다음
+
+- [Background Tasks, /loop & Scheduling](/docs/claude-code/background-tasks) — 이러한 백그라운드 세션 아래의 프리미티브
+- [Subagent Fleet Limits](/docs/claude-code/subagent-fleet-limits) — 왜 `claude agents`의 25개 열린 세션이 스폰 실패를 시작하는지
+- [Hooks: Deterministic Automation](/docs/claude-code/hooks) — `Notification` 훅 페이로드와 그 위에서 라우팅하는 방법
+- [Permissions & Modes](/docs/claude-code/permissions) — "propose-only"가 강제되는 실제 계층
+- [Hardening Autonomous Runs](/docs/security/hardening-autonomous-runs) — 사람 없이 발행하는 것에 대한 보안 태세
+
+## 출처 및 추가 참고자료
+
+- [Claude Code changelog](https://code.claude.com/docs/en/changelog) — v2.1.198(2026-07-01)부터 v2.1.221(2026-08-04)까지의 권위 있는 버전 이력.
+- [`anthropics/claude-code#73197`](https://github.com/anthropics/claude-code/issues/73197) — `backgroundAgents.autoCreatePr: false`를 요청한 2026년 7월 2일 이슈. v2.1.221 기본값 조정의 동기가 됨.
+- [Claude Code v2.1.198: Background Agents Now Commit, Push, and Open Draft PRs](https://aiagentsfirst.com/claude-code-v2-1-198-background-agents) — 7월 1일 발행된 전체 v2.1.198 릴리스 분석이 있는 서드파티 글.
+- [Claude Code v2.1.198 Release Notes — 33 Changes](https://www.claudeupdates.dev/version/2.1.198) — Notification 훅 페이로드와 flag-conflict 수정을 열거.
+- [Claude Code Updates by Anthropic — August 2026](https://releasebot.io/updates/anthropic/claude-code) — v2.1.212(`/fork`, `/resume`), v2.1.216(재개-세션 복원), v2.1.218(`/code-review` 백그라운드), v2.1.221(기본값 조정, `/subtask` 이름 변경) 포함하는 릴리스 간 뷰.
+- [Claude Code v2.1.220 to v2.1.221 Major Updates](https://dev.classmethod.jp/en/articles/20260804-cc-updates-v2-1-221/) — 기본값 변경의 정확한 문구가 있는 발행일.
+- [Hooks reference — Claude Code Docs](https://code.claude.com/docs/en/hooks) — `Notification` 훅 계약 및 stdin 페이로드 모양.
