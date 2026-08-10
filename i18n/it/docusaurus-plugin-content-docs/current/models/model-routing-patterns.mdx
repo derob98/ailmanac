@@ -1,0 +1,208 @@
+---
+sidebar_position: 7.1
+title: "Pattern di Routing dei Modelli: cascate, classificatori e cosa arriva davvero in produzione"
+description: "I design pattern per inviare ogni richiesta al modello AI giusto — rule-based, classificatore, complessità, cascata, ensemble, fallback. Quando usare ciascuno, cosa si rompe e le ricette che funzionano davvero nel 2026."
+keywords: [LLM routing, model routing, model cascade, LLM router, RouteLLM, orchestrator worker, multi-model app, Claude Haiku Sonnet Opus, GPT Gemini routing, AI gateway routing]
+---
+
+<LevelBadge level="intermediate" />
+
+Quando il tuo prodotto fa più di una sola cosa, un unico modello smette di essere la risposta giusta per ogni richiesta. Classificare il ticket, estrarre i campi, scrivere la risposta, revisionarla — sono quattro job con quattro budget diversi di costo/latenza/qualità. Il pattern su cui tutto il campo è convergiuto nel 2026 è **instradare ogni richiesta al modello che si adatta al job**, ed **escalare** quando il modello economico non basta. Questa pagina è la guida editoriale a quei pattern: quali sono, quando arrivano in produzione, le ricette che funzionano e le failure mode da evitare.
+
+<Callout type="objectives" items={[
+  "Conoscere i sei pattern di routing che arrivano in produzione e quando usare ciascuno",
+  "Capire la differenza tra routing (una decisione a monte) e cascading (escalation al fallimento)",
+  "Costruire il tuo primo classifier router con un prompt copia-incolla e un piano di rollout di una settimana",
+  "Leggere la matematica dei costi: quando il routing fa davvero risparmiare, e quando l'overhead si mangia il risparmio",
+  "Riconoscere gli anti-pattern che trasformano un router in un'interruzione di servizio in attesa di accadere",
+]} />
+
+<VerifyNote lastVerified="2026-08-10" source="https://www.anthropic.com/engineering/building-effective-agents">
+La guida "Building Effective Agents" di Anthropic definisce il **Routing** come un workflow di prima classe: *"Il routing classifica un input e lo indirizza a un task specialistico di follow-up. Questo workflow consente separation of concerns e la costruzione di prompt più specialistici."* Due degli esempi che portano sono esattamente quelli trattati qui — dividere le categorie di customer service in flussi downstream distinti, e *"instradare le domande facili a modelli più piccoli come Claude Haiku... e quelle difficili a Claude Sonnet."* Nomi dei modelli, prezzi e gap di qualità cambiano nel tempo; controlla sempre la documentazione per-provider corrente prima di hard-codare una soglia. Prezzi/limiti in questa pagina: consulta [Modelli e prezzi](/docs/whats-new/models-and-pricing) prima di costruire.
+</VerifyNote>
+
+## Perché il routing è il pattern di default nel 2026
+
+L'era del "un solo grande modello per tutto" è ormai silenziosamente finita. Tre forze hanno guidato il passaggio:
+
+- **Una curva dei prezzi ampia e ben distribuita.** Ogni provider maggiore ora rilascia una famiglia — Anthropic (Haiku / Sonnet / Opus), OpenAI (small / mid / frontier), Google (Flash / Pro), più i tier open-weight. I tier economici costano 10–100× meno del frontier e, su task ristretti, sono solo marginalmente peggiori. Lasciare il tier economico inattivo significa bruciare soldi.
+- **Budget di latenza reali.** Uno step di classificazione davanti a un support agent deve rispondere in meno di 300 ms. Un modello frontier è spesso lo strumento sbagliato per motivi diversi dal costo — è semplicemente troppo lento per quello step.
+- **Specializzazione.** Modelli diversi guidano davvero su task diversi — uno è migliore su JSON strutturato, un altro sul long context, un altro sul codice, un altro sul multilingua. Le classifiche cambiano ogni mese (vedi [Scegliere un Modello](/docs/models/choosing-a-model)), ma la forma — "strumenti diversi per job diversi" — è duratura.
+
+Il risultato: un **router** davanti ai tuoi modelli, che decide per-richiesta dove inviare il lavoro. Il resto di questa pagina è il vocabolario di design per quel router.
+
+## Le due grandi famiglie: routing vs cascading
+
+Quasi ogni pattern qui sotto è una variazione di due idee. Se cogli la differenza, il resto è nomenclatura.
+
+- Il **Routing** prende **una decisione a monte**, prima che qualsiasi modello venga eseguito. Un classificatore (una regola, un piccolo modello, o un modello più grande) legge la richiesta, sceglie un target e passa il lavoro. Veloce, economico a regime, ma *sbagliato quando il classificatore sbaglia* — e non lo scopri finché non è tardi.
+- Il **Cascading** esegue prima il **modello economico** ed **escala** a uno più forte solo quando un segnale definito dice "questa risposta non è abbastanza buona." Robusto perché il segnale è fondato sull'output reale, ma ogni escalation paga *entrambi* i modelli — quindi il vantaggio sopravvive solo quando il tier economico gestisce la maggior parte del traffico da solo.
+
+Si compongono. Un sistema di produzione di solito fa *entrambi*: instrada nella corsia giusta in base al tipo di task, poi fa cascade dentro la corsia in base alla confidenza del modello economico. La tassonomia di Anthropic chiama la decisione a monte "Routing" e la decomposizione dinamica "Orchestrator-Workers"; cascading è il nome usato nell'industria per la variante "prova il piccolo prima, escala al fallimento" della stessa idea.
+
+## I sei pattern che arrivano davvero in produzione
+
+### 1. Rule-based routing
+
+Una regola scritta a mano (regex, keyword, campo della richiesta, lunghezza del messaggio) decide il target. Nessun modello viene eseguito per prendere la decisione.
+
+- **Quando vince.** Il segnale è inequivocabile ed economico: "se la richiesta contiene un code fence, invia al modello di coding", "se il cliente è sul piano Enterprise, invia al tier frontier", "se l'input è > 200k token, invia al modello long-context."
+- **Quando si rompe.** La regola silenziosamente marcisce col cambiare del dominio — nuovi modi di dire, nuovi intent, edge case che il regex non aveva mai anticipato. Ogni "if X then Y" è un piccolo pezzo di tech debt.
+- **Portalo in produzione quando.** Hai uno o due carve-out ad alto valore (un tier a pagamento, un code path, una lingua) e vuoi zero overhead di latenza.
+
+### 2. Classifier routing (LLM-as-router)
+
+Un modello piccolo e veloce legge la richiesta e restituisce un'etichetta — `"billing" | "technical" | "sales" | "other"` — che sceglie l'handler downstream. Anthropic dà questo come uno dei loro esempi canonici: domande facili ad Haiku, difficili a Sonnet.
+
+- **Quando vince.** Hai un **insieme piccolo e stabile di categorie** e ciascuna merita il suo prompt/tool set/modello. Un singolo prompt specialistico per categoria batte un unico gigantesco system prompt fai-tutto.
+- **Quando si rompe.** Le categorie si sovrappongono (molte richieste reali sono "billing *e* technical"), il classificatore instrada male in silenzio, o il tuo set di etichette esplode oltre ~10 categorie e le scelte diventano rumorose.
+- **Portalo in produzione quando.** Puoi enumerare i primi 5–8 tipi di richiesta e *ciascuno* beneficia materialmente di un handler diverso.
+
+<PromptCard title="Prompt classifier-router (portabile tra Claude/GPT/Gemini)">
+{`You are a request classifier for a support product.
+
+Read the CUSTOMER MESSAGE below and return a JSON object with:
+  - "category": one of ["billing", "technical", "account", "sales", "other"]
+  - "confidence": a number from 0.0 to 1.0
+  - "reason": one short sentence explaining the pick
+
+If you are less than 0.7 confident, use "other" and say why.
+Return ONLY the JSON, no prose, no code fence.
+
+CUSTOMER MESSAGE:
+"""
+{{message}}
+"""`}
+</PromptCard>
+
+### 3. Complexity-based routing
+
+Invece di *cosa* riguarda la richiesta, stimi *quanto è difficile* — lunghezza, numero di entità, se fa riferimento a numeri/codice, se è probabile l'uso di tool — e scegli un tier di conseguenza: economico per facile, mid per medio, frontier per difficile.
+
+- **Quando vince.** Il tipo di task è grosso modo omogeneo (per esempio "rispondere a una domanda di coding") ma le singole richieste variano molto in difficoltà. Invece di pagare prezzi frontier per una domanda di sintassi di due righe, paghi prezzi Haiku per quelle e riservi il frontier per i refactor multi-file.
+- **Quando si rompe.** Lo "score di difficoltà" è in realtà "lunghezza del prompt", e i prompt lunghi non sono sempre prompt difficili. Un utente incolla un enorme stack trace e fa una domanda banale al riguardo — il tuo router fa upgrade inutilmente.
+- **Portalo in produzione quando.** Hai varianza misurabile in difficoltà *dentro* un tipo di task e segnali chiari (lunghezza, presenza di codice, numero di sottodomande) che correlano con essa.
+
+### 4. Cascade (economico-prima, escalation al fallimento)
+
+Prova prima il modello economico. Controlla la risposta contro un **segnale di fallimento**. Se fallisce, riprova sul modello più forte. Questo è il pattern che l'industria porta in produzione più di ogni altro, perché il "segnale" è fondato su ciò che il modello *ha effettivamente detto* — non su un'ipotesi su ciò che dirà.
+
+- **Cosa conta come segnale?** Qualsiasi cosa economica e affidabile: validazione dello schema su un output JSON, un check "questo risponde alla domanda?" fatto da un LLM judge, un campo esplicito `"needs_help": true` che il modello può emettere quando non è sicuro, un test downstream che esegue il codice, un logprob basso sul token della risposta quando il provider lo espone.
+- **Matematica dei costi.** Il risparmio sopravvive solo quando il tier economico gestisce la maggior parte del traffico. Se il 90% delle richieste viene risolto dal modello economico e il 10% escala, paghi `0.9 × economico + 0.1 × (economico + forte)` ≈ per lo più economico. Se la metà escala, stai pagando *più* di quanto pagheresti usando sempre il modello forte.
+- **Quando vince.** Task con un chiaro segnale "ha funzionato?" — codice che gira o non gira, JSON che valida o no, estrazione dove il campo o matcha la sorgente o no.
+- **Quando si rompe.** Nessun segnale di fallimento economico, oppure il modello economico *pensa* di aver avuto successo quando non è così (fallimento silenzioso — il caso peggiore).
+- **Portalo in produzione quando.** Puoi nominare il segnale di fallimento in una frase e non richiede il modello forte per essere controllato.
+
+### 5. Ensemble / verify-and-vote
+
+Esegui la stessa richiesta su N modelli in parallelo e riconcilia le risposte — prendi il voto di maggioranza, prendi la prima schema-valida, o invia tutte le N a un judge model che sceglie la migliore.
+
+- **Quando vince.** La qualità conta più del costo o della latenza: ricerca legale, riassunto medico, estrazione finanziaria ad alto rischio, "revisiona questo contratto in cerca di red flag." Utile anche per matematica dura e codice, dove modelli diversi fanno errori diversi e la loro intersezione è più affidabile di ogni singolo modello.
+- **Quando si rompe.** Paghi N× il costo ed erediti la latenza del modello più lento per *ogni* richiesta. Gli ensemble sono una tassa che accetti per la qualità, non un modo per risparmiare.
+- **Portalo in produzione quando.** Il costo di sbagliare la risposta è almeno un ordine di grandezza maggiore del costo di N chiamate al modello — cosa quasi mai vera per il traffico consumer e spesso vera per i workflow enterprise.
+
+### 6. Fallback (disponibilità, non costo)
+
+Prova il primario; su 429/5xx/timeout, riprova in modo trasparente su un secondario da un provider diverso. Questo è il pattern di cui ogni app multi-modello seria ha bisogno anche se non usa nessuno degli altri.
+
+- **Quando vince.** Ogni volta che il tuo provider primario ha un'interruzione o ti mette il throttle esattamente nel momento sbagliato. Il fallback è un pattern di *affidabilità*, non di ottimizzazione dei costi — il secondario è di solito il tier equivalente di un altro provider, non un modello più economico.
+- **Cosa tenere d'occhio.** Il fallback path è codice non testato la maggior parte del tempo; regredirà. Fai passare almeno una piccola quota di traffico live sul secondario di continuo, così scopri che la forma della risposta è cambiata *prima* di doverci contare durante un'interruzione.
+- **Portalo in produzione quando.** Il tuo SLO di uptime è più alto di quello di qualsiasi singolo provider, o una dipendenza single-provider è un rischio di business (contratti, disponibilità regionale, geopolitica).
+
+## Confronto a colpo d'occhio
+
+| Pattern | Decisione presa | Aggiunge latenza? | Aggiunge costo? | Rischio principale |
+| --- | --- | --- | --- | --- |
+| Rule-based | Prima che il modello parta | No | No | Le regole marciscono silenziosamente al cambiare degli input |
+| Classifier | Prima, da un piccolo modello | + una chiamata veloce | + una chiamata economica | Instrada male quando le categorie si sovrappongono |
+| Complexity-based | Prima, da un'euristica | Trascurabile | Trascurabile | "Difficoltà" spesso significa "lunghezza" |
+| Cascade | Dopo che il modello economico ci prova | + retry all'escalation | Per lo più economico a regime | Successo silenzioso su una risposta sbagliata |
+| Ensemble | Esegue N in parallelo, riconcilia | Il più lento degli N | N× | Stai comprando qualità, non risparmiando |
+| Fallback | Solo al fallimento del primario | 0 nel happy path | 0 nel happy path | Non testato finché non serve |
+
+## Ricette reali che vanno in produzione
+
+I pattern qui sopra sono Lego. In produzione si compongono. Tre ricette che vediamo ripetutamente:
+
+- **Agente di customer support.** Il classifier router sceglie una corsia (billing / technical / account / sales), ogni corsia ha il suo system prompt e tool set, dentro la corsia technical un **cascade** prova prima un modello economico ed escala al frontier quando scatta una tool call "needs escalation". Un fallback tra provider avvolge tutto. Risultato: il 70–90% del traffico non tocca mai il modello frontier.
+- **Assistente di coding.** Il rule-based routing su tipo di file e dimensione del diff invia piccole edit a un tier economico e refactor multi-file a un coding-specialist. Un cascade sull'output — "la patch si applica pulita e passa lo smoke test?" — escala i fallimenti a un modello più forte. Confronta con la field guide in [Claude vs GPT vs Gemini per il coding](/docs/models/claude-gpt-gemini-for-coding).
+- **RAG QA su un corpus documentale.** Il classifier sceglie tra "risponde dal contesto" (economico) e "serve ragionamento cross-document" (mid). Un ensemble di due modelli fa cross-check della risposta per documenti ad alto rischio (contratti, filing). Confronta con [Retrieval-Augmented Generation](/docs/foundations/rag).
+
+## Come costruire il tuo primo router in una settimana
+
+<Steps items={[
+  {title: "Giorno 1 — Scegli un workload e logga una settimana", body: "Strumenta i prompt *reali* che il tuo prodotto già invia. Te ne servono almeno alcune centinaia, idealmente categorizzati per esito (risolto / escalato / sbagliato). Senza traffico ground-truth stai tirando a indovinare dove il router dovrebbe inviare le cose."},
+  {title: "Giorno 2 — Cluster a mano", body: "Leggi 100 richieste e annota le 5–8 categorie in cui cadono naturalmente. Se non riesci a farlo in un pomeriggio, il workload non è pronto per un classifier router — parti con un rule-based routing sui uno o due carve-out ovvi (tier a pagamento, long context, codice)."},
+  {title: "Giorno 3 — Scrivi il prompt del classificatore", body: "Usa il PromptCard qui sopra. Fallo girare sui cluster di ieri su un modello economico (Haiku, Gemini Flash, GPT-nano). Misura l'accuratezza contro le tue etichette a mano. Se è sotto ~85%, o unisci categorie o aggiungi esempi few-shot — non portare in produzione un router che sbaglia 1 volta su 5."},
+  {title: "Giorno 4 — Route + shadow-log", body: "Cabla il router nel request path ma NON cambiare ancora il modello downstream — ogni richiesta va ancora al modello corrente, e *inoltre* logghi dove il router *avrebbe* inviato. Confronta con gli esiti reali per un giorno."},
+  {title: "Giorno 5 — Accendilo per una corsia", body: "Attiva il routing live per la corsia a più alto valore (di solito la più facile, dove i risparmi del tier economico sono maggiori). Osserva le metriche di qualità — retry rate, thumbs-down rate, escalation rate — per 24 ore."},
+  {title: "Giorno 6 — Aggiungi un cascade dentro una corsia", body: "Per la corsia dove il tier economico è 'di solito giusto ma a volte sbagliato', aggiungi un segnale di escalation (validazione dello schema, judge check, flag esplicita `needs_help`) e riprova sul modello forte. Conferma il fallback path con un chaos test — killa il modello economico e verifica che l'escalation funzioni."},
+  {title: "Giorno 7 — Scrivi il runbook e passa la mano", body: "Documenta le regole del router, il prompt del classificatore, il segnale di escalation e — cosa critica — la dashboard delle metriche. Se il router instrada male una categoria in silenzio il mese prossimo, qualcuno deve accorgersene."},
+]} />
+
+## Cosa arriva davvero in produzione (field notes 2026)
+
+- **Le cascade vanno in produzione molto più dei router appresi.** Sistemi di ricerca come RouteLLM addestrano un router su dati di preferenza e possono tagliare i costi 2× o più su benchmark standard (vedi il [paper RouteLLM](https://arxiv.org/abs/2406.18665)) — ma addestrare e mantenere un router appreso è vera ingegneria. La maggior parte dei team ottiene gran parte dei vantaggi con "economico-prima + escalation esplicita".
+- **Il classificatore è quasi sempre un modello di chat economico, non un fine-tune.** Modelli Haiku-class o Flash-class con un buon prompt raggiungono la soglia di accuratezza per 5–8 categorie. Fai fine-tune solo se sei in scala e il classificatore economico è il tuo collo di bottiglia.
+- **L'evaluator conta più del router.** Un router senza un loop di metriche è un'ipotesi. Strumenta ogni decisione di routing con richiesta → modello scelto → esito, e revisiona ogni settimana. Non puoi tunare ciò che non misuri.
+- **Infrastruttura e design sono separabili.** I *pattern* qui sopra sono neutrali rispetto a linguaggio e provider. L'*idraulica* — un endpoint per provider, chiavi virtuali, cap di spesa per team, prompt caching — è ciò che un AI gateway ti dà. Una volta che sai quale pattern vuoi, vedi [AI gateway: LiteLLM, OpenRouter, Portkey, Vercel](/docs/models/ai-gateways-litellm-openrouter-portkey) per la scelta concreta.
+
+## Anti-pattern da evitare
+
+- **Il classificatore che chiama il modello frontier.** Se scegliere una corsia costa quanto girare il modello forte, non hai risparmiato niente e hai aggiunto latenza. I classificatori devono essere economici.
+- **Cascade senza un segnale di fallimento.** "Il modello economico ha restituito *qualcosa*, quindi abbiamo finito" non è un segnale — è una scommessa. Ogni cascade ha bisogno di un check definito che il modello economico può *fallire*.
+- **Proliferazione di regole.** Dieci regole sono gestibili. Cento sono un classificatore scritto a mano senza i test. Quando il tuo set di regole supera i ~15 branch, buttalo via e usa un piccolo modello.
+- **Ensemble come strategia di costo.** Far girare tre modelli in parallelo per risparmiare è un errore di categoria — gli ensemble costano N× per comprare qualità, non per risparmiare costo. Se stai usando un ensemble per compensare un primario scarso, aggiusta il primario.
+- **Nessun fallback path.** Ogni model provider prima o poi va giù. Un prodotto single-provider erediterà quell'interruzione. Vedi [AI gateway](/docs/models/ai-gateways-litellm-openrouter-portkey) per l'idraulica.
+- **Routing senza osservabilità.** Un router che invia silenziosamente tutto nella corsia sbagliata sembra a posto finché la qualità non crolla due settimane dopo. Logga ogni decisione con l'hash dell'input, il modello scelto, l'esito e il costo — e revisiona settimanalmente.
+
+## Verifica la tua comprensione
+
+<Quiz questions={[
+  {
+    q: "Hai un prodotto di support dove il 90% delle richieste viene risolto correttamente da un modello economico, ma il restante 10% richiede il frontier. Quale pattern ti dà il maggior risparmio di costo?",
+    options: [
+      "Ensemble — gira economico + frontier in parallelo e prendi il migliore",
+      "Cascade — prova prima l'economico, escala al frontier su un segnale di fallimento",
+      "Instrada sempre al frontier, tanto il 10% ne ha comunque bisogno",
+      "Fallback — invia all'economico, poi al frontier quando l'economico è in outage",
+    ],
+    answer: 1,
+    explain: "Il Cascade vince qui. Paghi economico sul 90% del happy path e paghi entrambi i modelli solo sul 10% che escala — è per-lo-più-economico a regime. L'ensemble pagherebbe entrambi i prezzi per ogni richiesta. Il fallback è un pattern di disponibilità, non di costo.",
+  },
+  {
+    q: "La guida 'Building Effective Agents' di Anthropic definisce il Routing come:",
+    options: [
+      "Far girare la stessa richiesta su più modelli e votare la risposta",
+      "Classificare un input e indirizzarlo a un task specialistico di follow-up",
+      "Fare failover verso un provider secondario quando il primario è giù",
+      "Escalare a un modello più forte quando quello economico restituisce bassa confidenza",
+    ],
+    answer: 1,
+    explain: "È la definizione esatta — routing = classifica + hand off a un handler specialistico. Il voting è ensemble, il failover di provider è fallback, e l'escalation a bassa confidenza è cascade.",
+  },
+  {
+    q: "Stai costruendo un classifier router. Il tuo prompt di classificatore gira su un modello frontier perché 'l'accuratezza conta'. Qual è il problema?",
+    options: [
+      "Nessuno — l'accuratezza è ciò che conta, quindi paghi per averla",
+      "Il classificatore ora costa quanto il lavoro downstream — hai pagato per la decisione di routing senza risparmiare nulla, e in più hai aggiunto latenza",
+      "I modelli frontier sono meno accurati sulla classificazione rispetto a quelli più economici",
+      "Il classificatore deve essere sempre un modello fine-tuned, non un modello di chat",
+    ],
+    answer: 1,
+    explain: "Il punto del routing è che la *decisione* è economica così il *lavoro* può essere dimensionato sulla richiesta. Un classificatore su modello frontier vanifica il pattern — hai pagato prezzi da strong-tier sulla classificazione *e anche* sulla chiamata downstream. I classificatori devono girare sul modello più economico che raggiunge la tua soglia di accuratezza.",
+  },
+]} />
+
+## Prossimi passi
+
+- Scegli un target: [Scegliere un Modello](/docs/models/choosing-a-model) — il framework degli archetipi su cui il router si appoggia.
+- Cablalo: [AI gateway: LiteLLM, OpenRouter, Portkey, Vercel](/docs/models/ai-gateways-litellm-openrouter-portkey) — l'idraulica di cui ogni router ha bisogno.
+- Sposta un prompt sul modello a cui hai instradato: [Portare Prompt tra Modelli](/docs/models/porting-prompts-across-models).
+- Segnali di routing specifici per il coding: [Claude vs GPT vs Gemini per il coding](/docs/models/claude-gpt-gemini-for-coding).
+- Tassonomia canonica dei workflow di Anthropic: [Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents).
+
+## Fonti
+
+- [Anthropic — Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents) — definizioni canoniche dei workflow Routing e Orchestrator-Workers.
+- [Paper RouteLLM (arXiv 2406.18665)](https://arxiv.org/abs/2406.18665) — un router appreso addestrato su dati di preferenza; dimostra il potenziale del pattern, anche se la maggior parte dei team in produzione ancora manda in produzione regole + classificatore + cascade piuttosto che routing appreso.
