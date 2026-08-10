@@ -1,0 +1,216 @@
+---
+sidebar_position: 4.7
+title: "Apple Foundation Models 3 & la stack LLM on-device pour utilisateurs de Claude"
+description: "La troisième génération des Foundation Models d'Apple (AFM 3) a atterri à la WWDC 2026 avec un modèle dense on-device 3B, un MoE sparse 20B qui tourne sur iPhone, et un framework Swift-natif qui vous permet maintenant d'apporter votre propre fournisseur LLM — y compris Claude. Ce qui a réellement été livré, les mécanismes non évidents, et comment ça change l'histoire on-device pour quiconque livre des apps Claude."
+keywords: [Apple Foundation Models, AFM 3, AFM 3 Core, AFM 3 Core Advanced, on-device LLM, Foundation Models framework, iOS 26, Swift, Generable, guided generation, LanguageModel protocol, on-device AI, Private Cloud Compute, Claude on Apple Silicon]
+---
+
+<LevelBadge level="intermediate" />
+
+À la **WWDC 2026 (annoncée le 8 juin 2026)**, Apple a livré la troisième génération de ses Foundation Models — **AFM 3** — et a étendu le **framework Foundation Models** d'une manière qui compte même si vous n'écrivez jamais de Swift : le framework accepte maintenant des *fournisseurs LLM tiers* (Anthropic Claude et Google Gemini sont livrés comme packages Swift), et le chemin *on-device* cesse d'être un jouet 3B et ajoute un **MoE sparse à 20 milliards de paramètres** qui tourne sur Apple Silicon en gardant la plupart des experts en NAND et en n'échangeant que ce dont un prompt a besoin en RAM. Si vous construisez des apps Claude et avez traité « on-device » comme un univers séparé de vos workflows API, cet écart se referme cette année. Cette page décortique ce qui a réellement été livré, les mécanismes non évidents, et les choix concrets de migration et de compatibilité dont vous disposez maintenant.
+
+<Callout type="objectives" items={[
+  "Nommer les quatre modèles AFM 3 — Core (3B), Core Advanced (20B sparse), Cloud, Cloud Pro — et lequel tourne où",
+  "Comprendre l'astuce de routage d'experts flash-plus-DRAM qui permet à un modèle 20B de tenir sur un iPhone du tout",
+  "Utiliser les macros @Generable / @Guide du framework Foundation Models pour du décodage contraint — le modèle ne peut littéralement pas émettre du JSON invalide",
+  "Savoir ce qui a changé à la WWDC26 : les protocoles LanguageModel / LanguageModelExecutor qui vous permettent de brancher Claude ou tout autre LLM sur la même API session Swift",
+  "Décider quand attraper le 3B on-device, quand sauter à Private Cloud Compute, et quand garder la charge sur l'API Claude",
+]} />
+
+<VerifyNote lastVerified="2026-08-09" source="Apple ML Research 'Introducing the third generation of Apple's foundation models' (8 June 2026) + Apple Developer WWDC26 session 339 'Bring an LLM provider to the Foundation Models framework'." />
+
+## La version en une phrase
+
+**AFM 3** est le deuxième vrai coup d'Apple sur les LLM on-device : un **modèle dense 3B (Core)** reconstruit, un nouveau **MoE sparse 20B (Core Advanced)** qui tourne sur iPhone en gardant la plupart des experts en stockage flash, une paire **Cloud** et **Cloud Pro** sur Apple Silicon plus GPU NVIDIA dans Google Cloud, et un **framework** qui traite maintenant Anthropic Claude et Google Gemini comme des fournisseurs interchangeables de première classe derrière le même protocole `LanguageModel`. Gratuit pour les développeurs à appeler on-device ; gratuit sur Private Cloud Compute pour les membres du programme App Store Small Business sous les 2M de premiers téléchargements.
+
+## Trois choses non évidentes sur AFM 3
+
+Tout le monde écrit le titre « Apple a un modèle 3B on-device ». Voici les mécanismes que la plupart des articles sautent.
+
+### 1. Le modèle 20B tient sur iPhone parce que la plupart vit en NAND, pas en RAM
+
+La lecture naïve de « modèle à 20 milliards de paramètres sur iPhone » est impossible : même en 4-bit, 20B de poids fait ~10 Go, bien au-delà de ce qu'un iPhone peut tenir en RAM. L'astuce d'Apple, selon l'annonce WWDC 2026, est de stocker **le modèle AFM 3 Core Advanced complet en mémoire flash (NAND)** et de n'échanger **que les experts routés dépendants de l'entrée en DRAM** au moment de l'inférence. L'architecture a des *experts partagés* qui restent résidents et des *experts routés* qu'un routeur choisit par prompt (activant **1–4B de paramètres à la fois**, pas les 20B complets). Combiné avec le **Quantization Aware Training**, c'est ce qui permet à Apple de livrer un modèle de classe 20B sur un appareil qui a ~8 Go de RAM utilisable. La conséquence pour vous : la latence côté iPhone est maintenant dominée moins par la multiplication de matrices et plus par la bande passante de lecture NAND et les choix du routeur — une enveloppe de performance très différente d'un modèle dense 3B.
+
+### 2. Le décodage contraint est cuit dans le compilateur Swift, pas dans le runtime
+
+La macro `@Generable` du framework est souvent décrite comme « sortie structurée », ce qui minimise ce qu'elle fait. `@Generable` tourne à la *compilation* : elle génère un schéma JSON et un parseur pour votre type Swift, et le framework utilise ensuite ce schéma pour du **décodage contraint** — le modèle on-device est forcé, au niveau des tokens, à produire une sortie qui se parse en votre struct Swift. Il n'y a pas de « on espère que c'est du JSON valide, puis on réessaie ». Une annotation `@Guide` vous laisse ajouter des contraintes (`.anyOf(["PG", "PG-13", "R", "G"])`, des plages, des descriptions) qui sont aussi appliquées au moment du décodage. Si vous avez passé du temps à écrire des fallbacks de réparation JSON autour d'une boucle d'utilisation d'outils Claude, le côté modèle 3B on-device de votre app peut abandonner toute cette couche de retry.
+
+### 3. Le framework accepte maintenant n'importe quel LLM — y compris Claude et Gemini — derrière une API Swift
+
+La session WWDC 2026 **« Bring an LLM provider to the Foundation Models framework »** a livré deux nouveaux protocoles : **`LanguageModel`** (déclare les capacités et la configuration de l'exécuteur) et **`LanguageModelExecutor`** (gère la génération réelle, le cache KV et le streaming). N'importe qui peut livrer un package Swift qui s'y conforme — Apple a explicitement nommé Anthropic Claude et Google Gemini comme fournisseurs au lancement. La conséquence : du point de vue de l'app, la même `LanguageModelSession`, les mêmes types `@Generable`, le même contrat d'appel d'outils, et le même modèle de transcript s'appliquent que le modèle sous-jacent soit le 3B on-device, Private Cloud Compute, Claude sur l'API Anthropic, Gemini sur Google Cloud, ou un fichier de poids MLX depuis Hugging Face. Le choix de modèle devient une dépendance de package Swift plutôt qu'une réécriture de SDK.
+
+## AFM 3 en un coup d'œil
+
+<Flashcards cards={[
+  { front: "AFM 3 Core", back: "Modèle dense on-device à 3B paramètres. Reconstruit à partir de la deuxième génération 3B, nativement multimodal (texte + image + audio), 25 langues. Tourne sur tous les appareils compatibles Apple Intelligence. Gratuit pour les appels on-device." },
+  { front: "AFM 3 Core Advanced", back: "MoE sparse 20B. Poids complets vivent en NAND ; le routeur échange les experts dépendants de l'entrée en DRAM. Active 1–4B paramètres par prompt. Nécessite le silicium le plus puissant d'Apple ; les anciens appareils Apple Intelligence retombent sur Core." },
+  { front: "AFM 3 Cloud", back: "Cheval de bataille côté serveur sur Apple Silicon dans Private Cloud Compute (PCC). Même contrat de confidentialité que le chemin on-device : pas d'état serveur persistant, pas de logs que vous ne pouvez pas auditer." },
+  { front: "AFM 3 Cloud Pro", back: "Modèle serveur le plus capable. Utilise Parallel-Track Mixture-of-Experts (PT-MoE). Étendu aux GPU NVIDIA dans Google Cloud, toujours à l'intérieur de la frontière PCC. Visé au palier de tâches Claude Opus / GPT-5 Sol." },
+  { front: "ADM 3 Cloud", back: "Modèle de génération et d'édition d'images (Apple Diffusion Model 3). Cohabite avec AFM 3 dans la même frontière PCC. Alimente Image Playground et Genmoji côté serveur." },
+  { front: "Surprise du palier gratuit", back: "Les membres du programme App Store Small Business avec moins de 2 millions de premiers téléchargements obtiennent les appels Private Cloud Compute sans coût d'API cloud. C'est une vraie subvention — pas un crédit d'essai." },
+]} />
+
+## Ce qui tourne réellement où
+
+<Steps items={[
+  { title: "AFM 3 Core (3B) — toujours on-device", body: "Tourne sur n'importe quel appareil Apple Intelligence. Gratuit à appeler depuis Swift via le framework Foundation Models — pas de clé API, pas de réseau, pas de facture par token. C'est là que vous mettez classification, extraction, résumés, réécritures on-device, et tout ce qui doit marcher en mode avion." },
+  { title: "AFM 3 Core Advanced (20B) — iPhones plus récents seulement", body: "Tourne sur le silicium le plus puissant d'Apple ; les anciens appareils Apple Intelligence retombent de manière transparente sur Core. Utilisez-le quand le 3B refuse ou hallucine sur une tâche et que la requête peut attendre la latence d'échange d'experts mais doit rester on-device (ex. raisonnement santé/finance privé)." },
+  { title: "AFM 3 Cloud / Cloud Pro — Private Cloud Compute", body: "Le framework achemine vers PCC quand le modèle de l'appareil n'est pas suffisant. Vous ne choisissez pas le SKU serveur spécifique — vous demandez un niveau de raisonnement et Apple choisit. Même contrat de confidentialité qu'on-device : l'attestation de nœud de PCC empêche le personnel d'Apple de lire vos requêtes." },
+  { title: "Fournisseurs tiers — via package Swift", body: "Ajoutez un package qui se conforme à LanguageModel + LanguageModelExecutor (Anthropic Claude et Google Gemini sont les exemples au lancement). Depuis l'API session le code est identique — le choix du modèle est une dépendance de package." },
+]} />
+
+## Un appel on-device minimal
+
+La fonctionnalité phare du framework est que vous pouvez obtenir une sortie typée et validée par schéma depuis le 3B on-device avec presque aucune cérémonie.
+
+<PromptCard title="Appel on-device 3B avec sortie structurée @Generable (Swift)">
+{`import FoundationModels
+
+@Generable
+struct TripIdea {
+    @Guide(description: "Short, evocative title")
+    let title: String
+
+    @Guide(description: "One-paragraph pitch, 40–80 words")
+    let summary: String
+
+    @Guide(.range(1...14))
+    let estimatedDays: Int
+
+    @Guide(.anyOf(["easy", "moderate", "hard"]))
+    let difficulty: String
+}
+
+let session = LanguageModelSession()   // defaults to on-device Core
+let idea = try await session.respond(
+    to: "Suggest a shoulder-season trip in Puglia for a family with a 6-year-old.",
+    generating: TripIdea.self          // constrained decoding
+)
+
+print(idea.title, idea.difficulty, idea.estimatedDays)
+`}
+</PromptCard>
+
+Au runtime, le modèle est forcé, au niveau des tokens, à émettre des tokens qui gardent le texte en cours parseable comme un `TripIdea`. Vous ne voyez jamais une chaîne JSON ; vous recevez une valeur `TripIdea`. C'est le même contrat que la session parle au 3B on-device, à PCC, ou à un fournisseur tiers que vous avez branché comme package Swift.
+
+## Amener Claude dans la même session Swift
+
+La session WWDC 2026 « Bring an LLM provider » a rendu ça concret : implémentez `LanguageModel` et `LanguageModelExecutor`, publiez-le comme un package Swift avec tag git, et le code d'app qui utilisait déjà le 3B on-device peut appeler votre fournisseur en changeant un initialiseur.
+
+<PromptCard title="Esquisse d'un fournisseur tiers se conformant à LanguageModel">
+{`import FoundationModels
+
+public struct ClaudeSonnet5: LanguageModel {
+    public let capabilities = LanguageModelCapabilities(capabilities: [
+        .toolCalling, .guidedGeneration, .reasoning
+    ])
+    public var executorConfiguration: ClaudeExecutor.Configuration
+}
+
+public final class ClaudeExecutor: LanguageModelExecutor {
+    public struct Configuration: Hashable {   // hashable = KV-cache key
+        public var modelID: String
+        public var tokenProvider: TokenProvider   // NOT a plain API key string
+    }
+
+    public required init(configuration: Configuration) throws { /* … */ }
+
+    public func respond(
+        to request: LanguageModelExecutorGenerationRequest,
+        model: Model,
+        streamingInto channel: LanguageModelExecutorGenerationChannel
+    ) async throws {
+        // 1. Map Foundation Models transcript → Anthropic /messages payload
+        // 2. Stream deltas back via channel.send(.response(action: .appendText(...)))
+        // 3. Surface tool calls / reasoning via the same transcript entry types
+    }
+}
+`}
+</PromptCard>
+
+Deux subtilités vers lesquelles l'API vous pousse délibérément. Premièrement, **`Configuration` est `Hashable` exprès** : le framework cache les exécuteurs par configuration, donc *même config = même exécuteur = cache KV préservé* entre les tours. Deuxièmement, la guidance décourage explicitement les **chaînes de clé API en clair** dans les initialiseurs — préférez un `TokenProvider` ou un flux de connexion, la persistance des tokens dans le keychain, et utilisez App Attest pour les appels cloud pour vérifier que l'appareil n'est pas un build altéré tapant sur votre endpoint depuis l'extérieur.
+
+## Quand utiliser quoi — un tableau de décision pour les développeurs Claude
+
+<Callout type="tip" items={[
+  "Attrapez AFM 3 Core (3B) on-device : résumés, classification, extraction d'entités, réécritures on-device, suggestions de clavier — tout ce où un prompt borné et une sortie typée battent un aller-retour réseau. Gratuit.",
+  "Attrapez AFM 3 Core Advanced (20B) : raisonnement privé qui ne peut pas quitter l'appareil (santé, finance, documents non publiés) et que le 3B rate. Attendez-vous à une latence variable à cause de l'échange d'experts NAND.",
+  "Attrapez Private Cloud Compute (Cloud / Cloud Pro) : contexte plus large, raisonnement plus long, ou multimodal où le 20B on-device ne peut pas suivre mais la confidentialité exclut toujours les API tierces.",
+  "Restez sur Claude via l'API Anthropic (ou le nouveau fournisseur via package Swift) : longues runs d'agents, extended thinking, travail sur grosses bases de code, et apps multi-plateformes qui ont besoin du même modèle sur Android et web. Voir la page fondations Claude vs autres.",
+  "Ne PAS envelopper le 3B on-device dans une boucle de réparation JSON : il a du décodage contraint. Si votre sortie ne se parse pas, le schéma est faux ou vous avez sauté @Generable.",
+]} />
+
+## Liens croisés
+
+- L'on-device est le contrepoids à l'histoire d'agent local que nous couvrons dans [Agents IA locaux](/docs/models/local-ai-agents) et [Faire tourner des modèles localement avec Ollama](/docs/models/run-models-locally-ollama). L'angle d'Apple est différent : c'est une *intégration OS de première partie*, pas un serveur local séparé.
+- Si vous choisissez entre le modèle on-device d'Apple et faire tourner Claude à côté, les patrons de design sont dans [Claude + modèles locaux : patrons hybrides](/docs/models/claude-plus-local-models) et [Agent local ou Claude](/docs/models/local-or-claude-agent).
+- Pour un cadre plus large de « comment ces modèles diffèrent et lequel je choisis », voir [Choisir un modèle](/docs/models/choosing-a-model) et [Porter des prompts entre modèles](/docs/models/porting-prompts-across-models).
+- Les implications de sécurité de livrer un hybride local + cloud vivent dans [Sécuriser les agents locaux et hybrides](/docs/models/securing-local-and-hybrid-agents).
+
+## Vérification rapide
+
+<Quiz questions={[
+  {
+    q: "Comment AFM 3 Core Advanced fait-il tenir un modèle à 20B paramètres sur un iPhone ?",
+    options: [
+      "Il fait tourner une version 3B rétrécie et distillée et l'appelle 20B pour le marketing",
+      "Il stocke les poids complets en flash NAND et n'échange que les experts routés dépendants de l'entrée en DRAM, activant 1–4B paramètres par prompt",
+      "Il streame chaque token depuis Private Cloud Compute et cache localement",
+      "Il utilise une nouvelle quantization 1-bit qui rétrécit le modèle pour tenir en RAM"
+    ],
+    answer: 1,
+    explain: "AFM 3 Core Advanced est un MoE sparse. Le modèle complet vit en flash ; un routeur choisit les experts par prompt et seuls ceux-là sont échangés en DRAM. C'est pourquoi les décomptes de paramètres actifs sont de 1–4B par prompt, pas 20B."
+  },
+  {
+    q: "Que vous donne la macro @Generable que le prompting JSON à la main ne donne pas ?",
+    options: [
+      "Une boucle de retry qui auto-répare le JSON mal formé",
+      "Une impression plus jolie de la sortie brute du modèle",
+      "Génération de schéma à la compilation plus décodage contraint au niveau des tokens, donc la sortie est garantie de se parser en votre type Swift",
+      "Un boost de vitesse en évitant le tokeniseur"
+    ],
+    answer: 2,
+    explain: "@Generable est une macro à la compilation qui produit le schéma et le parseur. Le framework contraint ensuite le décodage au niveau des tokens, donc le modèle ne peut émettre que des tokens qui gardent le texte en cours parseable comme votre type."
+  },
+  {
+    q: "Vous voulez appeler Claude Sonnet 5 depuis une app iOS qui utilise déjà le framework Foundation Models pour des résumés on-device. Quel est le chemin natif WWDC26 ?",
+    options: [
+      "Réécrire l'app autour du SDK Anthropic — le framework ne supporte que les modèles Apple",
+      "Ajouter un package Swift qui se conforme à LanguageModel + LanguageModelExecutor, puis échanger le modèle de la session en une ligne",
+      "Proxifier chaque appel Claude par Private Cloud Compute",
+      "Convertir les poids de Claude en package Core ML et les livrer dans le bundle de l'app"
+    ],
+    answer: 1,
+    explain: "C'est exactement ce que la session WWDC26 'Bring an LLM provider' a livré. Anthropic Claude et Google Gemini ont été cités comme exemples au lancement de fournisseurs tiers exposés par la même API session."
+  },
+  {
+    q: "Quel groupe de développeurs obtient les appels Private Cloud Compute gratuits depuis le framework ?",
+    options: [
+      "Chaque compte Apple Developer Program du palier gratuit",
+      "Les membres du programme App Store Small Business avec moins de 2 millions de premiers téléchargements",
+      "Seulement les apps de première partie d'Apple",
+      "Quiconque avec un abonnement Enterprise Developer Program"
+    ],
+    answer: 1,
+    explain: "La propre page développeur d'Apple documente le palier gratuit-cloud-cost pour les membres du programme App Store Small Business sous les 2 millions de premiers téléchargements. Tous les autres paient la tarification PCC standard."
+  },
+  {
+    q: "Pourquoi le type `Configuration` de l'exécuteur doit-il être `Hashable` ?",
+    options: [
+      "Pour qu'il puisse être envoyé à travers les frontières de concurrence Swift",
+      "Pour que le framework puisse cacher les exécuteurs par configuration — même config garde le cache KV chaud entre les tours",
+      "Pour satisfaire le générateur de schéma à la compilation",
+      "Parce que Swift 6 exige que tous les types de protocole soient Hashable"
+    ],
+    answer: 1,
+    explain: "Le framework utilise la Configuration comme clé de lookup hashable pour les instances d'exécuteur. Même configuration → même exécuteur → cache KV préservé. Configuration différente → cache séparé."
+  }
+]} />
+
+## Sources et lectures complémentaires
+
+- [Introducing the third generation of Apple's foundation models](https://machinelearning.apple.com/research/introducing-third-generation-of-apple-foundation-models) — Apple Machine Learning Research (8 juin 2026) : architectures AFM 3 Core / Core Advanced / Cloud / Cloud Pro, description NAND-plus-échange-d'experts, couverture 25 langues, Quantization Aware Training, architecture serveur PT-MoE.
+- [Bring an LLM provider to the Foundation Models framework — session WWDC26 339](https://developer.apple.com/videos/play/wwdc2026/339/) — le design des protocoles `LanguageModel` / `LanguageModelExecutor`, modèle streaming/transcript, segments personnalisés, fournisseurs tiers.
+- [Apple Intelligence for developers](https://developer.apple.com/apple-intelligence/) — vue d'ensemble du framework Foundation Models, profils dynamiques, évaluation, et la note de tarification PCC-gratuite pour App Store Small Business.
+- [Meet the Foundation Models framework — session WWDC25 286](https://developer.apple.com/videos/play/wwdc2025/286/) et [Deep dive into the Foundation Models framework — session WWDC25 301](https://developer.apple.com/videos/play/wwdc2025/301/) — APIs originales `@Generable` / `@Guide` / appel d'outils sur lesquelles la WWDC26 construit.
+- [Apple Intelligence Foundation Language Models: Technical Report (arXiv 2507.13575)](https://arxiv.org/pdf/2507.13575) — détail technique d'une génération plus ancienne, utile pour ancrer l'histoire de l'architecture on-device.
