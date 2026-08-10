@@ -1,0 +1,187 @@
+---
+sidebar_position: 6.7
+title: "エージェントランタイム: アイソレート vs コンテナ"
+description: "2026年8月3日、Cloudflareは @cloudflare/computer を出荷した — ほとんどの作業をV8アイソレートに振り分け、タスクが本当に必要とするときだけフルLinuxコンテナに手を伸ばすアーリープレビューのエージェントランタイムだ。賭けは、エージェントが行うことの約90%(ファイル読み、`grep`実行、コミット)はマイクロVMを必要としない、というもの。このページではその賭け、それに異を唱える陣営(Firecracker上のE2B、gVisor上のModal)、そして自分のエージェントスタックに合ったプリミティブの選び方を紐解く。"
+keywords: [cloudflare computer, agent runtime, sandbox, firecracker microvm, gvisor, v8 isolate, cloudflare sandboxes, e2b, modal, daytona, agent infrastructure, agent execution, computer use, agent isolation, agent containers, dynamic workers]
+---
+
+<LevelBadge level="advanced" />
+
+# エージェントランタイム: アイソレート vs コンテナ
+
+本気のエージェントには、何かを *実行する* 場所が必要だ: ファイルを読む、シェルコマンドを走らせる、パッケージをインストールする、たった今書いたスクリプトを実行する。2025年の大半、皆が手を伸ばした答えは「コンテナを与えろ」だった — Dockerイメージか、もっと良ければオンデマンドで起動するFirecracker microVMだ。その答えは機能する。同時にアクションあたりのコストが高く、起動も遅い。そして全ユーザーの全エージェントに独自環境をスケールで与えようとすると、機能しなくなる。
+
+**2026年8月3日**、Cloudflareは `@cloudflare/computer` というアーリープレビューのパッケージを出荷し、デフォルトは間違っていたと主張した。同社の主張は次の通り: エージェントが実際に何に時間を使っているかを見ると — `ls`、`cat`、`sed`、`git status`、`npm install`、小さなシェルスクリプト、小さなJS変換 — **V8アイソレート** がその作業を1桁ミリ秒でこなし、コストもごく一部で済む。フルLinuxコンテナを立ち上げる必要があるのは、タスクが本当にそれを要求する場合だけだ。同社の言葉を借りれば、コンテナが担うべきは「エージェントの作業の10%未満」だ。
+
+このページはCloudflareの宣伝ではない。90/10のフレーミングは賭けであってベンチマークではない。しかしそれは、2026年にあらゆるエージェントインフラベンダーで起きている現実のシフトの最も鋭い実例であり、それが強いるトレードオフを理解することはエージェント製品を作る誰にとっても既に必須事項だ。
+
+<Callout type="objectives" items={[
+  "3つの現実の分離プリミティブ(V8アイソレート、コンテナ、Firecracker microVM)と、それぞれが起動時間・メモリ・爆発半径で実際にいくらかかるか",
+  "@cloudflare/computer の背後にある90/10仮説と、なぜアイソレートランタイムに脱出口としてのコンテナをペアリングする設計になっているのか",
+  "Cloudflare Sandboxes(2026年4月13日GA)と @cloudflare/computer(2026年8月3日プレビュー)がどう違うか — 同じ会社、違う製品",
+  "陣営図: Firecracker上のE2B、gVisor上のModal、コンテナ上のDaytona/E2B/Cloudflare — 誰が何に、なぜ賭けているか",
+  "具体的な意思決定フレームワーク: エージェントにマイクロVMが必要なとき、コンテナで十分なとき、アイソレートが正解のとき",
+]} />
+
+<VerifyNote lastVerified="2026-08-10" source="https://developers.cloudflare.com/changelog/post/2026-08-03-cloudflare-computer/">
+執筆時点で `@cloudflare/computer` は **アーリープレビュー** だ。パッケージはMITライセンスで、npmに `@cloudflare/computer` として公開されており、github.com/cloudflare/computer に存在する(初週で約7.3kスター)。APIは明示的に不安定とマークされている。アイソレート対コンテナのフレーミングは持続的だが、具体的なAPI名、ディスパッチロジック、価格は変わる — 本番で具体的な内容を引用する前にリンク先のchangelogを確認すること。
+</VerifyNote>
+
+## 実際に持っている3つのプリミティブ
+
+一瞬マーケティング名は忘れよう。今日市場にあるすべてのエージェントサンドボックスの下には、3つの分離技術のいずれかが座っている。それぞれ非常に異なるコストカーブを持つ。
+
+<Steps
+  items={[
+    {title: "V8アイソレート(最も軽い)", body: "単一のV8プロセス内のJavaScript実行コンテキスト。起動時間は1桁前半のミリ秒、メモリオーバーヘッドは数十キロバイト、1つのプロセス内に数千個共存できる。Cloudflare Workers、Deno Deploy、Vercel Edgeが使用。任意のLinuxバイナリは実行できない — コードはアイソレートから到達可能なJavaScript(またはWASM)である必要がある。分離は言語ランタイムレベル: 同一プロセス内のアイソレート間にカーネル境界はない。"},
+    {title: "コンテナ", body: "独自のファイルシステムビュー、ネットワーク名前空間、cgroup制限を持つが、ホストカーネルを共有するLinuxプロセスグループ。Docker、containerd、Kubernetesポッド。起動時間はコールドで数百ミリ秒〜数秒、メモリのフロアは数十〜数百MB。任意のLinuxバイナリを実行できる。分離はホストカーネルが侵害されていないことに完全に依存するため、クラウドプロバイダーは信頼されていないユーザーコードを剥き出しのコンテナで直接実行することはめったにない。"},
+    {title: "Firecracker microVM(一般的な選択肢の中で最も強い)", body: "独自のカーネルを持つ、最小限のKVMバックの仮想マシン。AWS Lambda、E2B、Fly.io、Vercel SandboxesはFirecracker上で動く。起動時間は約125ms(AWS公称)〜数百ms、メモリのフロアは数MB(VM本体)+ゲストが必要とする分。任意のLinuxバイナリを実行できる。分離はカーネルレベル — 1つのmicroVM内の侵害はホストや兄弟には漏れない。"},
+  ]}
+/>
+
+十分な頻度で登場する隣接技術が2つあるので、名前を挙げておく価値がある:
+
+- **gVisor**(Google Cloud RunとModalが使用)はGoで書かれたユーザースペースカーネルで、コンテナからのシステムコールを傍受し、安全に再実装する。起動はコンテナ並みに速く、分離は剥き出しのコンテナより強いがハイパーバイザーほどは強くない。Modalは2024年にスタック全体をこれに賭けた。
+- **WASMサンドボックス**(Fastly Compute、WasmEdge)はアイソレート形だが、JavaScriptではなくコンパイル済みWebAssembly用。V8アイソレートと同じコストプロファイル; 異なる言語エコシステム。
+
+経験則: **アイソレート → コンテナ → gVisor → microVM** は、分離が強くなり起動コストが高くなるはしごだ。すべてのエージェントランタイムは1段を選ぶ — あるいは、これがCloudflareの新しい一手なのだが、*2段* をペアリングして実行時にルーティングする。
+
+## 90/10仮説
+
+セッション内でエージェントが何をするか見てみよう。典型的なコーディングエージェントのターンは次のようなものだ: `ls`、2つのファイルを `cat`、フォーマッタを実行、1つのファイルを編集、`git diff`、`git commit`。そのどれも新しいLinuxカーネルを必要としない。Pythonすら必要ない。ほとんどは小さな仮想ファイルシステム上のバイト入力・バイト出力だ。
+
+次に残りの10%を見よう: フルテストスイートを実行、`npm install`、動画をトランスコード、ヘッドレスChromeを起動。その作業は本当にLinuxユーザーランドを必要とする。実カーネルの恩恵を受ける。そしてそれがより高くつくのは問題ない — むしろ *良い* — なぜならめったに起きないからだ。
+
+Cloudflareの論点は、すべてのエージェントをmicroVMにデプロイすると、`cat` と `grep` である作業の90%に対してmicroVM価格を払うことになる、というものだ。`@cloudflare/computer` での彼らの賭けは、賢いランタイムは次のようにあるべきというもの:
+
+1. **アイソレートにデフォルトする。** シェルコマンドはbash形状のアイソレート(Dynamic Worker内で動作する「just-bash」)で実行され、JavaScriptモジュールは構造化I/Oを持つ新しいアイソレートで実行される。
+2. **タスクが本当に必要とした瞬間にコンテナへフォールオーバー** — 任意のバイナリ、ネイティブ依存、持続的なCPU。
+3. **ワークスペースの状態を1箇所に保つ** — SQLiteバックの仮想ファイルシステムで、両方の世界から読み書き可能 — そうすればタスクはファイルを再アップロードしたりコンテキストを失ったりすることなくアイソレートとコンテナ間を移動できる。
+
+ディスパッチは自動であることを意図されており(発表によれば「フロンティアモデルは正しい判断をするのが非常に上手い」)、アイソレート側は `just-bash` とDynamic Workersが、コンテナ側は `computerd` という小さなデーモンが担当する。このデーモンはワークスペースをFUSEマウントし、変更を `capnweb` RPC経由で同期する。あなたのコードからは単一の `Workspace` オブジェクトを触るだけで、与えられた `exec` が実際にどこで実行されたかは実装の詳細だ。
+
+一緒に座って考えるべき主張は、具体的なディスパッチロジックではない — それは進化する — 代わりに **構造的な** ポイントだ: エージェント全体で1つの分離プリミティブを選ぶと、片方の軸で過剰に支払うことになる。ルーティングするランタイムは、安全な場所では安いままでいられ、必要な場所では強くいられる。
+
+## 反対の賭け: 隅々までmicroVM
+
+皆が同意しているわけではない。2026年の陣営図には、エージェントが実際にどれだけの分離を必要とするかについて、本物の意見の相違がある。
+
+- **E2B** は製品全体をFirecracker microVM上に構築した — AWS Lambdaと同じ技術 — そしてウォームリージョンサンドボックスで200ms以下の起動、最大24時間のセッション、アカウントあたり数千同時VMを謳っている。彼らのピッチはCloudflareの正反対だ: 各セッションに実カーネルを与えよ、なぜならエージェントが何を試みるか分からないし、LinuxのVM境界がセキュリティレビューで証明できる唯一の分離だからだ。
+- **Vercel Sandboxes** もVercel管理プール経由でFirecracker上で動く。
+- **Modal** はgVisorに賭けた: コンテナ並みの起動、システムコール傍受による分離。ハイパーバイザーより弱いが剥き出しのコンテナより強く、Firecrackerより安い。
+- **Daytona** と従来のdev-containerプラットフォームは、エージェントに実コンテナを渡す。エージェントのワークロードは人間の開発者のワークロードに十分近いため、同じプリミティブが適合するという理論だ。
+
+この不一致は無視できない。Cloudflareは意図的に、エージェントのシェルの大部分を共有のV8プロセスで実行している — V8のゼロデイを持つ決意ある攻撃者が越えられる境界だ。E2BとVercelは、エージェントが書くコードはデフォルトで信頼されていないものとして扱われるべきで、それはmicroVMを強制すると論じる。
+
+両方の立場は擁護可能だ。正しい選択は **エージェントが実行するコードを誰が所有するか** による。エージェントがあなた自身のレビュー済みコードをあなた自身のデータに対して実行するなら、Cloudflareのアイソレートファーストの賭けは、同じ実用的安全性のために圧倒的に安い。エージェントがオープンPR、GitHub issue、エンドユーザーのプロンプトから引き出したコード — 信頼できない何か — を実行するなら、それとそれ以外の全ての間にカーネル境界が欲しいし、microVMの料金を払うべきだ。
+
+## Cloudflareの2つの製品を並べて
+
+今月最もよくある混乱は、Cloudflareの2つのエージェントインフラ製品の間だ。4ヶ月差で出荷され、同じブランドの下で存在し、関連するが異なる問題を解いている。
+
+| | **Cloudflare Sandboxes** | **@cloudflare/computer** |
+|---|---|---|
+| ステータス | GA(2026年4月13日) | アーリープレビュー(2026年8月3日) |
+| 分離 | 名前付きセッションごとにコンテナ | デフォルトでアイソレート、必要時にコンテナ |
+| ファイルシステム | ネイティブコンテナFS、inotifyで監視、R2にスナップショット | SQLiteバックの仮想FS、コンテナへFUSEマウント |
+| 起動 | コールドclone-and-install 約30秒; スナップショット復元 約2秒(15倍高速) | アイソレート: 1桁ミリ秒; コンテナ: 秒単位 |
+| 適した用途 | 長時間動作するdev-serverスタイルのセッション、Python状態を保持するコードインタープリタ | 短くバースト的で、ほぼシェルのエージェントターン、時々重いタスク |
+| 価格 | アクティブCPUサイクル(実行時のみ課金) | 未公開 |
+
+メンタルモデル: **Sandboxesは1エージェントに1つのフルコンピューターを与える**; **Computerは1エージェントにアクションごとに正しいコンピュートを選ぶ *ルーティング層* を与える**。両者は共存できる — Computerのコンテナバックエンドは、内部でSandboxesスタイルのインフラを使えるし、実際に使っている — が、同じ製品ではない。
+
+## 各プリミティブが正解のとき
+
+好みを選ぶのではなく、エージェントの実際の作業形状を使え。
+
+<Steps
+  items={[
+    {title: "自分のチーム向けのコーディングエージェントを作っている", body: "信頼できるオペレータ、信頼できるデータ、ほぼ有界なシェル操作。アイソレートファースト(Cloudflare Computer、あるいはWorkers上の手組み)か gVisor(Modal)は強くフィットする。起動時間とオペレーションあたりコストの節約はエージェントスケールで急速に積み上がる — エージェントが1時間に何千回も走るとき、あらゆる `ls` が重要になる。"},
+    {title: "オープンなユーザーコード、エージェント生成PR、信頼できないモデルの評価を実行している", body: "カーネル分離はオプションではない。Firecracker(E2B、Vercel Sandboxes)または強化されたmicroVM相当を選べ。どれだけ速くても、信頼できないコードを共有のV8プロセスで実行してはいけない。"},
+    {title: "多数のターンにわたってステートフルなPython/Jupyter環境を生かし続ける必要がある", body: "Cloudflare Sandboxes(GA)、E2B、Daytona。スナップショット付きの実で永続的なLinux環境が欲しい; 毎回pandasを再インストールするコストは払いたくない。スナップショット復元こそがこれを経済的にする。"},
+    {title: "エージェントがほぼ推論と少数の重いツール呼び出し(研究またはリサーチアシスタントエージェント)", body: "ランタイムはほとんど重要ではない — SDKのエルゴノミクスと、既にコミットしているモデルプロバイダーで選べ。ランタイムのレイテンシはモデルレイテンシの前では霞んでしまう。"},
+    {title: "最強の監査ストーリーが欲しい", body: "ここではまだFirecrackerが勝つ。規制のあるバイヤーは「各セッションは独自のカーネルを持つ仮想マシンだ」という表現を、「各セッションは慎重に機能配線されたV8アイソレートだ」よりもよく理解する。"},
+  ]}
+/>
+
+## 最小限の `@cloudflare/computer` の例
+
+具体的には、アイソレートファーストのワークスペースは次のようになる。1つのオブジェクトを得て、与えられたexecがどこで実行されるかを言う必要はない。
+
+<PromptCard title="ワークスペースを作成してシェルコマンドを実行する">
+{`import { Workspace } from "@cloudflare/computer";
+
+const ws = new Workspace();
+
+// Isolate-backed by default: fast, cheap.
+await ws.write("hello.txt", "hi\\n");
+const out = await ws.runtime.exec("cat hello.txt && ls -la");
+
+console.log(out.stdout);`}
+</PromptCard>
+
+<PromptCard title="アイソレートで足りないときにフルLinuxコンテナを強制する">
+{`// npm install needs a real userland — pick the container backend explicitly.
+await ws.runtime.exec("npm install lodash", { backend: "container" });`}
+</PromptCard>
+
+これを何か本物に配線する前に、発表とchangelogを読むこと — 正確なバックエンド名、ルーティングのデフォルト、認証モデルはすべて、パッケージがプレビューを離れる前に変わる可能性がある。
+
+## こういうこと全部について、実際に人を驚かせるもの
+
+エージェントランタイムの上に構築するとき、初めてチームを油断させる3つのことがある。
+
+- **短いエージェントではサンドボックスのtime-to-first-commandが支配的になる。** エージェントターンが「1つのシェルコマンドを実行する」なら、200msのmicroVM起動に5msのコマンドが続くのは40倍のオーバーヘッドだ。ユーザーあたり1日数千ターンを掛けると、ランタイム請求書がモデルより先に最大の項目になる。
+- **状態の可搬性は生の速度より価値がある。** Cloudflare Sandboxesの2秒スナップショット復元と、`@cloudflare/computer` のバックエンド横断単一ワークスペースモデルは、どちらも同じ議論を勝ち取っている: *状態を運ぶ* 方が *再構築する* より安い。
+- **分離は技術的な問題であるだけでなく、法的な問題だ。** 正しいプリミティブは、コンプライアンス表面が何を受け入れるかによる。microVMは監査人に対してアイソレートよりも守りやすい。ワークロードにとって実際にはアイソレートの方が本当に安全な場合であってもだ。
+
+## AILmanacでの関連読み物
+
+- [長時間動作エージェント用のハーネス](/docs/frontiers/long-running-agent-harnesses) — セッションをまたいで状態を運ぶ、ランタイムの上のラッパー。
+- [Managed Agents](/docs/api/managed-agents) — エージェントループがどこに住むかについてのAnthropicの見方。
+- [Computer-Useエージェント](/docs/models/computer-use-agents) — 「エージェントにコンピューターを与える」パターンのクロスプロバイダー調査。
+- [Playwright MCP 詳細ガイド](/docs/api/playwright-mcp-deep-guide) — エージェントランタイムがほぼ必ずホストすることになる、特定のツール1つ。
+
+<Quiz questions={[
+  {
+    q: "Cloudflareの明言した設計目標では、@cloudflare/computer において、エージェントの作業のうちフルコンテナバックエンドを必要とすべき割合はどれくらいか?",
+    options: ["約半分", "10%未満", "おおよそ50〜70%", "全部 — コンテナがデフォルト"],
+    answer: 1,
+    explain: "Cloudflareの公式ターゲットは、アイソレートが典型的なエージェント作業(シェル編集、小さなスクリプト、gitオペレーション)の90%超を処理し、コンテナはフルLinuxユーザーランドを本当に必要とする約10%のために予約されるというもの。"
+  },
+  {
+    q: "E2Bは各サンドボックスにどの分離技術を使っているか?",
+    options: ["V8アイソレート", "gVisorでラップしたコンテナ", "Firecracker microVM", "普通のDockerコンテナ"],
+    answer: 2,
+    explain: "E2Bは各サンドボックスをFirecracker microVMとして実行する — AWS Lambdaが使うのと同じ軽量KVMベース技術 — だからこそセッションごとのカーネル境界を保ちながら200ms以下のウォーム起動を謳える。"
+  },
+  {
+    q: "Cloudflare Sandboxesが2026年4月13日にGAになったとき、ある特定の操作でおおよそ15倍のスピードアップを示した。それはどの操作か?",
+    options: ["最初のモデルトークン", "リポジトリのコールドclone-and-install 対 スナップショットからの復元", "ネットワーク送信スループット", "クロスリージョンレプリケーション"],
+    answer: 1,
+    explain: "GA記事は、コールドな `git clone` + `npm install`(約30秒)を同じワークスペースをスナップショットから復元する場合(約2秒)と比較してベンチマークした — 約15倍の改善で、これがスナップショットベースのサンドボックスがステートフルなエージェントループにこれほど安い理由だ。"
+  },
+  {
+    q: "オープンなユーザー投稿コード(例えばGitHub issueやユーザーのプロンプトから)を実行するエージェントに、どのペアリングが最も適合するか?",
+    options: ["V8アイソレートのみ", "セッションごとにFirecracker microVMを1つ", "共有ホスト上の剥き出しのDockerコンテナ", "最も安いもの — 信頼はランタイムの関心事ではない"],
+    answer: 1,
+    explain: "信頼できないコードはカーネル境界を必要とする。Firecracker microVM(E2B、Vercel Sandboxes、AWS Lambda)はセッションごとのVM分離を提供し、エージェントが実行するコードを自分で制御しないときの防御可能な選択肢だ。"
+  },
+  {
+    q: "@cloudflare/computer では、アイソレートexecとコンテナexecの間でワークスペースの状態はどうやって一貫性を保たれるか?",
+    options: ["アイソレートが呼び出しごとに自分のファイルシステムをコンテナにコピーする", "両方が同じSQLiteバックの仮想ファイルシステムを読み書きする(コンテナへFUSEマウント)", "コンテナは独自のファイルシステムを持ち、結果は手動で差分反映される", "状態は共有されない — ワークスペースごとに1つのバックエンドを選ぶ必要がある"],
+    answer: 1,
+    explain: "Workspaceの仮想ファイルシステムはSQLiteに存在する。アイソレートはWorkers RPC経由でそれにアクセスし、コンテナは小さなデーモン(`computerd`)経由で実ファイルシステムとして見る。そのデーモンがFUSEマウントし、capnweb RPCで変更を同期する。これがタスクがファイルを動かさずにバックエンド間を飛び回れる理由だ。"
+  }
+]} />
+
+## 出典 & さらなる読み物
+
+- [Preview: @cloudflare/computer agent runtime — Cloudflare Changelog (2026-08-03)](https://developers.cloudflare.com/changelog/post/2026-08-03-cloudflare-computer/)
+- [cloudflare/computer on GitHub](https://github.com/cloudflare/computer) — README、`Workspace` API、バックエンド一覧
+- [Agents have their own computers with Sandboxes GA — Cloudflare Blog](https://blog.cloudflare.com/sandbox-ga/) — 2026年4月13日のGA記事
+- [Cloudflare Sandbox docs — Cloudflare Agents](https://developers.cloudflare.com/agents/tools/sandbox/)
+- [Cloudflare Launches Persistent, Stateful, Computer-like Environments for Agents — InfoQ](https://www.infoq.com/news/2026/08/cloudflare-computer-agents/)
+- [E2B — Firecracker-based sandboxes for AI agents](https://e2b.dev/) — microVMファーストの反対の賭け
+- [Modal — gVisor-based serverless compute](https://modal.com/)
+- [Firecracker microVM project](https://firecracker-microvm.github.io/) — Lambda、E2B、Fly.io Machinesの背後にある基盤技術
