@@ -1,0 +1,187 @@
+---
+sidebar_position: 6.7
+title: "Runtime per agenti: isolate vs container"
+description: "Il 3 agosto 2026 Cloudflare ha rilasciato @cloudflare/computer — un runtime per agenti in anteprima che indirizza la maggior parte del lavoro verso isolate V8 e ricorre a un container Linux completo solo quando il task lo richiede davvero. La scommessa è che circa il 90% di ciò che fa un agente (leggere un file, eseguire `grep`, fare un commit) non ha bisogno di una microVM. Questa pagina analizza quella scommessa, il campo che la contesta (E2B su Firecracker, Modal su gVisor) e come scegliere la primitiva giusta per il tuo stack di agenti."
+keywords: [cloudflare computer, agent runtime, sandbox, firecracker microvm, gvisor, v8 isolate, cloudflare sandboxes, e2b, modal, daytona, agent infrastructure, agent execution, computer use, agent isolation, agent containers, dynamic workers]
+---
+
+<LevelBadge level="advanced" />
+
+# Runtime per agenti: isolate vs container
+
+Ogni agente serio ha bisogno di un posto dove *fare* le cose: leggere file, eseguire comandi shell, installare un pacchetto, eseguire uno script appena scritto. Per la maggior parte del 2025 la risposta a cui tutti si aggrappavano era "dagli un container" — un'immagine Docker o, meglio ancora, una microVM Firecracker avviata su richiesta. Quella risposta funziona. È anche costosa per ogni azione e lenta ad avviarsi, e smette di funzionare quando provi a dare ad ogni agente di ogni utente il proprio ambiente su larga scala.
+
+Il **3 agosto 2026** Cloudflare ha rilasciato un pacchetto in anteprima chiamato `@cloudflare/computer` che sostiene che il default fosse sbagliato. L'affermazione dell'azienda è che se guardi cosa gli agenti passano davvero il tempo a fare — `ls`, `cat`, `sed`, `git status`, `npm install`, piccoli script shell, minuscole trasformazioni JS — un **isolate V8** svolge il lavoro in millisecondi a una cifra a una frazione del costo, e serve avviare un container Linux completo solo quando il task lo richiede davvero. Nelle loro parole: i container dovrebbero gestire "meno del 10% del lavoro di un agente".
+
+Questa pagina non è una pubblicità di Cloudflare. Il framing 90/10 è una scommessa, non un benchmark. Ma è l'istanza più netta di uno spostamento reale in atto tra tutti i vendor di infrastruttura per agenti nel 2026, e capire i tradeoff che impone è ormai il minimo sindacale per chiunque costruisca prodotti basati su agenti.
+
+<Callout type="objectives" items={[
+  "Le tre vere primitive di isolamento (isolate V8, container, microVM Firecracker) e cosa costa realmente ciascuna in tempo di avvio, memoria e raggio d'esplosione",
+  "L'ipotesi 90/10 dietro @cloudflare/computer e perché il design abbina un runtime a isolate con un container come via di fuga",
+  "Come Cloudflare Sandboxes (GA il 13 aprile 2026) differisce da @cloudflare/computer (anteprima il 3 agosto 2026) — stessa azienda, prodotti diversi",
+  "Il campo: E2B su Firecracker, Modal su gVisor, Daytona/E2B/Cloudflare sui container — chi scommette su cosa e perché",
+  "Un framework decisionale concreto: quando il tuo agente ha bisogno di una microVM, quando basta un container, e quando un isolate è la scelta giusta",
+]} />
+
+<VerifyNote lastVerified="2026-08-10" source="https://developers.cloudflare.com/changelog/post/2026-08-03-cloudflare-computer/">
+`@cloudflare/computer` è in **anteprima iniziale** al momento della scrittura. Il pacchetto è rilasciato con licenza MIT, pubblicato come `@cloudflare/computer` su npm, e risiede su github.com/cloudflare/computer (~7,3k stelle nella prima settimana). Le API sono esplicitamente marcate come instabili. Il framing isolate-vs-container è duraturo; nomi API specifici, logica di dispatch e prezzi cambieranno — consulta il changelog collegato prima di citare qualcosa di specifico in produzione.
+</VerifyNote>
+
+## Le tre primitive che hai davvero a disposizione
+
+Ignora per un momento i nomi di marketing. Sotto ogni sandbox per agenti oggi sul mercato c'è una di queste tre tecnologie di isolamento, ognuna con una curva di costo molto diversa.
+
+<Steps
+  items={[
+    {title: "Isolate V8 (il più leggero)", body: "Un contesto di esecuzione JavaScript all'interno di un singolo processo V8. Il tempo di avvio è nell'ordine dei millisecondi a una cifra, l'overhead di memoria è di decine di kilobyte, e migliaia possono coesistere in un unico processo. Usato da Cloudflare Workers, Deno Deploy, Vercel Edge. Non può eseguire binari Linux arbitrari — il codice deve essere JavaScript (o WASM) raggiungibile dall'isolate. L'isolamento è a livello di runtime del linguaggio: nessun confine di kernel tra isolate nello stesso processo."},
+    {title: "Container", body: "Un gruppo di processi Linux con la propria vista del filesystem, namespace di rete, limiti cgroup — ma che condivide il kernel host. Docker, containerd, pod Kubernetes. Il tempo di avvio va da centinaia di millisecondi a qualche secondo a freddo; il floor di memoria è da decine a centinaia di MB. Esegue qualsiasi binario Linux. L'isolamento dipende interamente dal fatto che il kernel host non sia compromesso, motivo per cui i cloud provider raramente eseguono codice utente non fidato direttamente in un container nudo."},
+    {title: "microVM Firecracker (la scelta comune più forte)", body: "Una macchina virtuale minimale basata su KVM con il proprio kernel. AWS Lambda, E2B, Fly.io e Vercel Sandboxes girano su Firecracker. Il tempo di avvio è ~125ms (dichiarato da AWS) fino a qualche centinaio di ms, il floor di memoria è di pochi MB (la VM), più quanto serve al guest. Esegue qualsiasi binario Linux. L'isolamento è a livello di kernel — una compromissione in una microVM non filtra nell'host o nei suoi vicini."},
+  ]}
+/>
+
+Due tecnologie adiacenti compaiono abbastanza spesso da meritare un nome:
+
+- **gVisor** (usato da Google Cloud Run e Modal) è un kernel user-space scritto in Go che intercetta le syscall da un container e le reimplementa in modo sicuro. L'avvio è veloce come un container; l'isolamento è più forte di un container nudo ma non tanto quanto un hypervisor. Modal ha scommesso l'intero stack su questo nel 2024.
+- **WASM sandbox** (Fastly Compute, WasmEdge) hanno la forma di isolate ma per WebAssembly compilato invece che JavaScript. Stesso profilo di costo degli isolate V8; ecosistema di linguaggi diverso.
+
+La regola pratica: **isolate → container → gVisor → microVM** è una scala di isolamento crescente e costo di avvio crescente. Ogni runtime per agenti sceglie un gradino, oppure — e questa è la nuova mossa di Cloudflare — abbina *due* gradini e instrada a runtime.
+
+## L'ipotesi 90/10
+
+Guarda cosa fa un agente in una sessione. Un tipico turno di agente di coding assomiglia a questo: `ls`, `cat` di due file, esecuzione di un formatter, modifica di un file, `git diff`, `git commit`. Niente di tutto ciò richiede un kernel Linux fresco. Niente di ciò richiede nemmeno Python. La maggior parte è byte-in-byte-out su un piccolo filesystem virtuale.
+
+Ora guarda l'altro 10%: eseguire l'intera test suite, `npm install`, transcodificare un video, avviare un Chrome headless. Quel lavoro richiede davvero uno userland Linux. Beneficia di un kernel vero. Va bene — anzi è *positivo* — che costi di più, perché avviene raramente.
+
+L'argomento di Cloudflare è che se distribuisci ogni agente su una microVM, paghi prezzi da microVM per il 90% del lavoro che è `cat` e `grep`. La loro scommessa con `@cloudflare/computer` è che un runtime intelligente dovrebbe:
+
+1. **Fare default sull'isolate.** I comandi shell girano in un isolate a forma di bash ("just-bash" in esecuzione dentro un Dynamic Worker); i moduli JavaScript girano in un isolate fresco con I/O strutturato.
+2. **Ripiegare su un container** nel momento in cui il task lo richiede davvero — binari arbitrari, dipendenze native, CPU sostenuta.
+3. **Tenere lo stato del workspace in un unico posto** — un filesystem virtuale basato su SQLite leggibile/scrivibile da entrambi i mondi — così un task può spostarsi tra isolate e container senza ricaricare file o perdere contesto.
+
+Il dispatch è pensato per essere automatico ("i modelli di frontiera sono molto bravi a prendere la decisione corretta", secondo l'annuncio), con il lato isolate gestito da `just-bash` e Dynamic Workers, e il lato container da un piccolo demone chiamato `computerd` che monta il workspace tramite FUSE e sincronizza le modifiche via RPC `capnweb`. Dal tuo codice tocchi un singolo oggetto `Workspace`; dove un dato `exec` sia effettivamente girato è un dettaglio implementativo.
+
+L'affermazione con cui vale la pena confrontarsi non è la logica di dispatch specifica — quella evolverà — ma il punto **strutturale**: se scegli una sola primitiva di isolamento per l'intero agente, pagherai troppo su un asse. Un runtime che instrada può essere economico dove economico è sicuro, e forte dove è richiesta la forza.
+
+## La contro-scommessa: microVM ovunque
+
+Non tutti sono d'accordo. Nel campo del 2026 c'è disaccordo reale su quanto isolamento serva davvero a un agente.
+
+- **E2B** ha costruito l'intero prodotto sulle microVM Firecracker — la stessa tecnologia che usa AWS Lambda — e dichiara avvii sotto i 200ms per sandbox in regioni calde, sessioni fino a 24 ore e migliaia di VM concorrenti per account. Il loro pitch è esattamente l'opposto di quello di Cloudflare: dai a ogni sessione un kernel vero, perché non sai cosa proverà a fare l'agente, e un confine di VM Linux è l'unico isolamento che puoi dimostrare a una security review.
+- **Vercel Sandboxes** girano anch'essi su Firecracker tramite un pool gestito da Vercel.
+- **Modal** ha scommesso su gVisor: avvio veloce come un container, isolamento con intercettazione delle syscall. Più debole di un hypervisor ma più forte di container nudi, e più economico di Firecracker.
+- **Daytona** e le piattaforme tradizionali di dev-container consegnano all'agente un container vero, sulla teoria che i workload degli agenti siano abbastanza vicini a quelli degli sviluppatori umani da rendere adatta la stessa primitiva.
+
+Il disaccordo non è ignorabile. Cloudflare fa girare deliberatamente la maggior parte della shell di un agente in un processo V8 condiviso — un confine che un attaccante determinato con uno zero-day su V8 può attraversare. E2B e Vercel sostengono che qualsiasi codice scritto da un agente debba essere trattato come non fidato per default, il che impone una microVM.
+
+Entrambe le posizioni sono difendibili. La scelta giusta dipende da **chi possiede il codice che l'agente eseguirà**. Se l'agente esegue il tuo codice già rivisto contro i tuoi dati, la scommessa isolate-first di Cloudflare è enormemente più economica a parità di sicurezza pratica. Se l'agente esegue codice preso da PR aperte, issue di GitHub o prompt degli utenti finali — qualunque cosa non ti puoi fidare — probabilmente vuoi un confine di kernel tra questo e tutto il resto, e dovresti pagare per una microVM.
+
+## I due prodotti di Cloudflare, uno accanto all'altro
+
+La singola confusione più comune di questo mese è tra i due prodotti di infrastruttura per agenti di Cloudflare. Sono stati rilasciati a quattro mesi di distanza, vivono sotto lo stesso brand e risolvono problemi correlati ma diversi.
+
+| | **Cloudflare Sandboxes** | **@cloudflare/computer** |
+|---|---|---|
+| Stato | GA (13 aprile 2026) | Anteprima iniziale (3 agosto 2026) |
+| Isolamento | Container per sessione nominata | Isolate per default, container su richiesta |
+| Filesystem | FS nativo del container, osservato via inotify; snapshot su R2 | FS virtuale basato su SQLite, montato via FUSE nei container |
+| Avvio | Cold clone-and-install ~30s; snapshot restore ~2s (15× più veloce) | Isolate: millisecondi a una cifra; container: secondi |
+| Ideale per | Sessioni long-running stile dev-server, code interpreter che mantengono stato Python | Turni di agente brevi, a raffica, prevalentemente shell con task pesanti occasionali |
+| Prezzi | Cicli CPU attivi (fatturati solo in esecuzione) | Non ancora pubblicati |
+
+Il modello mentale: **Sandboxes dà a un agente un computer completo**; **Computer dà a un agente un *layer di routing* che sceglie la compute giusta per ogni azione**. Possono coesistere — il backend container di Computer può usare e usa infrastruttura in stile Sandboxes sotto il cofano — ma non sono lo stesso prodotto.
+
+## Quando ciascuna primitiva è la scelta giusta
+
+Piuttosto che eleggere un favorito, usa la forma concreta del lavoro del tuo agente.
+
+<Steps
+  items={[
+    {title: "Stai costruendo un agente di coding per il tuo team", body: "Operatore fidato, dati fidati, prevalentemente operazioni shell delimitate. Isolate-first (Cloudflare Computer, o fatto a mano su Workers) o gVisor (Modal) è una buona scelta. I risparmi su tempo di avvio e costo per operazione si accumulano velocemente alla scala di un agente — ogni `ls` conta quando l'agente ne esegue migliaia all'ora."},
+    {title: "Stai eseguendo codice utente aperto, PR generate da agenti o valutando modelli non fidati", body: "L'isolamento del kernel non è opzionale. Scegli Firecracker (E2B, Vercel Sandboxes) o un equivalente microVM hardenizzato. Non eseguire codice non fidato in un processo V8 condiviso, per quanto veloce."},
+    {title: "Devi mantenere vivo un ambiente Python/Jupyter con stato attraverso molti turni", body: "Cloudflare Sandboxes (GA), E2B, Daytona. Vuoi un ambiente Linux reale e persistente con snapshot; non vuoi pagare il costo di reinstallare pandas ad ogni chiamata. Lo snapshot restore è ciò che rende economica questa soluzione."},
+    {title: "Il tuo agente è prevalentemente ragionamento + poche chiamate a tool pesanti (un agente di ricerca o assistente di ricerca)", body: "Il runtime quasi non conta — scegli per ergonomia dell'SDK e per il provider di modelli su cui ti sei già impegnato. La latenza del runtime è schiacciata dalla latenza del modello."},
+    {title: "Vuoi la storia di audit più forte", body: "Firecracker vince ancora qui. I compratori regolamentati capiscono 'ogni sessione è una macchina virtuale con il proprio kernel' in un modo in cui non capiscono ancora 'ogni sessione è un isolate V8 con un cablaggio di capability accurato'."},
+  ]}
+/>
+
+## Un esempio minimo di `@cloudflare/computer`
+
+Concretamente, un workspace isolate-first ha questo aspetto. Ottieni un oggetto, e non dici dove viene eseguito un dato exec.
+
+<PromptCard title="Creare un workspace ed eseguire un comando shell">
+{`import { Workspace } from "@cloudflare/computer";
+
+const ws = new Workspace();
+
+// Isolate-backed by default: fast, cheap.
+await ws.write("hello.txt", "hi\\n");
+const out = await ws.runtime.exec("cat hello.txt && ls -la");
+
+console.log(out.stdout);`}
+</PromptCard>
+
+<PromptCard title="Forzare un container Linux completo quando l'isolate non basta">
+{`// npm install needs a real userland — pick the container backend explicitly.
+await ws.runtime.exec("npm install lodash", { backend: "container" });`}
+</PromptCard>
+
+Leggi l'annuncio e il changelog prima di cablare questo in qualcosa di reale — i nomi esatti dei backend, il default di routing e il modello di auth sono tutti soggetti a cambiamento prima che il pacchetto esca dall'anteprima.
+
+## Cosa sorprende davvero le persone di tutto questo
+
+Tre cose colgono regolarmente impreparati i team la prima volta che costruiscono sopra un runtime per agenti.
+
+- **Il tempo al primo comando della sandbox domina gli agenti brevi.** Se il turno del tuo agente è "esegui un comando shell", un avvio di microVM da 200ms seguito da un comando da 5ms è un overhead 40×. Moltiplica per qualche migliaio di turni per utente al giorno e la bolletta del runtime diventa la voce di costo più grande, davanti al modello.
+- **La portabilità dello stato vale più della velocità grezza.** Lo snapshot restore di 2 secondi di Cloudflare Sandboxes, e il modello single-workspace-across-backend di `@cloudflare/computer`, vincono entrambi lo stesso argomento: è più economico *portarsi lo stato* che *ricostruirlo*.
+- **L'isolamento è una questione legale, non solo tecnica.** La primitiva giusta dipende da cosa la tua superficie di compliance accetterà. Una microVM è più facile da difendere davanti a un auditor rispetto a un isolate, anche nei casi in cui l'isolate sia genuinamente più sicuro per il tuo workload.
+
+## Letture correlate su AILmanac
+
+- [Harness per agenti long-running](/docs/frontiers/long-running-agent-harnesses) — il wrapper sopra il runtime che porta lo stato attraverso le sessioni.
+- [Managed Agents](/docs/api/managed-agents) — la posizione di Anthropic su dove viva il loop dell'agente.
+- [Agenti computer-use](/docs/models/computer-use-agents) — panoramica cross-provider del pattern "dai un computer all'agente".
+- [Guida approfondita a Playwright MCP](/docs/api/playwright-mcp-deep-guide) — uno strumento specifico che un runtime per agenti finisce quasi sempre per ospitare.
+
+<Quiz questions={[
+  {
+    q: "Secondo l'obiettivo di design dichiarato da Cloudflare, quale frazione del lavoro di un agente dovrebbe richiedere il backend container completo in @cloudflare/computer?",
+    options: ["Circa la metà", "Meno del 10%", "Grossomodo 50–70%", "Tutto — i container sono il default"],
+    answer: 1,
+    explain: "L'obiettivo pubblico di Cloudflare è che gli isolate gestiscano >90% del lavoro tipico dell'agente (modifiche shell, piccoli script, operazioni git), e i container siano riservati al ~10% che richiede davvero uno userland Linux completo."
+  },
+  {
+    q: "Che tecnologia di isolamento usa E2B per ogni sandbox?",
+    options: ["Isolate V8", "Container avvolti da gVisor", "microVM Firecracker", "Container Docker semplici"],
+    answer: 2,
+    explain: "E2B esegue ogni sandbox come una microVM Firecracker — la stessa tecnologia leggera basata su KVM che usa AWS Lambda — motivo per cui può dichiarare avvii a caldo sotto i 200ms mantenendo un confine di kernel per sessione."
+  },
+  {
+    q: "Quando Cloudflare Sandboxes è andato in GA il 13 aprile 2026, ha mostrato uno speedup di circa 15× su un'operazione specifica. Quale?",
+    options: ["Primo token del modello", "Cold clone-and-install di un repo vs restore da snapshot", "Throughput di egress di rete", "Replica cross-region"],
+    answer: 1,
+    explain: "Il post di GA ha misurato un cold `git clone` + `npm install` (~30s) contro il restore dello stesso workspace da uno snapshot (~2s) — un miglioramento di ~15×, e il motivo per cui le sandbox basate su snapshot sono così tanto più economiche per i loop di agenti con stato."
+  },
+  {
+    q: "Quale accoppiamento corrisponde meglio a un agente che esegue codice inviato da utenti esterni (per esempio da issue GitHub o prompt utente)?",
+    options: ["Solo isolate V8", "Una microVM Firecracker per sessione", "Container Docker nudi su un host condiviso", "Ciò che costa meno — la fiducia non è una questione di runtime"],
+    answer: 1,
+    explain: "Il codice non fidato ha bisogno di un confine di kernel. Le microVM Firecracker (E2B, Vercel Sandboxes, AWS Lambda) forniscono isolamento VM per sessione e sono la scelta difendibile quando non controlli il codice che l'agente eseguirà."
+  },
+  {
+    q: "In @cloudflare/computer, come viene mantenuto coerente lo stato del workspace tra un exec in isolate e un exec in container?",
+    options: ["L'isolate copia il proprio filesystem nel container ad ogni chiamata", "Entrambi i lati leggono/scrivono lo stesso filesystem virtuale basato su SQLite (montato via FUSE nel container)", "Il container ha il proprio filesystem e i risultati vengono confrontati manualmente", "Lo stato non è condiviso — devi scegliere un backend per workspace"],
+    answer: 1,
+    explain: "Il filesystem virtuale del Workspace vive in SQLite. Gli isolate vi accedono via Workers RPC; i container lo vedono come un filesystem reale tramite un piccolo demone (`computerd`) che lo monta via FUSE e sincronizza le modifiche via RPC capnweb. È questo che permette a un task di saltare tra backend senza spostare file."
+  }
+]} />
+
+## Fonti e approfondimenti
+
+- [Preview: @cloudflare/computer agent runtime — Cloudflare Changelog (2026-08-03)](https://developers.cloudflare.com/changelog/post/2026-08-03-cloudflare-computer/)
+- [cloudflare/computer su GitHub](https://github.com/cloudflare/computer) — README, API `Workspace`, elenco backend
+- [Agents have their own computers with Sandboxes GA — Cloudflare Blog](https://blog.cloudflare.com/sandbox-ga/) — il post di GA del 13 aprile 2026
+- [Documentazione Cloudflare Sandbox — Cloudflare Agents](https://developers.cloudflare.com/agents/tools/sandbox/)
+- [Cloudflare Launches Persistent, Stateful, Computer-like Environments for Agents — InfoQ](https://www.infoq.com/news/2026/08/cloudflare-computer-agents/)
+- [E2B — Sandbox basate su Firecracker per agenti AI](https://e2b.dev/) — la contro-scommessa microVM-first
+- [Modal — Compute serverless basata su gVisor](https://modal.com/)
+- [Progetto Firecracker microVM](https://firecracker-microvm.github.io/) — la tecnologia sottostante a Lambda, E2B, Fly.io Machines
