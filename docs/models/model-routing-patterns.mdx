@@ -1,0 +1,208 @@
+---
+sidebar_position: 7.1
+title: "Model Routing Patterns: Cascades, Classifiers, and What Actually Ships"
+description: "The design patterns for sending each request to the right AI model — rule-based, classifier, complexity, cascade, ensemble, fallback. When to use each, what breaks, and the recipes that actually ship in 2026."
+keywords: [LLM routing, model routing, model cascade, LLM router, RouteLLM, orchestrator worker, multi-model app, Claude Haiku Sonnet Opus, GPT Gemini routing, AI gateway routing]
+---
+
+<LevelBadge level="intermediate" />
+
+Once your product does more than one kind of thing, one model stops being the right answer for every request. Classify the ticket, extract the fields, draft the reply, review it — those are four jobs with four different cost/latency/quality budgets. The pattern the whole field has converged on in 2026 is to **route each request to the model that fits the job**, and to **escalate** when the cheap model isn't good enough. This page is the editorial guide to those patterns: what they are, when each one ships, the recipes that work, and the failure modes to avoid.
+
+<Callout type="objectives" items={[
+  "Know the six routing patterns that ship in production and when to reach for each",
+  "Understand the difference between routing (one decision up front) and cascading (escalate on failure)",
+  "Build your first classifier router with a copy-paste prompt and a one-week rollout plan",
+  "Read the cost math: when routing saves real money, and when the overhead eats the savings",
+  "Recognize the anti-patterns that turn a router into an outage waiting to happen",
+]} />
+
+<VerifyNote lastVerified="2026-08-10" source="https://www.anthropic.com/engineering/building-effective-agents">
+Anthropic's own "Building Effective Agents" guide defines **Routing** as a first-class workflow: *"Routing classifies an input and directs it to a specialized followup task. This workflow allows for separation of concerns, and building more specialized prompts."* Two of the examples they give are exactly the ones covered here — splitting customer-service categories into distinct downstream flows, and *"routing easy questions to smaller models like Claude Haiku... and difficult ones to Claude Sonnet."* Model names, prices and quality gaps drift; always check the current per-provider docs before hard-coding a threshold. Prices/limits in this page: check [Models & pricing](/docs/whats-new/models-and-pricing) before you build.
+</VerifyNote>
+
+## Why routing is the default pattern in 2026
+
+The "one big model for everything" era is quietly over. Three forces drove the shift:
+
+- **A wide, well-behaved price curve.** Every major provider now ships a family — Anthropic (Haiku / Sonnet / Opus), OpenAI (small / mid / frontier), Google (Flash / Pro), plus open-weight tiers. Cheap tiers are 10–100× cheaper than the frontier and, on narrow tasks, only marginally worse. Leaving the cheap tier idle is money you're setting on fire.
+- **Real latency budgets.** A classify step in front of a support agent needs to answer in under 300 ms. A frontier model is often the wrong tool for reasons other than cost — it's just too slow for the step.
+- **Specialization.** Different models genuinely lead on different tasks — one is better at structured JSON, another at long context, another at code, another at multilingual. The rankings shuffle monthly (see [Choosing a Model](/docs/models/choosing-a-model)), but the shape — "different tools for different jobs" — is durable.
+
+The result: a **router** in front of your models, deciding per-request where to send the work. The rest of this page is the design vocabulary for that router.
+
+## The two big families: routing vs cascading
+
+Almost every pattern below is a variation on two ideas. Get the difference right and the rest is naming.
+
+- **Routing** makes **one decision up front**, before any model runs. A classifier (a rule, a small model, or a bigger model) reads the request, picks a target, and hands off. Fast, cheap in the steady state, but *wrong when the classifier is wrong* — and you don't find out until later.
+- **Cascading** runs the **cheap model first** and **escalates** to a stronger one only when a defined signal says "this answer isn't good enough." Robust because the signal is grounded in the actual output, but every escalation pays *both* models — so the win only survives when the cheap tier handles most traffic on its own.
+
+They compose. A production system usually does *both*: route to the right lane based on task type, then cascade inside a lane based on the cheap model's confidence. Anthropic's taxonomy calls the up-front decision "Routing" and the dynamic decomposition "Orchestrator-Workers"; cascading is the industry name for the "try small first, escalate on failure" variant of the same idea.
+
+## The six patterns that actually ship
+
+### 1. Rule-based routing
+
+A hand-written rule (regex, keyword, request field, message length) decides the target. No model runs to make the decision.
+
+- **When it wins.** The signal is unambiguous and cheap: "if the request contains a code fence, send to the coding model", "if the customer is on the Enterprise plan, send to the frontier tier", "if the input is > 200k tokens, send to the long-context model."
+- **When it breaks.** The rule silently rots as the domain shifts — new phrasing, new intents, edge cases the regex never anticipated. Every "if X then Y" is a small piece of tech debt.
+- **Ship it when.** You have one or two high-value carve-outs (a paying tier, a code path, a language) and want zero latency overhead.
+
+### 2. Classifier routing (LLM-as-router)
+
+A small, fast model reads the request and returns a label — `"billing" | "technical" | "sales" | "other"` — which picks the downstream handler. Anthropic gives this as one of their canonical examples: easy questions to Haiku, hard ones to Sonnet.
+
+- **When it wins.** You have a **small, stable set of categories** and each one deserves its own prompt/tool set/model. A single specialized prompt per category beats one giant do-everything system prompt.
+- **When it breaks.** Categories overlap (many real requests are "billing *and* technical"), the classifier misroutes silently, or your label set explodes past ~10 categories and picks become noisy.
+- **Ship it when.** You can enumerate the top 5–8 request types and *each* one materially benefits from a different handler.
+
+<PromptCard title="Classifier-router prompt (portable across Claude/GPT/Gemini)">
+{`You are a request classifier for a support product.
+
+Read the CUSTOMER MESSAGE below and return a JSON object with:
+  - "category": one of ["billing", "technical", "account", "sales", "other"]
+  - "confidence": a number from 0.0 to 1.0
+  - "reason": one short sentence explaining the pick
+
+If you are less than 0.7 confident, use "other" and say why.
+Return ONLY the JSON, no prose, no code fence.
+
+CUSTOMER MESSAGE:
+"""
+{{message}}
+"""`}
+</PromptCard>
+
+### 3. Complexity-based routing
+
+Instead of *what* the request is about, you estimate *how hard* it is — length, entity count, whether it references numbers/code, whether tool use is likely — and pick a tier accordingly: cheap for easy, mid for medium, frontier for hard.
+
+- **When it wins.** The task type is roughly homogeneous (say, "answer a coding question") but the individual requests vary wildly in difficulty. Instead of paying frontier prices for a two-line syntax question, you pay Haiku prices for those and reserve the frontier for the multi-file refactors.
+- **When it breaks.** The "difficulty score" is really "prompt length", and long prompts aren't always hard prompts. A user pastes a huge stack trace and asks a trivial question about it — your router upgrades needlessly.
+- **Ship it when.** You have measurable variance in difficulty *within* a task type and clear signals (length, presence of code, number of subquestions) that correlate with it.
+
+### 4. Cascade (cheap-first, escalate on failure)
+
+Try the cheap model first. Check the answer against a **failure signal**. If it fails, retry on the stronger model. This is the pattern the industry ships more than any other, because the "signal" is grounded in what the model *actually said* — not a guess about what it will say.
+
+- **What counts as a signal?** Anything cheap and reliable: schema validation on JSON output, a "does this answer the question?" check by an LLM judge, an explicit `"needs_help": true` field the model can emit when unsure, a downstream test that runs the code, a low logprob on the answer token when the provider exposes it.
+- **Cost math.** The savings survive only when the cheap tier handles most traffic. If 90% of requests get resolved by the cheap model and 10% escalate, you pay `0.9 × cheap + 0.1 × (cheap + strong)` ≈ mostly cheap. If half escalate, you're paying *more* than always using the strong model.
+- **When it wins.** Tasks with a clear "did this work?" signal — code that runs or doesn't, JSON that validates or doesn't, extraction where the field either matches the source or doesn't.
+- **When it breaks.** No cheap failure signal, or the cheap model *thinks* it succeeded when it didn't (silent failure — the worst case).
+- **Ship it when.** You can name the failure signal in one sentence and it doesn't require the strong model to check.
+
+### 5. Ensemble / verify-and-vote
+
+Run the same request against N models in parallel and reconcile the answers — take a majority vote, take the first schema-valid one, or send all N to a judge model that picks the best.
+
+- **When it wins.** Quality matters more than cost or latency: legal research, medical summarization, high-stakes financial extraction, "review this contract for red flags." Also useful for hard math and code, where different models make different mistakes and their intersection is more reliable than any single one.
+- **When it breaks.** You pay N× the cost and inherit the slowest model's latency for *every* request. Ensembles are a tax you accept for quality, not a way to save money.
+- **Ship it when.** The cost of getting the answer wrong is at least an order of magnitude larger than the cost of N model calls — which is almost never true for consumer traffic and often true for enterprise workflows.
+
+### 6. Fallback (availability, not cost)
+
+Try the primary; on 429/5xx/timeout, transparently retry on a secondary from a different provider. This is the pattern every serious multi-model app needs even if it uses none of the others.
+
+- **When it wins.** Every time your primary provider has an outage or throttles you at exactly the wrong moment. Fallback is a *reliability* pattern, not a cost-optimization pattern — the secondary is usually a different provider's equivalent tier, not a cheaper model.
+- **What to watch.** The fallback path is untested code most of the time; it will regress. Run at least a small share of live traffic through the secondary continuously so you find out the response shape drifted *before* you're relying on it in an outage.
+- **Ship it when.** Your uptime SLO is higher than any single provider's, or a single-provider dependency is a business risk (contracts, region availability, geopolitics).
+
+## Comparison at a glance
+
+| Pattern | Decision made | Adds latency? | Adds cost? | Main risk |
+| --- | --- | --- | --- | --- |
+| Rule-based | Before the model runs | No | No | Rules silently rot as inputs shift |
+| Classifier | Before, by a small model | + one fast call | + one cheap call | Misroutes when categories overlap |
+| Complexity-based | Before, by a heuristic | Negligible | Negligible | "Difficulty" often means "length" |
+| Cascade | After the cheap model tries | + retry when escalating | Mostly-cheap in steady state | Silent success on wrong answer |
+| Ensemble | Runs N in parallel, reconciles | Slowest-of-N | N× | You are buying quality, not saving money |
+| Fallback | Only on primary failure | 0 in the happy path | 0 in the happy path | Untested until it matters |
+
+## Real ship recipes
+
+The patterns above are Lego. In production they compose. Three recipes we see repeatedly:
+
+- **Customer support agent.** Classifier router picks a lane (billing / technical / account / sales), each lane has its own system prompt and tool set, inside the technical lane a **cascade** tries a cheap model first and escalates to the frontier when a "needs escalation" tool call fires. Fallback across providers wraps everything. Result: 70–90% of traffic never touches the frontier model.
+- **Coding assistant.** Rule-based routing on file type and diff size sends small edits to a cheap tier and multi-file refactors to a coding-specialist. A cascade on the output — "does the patch apply cleanly and pass the smoke test?" — escalates failures to a stronger model. Compare against the field guide in [Claude vs GPT vs Gemini for coding](/docs/models/claude-gpt-gemini-for-coding).
+- **RAG QA over a document corpus.** Classifier picks between "answer from context" (cheap) and "needs cross-document reasoning" (mid). An ensemble of two models cross-checks the answer for high-stakes documents (contracts, filings). Compare with [Grounding & RAG discipline](/docs/prompting/grounding).
+
+## How to build your first router in a week
+
+<Steps items={[
+  {title: "Day 1 — Pick one workload and log a week of it", body: "Instrument the *real* prompts your product already sends. You need at least a few hundred, ideally categorized by outcome (resolved / escalated / wrong). Without ground-truth traffic you're guessing at where the router should send things."},
+  {title: "Day 2 — Cluster by hand", body: "Read 100 requests and write down the 5–8 categories they naturally fall into. If you can't do this in an afternoon, the workload isn't ready for a classifier router — start with rule-based routing on the one or two obvious carve-outs (paying tier, long context, code)."},
+  {title: "Day 3 — Write the classifier prompt", body: "Use the PromptCard above. Run it against yesterday's clusters on a cheap model (Haiku, Gemini Flash, GPT-nano). Measure accuracy against your hand-labels. If it's below ~85%, either merge categories or add few-shot examples — don't ship a router that's wrong 1-in-5."},
+  {title: "Day 4 — Route + shadow-log", body: "Wire the router into the request path but do NOT change the downstream model yet — every request still goes to the current model, and you *also* log where the router *would* have sent it. Compare against real outcomes for a day."},
+  {title: "Day 5 — Turn it on for one lane", body: "Flip routing live for the highest-value lane (usually the easiest one, where cheap-tier savings are biggest). Watch quality metrics — retry rate, thumbs-down rate, escalation rate — for 24 hours."},
+  {title: "Day 6 — Add a cascade inside a lane", body: "For the lane where the cheap tier is 'usually right but sometimes wrong', add an escalation signal (schema validation, judge check, explicit `needs_help` flag) and retry on the strong model. Confirm the fallback path with a chaos test — kill the cheap model and check the escalation works."},
+  {title: "Day 7 — Write the runbook and hand it off", body: "Document the router's rules, the classifier prompt, the escalation signal, and — critically — the metrics dashboard. If the router silently misroutes a category next month, someone needs to notice."},
+]} />
+
+## What actually gets deployed (2026 field notes)
+
+- **Cascades ship far more than learned routers.** Research systems like RouteLLM train a router on preference data and can cut cost 2× or more on standard benchmarks (see the [RouteLLM paper](https://arxiv.org/abs/2406.18665)) — but training and maintaining a learned router is real engineering. Most teams get most of the wins from cheap-first + explicit escalation.
+- **The classifier is almost always a cheap chat model, not a fine-tune.** Haiku-class or Flash-class models with a good prompt hit the accuracy bar for 5–8 categories. Fine-tune only if you're at scale and the cheap classifier is your bottleneck.
+- **The evaluator matters more than the router.** A router without a metrics loop is a guess. Instrument every routing decision with request → chosen model → outcome, and review weekly. You can't tune what you don't measure.
+- **Infrastructure and design are separable.** The *patterns* above are language- and provider-neutral. The *plumbing* — one endpoint per provider, virtual keys, per-team spend caps, prompt caching — is what an AI gateway gives you. Once you know the pattern you want, see [AI gateways: LiteLLM, OpenRouter, Portkey, Vercel](/docs/models/ai-gateways-litellm-openrouter-portkey) for the concrete choice.
+
+## Anti-patterns to avoid
+
+- **The classifier that calls the frontier model.** If picking a lane costs as much as running the strong model would have, you saved nothing and added latency. Classifiers must be cheap.
+- **Cascade without a failure signal.** "The cheap model returned *something*, so we're done" is not a signal — it's a bet. Every cascade needs a defined check the cheap model can *fail*.
+- **Rule proliferation.** Ten rules is manageable. A hundred is a hand-coded classifier without the tests. When your rule set drifts past ~15 branches, rip it out and use a small model.
+- **Ensembles as a cost strategy.** Running three models in parallel to save money is a category error — ensembles cost N× to buy quality, not to save cost. If you're using an ensemble to make up for a bad primary model, fix the primary instead.
+- **No fallback path.** Every model provider goes down eventually. A single-provider product will inherit that outage. See [AI gateways](/docs/models/ai-gateways-litellm-openrouter-portkey) for the plumbing.
+- **Routing without observability.** A router that quietly sends everything to the wrong lane looks fine until quality craters two weeks later. Log every decision with the input hash, the chosen model, the outcome, and the cost — and review weekly.
+
+## Check your understanding
+
+<Quiz questions={[
+  {
+    q: "You have a support product where 90% of requests are answered correctly by a cheap model, but the remaining 10% need the frontier. What pattern gives you the biggest cost win?",
+    options: [
+      "Ensemble — run cheap + frontier in parallel and take the better one",
+      "Cascade — try cheap first, escalate to frontier on a failure signal",
+      "Always route to the frontier, since 10% need it anyway",
+      "Fallback — send to cheap, then to frontier when cheap has an outage",
+    ],
+    answer: 1,
+    explain: "Cascade wins here. You pay cheap on the 90% happy path and only pay both models on the 10% that escalate — that's mostly-cheap in the steady state. Ensemble would pay both prices for every request. Fallback is an availability pattern, not a cost pattern.",
+  },
+  {
+    q: "Anthropic's 'Building Effective Agents' guide defines Routing as:",
+    options: [
+      "Running the same request against multiple models and voting on the answer",
+      "Classifying an input and directing it to a specialized followup task",
+      "Failing over to a secondary provider when the primary is down",
+      "Escalating to a stronger model when the cheap one returns low confidence",
+    ],
+    answer: 1,
+    explain: "That's the exact definition — routing = classify + hand off to a specialized handler. Voting is ensemble, provider failover is fallback, and escalation-on-low-confidence is cascade.",
+  },
+  {
+    q: "You're building a classifier router. Your classifier prompt runs on a frontier model because 'accuracy matters'. What's the problem?",
+    options: [
+      "Nothing — accuracy is what matters, so pay for it",
+      "The classifier now costs as much as the downstream work — you've paid for the routing decision without saving anything, and added latency on top",
+      "Frontier models are less accurate at classification than cheaper models",
+      "The classifier must always be a fine-tuned model, not a chat model",
+    ],
+    answer: 1,
+    explain: "The whole point of routing is that the *decision* is cheap so the *work* can be sized to the request. A frontier-model classifier defeats the pattern — you paid strong-tier prices on the classification and *also* on the downstream call. Classifiers should run on the cheapest model that hits your accuracy bar.",
+  },
+]} />
+
+## Next
+
+- Pick a target: [Choosing a Model](/docs/models/choosing-a-model) — the archetype framework the router leans on.
+- Wire it up: [AI gateways: LiteLLM, OpenRouter, Portkey, Vercel](/docs/models/ai-gateways-litellm-openrouter-portkey) — the plumbing every router needs.
+- Move a prompt to the model you routed to: [Porting Prompts Across Models](/docs/models/porting-prompts-across-models).
+- Coding-specific routing signals: [Claude vs GPT vs Gemini for coding](/docs/models/claude-gpt-gemini-for-coding).
+- Anthropic's canonical workflow taxonomy: [Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents).
+
+## Sources
+
+- [Anthropic — Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents) — canonical definitions of the Routing and Orchestrator-Workers workflows.
+- [RouteLLM paper (arXiv 2406.18665)](https://arxiv.org/abs/2406.18665) — a learned router trained on preference data; demonstrates the pattern's headroom, though most production teams still ship rule + classifier + cascade rather than learned routing.
