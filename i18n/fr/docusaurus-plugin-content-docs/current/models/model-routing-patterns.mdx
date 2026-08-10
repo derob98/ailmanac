@@ -1,0 +1,208 @@
+---
+sidebar_position: 7.1
+title: "Patterns d'aiguillage de modèles : cascades, classifieurs et ce qui expédie vraiment"
+description: "Les patterns de conception pour envoyer chaque requête au bon modèle d'IA — par règle, par classifieur, par complexité, cascade, ensemble, fallback. Quand utiliser chacun, ce qui casse et les recettes qui expédient vraiment en 2026."
+keywords: [LLM routing, model routing, model cascade, LLM router, RouteLLM, orchestrator worker, multi-model app, Claude Haiku Sonnet Opus, GPT Gemini routing, AI gateway routing]
+---
+
+<LevelBadge level="intermediate" />
+
+Dès que votre produit fait plus d'une chose, un seul modèle cesse d'être la bonne réponse pour chaque requête. Classer le ticket, extraire les champs, rédiger la réponse, la relire — ce sont quatre tâches avec quatre budgets coût/latence/qualité différents. Le pattern sur lequel tout le domaine a convergé en 2026 consiste à **acheminer chaque requête vers le modèle qui convient à la tâche**, et à **escalader** quand le modèle bon marché ne suffit pas. Cette page est le guide éditorial de ces patterns : ce qu'ils sont, quand chacun expédie, les recettes qui marchent et les modes d'échec à éviter.
+
+<Callout type="objectives" items={[
+  "Connaître les six patterns d'aiguillage qui expédient en production et quand recourir à chacun",
+  "Comprendre la différence entre aiguillage (une décision d'entrée) et cascade (escalade sur échec)",
+  "Construire votre premier classifieur d'aiguillage avec un prompt copier-coller et un plan de déploiement d'une semaine",
+  "Lire le calcul de coût : quand l'aiguillage économise vraiment de l'argent, et quand la surcharge dévore les économies",
+  "Reconnaître les anti-patterns qui transforment un aiguilleur en panne annoncée",
+]} />
+
+<VerifyNote lastVerified="2026-08-10" source="https://www.anthropic.com/engineering/building-effective-agents">
+Le propre guide « Building Effective Agents » d'Anthropic définit **Routing** comme un workflow de première classe : *« Routing classe une entrée et la dirige vers une tâche de suivi spécialisée. Ce workflow permet la séparation des préoccupations et la construction de prompts plus spécialisés. »* Deux des exemples qu'ils donnent sont exactement ceux couverts ici — répartir les catégories de service client vers des flux avals distincts, et *« acheminer les questions faciles vers de plus petits modèles comme Claude Haiku... et les difficiles vers Claude Sonnet. »* Les noms de modèles, les prix et les écarts de qualité dérivent ; vérifiez toujours la documentation par fournisseur en cours avant de coder en dur un seuil. Prix/limites de cette page : consultez [Modèles et tarifs](/docs/whats-new/models-and-pricing) avant de construire.
+</VerifyNote>
+
+## Pourquoi l'aiguillage est le pattern par défaut en 2026
+
+L'ère du « un gros modèle pour tout » est discrètement révolue. Trois forces ont provoqué le changement :
+
+- **Une courbe de prix large et bien tenue.** Chaque grand fournisseur expédie désormais une famille — Anthropic (Haiku / Sonnet / Opus), OpenAI (small / mid / frontier), Google (Flash / Pro), plus les niveaux à poids ouverts. Les niveaux bon marché sont 10 à 100× moins chers que la frontière et, sur des tâches étroites, à peine moins bons. Laisser le niveau bon marché inactif, c'est brûler de l'argent.
+- **De vrais budgets de latence.** Une étape de classification devant un agent de support doit répondre en moins de 300 ms. Un modèle frontière est souvent le mauvais outil pour d'autres raisons que le coût — il est tout simplement trop lent pour l'étape.
+- **Spécialisation.** Différents modèles dominent véritablement sur différentes tâches — l'un est meilleur en JSON structuré, l'autre en contexte long, un autre en code, un autre en multilingue. Les classements changent mensuellement (voir [Choisir un modèle](/docs/models/choosing-a-model)), mais la forme — « des outils différents pour des tâches différentes » — est durable.
+
+Le résultat : un **aiguilleur** devant vos modèles, décidant par requête où envoyer le travail. Le reste de cette page est le vocabulaire de conception pour cet aiguilleur.
+
+## Les deux grandes familles : aiguillage vs cascade
+
+Presque chaque pattern ci-dessous est une variation sur deux idées. Comprenez bien la différence et le reste n'est que nommage.
+
+- **L'aiguillage** prend **une décision d'entrée**, avant qu'aucun modèle ne s'exécute. Un classifieur (une règle, un petit modèle ou un plus gros modèle) lit la requête, choisit une cible et transmet. Rapide, bon marché en régime permanent, mais *faux quand le classifieur se trompe* — et vous ne le découvrez que plus tard.
+- **La cascade** exécute d'abord le **modèle bon marché** et **escalade** vers un plus fort uniquement quand un signal défini dit « cette réponse n'est pas assez bonne ». Robuste parce que le signal est ancré dans la sortie réelle, mais chaque escalade paie *les deux* modèles — donc le gain ne survit que quand le niveau bon marché gère la majeure partie du trafic seul.
+
+Ils se composent. Un système de production fait généralement *les deux* : aiguille vers la bonne voie selon le type de tâche, puis cascade à l'intérieur d'une voie selon la confiance du modèle bon marché. La taxonomie d'Anthropic appelle la décision d'entrée « Routing » et la décomposition dynamique « Orchestrator-Workers » ; la cascade est le nom industriel de la variante « essayer petit d'abord, escalader sur échec » de la même idée.
+
+## Les six patterns qui expédient vraiment
+
+### 1. Aiguillage par règle
+
+Une règle écrite à la main (regex, mot-clé, champ de requête, longueur du message) décide de la cible. Aucun modèle ne s'exécute pour prendre la décision.
+
+- **Quand ça gagne.** Le signal est sans ambiguïté et bon marché : « si la requête contient un bloc de code, envoie au modèle de codage », « si le client est sur le plan Enterprise, envoie au niveau frontière », « si l'entrée fait plus de 200k tokens, envoie au modèle contexte long ».
+- **Quand ça casse.** La règle pourrit silencieusement à mesure que le domaine évolue — nouveaux formulations, nouvelles intentions, cas limites que la regex n'a jamais anticipés. Chaque « si X alors Y » est une petite dette technique.
+- **Expédie-le quand.** Vous avez un ou deux cas d'exception à forte valeur (un niveau payant, un chemin de code, une langue) et vous voulez zéro surcharge de latence.
+
+### 2. Aiguillage par classifieur (LLM-comme-aiguilleur)
+
+Un petit modèle rapide lit la requête et renvoie une étiquette — `"billing" | "technical" | "sales" | "other"` — qui choisit le gestionnaire aval. Anthropic donne cela comme l'un de leurs exemples canoniques : questions faciles vers Haiku, difficiles vers Sonnet.
+
+- **Quand ça gagne.** Vous avez un **petit ensemble stable de catégories** et chacune mérite son propre prompt/jeu d'outils/modèle. Un unique prompt spécialisé par catégorie bat un seul prompt système géant qui fait tout.
+- **Quand ça casse.** Les catégories se chevauchent (beaucoup de vraies requêtes sont « facturation *et* technique »), le classifieur se trompe d'aiguillage silencieusement, ou votre ensemble d'étiquettes explose au-delà de ~10 catégories et les choix deviennent bruités.
+- **Expédie-le quand.** Vous pouvez énumérer les 5 à 8 principaux types de requêtes et *chacun* bénéficie matériellement d'un gestionnaire différent.
+
+<PromptCard title="Prompt classifieur d'aiguillage (portable entre Claude/GPT/Gemini)">
+{`You are a request classifier for a support product.
+
+Read the CUSTOMER MESSAGE below and return a JSON object with:
+  - "category": one of ["billing", "technical", "account", "sales", "other"]
+  - "confidence": a number from 0.0 to 1.0
+  - "reason": one short sentence explaining the pick
+
+If you are less than 0.7 confident, use "other" and say why.
+Return ONLY the JSON, no prose, no code fence.
+
+CUSTOMER MESSAGE:
+"""
+{{message}}
+"""`}
+</PromptCard>
+
+### 3. Aiguillage par complexité
+
+Au lieu de *ce dont* parle la requête, vous estimez *à quel point* elle est difficile — longueur, nombre d'entités, si elle référence des chiffres/code, si l'usage d'outils est probable — et choisissez un niveau en conséquence : bon marché pour facile, milieu pour moyen, frontière pour difficile.
+
+- **Quand ça gagne.** Le type de tâche est à peu près homogène (par exemple « répondre à une question de codage ») mais les requêtes individuelles varient énormément en difficulté. Au lieu de payer les prix frontière pour une question de syntaxe de deux lignes, vous payez les prix Haiku pour celles-ci et réservez la frontière pour les refactors multi-fichiers.
+- **Quand ça casse.** Le « score de difficulté » est en réalité « longueur du prompt », et les longs prompts ne sont pas toujours des prompts difficiles. Un utilisateur colle une énorme stack trace et pose une question triviale à son sujet — votre aiguilleur monte de gamme inutilement.
+- **Expédie-le quand.** Vous avez une variance mesurable de difficulté *à l'intérieur* d'un type de tâche et des signaux clairs (longueur, présence de code, nombre de sous-questions) qui y corrèlent.
+
+### 4. Cascade (bon marché d'abord, escalade sur échec)
+
+Essayez d'abord le modèle bon marché. Vérifiez la réponse contre un **signal d'échec**. Si elle échoue, réessayez sur le modèle plus fort. C'est le pattern que l'industrie expédie plus que tout autre, parce que le « signal » est ancré dans ce que le modèle *a réellement dit* — pas dans une conjecture sur ce qu'il va dire.
+
+- **Qu'est-ce qui compte comme signal ?** N'importe quoi de bon marché et fiable : validation de schéma sur une sortie JSON, une vérification « est-ce que cela répond à la question ? » par un juge LLM, un champ explicite `"needs_help": true` que le modèle peut émettre en cas d'incertitude, un test aval qui exécute le code, un logprob faible sur le token de réponse quand le fournisseur l'expose.
+- **Calcul de coût.** Les économies ne survivent que quand le niveau bon marché gère la majeure partie du trafic. Si 90 % des requêtes sont résolues par le modèle bon marché et 10 % escaladent, vous payez `0,9 × bon_marché + 0,1 × (bon_marché + fort)` ≈ principalement bon marché. Si la moitié escalade, vous payez *plus* que si vous utilisiez toujours le modèle fort.
+- **Quand ça gagne.** Tâches avec un signal clair « est-ce que ça a marché ? » — code qui s'exécute ou non, JSON qui valide ou non, extraction où le champ correspond ou non à la source.
+- **Quand ça casse.** Pas de signal d'échec bon marché, ou le modèle bon marché *pense* qu'il a réussi alors que non (échec silencieux — le pire cas).
+- **Expédie-le quand.** Vous pouvez nommer le signal d'échec en une phrase et il ne requiert pas le modèle fort pour vérifier.
+
+### 5. Ensemble / vérifier-et-voter
+
+Exécutez la même requête contre N modèles en parallèle et réconciliez les réponses — prenez un vote majoritaire, prenez la première schéma-valide, ou envoyez les N à un modèle juge qui choisit la meilleure.
+
+- **Quand ça gagne.** La qualité compte plus que le coût ou la latence : recherche juridique, résumé médical, extraction financière à enjeux élevés, « relire ce contrat pour trouver des drapeaux rouges ». Utile aussi pour les maths et le code difficiles, où différents modèles font différentes erreurs et leur intersection est plus fiable qu'un seul.
+- **Quand ça casse.** Vous payez N× le coût et héritez de la latence du modèle le plus lent pour *chaque* requête. Les ensembles sont une taxe que vous acceptez pour la qualité, pas un moyen d'économiser de l'argent.
+- **Expédie-le quand.** Le coût de se tromper est au moins un ordre de grandeur plus grand que le coût de N appels de modèle — ce qui n'est presque jamais vrai pour le trafic consommateur et souvent vrai pour les workflows d'entreprise.
+
+### 6. Fallback (disponibilité, pas coût)
+
+Essayez le primaire ; sur 429/5xx/timeout, réessayez de manière transparente sur un secondaire d'un fournisseur différent. C'est le pattern dont chaque application multi-modèles sérieuse a besoin même si elle n'utilise aucun des autres.
+
+- **Quand ça gagne.** Chaque fois que votre fournisseur primaire a une panne ou vous limite exactement au mauvais moment. Le fallback est un pattern de *fiabilité*, pas un pattern d'optimisation de coût — le secondaire est généralement le niveau équivalent d'un fournisseur différent, pas un modèle moins cher.
+- **Ce qu'il faut surveiller.** Le chemin de fallback est du code non testé la plupart du temps ; il va régresser. Faites passer au moins une petite part de trafic live par le secondaire en continu pour découvrir que la forme de réponse a dérivé *avant* de compter dessus dans une panne.
+- **Expédie-le quand.** Votre SLO de disponibilité est supérieur à celui de n'importe quel fournisseur unique, ou une dépendance à un seul fournisseur est un risque métier (contrats, disponibilité régionale, géopolitique).
+
+## Comparaison en un coup d'œil
+
+| Pattern | Décision prise | Ajoute de la latence ? | Ajoute du coût ? | Risque principal |
+| --- | --- | --- | --- | --- |
+| Par règle | Avant l'exécution du modèle | Non | Non | Les règles pourrissent silencieusement à mesure que les entrées évoluent |
+| Par classifieur | Avant, par un petit modèle | + un appel rapide | + un appel bon marché | Se trompe d'aiguillage quand les catégories se chevauchent |
+| Par complexité | Avant, par heuristique | Négligeable | Négligeable | « Difficulté » signifie souvent « longueur » |
+| Cascade | Après la tentative du modèle bon marché | + retry en cas d'escalade | Principalement bon marché en régime permanent | Succès silencieux sur mauvaise réponse |
+| Ensemble | Exécute N en parallèle, réconcilie | Le plus lent des N | N× | Vous achetez de la qualité, pas des économies |
+| Fallback | Uniquement sur échec du primaire | 0 dans le chemin heureux | 0 dans le chemin heureux | Non testé jusqu'à ce que ça compte |
+
+## Vraies recettes d'expédition
+
+Les patterns ci-dessus sont des Lego. En production, ils se composent. Trois recettes que nous voyons régulièrement :
+
+- **Agent de support client.** Un aiguilleur par classifieur choisit une voie (facturation / technique / compte / ventes), chaque voie a son propre prompt système et son jeu d'outils, à l'intérieur de la voie technique une **cascade** essaie d'abord un modèle bon marché et escalade vers la frontière quand un appel d'outil « needs escalation » se déclenche. Un fallback entre fournisseurs enveloppe le tout. Résultat : 70 à 90 % du trafic ne touche jamais le modèle frontière.
+- **Assistant de codage.** Aiguillage par règle sur le type de fichier et la taille du diff envoie les petites éditions à un niveau bon marché et les refactors multi-fichiers à un spécialiste du code. Une cascade sur la sortie — « est-ce que le patch s'applique proprement et passe le smoke test ? » — escalade les échecs vers un modèle plus fort. Comparez au guide de terrain dans [Claude vs GPT vs Gemini pour le code](/docs/models/claude-gpt-gemini-for-coding).
+- **QA RAG sur un corpus de documents.** Un classifieur choisit entre « répondre depuis le contexte » (bon marché) et « nécessite un raisonnement inter-documents » (milieu). Un ensemble de deux modèles vérifie la réponse pour les documents à enjeux élevés (contrats, dépôts). Comparez avec [Retrieval-Augmented Generation](/docs/foundations/rag).
+
+## Comment construire votre premier aiguilleur en une semaine
+
+<Steps items={[
+  {title: "Jour 1 — Choisissez une charge de travail et loggez-en une semaine", body: "Instrumentez les *vrais* prompts que votre produit envoie déjà. Vous avez besoin d'au moins quelques centaines, idéalement catégorisés par résultat (résolu / escaladé / faux). Sans trafic vérité-terrain, vous devinez où l'aiguilleur devrait envoyer les choses."},
+  {title: "Jour 2 — Regroupez à la main", body: "Lisez 100 requêtes et notez les 5 à 8 catégories dans lesquelles elles tombent naturellement. Si vous ne pouvez pas faire cela en un après-midi, la charge de travail n'est pas prête pour un aiguilleur par classifieur — commencez par un aiguillage par règle sur les une ou deux exceptions évidentes (niveau payant, contexte long, code)."},
+  {title: "Jour 3 — Écrivez le prompt classifieur", body: "Utilisez le PromptCard ci-dessus. Exécutez-le contre les regroupements de la veille sur un modèle bon marché (Haiku, Gemini Flash, GPT-nano). Mesurez l'exactitude contre vos étiquettes manuelles. Si c'est en dessous de ~85 %, soit fusionnez des catégories, soit ajoutez des exemples few-shot — n'expédiez pas un aiguilleur qui se trompe 1 fois sur 5."},
+  {title: "Jour 4 — Aiguillez + loggez en fantôme", body: "Câblez l'aiguilleur dans le chemin de requête mais NE changez PAS encore le modèle aval — chaque requête va toujours au modèle actuel, et vous *loggez aussi* là où l'aiguilleur *aurait* envoyé. Comparez aux résultats réels pendant une journée."},
+  {title: "Jour 5 — Activez-le pour une voie", body: "Passez l'aiguillage en live pour la voie à plus haute valeur (généralement la plus facile, où les économies du niveau bon marché sont les plus grandes). Surveillez les métriques de qualité — taux de retry, taux de pouce en bas, taux d'escalade — pendant 24 heures."},
+  {title: "Jour 6 — Ajoutez une cascade dans une voie", body: "Pour la voie où le niveau bon marché est « généralement juste mais parfois faux », ajoutez un signal d'escalade (validation de schéma, vérification par juge, drapeau `needs_help` explicite) et réessayez sur le modèle fort. Confirmez le chemin de fallback avec un test de chaos — tuez le modèle bon marché et vérifiez que l'escalade fonctionne."},
+  {title: "Jour 7 — Écrivez le runbook et passez-le", body: "Documentez les règles de l'aiguilleur, le prompt classifieur, le signal d'escalade et — critiquement — le tableau de bord des métriques. Si l'aiguilleur se trompe silencieusement de catégorie le mois prochain, quelqu'un doit s'en apercevoir."},
+]} />
+
+## Ce qui est vraiment déployé (notes de terrain 2026)
+
+- **Les cascades expédient bien plus que les aiguilleurs appris.** Des systèmes de recherche comme RouteLLM entraînent un aiguilleur sur des données de préférence et peuvent diviser les coûts par 2 ou plus sur des benchmarks standards (voir le [papier RouteLLM](https://arxiv.org/abs/2406.18665)) — mais entraîner et maintenir un aiguilleur appris est de la vraie ingénierie. La plupart des équipes obtiennent l'essentiel des gains avec bon-marché-d'abord + escalade explicite.
+- **Le classifieur est presque toujours un modèle de chat bon marché, pas un fine-tune.** Les modèles de classe Haiku ou Flash avec un bon prompt atteignent la barre d'exactitude pour 5 à 8 catégories. Fine-tunez uniquement si vous êtes à l'échelle et que le classifieur bon marché est votre goulot d'étranglement.
+- **L'évaluateur compte plus que l'aiguilleur.** Un aiguilleur sans boucle de métriques est une devinette. Instrumentez chaque décision d'aiguillage avec requête → modèle choisi → résultat, et revoyez chaque semaine. Vous ne pouvez pas régler ce que vous ne mesurez pas.
+- **Infrastructure et design sont séparables.** Les *patterns* ci-dessus sont neutres en langage et en fournisseur. La *plomberie* — un endpoint par fournisseur, clés virtuelles, plafonds de dépenses par équipe, prompt caching — est ce qu'une passerelle d'IA vous donne. Une fois que vous connaissez le pattern que vous voulez, voir [Passerelles IA : LiteLLM, OpenRouter, Portkey, Vercel](/docs/models/ai-gateways-litellm-openrouter-portkey) pour le choix concret.
+
+## Anti-patterns à éviter
+
+- **Le classifieur qui appelle le modèle frontière.** Si choisir une voie coûte autant qu'exécuter le modèle fort l'aurait fait, vous n'avez rien économisé et vous avez ajouté de la latence. Les classifieurs doivent être bon marché.
+- **Cascade sans signal d'échec.** « Le modèle bon marché a renvoyé *quelque chose*, donc on a fini » n'est pas un signal — c'est un pari. Chaque cascade a besoin d'une vérification définie que le modèle bon marché peut *échouer*.
+- **Prolifération de règles.** Dix règles, c'est gérable. Cent, c'est un classifieur codé à la main sans les tests. Quand votre ensemble de règles dérive au-delà de ~15 branches, arrachez-le et utilisez un petit modèle.
+- **Les ensembles comme stratégie de coût.** Exécuter trois modèles en parallèle pour économiser de l'argent est une erreur de catégorie — les ensembles coûtent N× pour acheter de la qualité, pas pour économiser du coût. Si vous utilisez un ensemble pour compenser un mauvais modèle primaire, corrigez plutôt le primaire.
+- **Pas de chemin de fallback.** Chaque fournisseur de modèles tombe en panne un jour. Un produit à fournisseur unique héritera de cette panne. Voir [Passerelles IA](/docs/models/ai-gateways-litellm-openrouter-portkey) pour la plomberie.
+- **Aiguillage sans observabilité.** Un aiguilleur qui envoie discrètement tout dans la mauvaise voie a l'air bien jusqu'à ce que la qualité s'effondre deux semaines plus tard. Loggez chaque décision avec le hash d'entrée, le modèle choisi, le résultat et le coût — et revoyez chaque semaine.
+
+## Vérifiez votre compréhension
+
+<Quiz questions={[
+  {
+    q: "Vous avez un produit de support où 90 % des requêtes reçoivent une réponse correcte d'un modèle bon marché, mais les 10 % restants nécessitent la frontière. Quel pattern vous donne le plus grand gain de coût ?",
+    options: [
+      "Ensemble — exécuter bon marché + frontière en parallèle et prendre le meilleur",
+      "Cascade — essayer bon marché d'abord, escalader vers la frontière sur un signal d'échec",
+      "Toujours aiguiller vers la frontière, puisque 10 % en ont besoin de toute façon",
+      "Fallback — envoyer au bon marché, puis à la frontière quand le bon marché a une panne",
+    ],
+    answer: 1,
+    explain: "La cascade gagne ici. Vous payez le bon marché sur les 90 % du chemin heureux et ne payez les deux modèles que sur les 10 % qui escaladent — c'est principalement bon marché en régime permanent. L'ensemble paierait les deux prix pour chaque requête. Le fallback est un pattern de disponibilité, pas un pattern de coût.",
+  },
+  {
+    q: "Le guide « Building Effective Agents » d'Anthropic définit le Routing comme :",
+    options: [
+      "Exécuter la même requête contre plusieurs modèles et voter sur la réponse",
+      "Classer une entrée et la diriger vers une tâche de suivi spécialisée",
+      "Basculer vers un fournisseur secondaire quand le primaire est en panne",
+      "Escalader vers un modèle plus fort quand le bon marché renvoie une faible confiance",
+    ],
+    answer: 1,
+    explain: "C'est la définition exacte — routing = classer + transmettre à un gestionnaire spécialisé. Voter, c'est l'ensemble ; basculer entre fournisseurs, c'est le fallback ; escalader sur faible confiance, c'est la cascade.",
+  },
+  {
+    q: "Vous construisez un aiguilleur par classifieur. Votre prompt classifieur tourne sur un modèle frontière parce que « l'exactitude compte ». Quel est le problème ?",
+    options: [
+      "Rien — l'exactitude est ce qui compte, donc payez-la",
+      "Le classifieur coûte maintenant autant que le travail aval — vous avez payé la décision d'aiguillage sans rien économiser, et ajouté de la latence par-dessus",
+      "Les modèles frontière sont moins précis à la classification que les modèles moins chers",
+      "Le classifieur doit toujours être un modèle fine-tuné, pas un modèle de chat",
+    ],
+    answer: 1,
+    explain: "Le but même de l'aiguillage est que la *décision* soit bon marché pour que le *travail* puisse être dimensionné à la requête. Un classifieur en modèle frontière défait le pattern — vous avez payé les prix du niveau fort sur la classification *et* sur l'appel aval. Les classifieurs devraient tourner sur le modèle le moins cher qui atteint votre barre d'exactitude.",
+  },
+]} />
+
+## Suite
+
+- Choisissez une cible : [Choisir un modèle](/docs/models/choosing-a-model) — le cadre d'archétypes sur lequel l'aiguilleur s'appuie.
+- Câblez-le : [Passerelles IA : LiteLLM, OpenRouter, Portkey, Vercel](/docs/models/ai-gateways-litellm-openrouter-portkey) — la plomberie dont chaque aiguilleur a besoin.
+- Portez un prompt vers le modèle vers lequel vous avez aiguillé : [Porter les prompts entre modèles](/docs/models/porting-prompts-across-models).
+- Signaux d'aiguillage spécifiques au code : [Claude vs GPT vs Gemini pour le code](/docs/models/claude-gpt-gemini-for-coding).
+- Taxonomie canonique de workflow d'Anthropic : [Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents).
+
+## Sources
+
+- [Anthropic — Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents) — définitions canoniques des workflows Routing et Orchestrator-Workers.
+- [Papier RouteLLM (arXiv 2406.18665)](https://arxiv.org/abs/2406.18665) — un aiguilleur appris entraîné sur des données de préférence ; démontre la marge de progression du pattern, bien que la plupart des équipes de production expédient encore règle + classifieur + cascade plutôt que de l'aiguillage appris.
