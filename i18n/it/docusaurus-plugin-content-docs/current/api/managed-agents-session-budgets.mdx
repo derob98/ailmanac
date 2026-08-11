@@ -1,0 +1,285 @@
+---
+sidebar_position: 11.6
+title: "Budget di sessione per Managed Agents"
+description: "La beta di agosto 2026 — tetti hard in dollari su una sessione di Managed Agents, applicati alle tariffe di listino pubblico, con lo stop reason budget_reached, l'overshoot da una richiesta e il modello pausa-e-riprendi."
+keywords: [claude session budget, managed agents budget, max_list_cost, budget_reached stop reason, agent cost cap, unattended agent cost, deployment budget, list cost, task budget vs session budget]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Mettere un tetto a quanto una singola sessione di Managed Agents può spendere, in centesimi di dollaro interi, prima che parta", "Leggere la sequenza di eventi in quattro passi che scatta quando una sessione si mette in pausa a budget_reached", "Capire l'overshoot da una richiesta — perché un tetto di $0,50 può fermarsi a $0,53, e come dimensionarlo di conseguenza", "Riprendere una sessione in pausa alzando o rimuovendo il tetto — e sapere perché la rimozione è irreversibile", "Mettere un tetto per-run su una deployment schedulata così le esecuzioni ricorrenti non degenerano in spesa fuori controllo", "Distinguere i session budgets dai task budgets dell'API Messages (advisory, in token, single-loop)"]} />
+
+<VerifyNote lastVerified="2026-08-11" source="https://platform.claude.com/docs/en/managed-agents/budgets">
+I session budget sono usciti il **7 agosto 2026** nella beta di Managed Agents. Nomi dei campi, stringhe di errore e l'esatto `stop_reason` sono citati dalla reference ufficiale — verifica prima di andare in produzione, perché Managed Agents è ancora in beta.
+</VerifyNote>
+
+Una sessione autonoma di [Managed Agents](/docs/api/managed-agents) può svegliarsi alle 3 di notte, fissare un risultato di tool duro e mettersi a ciclare. Senza un tetto, l'unico paracadute è il rate limit dell'organizzazione o un alert di monitoring che qualcuno legge dopo il caffè. I **session budgets** sono la soluzione first-party di Anthropic: un tetto hard in dollari, impostato quando crei la sessione, applicato dalla piattaforma tra una richiesta al modello e l'altra.
+
+Due cose li rendono diversi da ogni "cost alert" che tu abbia costruito prima:
+
+- Il tetto è applicato **prima di ogni richiesta al modello** lato piattaforma, non dal tuo webhook a cose fatte. Una sessione con budget si mette in pausa da sola.
+- Il tetto è in **centesimi di dollaro USA interi**, calcolato alle **tariffe di listino pubblico** di Anthropic — non alla tua tariffa contrattuale. Se la tua org ha uno sconto, la sessione raggiunge il tetto in dollari di listino e la tua spesa fatturata risulta più bassa.
+
+## Session budgets vs task budgets — non confonderli
+
+Sulla piattaforma Claude ci sono ora due primitive "budget". Risolvono problemi diversi.
+
+|  | **Session budgets** (questa pagina) | **Task budgets** ([API Messages](https://platform.claude.com/docs/en/build-with-claude/task-budgets)) |
+|---|---|---|
+| Superficie | Sessione / deployment di Managed Agents | Singolo agentic loop dell'API Messages |
+| Unità | Dollari USA, centesimi interi | Token |
+| Applicazione | **Hard** — la piattaforma mette in pausa la sessione | **Advisory** — il modello si autoregola |
+| Chi lo legge | Il contabile della piattaforma | Il modello, come guida |
+| Cosa succede al tetto | `stop_reason: "budget_reached"`, la sessione va idle | Il modello chiude la partita e rilascia |
+
+Se vuoi uno *stop hard* su un run non presidiato, è un session budget. Se vuoi che il modello si *dosi* dentro un loop, è un task budget. Si compongono — una sessione di Managed Agents può portare un session budget mentre una [chiamata a tool dell'API Messages](/docs/api/tool-use) annidata che fa porta il proprio task budget.
+
+## Impostare un budget alla creazione della sessione
+
+Passa il campo opzionale `budget` su `POST /v1/sessions`:
+
+<PromptCard title="Crea una sessione con tetto a $25,00">{`curl -fsSL https://api.anthropic.com/v1/sessions \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: managed-agents-2026-04-01" \\
+  -H "content-type: application/json" \\
+  -d '{
+    "agent": "'"$AGENT_ID"'",
+    "environment_id": "'"$ENVIRONMENT_ID"'",
+    "budget": {
+      "type": "limit",
+      "max_list_cost": {"amount": "2500", "currency": "USD"}
+    }
+  }'`}</PromptCard>
+
+L'oggetto `budget` ha esattamente due campi:
+
+- `type` è sempre `"limit"`. Oggi non ce n'è altro; il campo esiste perché forme future di enforcement non rompano i client esistenti.
+- `max_list_cost` è il tetto vero e proprio. `amount` è un **numero intero di centesimi USA come stringa** — `"2500"` è $25,00, `"50"` è 50 centesimi, `"1"` è un centesimo. Le forme decimali come `"25.00"` sono rifiutate con un 400. La forma stringa è deliberata: gli arrotondamenti floating-point non toccano mai il tetto. `currency` è un codice ISO-4217 in maiuscolo e oggi `USD` è l'unico valore supportato.
+
+<Callout type="warning" items={["Un budget può essere collegato solo alla creazione della sessione. Aggiungere un budget a una sessione già in esecuzione creata senza budget restituisce 400 — pianifica in anticipo.", "Amount è una stringa di centesimi interi. \"25.00\" è rifiutato. \"0\" è rifiutato. \"-1\" è rifiutato."]} />
+
+## Come si misura il list cost
+
+La piattaforma prezza in continuo quello che la sessione consuma, alle tariffe di listino pubblico, e chiama questo totale corrente il **list cost** della sessione. Ci entrano tre cose:
+
+- **Token del modello**, al prezzo di listino del modello servito. In una [sessione multiagent](https://platform.claude.com/docs/en/managed-agents/multiagent-orchestration), i token di ogni thread sono prezzati sul modello di quel thread.
+- **Ricerche web**, a $10 ogni 1.000 richieste (cioè un centesimo a ricerca).
+- **Tempo di esecuzione della sessione**, a $0,08 all'ora di tempo attivo.
+
+Le richieste di web *fetch* sono neutre per il contatore: appaiono nei counter `server_tool_use` ma non hanno costo per richiesta e non alimentano il budget.
+
+Due dettagli di contabilità da interiorizzare:
+
+1. L'enforcement usa il list cost **esatto, non arrotondato**. Il `list_cost` che *vedi* sugli oggetti session e event è arrotondato al centesimo intero, quindi un valore riportato può stare fino a mezzo centesimo sopra o sotto rispetto al valore che legge il check di enforcement. Non confrontare mai due letture arrotondate e concludere che la piattaforma "si è dimenticata" un centesimo.
+2. Nelle sessioni multiagent, `active_seconds` a livello di sessione conta l'attività sovrapposta dei thread **una volta sola** (così non sovracarica il tempo di esecuzione per il lavoro in parallelo). L'`active_seconds` per-thread è prezzato per thread ed esclude il costo di running-time della sessione, quindi sommare i `list_cost` dei thread **non** eguaglierà il `list_cost` della sessione. Fidati del dato di sessione — è quello contro cui il tetto viene applicato.
+
+## L'overshoot da una richiesta
+
+È la cosa più sorprendente sui session budgets, ed è quella su cui costruire i tuoi alert.
+
+Il tetto è controllato **tra** le richieste al modello, non a metà di una richiesta. Prima di ogni richiesta, la piattaforma legge il list cost consumato dalla sessione; una volta raggiunto il tetto, ogni thread si mette in pausa prima della sua richiesta successiva. La richiesta che ha portato il totale oltre il tetto era stata ammessa quando la sessione era ancora sotto il tetto e arriva fino in fondo.
+
+La conseguenza: una sessione con tetto `"50"` (50 centesimi) può fermarsi con un `list_cost` di `"53"`. Non è un bug di fatturazione. L'overshoot è limitato a una richiesta al modello per thread — ma su un roster multiagent con vari thread concorrenti, quell'"uno" si moltiplica.
+
+<Callout type="tip">
+Considera `max_list_cost` un limite sul **nuovo lavoro**, non un punto di arresto esatto. Se devi garantire che la spesa non superi mai $X, imposta il tetto a `X - (max_request_cost * concurrent_threads)`. Su una sessione multiagent da 25 thread con chiamate Opus costose, il margine può contare.
+</Callout>
+
+## Cosa succede quando una sessione raggiunge il suo budget
+
+Una sessione al suo budget non muore — va **idle**, con storia e sandbox preservate. Nello [stream degli eventi](https://platform.claude.com/docs/en/managed-agents/events-and-streaming) vedrai, in ordine:
+
+<Steps items={[
+  {title: "session.thread_status_idle (per thread)", body: "Man mano che ogni thread finisce la richiesta in volo, emette un evento idle con stop_reason: \"budget_reached\". Un thread la cui richiesta finale ha anche completato il proprio turno riporta stop_reason: \"end_turn\" sul suo evento — ma l'evento a livello di sessione continua a riportare budget_reached. Fidati del segnale a livello di sessione."},
+  {title: "session.usage", body: "Uno snapshot dell'utilizzo cumulativo: totali dei token, list_cost, active_seconds, counter server_tool_use, e un eco del budget corrente. Questo evento precede sempre immediatamente l'evento idle a livello di sessione."},
+  {title: "session.status_idle", body: "L'evento idle a livello di sessione con stop_reason: \"budget_reached\". È il segnale definitivo che la sessione si è messa in pausa al suo tetto."},
+  {title: "Tutto in sospeso", body: "Il filesystem sandbox, i memory store, le tool confirmation in volo e la storia degli eventi vengono tutti mantenuti. Riprendi, e il lavoro riparte esattamente da dov'era."}
+]} />
+
+### Quali eventi la sessione accetta ancora
+
+In pausa al tetto, la sessione accetta **solo eventi che chiudono il lavoro già in corso**:
+
+- `user.tool_confirmation`
+- `user.tool_result`
+- `user.custom_tool_result`
+- `user.interrupt`
+
+Un `user.message` — cioè qualsiasi cosa che avvierebbe nuovo lavoro — viene rifiutato con un errore 400 che nomina esattamente la lista qui sopra. Un `user.interrupt` inviato a una sessione totalmente in pausa viene accettato e silenziosamente ignorato (non compare nemmeno nella lista eventi). Chiudere i tool in volo non fa scattare una nuova richiesta al modello; la sessione resta in pausa.
+
+## Riprendere: cambiare o rimuovere il budget
+
+Ci sono esattamente due leve.
+
+### Cambiare il budget
+
+Invia un `PATCH` (o l'`update` dell'SDK) con un nuovo `max_list_cost`. Il nuovo valore può essere più alto **o** più basso del vecchio tetto — ma deve essere **strettamente maggiore del list cost consumato dalla sessione**, altrimenti ottieni:
+
+```
+400 budget.max_list_cost must be greater than the session's consumed list cost
+```
+
+<Callout type="warning">
+Poiché il costo consumato di solito è **una frazione oltre il vecchio tetto** quando la sessione si è messa in pausa, basa il nuovo valore sul `usage.list_cost` riportato dalla sessione, non sul vecchio `max_list_cost`. Imposta il nuovo tetto **almeno un centesimo sopra** il valore riportato — il valore riportato è arrotondato e può stare un capello sotto il costo consumato esatto che usa il check.
+</Callout>
+
+<PromptCard title="Alza il tetto a $40,00">{`curl -sS --fail-with-body "https://api.anthropic.com/v1/sessions/$SESSION_ID" \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: managed-agents-2026-04-01" \\
+  -H "content-type: application/json" \\
+  -d '{"budget": {"type": "limit", "max_list_cost": {"amount": "4000", "currency": "USD"}}}'`}</PromptCard>
+
+Un update accettato riprende automaticamente il lavoro in pausa. Non devi inviare altro.
+
+### Rimuovere il budget
+
+Imposta `budget` a `null` e il tetto sparisce. La sessione riprende e l'evento `session.updated` risultante porta `budget: null`.
+
+```json
+{"budget": null}
+```
+
+<Callout type="warning">
+**La rimozione è irreversibile.** Una sessione a cui il budget è stato rimosso non può ricevere un nuovo budget — è la stessa regola di "budget solo alla creazione" applicata alla rimozione. Se vuoi *mantenere* un tetto sulla sessione, **cambialo** sempre. Rimuovilo solo quando stai consciamente restituendo la sessione ai normali limiti di spesa della tua org.
+</Callout>
+
+## Budget sulle deployment — per-run, non cumulativo
+
+Una [deployment](https://platform.claude.com/docs/en/managed-agents/scheduled-deployments) schedulata accetta lo stesso oggetto `budget`:
+
+```json
+{
+  "budget": {
+    "type": "limit",
+    "max_list_cost": {"amount": "2000", "currency": "USD"}
+  }
+}
+```
+
+Il tetto viene **copiato su ogni sessione che la deployment avvia**. Limita ogni run separatamente — non la spesa cumulativa della deployment su tutti i run. Un deployment budget di $20 con un cron giornaliero e 30 run al mese può quindi bruciare fino a ~$600 di list cost, non $20.
+
+Altre due differenze rispetto ai session budget:
+
+- Cambiare il budget della deployment vale per **le sessioni che la deployment avvia da lì in avanti** — le sessioni già in esecuzione tengono il budget con cui sono state create.
+- A differenza di una sessione, il budget di una deployment **può essere azzerato con `null` e reimpostato dopo**. La regola dell'irreversibilità è una regola a livello di sessione, non a livello di deployment.
+
+## Multiagent, advisor e il tetto condiviso
+
+Una sessione multiagent ha **un unico budget condiviso su tutti i suoi thread** — non ci sono tetti per-thread. Il consumo di ciascun thread è prezzato al proprio modello servito; i thread si mettono in pausa indipendentemente man mano che il tetto condiviso viene raggiunto. Un thread può essere in pausa a `budget_reached` mentre un altro sta ancora finendo la sua richiesta in volo.
+
+Le consultazioni di [advisor](/docs/api/advisor-tool) contano contro lo stesso budget, prezzate alle tariffe del modello advisor. Quindi un advisor Opus-5 consultato da un executor Sonnet-5 su una sessione con budget di $10 attinge dallo stesso pool. Se stai usando il pattern advisor per ottimizzare i costi, dimensiona il tetto per entrambi i livelli, non solo per l'executor.
+
+C'è un importante tie-breaker: **una richiesta in sospeso batte il tetto**. Se un thread è in attesa su `requires_action` (una `user.tool_confirmation`, per dire) e un altro è in pausa a `budget_reached`, la sessione riporta `requires_action` al livello top — perché rispondere a quella richiesta è un [settle event](#quali-eventi-la-sessione-accetta-ancora) che il budget non blocca. La tua UI operatore dovrebbe mostrare per primo il prompt di requires-action.
+
+## Modelli senza prezzo di listino
+
+Un budget può tracciare solo il consumo che la piattaforma può prezzare. Due modi di fallire:
+
+- **Alla creazione**: creare una sessione con budget il cui agent — o **qualunque agent o advisor** nel suo roster multiagent — usa un modello senza prezzo di listino pubblico restituisce 400 con un messaggio che dice esattamente `no list price is available for the model`. Rientrano i modelli preview/research-preview che non sono ancora stati prezzati.
+- **Dopo la creazione**: se l'uso di una sessione con budget arriva a includere un modello non prezzato (per esempio via una voce del roster che un override a livello di sessione aggiunge), il budget non può più misurare la spesa. La sessione può ancora fermarsi con `stop_reason: "budget_reached"`, e qualunque tentativo di cambiare il budget verrà rifiutato. L'unico recupero è **rimuovere** il budget — cosa irreversibile, per la regola sopra. Progetta il roster in modo che non possa succedere a metà run.
+
+## Reference degli errori
+
+La lista completa delle condizioni 400 legate al budget:
+
+| Condizione | Status |
+|---|---|
+| Un evento che avvia lavoro (es. `user.message`) inviato mentre la sessione è al o oltre il budget | 400 (l'errore nomina i settle event accettati) |
+| Il budget è impostato a un valore uguale o inferiore al list cost consumato dalla sessione | 400 |
+| Un budget è aggiunto a una sessione creata senza, o riaggiunto dopo la rimozione | 400 |
+| `amount` non è un numero intero di centesimi (es. `"25.00"`), è zero o negativo, oppure `currency` non è `USD` | 400 |
+| Una create con budget referenzia un modello senza prezzo di listino pubblico | 400 |
+
+## La checklist ops
+
+Sei cose da mettere nel runbook il giorno in cui accendi i session budget:
+
+<Steps items={[
+  {title: "Tetto = atteso * 1,5, poi arrotonda al centesimo intero", body: "Datti margine per l'overshoot da una richiesta e per un run più lungo del solito. Solo centesimi interi — niente \"25.00\"."},
+  {title: "Sottoscrivi l'evento session.usage, non solo l'evento idle", body: "L'evento usage scatta subito prima di ogni evento idle e porta l'esatto list_cost e active_seconds che ti servono se vuoi cambiare il budget al volo. Salvarlo costa poco."},
+  {title: "Nel tuo handler, basa i nuovi tetti su usage.list_cost + un centesimo", body: "Non su max_list_cost. Il list_cost riportato è arrotondato e può stare un capello sotto il costo consumato esatto che usa il check di enforcement. Un centesimo di margine evita il 400 \"must be strictly greater\"."},
+  {title: "Per le deployment, cap per-run e alert separato sul conteggio dei run", body: "Un budget per-run non è un budget mensile. Traccia i conteggi dei run della deployment (record drun_) e alerta su volumi inattesi."},
+  {title: "Non lasciare mai che un pattern runaway \"riprenda\" silenziosamente", body: "Un budget hit è un segnale, non un compito burocratico. Tratta ogni idle a budget_reached come un evento che un umano triage prima di alzare il tetto — l'alternativa è un bug che mangia N * tetto a settimana."},
+  {title: "Blindati contro i modelli non prezzati", body: "Se il tuo roster può tirare dentro un research-preview o un modello non prezzato, applica il vincolo in CI: rifiuta un coordinator il cui roster include un modello senza prezzo di listino pubblico quando il coordinator stesso è destinato all'uso con budget."}
+]} />
+
+## Nota cross-AI: come lo trattano le altre piattaforme
+
+Nessuna delle grandi piattaforme di hosted-agent ha rilasciato una primitiva equivalente prima del rilascio del 7 agosto di Anthropic. Cosa puoi approssimare altrove al 2026-08-11:
+
+- **OpenAI**: esistono *monthly spend limit* a livello di organizzazione e *usage limit* per-progetto, ma non sono per-run e non possono mettere in pausa una sessione Assistants / Responses API in corso a metà loop. Fai da back-stop con un tuo webhook che guarda lo stream di token.
+- **Google Vertex AI (Gemini)**: le quote a livello di progetto e i budget di billing (via Cloud Billing) sono asincroni — alertano, non mettono in pausa un agente inline.
+- **AWS Bedrock**: le quote di invocazione del modello sono cap hard al secondo/al minuto, non cap in dollari per sessione. Il gating della spesa a livello di sessione è tua responsabilità.
+- **Gateway di terze parti** (LiteLLM, OpenRouter, Portkey): tutti offrono cap di budget per-key che restituiscono un errore HTTP quando raggiunti — più vicini ai session budget come forma, ma il comportamento "pausa e riprendi" non è una primitiva di prima classe.
+
+Se il costo è *la* ragione per cui stai valutando Managed Agents contro un loop fatto in casa con un gateway, il cap hard per-sessione con pausa graziosa è un vero punto di differenziazione questa settimana.
+
+<Callout type="takeaways" items={[
+  "I session budget sono cap USD hard, applicati dalla piattaforma su una sessione di Managed Agents, prezzati alle tariffe di listino pubblico e impostati solo alla creazione della sessione",
+  "Lo stop_reason è budget_reached. Aspettati session.thread_status_idle, poi session.usage, poi session.status_idle — costruisci il tuo handler su quest'ordine",
+  "Il costo consumato può stare una frazione oltre il tetto (fino a una richiesta piena per thread) — dimensiona il tetto tenendo conto di quest'overshoot",
+  "Cambia il tetto a un valore strettamente maggiore del list_cost corrente per riprendere; rimuovilo del tutto con budget: null — ma la rimozione è irreversibile",
+  "I budget di deployment sono per-run, non cumulativi. Un job giornaliero con cap $20 per-run non è un cap $20 al mese",
+  "Non confondere i session budget (hard, USD, applicati dalla piattaforma) con i task budget dell'API Messages (advisory, token, applicati dal modello)"
+]} />
+
+## Verifica
+
+<Quiz title="Verifica" questions={[
+  {
+    q: "Crei una sessione con max_list_cost di \"50\" (50 centesimi). La sessione si mette in pausa con usage.list_cost che legge \"53\". Cos'è successo?",
+    options: [
+      "Un bug nella piattaforma — dovresti aprire un ticket di supporto",
+      "La richiesta che ha portato il totale oltre i 50 centesimi è finita prima della pausa; l'overshoot è limitato a una richiesta al modello per thread",
+      "La tua organizzazione è stata fatturata 53 centesimi invece di 50 per errore",
+      "La sessione ha ignorato il budget e continuerà a girare"
+    ],
+    answer: 1,
+    explain: "Il tetto è controllato tra le richieste al modello, non a metà richiesta. La richiesta in volo quando il totale ha attraversato il tetto arriva in fondo, quindi il list_cost in pausa sta a o una frazione oltre max_list_cost. Limitato a una richiesta per thread."
+  },
+  {
+    q: "Una sessione creata senza budget è in esecuzione da un'ora. Ti rendi conto di volerla capare. Cosa puoi fare?",
+    options: [
+      "Inviare un update con un nuovo oggetto budget — verrà applicato",
+      "Niente. Un budget può essere collegato solo alla creazione della sessione; aggiungerne uno a una sessione partita senza restituisce 400",
+      "Cancellare la sessione e ricrearla con un budget",
+      "Impostare un budget a livello di organizzazione che cappa retroattivamente la sessione"
+    ],
+    answer: 1,
+    explain: "\"Un budget può essere collegato solo quando la sessione viene creata. Aggiungere un budget a una sessione esistente che non ne ha uno viene rifiutato con un errore 400.\" Pianifica il tetto in anticipo."
+  },
+  {
+    q: "Hai una deployment con un budget di $20 per-run su un cron giornaliero. Qual è il list cost massimo che la deployment può accumulare in un mese di 30 giorni?",
+    options: [
+      "$20 — quello è il budget",
+      "$600 — il budget è per-run, non cumulativo",
+      "$0 — le deployment non possono portare un budget",
+      "Dipende dalla tariffa contrattuale della tua org"
+    ],
+    answer: 1,
+    explain: "Il budget di una deployment viene copiato su ogni sessione che avvia — limita ogni run separatamente, non la spesa cumulativa della deployment. 30 run × $20 = fino a $600 di list cost."
+  },
+  {
+    q: "Una sessione con budget è in pausa a budget_reached. Le invii un user.message chiedendole di continuare. Cosa succede?",
+    options: [
+      "La sessione riprende con la nuova istruzione",
+      "Il messaggio viene messo in coda e scatterà quando alzi il tetto",
+      "Ottieni un errore 400 che nomina i quattro settle event accettati (tool_confirmation, tool_result, custom_tool_result, interrupt)",
+      "La sessione viene terminata"
+    ],
+    answer: 2,
+    explain: "Al tetto vengono accettati solo settle event. Un user.message è un evento che avvia lavoro ed è rifiutato con un 400 il cui messaggio nomina la lista consentita. Cambia o rimuovi il budget per riprendere."
+  }
+]} />
+
+## Prossimi passi
+
+- [Managed Agents](/docs/api/managed-agents) — il modello mentale coordinator + session su cui questo budget si aggancia
+- [Managed Agents Memory Stores](/docs/api/managed-agents-memory-stores) — la beta di memoria persistente di luglio 2026
+- [Effort tuning su Managed Agents](/docs/api/effort-tuning) — l'altra grande leva di costo, impostata alla creazione dell'agent
+- [Il tool advisor](/docs/api/advisor-tool) — Sonnet-fa-il-lavoro, Opus-fa-il-pensiero (i suoi costi contano contro i session budget)
+- [Perché gli agenti bruciano token](/docs/models/why-agents-burn-tokens) — i pattern di design che trasformano un turno da $1 in un loop da $50
+- [Cosa costa l'AI tra i provider](/docs/models/what-ai-costs-across-providers) — il contesto cross-model
+- [Hardening dei run autonomi](/docs/security/hardening-autonomous-runs) — perché un cap sul costo è uno dei tre guardrail, non tutti e tre
