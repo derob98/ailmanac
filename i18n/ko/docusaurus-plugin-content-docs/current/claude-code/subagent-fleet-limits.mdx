@@ -1,0 +1,165 @@
+---
+sidebar_position: 13.3
+title: "서브에이전트 플릿 한계: 동시성 캡 & 중첩 깊이"
+description: "2026년 7월 21일 Claude Code는 동시 서브에이전트를 20개로 캡핑하고 중첩 스포닝을 제거했습니다. 3일 후 중첩이 깊이 3으로 돌아왔습니다. 네 개의 환경 변수, 마주칠 에러, 캡이 존재하는 이유, 그리고 그것들을 살아남는 플릿 설계법."
+keywords: [Claude Code, subagents, nested subagents, spawn depth, concurrency cap, CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH, fleet limits, v2.1.217, v2.1.219, ultracode]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-07-30" source="https://code.claude.com/docs/en/changelog">
+서브에이전트 한계의 버전 번호, 기본값, 환경 변수 이름은 릴리스마다 바뀝니다. 플릿 구성을 배포하기 전에 Claude Code 체인지로그에서 현재 값을 확인하세요.
+</VerifyNote>
+
+**2026년 7월 21일** Claude Code는 `v2.1.217`을 출시하며 서브에이전트 플릿에 첫 번째 확고한 캡을 두었습니다: **세션당 동시 서브에이전트 20개**, 그리고 **중첩 스포닝 완전 비활성화**. 3일 후 `v2.1.219`(7월 24일)가 중첩을 **기본 깊이 3**으로 복원했습니다. 트리거는 공개적이고 구체적이었습니다: 6월 13일 하나의 리서치 작업이 **48개 이상의 동시 백그라운드 에이전트를 스폰하고 사용자가 멈추기 전에 중복 작업으로 ~1.5M 토큰을 태워버린** 이슈(`anthropics/claude-code#68110`).
+
+턴당 소수 이상의 에이전트를 오케스트레이션한다면, 이 캡들은 이제 하나의 메시지가 할 수 있는 것을 — 그리고 `.mcp.json`, `.env`, 오케스트레이션 프롬프트를 어떻게 쓸지를 — 결정합니다.
+
+<Callout type="objectives" items={[
+  "플릿을 지배하는 네 가지 환경 변수: 동시성, 중첩 깊이, 세션당 총합, 서브에이전트 모델",
+  "Claude가 캡에 도달했을 때 정확한 에러, 그리고 런타임이 재시도하지 않도록 지시하는 이유",
+  "중첩이 72시간 동안 죽었던 이유와 복원된 기본값(깊이 3)이 fan-out에 실제로 의미하는 것",
+  "ultracode가 동시성 상한에서 면제될 때, 그리고 워크플로우 확고한 캡이 모든 것을 오버라이드할 때",
+  "어떤 규모에서든 캡 안에 머무는 부모-오케스트레이션 패턴"
+]} />
+
+## 캡을 형성한 사건
+
+이슈 `#68110`(2026년 6월 13일 제출)이 정직한 기원 이야기입니다. 사용자가 하나의 리서치 작업을 범용 서브에이전트에 위임했습니다. 그 서브에이전트는 — 범용 서브에이전트가 `Agent` 도구를 상속하기 때문에 — 자신의 자식을 스폰했습니다. 그 자식들이 더 스폰했습니다. 몇 턴 안에 **48개 이상의 백그라운드 에이전트**가 실행되고 있었고, 네 개의 별개 에이전트가 독립적으로 같은 서드파티 API(Wise)를 리서치하고 있었으며, 사용자는 그들이 다시 스폰되는 것보다 빨리 죽일 수 없었습니다. 개입 전 총 지출: **~1.5M 토큰**.
+
+응답은 5주 후 두 번의 출시 이벤트로 도착했습니다:
+
+| 날짜 | 버전 | 변경 |
+|---|---|---|
+| 2026-07-21 | `v2.1.217` | 동시 캡 = 20; 중첩 스포닝 **비활성화** (깊이 = 1) |
+| 2026-07-24 | `v2.1.219` | 중첩 **복원** 기본 깊이 = 3 |
+
+중첩이 꺼진 3일 창이 흥미로운 부분입니다 — Anthropic은 명백히 "fan-out 없음"과 "오케스트레이션 없음"을 저울질하고 중간 경로를 골랐습니다.
+
+## 네 가지 환경 변수
+
+모든 손잡이는 `CLAUDE_CODE_` 환경 변수입니다 — 셸, `.env`, 또는 `settings.json`을 통해 프로젝트별로 설정하세요.
+
+| 환경 변수 | 기본값 | 하는 일 |
+|---|---|---|
+| `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` | `20` | 한 세션에서 같은 순간에 실행되는 서브에이전트의 확고한 상한. 도달하면 스폰이 `"Concurrent subagent limit reached"`로 실패합니다. |
+| `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` | `3` | 서브에이전트가 자신의 자식을 몇 레벨 깊이까지 스폰할 수 있는지. `1` = 중첩 완전 비활성화(부모만 오케스트레이션). |
+| `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` | `200` | 전체 세션에 걸친 누적 캡 — 이를 넘어서는 스폰은 동시성이 괜찮아도 실패. |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | (상속) | 모든 서브에이전트를 특정 모델에 강제. 벌크 스테이지를 Haiku/Sonnet으로 라우팅하여 부모의 Opus 예산을 유지. |
+
+두 개의 더 많은 숫자가 환경 변수가 아니라 런타임 내부에 있습니다:
+
+- **워크플로우 확고한 캡** [Dynamic Workflows & ultracode](/docs/claude-code/dynamic-workflows): 워크플로우 실행당 **16 동시** 및 **1,000 총** 에이전트. 이들은 세션 환경과 무관하게 워크플로우가 시작하는 모든 것을 클램프합니다.
+- **ultracode 활성 세션**은 `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`에서 **면제**됩니다. 이유: ultracode의 워크플로우 레이어가 이미 자체 16/1,000 쌍을 강제하므로, 세션 캡은 이중 예약될 것.
+
+## 실제로 볼 에러
+
+주 에이전트가 21번째 동시 서브에이전트(또는 기본 깊이에서 4번째 중첩된 것)를 스폰하려 할 때, 도구 호출은 반환합니다:
+
+<PromptCard title="Tool result — do not retry">{`Concurrent subagent limit reached`}</PromptCard>
+
+런타임은 모델에게 **캡에 대해 루프하지 말라고** 지시합니다 — 더 적은 에이전트로 진행하거나 직렬화해야 합니다. 이는 두 가지 이유로 중요합니다:
+
+1. 재시도는 `#68110`을 재앙으로 만든 정확한 행동입니다. 물러남은 설계상입니다.
+2. 훅이나 로그에서 같은 에러가 몇 번 이상 연속으로 보이면, 한계 문제가 아니라 프롬프트 문제입니다 — 부모가 fan-out에 열심이고 배치하도록 지시받아야 합니다.
+
+## 플릿을 구성하는 방법
+
+<Steps items={[
+  { title: "동시성 예산 선택", body: "기본값 20에서 시작. 실제로 독립적인 작업이 있을 때만 올리세요 — 예를 들어 60개 패키지 전반의 코드베이스 전체 스윕. `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=40`을 프로젝트별로 설정, 전역으로 하지 마세요." },
+  { title: "중첩을 켤지 결정", body: "깊이 3(기본값)은 부모 → 오케스트레이터 → 워커 체인이 존재하게 합니다. 깊이 1은 엄격한 2레벨 토폴로지로 강제합니다: 주 세션과 워커 한 레이어. 깊이 1이 더 안전, 깊이 3이 더 표현력 있음." },
+  { title: "벌크 스테이지를 더 작은 모델에 핀 고정", body: "서브에이전트가 기계적 작업을 하는 세션에 `CLAUDE_CODE_SUBAGENT_MODEL=claude-haiku-4-5`를 설정. 부모는 여전히 여러분이 고른 어떤 `/model`이든 실행하고, 자식만 다운그레이드됩니다." },
+  { title: "세션당 총합 감시", body: "`CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION=200`은 관대하지만 실재합니다. `/agents` 호출의 긴 하루가 이를 소진할 수 있습니다. 세션을 재시작하여 리셋하세요." },
+  { title: "더 큰 것에는 ultracode로 이동", body: "동시성 캡을 ~40 이상으로 올려야 한다고 자신을 발견하는 순간, 한 세션을 넘어선 것입니다. 동적 워크플로우에 위임 — 16/1,000 워크플로우 캡을 얻지만 자체 스케줄러도 얻습니다." }
+]} />
+
+## 캡을 살아남는 부모-오케스트레이션 패턴
+
+새 기본값 아래 가장 안전한 플릿 토폴로지는 **부모에서 너비 우선** — 주 세션이 워커를 스폰하고, 워커는 워커를 스폰하지 않습니다. 이는 깊이 3이 사용 가능해도 깊이 1 시맨틱을 사용하고, 동시성 수학을 사소하게 만듭니다: 어느 순간이든 ≤ N 워커를 가지며, 절대 알 수 없는 크기의 트리가 아닙니다.
+
+60 모듈 코드베이스 스윕의 구체적인 형태:
+
+<PromptCard title="Batch-orchestrated sweep — main session prompt">{`Sweep the codebase for uses of the deprecated \`legacyClient()\` helper.
+
+Batch the 60 packages into 3 waves of 20. For each wave:
+  1. Spawn 20 read-only \`Explore\` subagents in parallel, one per package.
+  2. Wait for all 20 to return before spawning the next wave.
+  3. Do NOT let a subagent spawn its own children — pass every package
+     in the delegation prompt directly.
+
+Aggregate into a single \`REPORT.md\` after wave 3. Report the total
+count and any packages that failed with the exact error string.`}</PromptCard>
+
+이것이 유지되는 이유:
+
+- 20 동시 워커가 웨이브당 한 번 정확히 기본 상한에 도달 — 실패한 스폰 없음.
+- 중첩이 사용되지 않으므로 `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`는 상관없음 — 구성은 `v2.1.217`(중첩 꺼짐)과 `v2.1.219`(중첩 켜짐)에서 작동.
+- 누적 스폰: 60, 세션당 200 기본값보다 훨씬 아래.
+
+## 패턴을 깨고 중첩을 사용할 때
+
+깊이 = 3은 이유가 있어 존재합니다: 어떤 문제는 정말로 계층적입니다. 두 가지 형태가 중첩의 이점을 봅니다:
+
+- **깊은 리서치 트리.** 다섯 개의 소스를 비교해야 하는 최상위 `research` 서브에이전트는 — 각각 비자명한 — 다섯 개의 형제 `researcher` 자식을 스폰할 수 있습니다. 총 깊이 = 2.
+- **Map/reduce에 샤드별 finalize.** 부모가 N 샤드 소유자를 스폰; 각 샤드 소유자가 자신의 샤드가 끝나면 1 finalizer를 스폰. 총 깊이 = 2, 하지만 부모가 모든 finalize를 스스로 추적하는 것보다 구조적으로 더 깔끔.
+
+두 형태 중 하나가 여러분의 작업을 설명한다면 기본값을 그대로 두세요. 토폴로지가 평평하다면 `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1`을 명시적으로 설정하세요 — 문서화와 안전망입니다.
+
+## `/agents`와 백그라운드 서브에이전트와의 상호작용
+
+캡에 처음 도달할 때 사람들을 걸려 넘어지게 하는 두 가지 미묘함:
+
+- **백그라운드 서브에이전트가 카운트됨.** Week 27(2026년 6월 29일 – 7월 3일) 이후로 서브에이전트는 기본으로 백그라운드에서 실행됩니다. 백그라운드 에이전트는 부모가 그것을 기다리며 블록되지 않아도, 실행 중인 동안 여전히 동시성 캡에 카운트됩니다.
+- **frontmatter의 `background: true`가 캡을 면제하지 않음.** frontmatter에서 서브에이전트를 백그라운드로 핀 고정하는 것은 부모가 언제 재개되는지 바꿉니다 — 런타임이 그것을 카운트하는지 여부가 아닙니다.
+
+캡 에러가 보이고 주 세션이 유휴하게 느껴지면 `/agents`(또는 상태 라인 확인 — [Statusline](/docs/claude-code/statusline) 참조)를 실행하여 세션 초기부터 여전히 살아있는 것을 찾으세요.
+
+## Sonnet 5, Opus 5, 그리고 캡 아래 비용
+
+기본 `CLAUDE_CODE_SUBAGENT_MODEL` 동작은 **상속** — 서브에이전트는 부모가 있는 모델에서 실행됩니다. 20 동시 워커가 있는 Opus 5 세션에서는 빠르게 쌓입니다. 캡이 도착한 후 권장 형태는:
+
+- 오케스트레이션과 최종 합성을 위해 부모는 Opus 5.
+- 잘 스코프된 IO 무거운 작업을 하는 워커를 위해 `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5`.
+- 기계적인 것(grep 형태 작업, 포맷 체크)에는 Haiku 4.5.
+
+계층 트레이드오프는 [모델 선택](/docs/models/choosing-a-model)을 참조하고, 도구 무거운 서브에이전트가 모델과 무관하게 청구서를 부풀리는 방식은 [MCP 토큰 비용](/docs/claude-code/mcp-token-cost)을 참조하세요.
+
+<Quiz title="자가 확인" questions={[
+  { q: "주 세션에서 한 번에 25 서브에이전트를 스폰합니다. 기본 설정에서 무슨 일이 일어날까요?", options: ["25개 모두 실행 — 캡은 백그라운드 에이전트에만 적용", "20개 실행; 21번째부터 25번째는 'Concurrent subagent limit reached'로 실패", "25개 모두 큐잉되어 FIFO 순서로 순차 실행"], answer: 1, explain: "동시성 캡은 큐가 아니라 스폰 시 확고한 실패입니다. 20을 넘어가는 시도는 에러 문자열 'Concurrent subagent limit reached'를 반환하고, 런타임은 모델에게 재시도하지 말라고 지시합니다." },
+  { q: "`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` 설정은 어떤 토폴로지를 만들까요?", options: ["주 세션만 서브에이전트를 스폰할 수 있음 — 서브에이전트는 자신의 자식을 스폰할 수 없음", "서브에이전트가 1 추가 레벨까지 중첩 가능(그래서 main → child → grandchild 허용)", "중첩은 무제한이지만 부모당 서브에이전트 1개로 캡"], answer: 0, explain: "깊이 = 1은 주 세션만 스폰함을 의미합니다. 서브에이전트는 작업을 받지만 자신의 자식을 스폰할 수 없습니다 — 런타임이 v2.1.217과 v2.1.219 사이 3일 동안 기본으로 강제한 토폴로지." },
+  { q: "동시에 200 에이전트가 필요한 워크플로우를 실행합니다. 어떤 경로가 작동할까요?", options: ["셸에서 `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=200` 설정", "Dynamic Workflow에 위임 — 워크플로우 레이어가 동시성을 16으로 캡하지만 큐를 관리", "위의 둘 다 같은 결과를 제공"], answer: 1, explain: "Dynamic Workflows는 세션 환경 변수와 무관한 자체 16 동시 / 1,000 총 캡을 가지며, 스케줄러가 나머지를 큐잉합니다. 세션 환경만으로 우회하려 하면 여전히 세션당 200 누적 캡에 부딪힙니다." }
+]} />
+
+<Flashcards title="플릿 한계 — 각 카드 뒤집기" cards={[
+  { front: "세션당 기본 동시 서브에이전트 캡", back: "20 (v2.1.217+). `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`로 오버라이드. ultracode 세션은 면제." },
+  { front: "기본 중첩 스폰 깊이", back: "3 (v2.1.219+). v2.1.217과 v2.1.219 사이 1(비활성화)이었음. `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`로 오버라이드." },
+  { front: "세션당 누적 서브에이전트 캡", back: "기본 200. `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`으로 오버라이드. 카운터 리셋에 세션 재시작." },
+  { front: "워크플로우 확고한 캡", back: "워크플로우 실행당 16 동시와 1,000 총. 이들은 세션 환경 변수와 무관하게 Dynamic Workflows를 클램프." },
+  { front: "캡 위반 시 에러 텍스트", back: "'Concurrent subagent limit reached' — 런타임이 모델에게 재시도하지 말라고 지시. 반복 발생을 구성 문제가 아닌 프롬프트 문제로 취급." },
+  { front: "비용 형성 환경 변수", back: "`CLAUDE_CODE_SUBAGENT_MODEL` — 부모가 Opus 5에 머무는 동안 워커를 Sonnet 5나 Haiku 4.5에 핀 고정." }
+]} />
+
+<Callout type="takeaways" items={[
+  "기본 동시 캡은 20; 중첩 깊이 기본값은 3(2026년 7월 말 72시간 동안 1이었음).",
+  "네 개의 손잡이는 모두 `CLAUDE_CODE_*` 환경 변수 — 동시성, 스폰 깊이, 세션당 총합, 서브에이전트 모델.",
+  "'Concurrent subagent limit reached'는 재시도 신호가 아니라 실패-후-정지 신호. 반복 발생은 부모 프롬프트가 fan-out에 열심임을 의미.",
+  "부모-웨이브-오케스트레이션은 새 캡 아래 가장 안전한 토폴로지이며 v2.1.217과 v2.1.219에서 동일하게 작동.",
+  "~40 동시 이상이 필요하면 한 세션을 넘어선 것 — Dynamic Workflows와 그것의 16/1,000 워크플로우 캡으로 이동."
+]} />
+
+## 다음
+
+- [서브에이전트 & 병렬 에이전트](/docs/claude-code/subagents) — 이 캡들이 제약하는 프리미티브
+- [Dynamic Workflows & ultracode](/docs/claude-code/dynamic-workflows) — 플릿 규모 탈출구
+- [모델 선택](/docs/models/choosing-a-model) — 작업에 맞는 `CLAUDE_CODE_SUBAGENT_MODEL` 선택
+- [MCP 토큰 비용](/docs/claude-code/mcp-token-cost) — 도구 무거운 플릿이 캡에서도 여전히 토큰을 태우는 이유
+
+## 출처 & 추가 읽기
+
+- [Claude Code 체인지로그](https://code.claude.com/docs/en/changelog) — `v2.1.217`(2026-07-21)과 `v2.1.219`(2026-07-24)의 공식 버전 히스토리.
+- [커스텀 서브에이전트 만들기](https://code.claude.com/docs/en/sub-agents) — 캡되는 프리미티브의 공식 문서.
+- [Week 27 · June 29 – July 3, 2026](https://code.claude.com/docs/en/whats-new/2026-w27) — 동시성 캡과 상호작용하는 "기본으로 백그라운드" 변경.
+- [`anthropics/claude-code#68110`](https://github.com/anthropics/claude-code/issues/68110) — 캡을 유발한 지수적 fan-out 사건(48+ 에이전트, ~1.5M 토큰).
+- [`anthropics/claude-code#78406`](https://github.com/anthropics/claude-code/issues/78406) — 세션당 캡 환경 변수를 위한 커뮤니티 제출 문서 격차.
+- [Claude Code v2.1.217 주요 업데이트 — 서브에이전트 한계와 동작](https://dev.classmethod.jp/en/articles/20260722-cc-updates-v2-1-217/) — 정확한 환경 변수 이름이 담긴 서드파티 글, `v2.1.217` 다음 날 게시.
+- [Claude Code가 자신의 에이전트 플릿에 가드레일을 두다](https://www.digitalapplied.com/blog/claude-code-subagent-depth-limits-budget-caps-2026) — 워크플로우 16/1,000 확고한 캡과 ultracode 면제에 대한 실무자 분석.

@@ -1,0 +1,280 @@
+---
+sidebar_position: 18
+title: "Admin API: Claude 조직 자동화"
+description: "Anthropic Admin API 운영자 가이드 — 멤버 조회, 사용자 초대, RBAC 그룹 운영, 깔끔한 오프보딩. Console + Claude Enterprise, 실무 팀이 걸려 넘어지는 시트 풀과 SSO 함정 포함."
+keywords: [claude admin api, anthropic admin api, org:admin, sk-ant-admin, ce-user-management-2026-07-13, rbac_groups, workspace members, claude enterprise scim, claude offboarding, claude workspace api]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Admin API가 허용하는 두 가지 자격 증명(Admin API 키 vs org:admin OAuth 토큰), 그리고 어떤 엔드포인트가 OAuth 경로를 REQUIRE 하는지", "조직 유형별로 실제 호출 가능한 엔드포인트 — Claude Console(Platform) vs Claude Enterprise(claude.ai)", "역할 모델을 쉬운 말로: user, claude_code_user, developer, billing, admin (Console) — 그리고 user, managed, membership_admin, owner, primary_owner (Enterprise)", "실제 통합을 망가뜨리는 세 가지 함정: 시트 풀 400, SCIM 400, ce-user-management-2026-07-13 베타 헤더", "복붙 가능한 두 가지 플레이북: 깔끔한 직원 오프보딩과 분기별 그룹 감사"]} />
+
+<VerifyNote lastVerified="2026-07-31" source="https://platform.claude.com/docs/en/manage-claude/admin-api">
+공식 출처. Claude Enterprise 사용자 관리 엔드포인트는 2026년 7월 13일 기준 베타입니다(헤더 `ce-user-management-2026-07-13`). 이 페이지의 나머지는 모두 정식 출시(GA) 상태입니다. 엔드포인트 형태는 베타 기간 동안 자리를 잡아갑니다 — 배포하기 전에 항상 [Admin API 레퍼런스](https://platform.claude.com/docs/en/api/admin)를 교차 확인하세요.
+</VerifyNote>
+
+Console에서 사람이 클릭할 수 있는 것이라면, 대개 Admin API로 스크립트를 짤 수 있습니다 — 그리고 Claude로 실제 팀을 운영한다면 결국 그렇게 해야 합니다. 이 가이드는 대부분의 첫 통합을 망가뜨리는 세 가지 함정에 걸려 넘어지지 않고 그 일을 해내는 법입니다.
+
+## Admin API가 무엇인가 (그리고 무엇이 아닌가)
+
+**베이스:** 모든 엔드포인트는 `https://api.anthropic.com/v1/organizations/` 아래에 있습니다. 별도의 호스트도 없고 별도의 SDK도 없습니다 — `curl`, `requests`, 또는 이미 사용 중인 HTTP 클라이언트로 평범한 HTTPS 호출을 하면 됩니다.
+
+**할 수 있는 것:** 조직 멤버, 역할, 초대, 워크스페이스와 그 멤버, 기존 API 키, 서비스 계정, 페더레이션 발급자/규칙 조회 및 관리 — 그리고 Claude Enterprise의 경우 RBAC 그룹과 (읽기 전용) 사용자 지정 역할.
+
+**할 수 없는 것:**
+
+- **새 API 키 생성.** 보안상 새 키는 Console에서만 생성됩니다. API는 이미 존재하는 키를 조회, 이름 변경, 비활성화할 수 있습니다.
+- **관리자 멤버 수정.** `admin`, `owner`, `primary_owner` 역할을 가진 멤버는 API를 통해 역할을 변경하거나 제거할 수 없습니다 — Console에서 하세요.
+- **아이덴티티 프로바이더 우회.** SSO/SCIM이 어떤 측면을 담당하고 있다면, API는 IdP와 싸우기보다 400을 반환합니다. [SSO + Admin API](#sso--admin-api)를 보세요.
+
+## 두 가지 자격 증명
+
+모든 요청은 이 중 하나가 필요합니다 — 호출별이 아니라 환경별로 고르세요.
+
+<Callout type="tip" items={["사람을 위해서는 전용 OAuth 프로필이 더 안전한 기본값입니다(짧은 수명의 토큰, 감사 로그에 실제 사용자).", "장수명 Admin API 키는 CI에 더 단순하지만, 프로덕션 시크릿처럼 다루고 정기적으로 로테이션하세요.", "서비스 계정, 페더레이션 발급자, 페더레이션 규칙 엔드포인트는 오직 org:admin OAuth 토큰만 받습니다 — Admin API 키는 이 경로에서 거부됩니다."]} />
+
+| 자격 증명 | 전송 방법 | 생성 권한자 | 참고 |
+|---|---|---|---|
+| **Admin API 키** (`sk-ant-admin…`) | `x-api-key: $ANTHROPIC_ADMIN_KEY` | `admin` 역할 멤버 | 장수명. 대부분의 엔드포인트를 포괄. |
+| **OAuth 베어러 토큰** (`org:admin` 스코프) | `authorization: Bearer $ANTHROPIC_OAUTH_TOKEN` | `admin`, `owner`, `primary_owner` 멤버 | 단수명; `ant` CLI로 갱신. 서비스 계정/페더레이션 엔드포인트에 REQUIRED. |
+
+두 경우 모두 매 요청에 `anthropic-version: 2023-06-01`도 보내야 합니다(Claude Enterprise 그룹 및 사용자 지정 역할 요청은 한 가지 예외입니다 — 아래 [베타 헤더 규칙](#the-beta-header-rule) 참조).
+
+<PromptCard title="First call: who am I?">{`# With an Admin API key
+curl -sS "https://api.anthropic.com/v1/organizations/me" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "x-api-key: $ANTHROPIC_ADMIN_KEY"
+
+# With an OAuth bearer token (org:admin scope)
+curl -sS "https://api.anthropic.com/v1/organizations/me" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "authorization: Bearer $ANTHROPIC_OAUTH_TOKEN"`}</PromptCard>
+
+응답은 조직의 `id`, `type`, `name`입니다. 401로 실패하면 자격 증명이 잘못된 것이고, 403이면 역할이 부족한 것입니다.
+
+## Console vs Claude Enterprise: 호출 가능한 것
+
+두 조직 유형은 같은 URL 공간을 공유하지만 서로 다른 부분 집합을 노출합니다. 이것이 Admin API에서 가장 헷갈리는 단 하나의 지점입니다.
+
+| 엔드포인트 | Claude Console (Platform) | Claude Enterprise (claude.ai) |
+|---|---|---|
+| 멤버 & 초대 | ✅ GA | ✅ **베타** (추가 헤더 없음) |
+| 워크스페이스 + 워크스페이스 멤버 | ✅ GA | ❌ 사용 불가 |
+| API 키 (조회 / 이름 변경 / 비활성화) | ✅ GA | ❌ 사용 불가 |
+| 사용량 & 비용 리포트, 레이트 리밋 | ✅ GA | ❌ 사용 불가 |
+| 서비스 계정, 페더레이션 발급자, 페더레이션 규칙 | ✅ GA (OAuth 전용) | ❌ 사용 불가 |
+| RBAC 그룹 + 그룹 멤버 | ❌ 사용 불가 | ✅ **베타** (헤더 필요) |
+| 사용자 지정 역할 (읽기 전용 카탈로그) | ❌ 사용 불가 | ✅ **베타** (헤더 필요) |
+| [Spend Limits API](https://platform.claude.com/docs/en/manage-claude/spend-limits-api) | ❌ 사용 불가 | ✅ GA |
+
+**AWS 상의 Claude Platform**은 세 번째 경우입니다: 워크스페이스 엔드포인트(`/v1/organizations/workspaces`)만 동작합니다. 나머지는 모두 404를 반환합니다.
+
+## 역할 모델
+
+역할은 조직 유형마다 이름이 다릅니다. 대충 짐작으로 대응시키지 마세요.
+
+### Claude Console 역할
+
+| 역할 | 가능한 작업 |
+|---|---|
+| `user` | Workbench 사용 |
+| `claude_code_user` | Workbench + [Claude Code](/docs/claude-code/what-is-claude-code) |
+| `developer` | Workbench + API 키 관리 |
+| `billing` | Workbench + 청구 관리 |
+| `admin` | 위 모든 것 + 사용자 관리 |
+
+`admin` 위에는 `owner`와 `primary_owner`가 있습니다 — Console에는 이들이 있지만 API 목적상 슈퍼 관리자로 취급합니다.
+
+### Claude Enterprise 역할
+
+다섯 개의 값이 있지만, API는 그중 두 개(`user`와 `managed`)만 *할당* 할 수 있습니다. 나머지는 `claude.ai` 조직 설정에서 지정되며 API로 수정하거나 제거할 수 없습니다.
+
+| 역할 | 의미 |
+|---|---|
+| `user` | 표준 멤버 — 권한은 플랜 기본값에서 옵니다. |
+| `managed` | 권한은 **그들이 속한 그룹에 붙은 사용자 지정 역할**에서 옵니다(이것이 RBAC 경로입니다). |
+| `owner` | 조직 소유자. |
+| `membership_admin` | 멤버를 관리할 수 있지만 청구/설정은 불가. |
+| `primary_owner` | 정확히 한 명 존재. 제거 불가. |
+
+Enterprise에서 세밀한 권한을 원한다면 레시피는 이렇습니다: 사람을 `managed` 역할에 두고, 원하는 역할을 가진 그룹에 추가하세요.
+
+## 베타 헤더 규칙
+
+Enterprise에서 단연코 가장 흔한 통합 버그입니다.
+
+<Callout type="warning" items={["멤버와 초대: 추가 베타 헤더 NO — 그냥 anthropic-version: 2023-06-01.", "그룹과 사용자 지정 역할: anthropic-beta: ce-user-management-2026-07-13을 SEND. 없으면 404 반환.", "그룹과 사용자 지정 역할 요청은 anthropic-version이 REQUIRE되지 않음 — 공식 예제는 생략합니다. 베타가 졸업할 때 예상치 못한 변화를 피하려면 공식 패턴을 따르세요."]} />
+
+모든 것에 하나의 HTTP 클라이언트를 사용한다면 URL로 게이팅하세요:
+
+```python
+BETA_ROUTES = ("/v1/organizations/rbac_groups", "/v1/organizations/rbac_roles")
+
+def headers(path: str, key: str) -> dict:
+    h = {"x-api-key": key}
+    if path.startswith(BETA_ROUTES):
+        h["anthropic-beta"] = "ce-user-management-2026-07-13"
+    else:
+        h["anthropic-version"] = "2023-06-01"
+    return h
+```
+
+## Enterprise Admin 키를 위한 스코프
+
+Claude Enterprise Admin API 키는 **스코프가 지정**되어 있습니다 — 프라이머리 오너가 생성 시점에 각 키가 할 수 있는 일을 선택합니다. 동작하는 최소한의 집합을 고르세요.
+
+| 스코프 | 부여하는 것 |
+|---|---|
+| `read:members` | 멤버, 초대, 그리고 **모든 사용자 지정 역할 엔드포인트**에 대한 GET (별도의 role 스코프는 없음) |
+| `write:members` | 멤버와 초대에 대한 POST/DELETE |
+| `read:rbac_groups` | 그룹 + 그룹 멤버에 대한 GET |
+| `write:rbac_groups` | 그룹 + 그룹 멤버에 대한 POST/DELETE. **초대 생성 시 `rbac_group_ids`를 전달하려면 이것도 필요**합니다 — 권한을 부여할 수 있기 때문입니다. |
+| `read:org_audit` | 읽기 전용 "audit integrations" 스코프 — 이 API의 모든 GET과 [Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api) 읽기를 포함. 보안 팀의 모니터링 봇에 완벽합니다. |
+
+## 페이지네이션 — 두 가지 다른 스타일
+
+작은 불편이지만, "왜 내 목록이 비어있지?"의 큰 원인:
+
+- **멤버와 초대**는 **ID 기반 페이지네이션**을 사용합니다: `limit`(기본 20, 최대 1000)과 최대 하나의 `before_id` 또는 `after_id`를 전달. `first_id` / `last_id`로 페이지를 넘기고 `has_more`가 `false`일 때 중단.
+- **그룹, 그룹 멤버, 사용자 지정 역할**은 **불투명 커서**를 사용합니다: 각 응답에서 `next_page`를 읽고 그대로 `page`로 되돌려 전달. `next_page`가 `null`일 때 중단.
+
+모든 Admin API 엔드포인트의 레이트 리밋은 **조직당 분당 100 요청**을 공유하며, 초대 생성만 자체 **시간당 1,200 요청** 예산을 가집니다. 어느 한계라도 넘으면 429를 반환합니다.
+
+## 자주 쓰는 레시피
+
+### 모든 멤버 조회 (페이징)
+
+```python
+import os, requests
+
+API = "https://api.anthropic.com/v1/organizations/users"
+H = {"anthropic-version": "2023-06-01", "x-api-key": os.environ["ANTHROPIC_ADMIN_KEY"]}
+
+after = None
+while True:
+    params = {"limit": 1000}
+    if after:
+        params["after_id"] = after
+    page = requests.get(API, headers=H, params=params).json()
+    for m in page["data"]:
+        print(m["email"], m["role"])
+    if not page["has_more"]:
+        break
+    after = page["last_id"]
+```
+
+### 이메일로 멤버 찾기 (대소문자 구분 없음, `+tags` 처리)
+
+```bash
+curl "https://api.anthropic.com/v1/organizations/users?email=jane%2Bhiring@example.com" \
+  -H "x-api-key: $ANTHROPIC_ADMIN_KEY" \
+  -H "anthropic-version: 2023-06-01"
+```
+
+`jane@example.com`에서도 같은 매치가 됩니다 — 서버가 양쪽 모두를 정규화합니다.
+
+### 멤버의 역할 변경
+
+Enterprise에서는 `user` 또는 `managed`만, Console에서는 `user`, `claude_code_user`, `developer`, `billing`만 할당 가능합니다. admin 역할을 할당하거나 이미 그런 역할을 가진 멤버를 수정하려 하면 400을 반환합니다.
+
+<PromptCard title="Promote a member to developer (Console)">{`curl -sS "https://api.anthropic.com/v1/organizations/users/$USER_ID" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "content-type: application/json" \\
+  -H "x-api-key: $ANTHROPIC_ADMIN_KEY" \\
+  -d '{"role": "developer"}'`}</PromptCard>
+
+### 신입 사원을 그룹에 미리 배정하여 초대 (Enterprise)
+
+`rbac_group_ids`를 전달하려면 키에 `write:rbac_groups` 스코프가 필요합니다. 그룹이 권한을 부여하기 때문입니다.
+
+<PromptCard title="Invite + auto-add to Engineering">{`curl -sS -X POST "https://api.anthropic.com/v1/organizations/invites" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "content-type: application/json" \\
+  -H "x-api-key: $ANTHROPIC_ADMIN_KEY" \\
+  -d '{
+    "email": "newhire@example.com",
+    "role": "managed",
+    "rbac_group_ids": ["rbac_group_01UvWxYzAbCdEfGhIjKlMn"]
+  }'`}</PromptCard>
+
+### 깔끔한 직원 오프보딩 (두 조직 유형 모두에서 작동)
+
+<Steps items={[{title: "1. 이메일로 사람 조회", body: "GET /v1/organizations/users?email=<address>. 배열이 비어 있다면 결코 가입한 적이 없음 — 3단계로 이동."}, {title: "2. 그들을 제거", body: "DELETE /v1/organizations/users/{user_id}. 시트(있다면)는 풀로 반환됩니다. 그들이 만든 API 키는 계속 동작합니다 — 4단계 참조."}, {title: "3. 대기 중인 초대 철회", body: "/v1/organizations/invites를 조회하여 대기 중인 초대를 찾고 DELETE. 수락되거나 만료된 초대는 철회할 수 없습니다."}, {title: "4. 그들이 만든 API 키 로테이션", body: "Admin API 키는 사용자 스코프가 아닌 조직 스코프이므로, 생성자를 제거해도 키가 비활성화되지 않습니다. claude.ai → Organization settings → API에서 그들이 소유한 키를 나열하고, 각각 비활성화/삭제한 뒤, 서비스 아이덴티티가 소유한 대체 키를 생성하세요."}, {title: "5. 로그 기록", body: "삭제 응답({\"type\":\"user_deleted\",\"id\":\"user_...\"})을 오프보딩 감사 기록으로 저장하세요."}]} />
+
+### 분기별 그룹 감사 (Enterprise)
+
+Console을 뚫어져라 보지 않고, 민감한 그룹에 있어서는 안 되는 멤버를 찾습니다.
+
+```python
+import os, requests
+
+H_BETA = {"x-api-key": os.environ["ANTHROPIC_ADMIN_KEY"],
+          "anthropic-beta": "ce-user-management-2026-07-13"}
+
+groups = requests.get("https://api.anthropic.com/v1/organizations/rbac_groups?limit=1000",
+                     headers=H_BETA).json()["data"]
+
+for g in groups:
+    if "prod" not in g["name"].lower():
+        continue
+    members = requests.get(
+        f"https://api.anthropic.com/v1/organizations/rbac_groups/{g['id']}/members?limit=1000",
+        headers=H_BETA).json()["data"]
+    print(f"{g['name']} ({len(members)} members)")
+    for m in members:
+        print(f"  {m['email']}")
+```
+
+그 출력을 IdP 명부와 diff하고, `DELETE /rbac_groups/{group_id}/members/{user_id}`로 오래된 사람은 제거하세요. SCIM으로 프로비저닝된 그룹(`source_type: "scim"`)은 수정 시 400을 반환합니다 — 그것들은 IdP에서 하세요.
+
+## SSO + Admin API
+
+아이덴티티 프로바이더가 어떤 측면을 담당한다면 API는 그것을 존중합니다:
+
+| IdP가 하는 것 | 차단되는 API 작업 | HTTP |
+|---|---|---|
+| JIT 또는 SCIM 사용자 프로비저닝 | 초대 생성 | 400 |
+| 고급 SSO / SCIM 역할 프로비저닝 | 멤버 역할 업데이트 | 400 |
+| SCIM 멤버십 프로비저닝 | 조직에서 멤버 제거 | 400 |
+| SCIM 그룹 프로비저닝 (`source_type: "scim"`) | 그룹 이름 변경, 그룹 삭제, 그룹 멤버 추가/제거 | 400 |
+
+읽기는 항상 동작합니다. 이는 의도된 것입니다: 여러분의 IdP는 자신이 소유한 것에 대한 진실의 원천이며, Admin API는 스크립트가 조용히 그것과 어긋나게 두지 않습니다.
+
+## 시트, 초대, 그리고 언젠가 마주칠 400
+
+유한한 시트 풀을 가진 플랜에서:
+
+- **대기 중인 초대는 시트를 소비합니다**. 시트를 반환하려면 철회하거나 만료되게 두세요.
+- 초대 생성은 **티어 매개변수를 받지 않습니다**. 서버가 가용성이 있는 가장 낮은 티어를 선택합니다.
+- 여유 시트가 없으면 초대 생성은 **400**을 반환합니다 — 구매가 아닙니다. 플랜 설정에서 시트를 구매한 뒤 다시 시도하세요.
+- 초대는 **21일** 후 만료되며 연장할 방법이 없습니다. 대기 중인 초대의 이메일이나 역할을 변경하려면 철회하고 다시 만드세요.
+
+## 조심할 것
+
+<Callout type="warning" items={["Admin API 키는 생성자가 떠나도 만료되지 않습니다. 수동으로 로테이션해야 합니다 — 오프보딩 플레이북의 4단계 참조.", "Enterprise의 'managed' 역할은 자체로는 무기력합니다. 그룹 멤버십이 없는 managed 멤버는 사실상 제품 접근이 없습니다. 역할 변경은 항상 그룹 할당과 짝지으세요.", "그룹의 roles 필드는 역할 데이터가 일시적으로 사용 불가능할 때 []가 아니라 null로 돌아올 수 있습니다. 그룹에 역할이 0개라고 결론짓기 전에 다시 시도하세요.", "역할 권한의 capability_access_all과 capability_access_all_ga는 포괄적 부여입니다 — 다른 행과 함께 집계하지 마세요, 이중 계산됩니다. 이들은 모델 접근과 permission_ 접두어의 관리자 권한을 제외하고 전체 변형을 포괄합니다."]} />
+
+## Admin API vs Compliance API vs Inference Hooks
+
+세 가지 거버넌스 표면, 종종 혼동되는 것들:
+
+- **Admin API** (이 페이지)는 **누가 조직에 있는지**와 **그들이 무엇을 할 수 있는지**를 관리합니다.
+- **[Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api)**는 **그들이 무엇을 했는지**를 노출합니다: 감사 이벤트, 활동 피드, 그리고 (Enterprise에서) 법적 보류를 위한 콘텐츠 검색 및 삭제.
+- **[Inference Hooks](/docs/api/inference-hooks)** — 셋 중 가장 최신(2026년 8월 5일 베타) — 은 DLP 서버가 Claude가 프롬프트를 보기 전에 **각 프롬프트를 실시간으로** 허용하거나 거부하게 해줍니다. 채팅, Claude Code, Cowork에 걸쳐.
+
+보안 도구를 위해서는 `read:org_audit` 단일 키로 두 API 측 읽기를 모두 커버할 수 있습니다. Inference Hooks는 관리자 콘솔의 별도 구성입니다.
+
+## 퀴즈
+
+<Quiz questions={[
+  {q: "anthropic-beta: ce-user-management-2026-07-13 헤더 없이 /v1/organizations/rbac_groups에 POST합니다. 무슨 일이 일어날까요?", options: ["그룹이 생성됨", "404 Not Found", "400 Bad Request", "401 Unauthorized"], answer: 1, explain: "RBAC 그룹 엔드포인트는 anthropic-beta: ce-user-management-2026-07-13 헤더를 필요로 합니다. 없으면 엔드포인트가 보이지 않고 — 서버가 404를 반환합니다."},
+  {q: "퇴사하는 직원이 CI가 사용하는 세 개의 Admin API 키를 만들었습니다. 사용자를 DELETE합니다. 키는 어떻게 될까요?", options: ["셋 다 자동으로 비활성화", "계속 동작 — Admin API 키는 사용자 스코프가 아닌 조직 스코프", "30일 후 동작 정지", "읽기 전용으로 표시됨"], answer: 1, explain: "Admin API 키는 조직에 스코프됩니다. 생성자를 제거하면 그들 자신의 접근은 끝나지만 키는 그렇지 않습니다. Console에서 수동으로 로테이션하세요."},
+  {q: "Claude Enterprise에서 Admin API가 할당할 수 있는 두 가지 역할은?", options: ["admin과 user", "user와 managed", "owner와 membership_admin", "developer와 billing"], answer: 1, explain: "API는 오직 `user`와 `managed`만 할당할 수 있습니다. 관리자 역할(owner, membership_admin, primary_owner)은 claude.ai 조직 설정에서 지정되며 API로 수정할 수 없습니다."}
+]} />
+
+## 다음
+
+- [Inference Hooks: Claude Enterprise를 위한 인라인 DLP](/docs/api/inference-hooks) — 이 관리/감사 컨트롤 플레인의 실시간 실행 동반자
+- [첫 API 호출](/docs/api/first-call) — 여기까지 그것 없이 왔다면 개발자 기초
+- [오류와 레이트 리밋](/docs/api/errors-and-rate-limits) — 첫 429 전에 읽으세요
+- [Managed Agents](/docs/api/managed-agents) — 다른 큰 Anthropic 호스팅 프리미티브
+- [이번 달의 새 소식](/docs/whats-new/this-month) — 베타 헤더가 언제 바뀌는지 추적
