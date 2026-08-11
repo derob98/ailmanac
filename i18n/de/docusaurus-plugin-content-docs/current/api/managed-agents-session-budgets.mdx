@@ -1,0 +1,285 @@
+---
+sidebar_position: 11.6
+title: "Session-Budgets für Managed Agents"
+description: "Die Beta vom August 2026 — harte Dollar-Obergrenzen für eine Managed-Agents-Session, durchgesetzt zu öffentlichen Listenpreisen, mit dem stop_reason budget_reached, dem Ein-Request-Überschuss und dem Pause-und-Resume-Modell."
+keywords: [claude session budget, managed agents budget, max_list_cost, budget_reached stop reason, agent cost cap, unattended agent cost, deployment budget, list cost, task budget vs session budget]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Begrenzen, was eine einzelne Managed-Agents-Session ausgeben darf — in ganzen US-Cent, festgelegt vor dem Start", "Die vierstufige Ereignisfolge lesen, die feuert, wenn eine Session bei budget_reached pausiert", "Den Ein-Request-Überschuss verstehen — warum eine Obergrenze von 0,50 $ bei 0,53 $ pausieren kann und wie man das einplant", "Eine pausierte Session fortsetzen, indem man die Obergrenze erhöht oder entfernt — und wissen, warum das Entfernen einseitig ist", "Eine Pro-Lauf-Obergrenze auf ein geplantes Deployment setzen, damit wiederkehrende Läufe nicht in unkontrollierte Ausgaben abdriften", "Session-Budgets von Task-Budgets der Messages-API unterscheiden (empfehlend, tokenbasiert, einzelner Loop)"]} />
+
+<VerifyNote lastVerified="2026-08-11" source="https://platform.claude.com/docs/en/managed-agents/budgets">
+Session-Budgets wurden am **7. August 2026** in der Managed-Agents-Beta ausgeliefert. Feldnamen, Fehlertexte und der exakte `stop_reason` sind aus der offiziellen Referenz zitiert — vor dem Ausliefern gegen die Docs prüfen, weil Managed Agents noch in der Beta ist.
+</VerifyNote>
+
+Eine autonome [Managed-Agents](/docs/api/managed-agents)-Session kann um 3 Uhr morgens aufwachen, auf ein hartes Tool-Ergebnis starren und in eine Schleife geraten. Ohne Obergrenze ist der einzige Rückhalt das Rate-Limit deiner Organisation oder ein Monitoring-Alarm, den jemand nach dem Kaffee liest. **Session-Budgets** sind Anthropics Erstanbieter-Lösung: eine harte Dollar-Obergrenze, gesetzt beim Anlegen der Session, von der Plattform zwischen Model-Requests durchgesetzt.
+
+Zwei Dinge unterscheiden sie von jedem "Kosten-Alarm", den du bisher gebaut hast:
+
+- Die Obergrenze wird **vor jedem Model-Request** auf der Plattformseite durchgesetzt, nicht nachträglich von deinem Webhook. Eine budgetierte Session pausiert von selbst.
+- Die Obergrenze ist in **ganzen US-Cent**, bepreist zu Anthropics **öffentlichen Listenpreisen** — nicht zu deinem vertraglich vereinbarten Preis. Wenn deine Organisation einen Rabatt hat, erreicht die Session ihre Obergrenze in Listen-Dollar, und deine tatsächlich abgerechneten Ausgaben liegen niedriger.
+
+## Session-Budgets vs. Task-Budgets — nicht verwechseln
+
+Zwei "Budget"-Primitive laufen jetzt auf der Claude-Plattform. Sie lösen unterschiedliche Probleme.
+
+|  | **Session-Budgets** (diese Seite) | **Task-Budgets** ([Messages-API](https://platform.claude.com/docs/en/build-with-claude/task-budgets)) |
+|---|---|---|
+| Oberfläche | Managed-Agents-Session / Deployment | Einzelner agentischer Loop der Messages-API |
+| Einheit | US-Dollar, ganze Cent | Tokens |
+| Durchsetzung | **Hart** — Plattform pausiert die Session | **Empfehlend** — Modell reguliert sich selbst |
+| Wer liest es | Der Kosten-Buchhalter der Plattform | Das Modell, als Leitlinie |
+| Was passiert an der Obergrenze | `stop_reason: "budget_reached"`, Session geht in den Leerlauf | Modell schließt ab und gibt zurück |
+
+Wenn du einen *harten Stopp* für einen unbeaufsichtigten Lauf willst, ist das ein Session-Budget. Wenn das Modell sich innerhalb eines Loops *selbst dosieren* soll, ist das ein Task-Budget. Sie sind kombinierbar — eine Managed-Agents-Session kann ein Session-Budget tragen, während ein verschachtelter [Messages-API-Tool-Call](/docs/api/tool-use) sein eigenes Task-Budget hat.
+
+## Ein Budget bei der Session-Erstellung setzen
+
+Das optionale Feld `budget` an `POST /v1/sessions` übergeben:
+
+<PromptCard title="Session mit Obergrenze von 25,00 $ anlegen">{`curl -fsSL https://api.anthropic.com/v1/sessions \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: managed-agents-2026-04-01" \\
+  -H "content-type: application/json" \\
+  -d '{
+    "agent": "'"$AGENT_ID"'",
+    "environment_id": "'"$ENVIRONMENT_ID"'",
+    "budget": {
+      "type": "limit",
+      "max_list_cost": {"amount": "2500", "currency": "USD"}
+    }
+  }'`}</PromptCard>
+
+Das `budget`-Objekt hat genau zwei Felder:
+
+- `type` ist immer `"limit"`. Es gibt heute keine andere Art; das Feld ist da, damit zukünftige Durchsetzungsformen bestehende Clients nicht brechen.
+- `max_list_cost` ist die Obergrenze selbst. `amount` ist eine **ganze Zahl US-Cent als String** — `"2500"` sind 25,00 $, `"50"` sind 50 Cent, `"1"` ist ein Cent. Dezimalformen wie `"25.00"` werden mit einem 400 abgelehnt. Die String-Form ist bewusst gewählt: Floating-Point-Rundung berührt deine Obergrenze nie. `currency` ist ein Großbuchstaben-ISO-4217-Code, und heute ist `USD` der einzige unterstützte Wert.
+
+<Callout type="warning" items={["Ein Budget kann nur beim Anlegen der Session angehängt werden. Ein Budget an eine bereits laufende Session hinzuzufügen, die ohne eines erstellt wurde, gibt 400 zurück — plane das im Voraus ein.", "Amount ist ein String aus ganzen Cent. \"25.00\" wird abgelehnt. \"0\" wird abgelehnt. \"-1\" wird abgelehnt."]} />
+
+## Wie Listenkosten gemessen werden
+
+Die Plattform bepreist kontinuierlich, was die Session verbraucht, zu öffentlichen Listenpreisen, und nennt die laufende Summe die **Listenkosten** der Session. Drei Dinge fließen ein:
+
+- **Model-Tokens**, zum Listenpreis jedes bedienten Modells. In einer [Multi-Agent-Session](https://platform.claude.com/docs/en/managed-agents/multiagent-orchestration) werden die Tokens jedes Threads zum eigenen Modell dieses Threads bepreist.
+- **Web-Suchen**, zu 10 $ pro 1.000 Anfragen (also einem Cent pro Suche).
+- **Session-Laufzeit**, zu 0,08 $ pro Stunde aktiver Session-Zeit.
+
+Web-*Fetch*-Anfragen sind zählerneutral: Sie tauchen in `server_tool_use`-Zählern auf, tragen aber keine Pro-Request-Gebühr und fließen nicht ins Budget.
+
+Zwei Buchhaltungsdetails, die es sich lohnt zu verinnerlichen:
+
+1. Die Durchsetzung verwendet die **exakten, ungerundeten** Listenkosten. Die `list_cost`, die du auf Session- und Event-Objekten *siehst*, ist auf ganze Cent gerundet, sodass ein gemeldeter Wert bis zu einem halben Cent über oder unter dem Wert liegen kann, den die Durchsetzungsprüfung liest. Vergleiche nie zwei gerundete Lesewerte und schließe daraus, die Plattform habe einen Cent "vergessen".
+2. In Multi-Agent-Sessions zählt `active_seconds` auf Session-Ebene überlappende Thread-Aktivität **einmal** (damit Laufzeit für parallele Arbeit nicht überberechnet wird). Pro-Thread-`active_seconds` wird pro Thread bepreist und schließt die Laufzeitkosten der Session aus, sodass das Summieren der Thread-`list_cost`-Werte **nicht** der Session-`list_cost` entspricht. Vertraue dem Session-Wert — dagegen wird die Obergrenze durchgesetzt.
+
+## Der Ein-Request-Überschuss
+
+Das ist das Überraschendste an Session-Budgets und das, worum du deine Alarme herum bauen solltest.
+
+Die Obergrenze wird **zwischen** Model-Requests geprüft, nicht mitten im Request. Vor jedem Request liest die Plattform die verbrauchten Listenkosten der Session; sobald sie die Obergrenze erreichen, pausiert jeder Thread vor seinem nächsten Request. Der Request, der die Summe über die Obergrenze getragen hat, wurde zugelassen, als die Session noch unter der Obergrenze war, und läuft zu Ende.
+
+Die Konsequenz: Eine Session mit Obergrenze `"50"` (50 Cent) kann mit einer `list_cost` von `"53"` pausieren. Das ist kein Abrechnungsfehler. Der Überschuss ist auf einen Model-Request pro Thread begrenzt — aber auf einer Multi-Agent-Aufstellung mit mehreren parallelen Threads multipliziert sich dieses "eins".
+
+<Callout type="tip">
+Behandle `max_list_cost` als Schranke für **neue Arbeit**, nicht als exakten Haltepunkt. Wenn du garantieren musst, dass die Ausgaben nie X $ überschreiten, setze die Obergrenze auf `X - (max_request_cost * concurrent_threads)`. Auf einer 25-Thread-Multi-Agent-Session mit teuren Opus-Calls kann die Marge beträchtlich sein.
+</Callout>
+
+## Was passiert, wenn eine Session ihr Budget erreicht
+
+Eine Session an ihrem Budget stirbt nicht — sie geht **in den Leerlauf**, mit erhaltener Historie und Sandbox. Auf dem [Event-Stream](https://platform.claude.com/docs/en/managed-agents/events-and-streaming) siehst du, in dieser Reihenfolge:
+
+<Steps items={[
+  {title: "session.thread_status_idle (pro Thread)", body: "Sobald jeder Thread seinen laufenden Request beendet, gibt er ein Idle-Event mit stop_reason: \"budget_reached\" aus. Ein Thread, dessen letzter Request auch seinen Turn abgeschlossen hat, meldet stop_reason: \"end_turn\" auf seinem eigenen Event — aber das Event auf Session-Ebene meldet trotzdem budget_reached. Vertraue dem Signal auf Session-Ebene."},
+  {title: "session.usage", body: "Ein Snapshot der kumulierten Nutzung: Token-Summen, list_cost, active_seconds, server_tool_use-Zähler und ein Echo des aktuellen Budgets. Dieses Event geht immer direkt dem Idle-Event auf Session-Ebene voraus."},
+  {title: "session.status_idle", body: "Das Idle-Event auf Session-Ebene mit stop_reason: \"budget_reached\". Das ist das definitive Signal, dass die Session an ihrer Obergrenze pausiert hat."},
+  {title: "Alles bleibt bestehen", body: "Das Sandbox-Dateisystem, Memory-Stores, laufende Tool-Bestätigungen und die Event-Historie bleiben alle erhalten. Beim Fortsetzen macht die Arbeit genau dort weiter, wo sie aufgehört hat."}
+]} />
+
+### Welche Events die Session noch akzeptiert
+
+Während sie an der Obergrenze pausiert, akzeptiert die Session **nur Events, die bereits laufende Arbeit abschließen**:
+
+- `user.tool_confirmation`
+- `user.tool_result`
+- `user.custom_tool_result`
+- `user.interrupt`
+
+Eine `user.message` — alles, was neue Arbeit starten würde — wird mit einem 400-Fehler abgelehnt, der genau die obige Liste nennt. Eine `user.interrupt`, die an eine vollständig pausierte Session gesendet wird, wird akzeptiert und stillschweigend ignoriert (sie erscheint nicht einmal in der Event-Liste). Das Abschließen laufender Tools löst keinen neuen Model-Request aus; die Session bleibt pausiert.
+
+## Fortsetzen: Budget ändern oder entfernen
+
+Es gibt genau zwei Hebel.
+
+### Budget ändern
+
+Sende ein `PATCH` (oder das SDK-`update`) mit einem neuen `max_list_cost`. Der neue Wert kann höher **oder** niedriger als die alte Obergrenze sein — aber er muss **strikt größer als die verbrauchten Listenkosten der Session** sein, sonst bekommst du:
+
+```
+400 budget.max_list_cost must be greater than the session's consumed list cost
+```
+
+<Callout type="warning">
+Weil die verbrauchten Kosten in der Regel **einen Bruchteil über der alten Obergrenze** liegen, wenn die Session pausiert hat, basiere den neuen Wert auf der gemeldeten `usage.list_cost` der Session, nicht auf der alten `max_list_cost`. Setze die neue Obergrenze **mindestens einen Cent über** den gemeldeten Wert — der gemeldete Wert ist gerundet und kann eine Winzigkeit unter den exakten verbrauchten Kosten liegen, die die Prüfung liest.
+</Callout>
+
+<PromptCard title="Obergrenze auf 40,00 $ anheben">{`curl -sS --fail-with-body "https://api.anthropic.com/v1/sessions/$SESSION_ID" \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: managed-agents-2026-04-01" \\
+  -H "content-type: application/json" \\
+  -d '{"budget": {"type": "limit", "max_list_cost": {"amount": "4000", "currency": "USD"}}}'`}</PromptCard>
+
+Ein akzeptiertes Update setzt die pausierte Arbeit automatisch fort. Du sendest sonst nichts.
+
+### Budget entfernen
+
+Setze `budget` auf `null`, und die Obergrenze verschwindet. Die Session wird fortgesetzt, und das resultierende `session.updated`-Event trägt `budget: null`.
+
+```json
+{"budget": null}
+```
+
+<Callout type="warning">
+**Das Entfernen ist einseitig.** Einer Session, deren Budget entfernt wurde, kann kein neues gegeben werden — das ist dieselbe Regel wie "Budget nur bei Erstellung", angewandt aufs Entfernen. Wenn du eine Obergrenze auf der Session *behalten* willst, dann **ändere** sie immer. Entferne nur, wenn du die Session bewusst wieder an die normalen Ausgabelimits deiner Organisation übergibst.
+</Callout>
+
+## Budgets auf Deployments — pro Lauf, nicht kumulativ
+
+Ein geplantes [Deployment](https://platform.claude.com/docs/en/managed-agents/scheduled-deployments) akzeptiert dasselbe `budget`-Objekt:
+
+```json
+{
+  "budget": {
+    "type": "limit",
+    "max_list_cost": {"amount": "2000", "currency": "USD"}
+  }
+}
+```
+
+Die Obergrenze wird **auf jede Session kopiert, die das Deployment startet**. Sie begrenzt jeden Lauf einzeln — nicht die kumulierten Ausgaben des Deployments über alle Läufe. Ein Deployment-Budget von 20 $ mit einem täglichen Cron und 30 Läufen pro Monat kann daher bis zu ~600 $ Listenkosten verbrauchen, nicht 20 $.
+
+Zwei weitere Unterschiede zu Session-Budgets:
+
+- Das Ändern des Deployment-Budgets gilt für **Sessions, die das Deployment danach startet** — bereits laufende Sessions behalten das Budget, mit dem sie angelegt wurden.
+- Anders als bei einer Session **kann das Budget eines Deployments mit `null` geleert und später wieder gesetzt werden**. Die Einweg-Entfernungsregel ist eine Session-Ebenen-Regel, keine Deployment-Ebenen-Regel.
+
+## Multi-Agent, Advisor und die gemeinsame Obergrenze
+
+Eine Multi-Agent-Session hat **ein einziges gemeinsames Budget über alle ihre Threads** — es gibt keine Pro-Thread-Obergrenzen. Der Verbrauch jedes Threads wird zum eigenen bedienten Modell bepreist; Threads pausieren unabhängig, sobald die gemeinsame Obergrenze erreicht ist. Ein Thread kann bei `budget_reached` pausieren, während ein anderer noch seinen laufenden Request beendet.
+
+[Advisor](/docs/api/advisor-tool)-Konsultationen zählen gegen dasselbe Budget, bepreist zu den Sätzen des Advisor-Modells. Ein Opus-5-Advisor, der von einem Sonnet-5-Executor auf einer mit 10 $ budgetierten Session konsultiert wird, zieht also aus demselben Topf. Wenn du das Advisor-Muster zur Kostenoptimierung nutzt, dimensioniere die Obergrenze für beide Stufen, nicht nur für den Executor.
+
+Es gibt einen wichtigen Tiebreaker: **Eine ausstehende Anfrage übertrumpft die Obergrenze**. Wenn ein Thread auf `requires_action` wartet (etwa eine `user.tool_confirmation`) und ein anderer bei `budget_reached` pausiert, meldet die Session `requires_action` auf oberster Ebene — weil das Beantworten dieser Anfrage ein [Settle-Event](#what-events-the-session-still-accepts) ist, das das Budget nicht blockiert. Deine Operator-UI sollte den Requires-Action-Prompt zuerst zeigen.
+
+## Modelle ohne Listenpreis
+
+Ein Budget kann nur Verbrauch tracken, den die Plattform bepreisen kann. Zwei Fehlermodi:
+
+- **Bei der Erstellung**: Das Anlegen einer budgetierten Session, deren Agent — oder **irgendein Agent oder Advisor** in ihrer Multi-Agent-Aufstellung — ein Modell ohne öffentlichen Listenpreis nutzt, gibt 400 zurück mit einer Nachricht, die genau `no list price is available for the model` sagt. Das schließt Preview-/Research-Preview-Modelle ein, die noch nicht bepreist wurden.
+- **Nach der Erstellung**: Wenn die Nutzung einer budgetierten Session ein unbepreistes Modell einschließt (z. B. über einen Roster-Eintrag, den ein Session-Level-Override hinzufügt), kann das Budget die Ausgaben nicht mehr messen. Die Session kann trotzdem mit `stop_reason: "budget_reached"` pausieren, und jeder Versuch, das Budget zu ändern, wird abgelehnt. Die einzige Rettung ist, das Budget zu **entfernen** — was einseitig ist, siehe die obige Regel. Gestalte die Aufstellung so, dass das mitten im Lauf nicht passieren kann.
+
+## Fehlerreferenz
+
+Die vollständige Liste der budgetbezogenen 400-Bedingungen:
+
+| Bedingung | Status |
+|---|---|
+| Ein arbeitsstartendes Event (z. B. `user.message`) gesendet, während die Session am oder über ihrem Budget ist | 400 (Fehler nennt die akzeptierten Settle-Events) |
+| Das Budget wird auf einen Wert am oder unter den verbrauchten Listenkosten der Session gesetzt | 400 |
+| Ein Budget wird zu einer Session ohne Budget hinzugefügt oder nach dem Entfernen wieder hinzugefügt | 400 |
+| `amount` ist keine ganze Zahl Cent (z. B. `"25.00"`), ist null oder negativ, oder `currency` ist nicht `USD` | 400 |
+| Ein budgetiertes Create referenziert ein Modell ohne öffentlichen Listenpreis | 400 |
+
+## Die Ops-Checkliste
+
+Sechs Dinge, die es wert sind, ins Runbook zu kommen, an dem Tag, an dem du Session-Budgets einschaltest:
+
+<Steps items={[
+  {title: "Obergrenze = erwartet * 1,5, dann auf ganze Cent aufrunden", body: "Gib dir Marge für den Ein-Request-Überschuss und für einen länger-als-normalen Lauf. Nur ganze Cent — kein \"25.00\"."},
+  {title: "Abonniere das session.usage-Event, nicht nur das Idle-Event", body: "Das Usage-Event feuert direkt vor jedem Idle-Event und trägt die exakte list_cost und active_seconds, die du brauchst, wenn du das Budget im laufenden Betrieb ändern willst. Es zu speichern ist billig."},
+  {title: "In deinem Handler neue Obergrenzen auf usage.list_cost + einen Cent basieren", body: "Nicht auf max_list_cost. Die gemeldete list_cost ist gerundet und kann eine Winzigkeit unter den exakten verbrauchten Kosten liegen, die die Durchsetzungsprüfung nutzt. Ein Cent Marge vermeidet den \"must be strictly greater\"-400."},
+  {title: "Für Deployments pro Lauf begrenzen und separat auf Lauf-Anzahl alarmieren", body: "Ein Pro-Lauf-Budget ist kein Monatsbudget. Tracke Deployment-Lauf-Anzahlen (drun_-Records) und alarmiere bei unerwartetem Volumen."},
+  {title: "Lass ein Runaway-Muster nie stillschweigend \"resumen\"", body: "Ein Budget-Treffer ist ein Signal, keine Papierkramaufgabe. Behandle jedes budget_reached-Idle als ein Ereignis, das ein Mensch triagiert, bevor du die Obergrenze anhebst — die Alternative ist ein Bug, der N * Obergrenze pro Woche frisst."},
+  {title: "Zäune unbepreiste Modelle ein", body: "Wenn deine Aufstellung ein Research-Preview- oder unbepreistes Modell einziehen kann, erzwinge es im CI: Lehne einen Koordinator ab, dessen Aufstellung ein Modell ohne öffentlichen Listenpreis enthält, wenn der Koordinator selbst für budgetierte Nutzung gedacht ist."}
+]} />
+
+## Cross-AI-Hinweis: wie andere Plattformen damit umgehen
+
+Keine der großen gehosteten Agent-Plattformen hat vor Anthropics Release am 7. August ein äquivalentes Primitiv ausgeliefert. Was du anderswo Stand 2026-08-11 annähern kannst:
+
+- **OpenAI**: Organisationsweite *monatliche Ausgabelimits* und Pro-Projekt-*Usage-Limits* existieren, aber sie sind nicht pro Lauf und können eine laufende Assistants-/Responses-API-Session nicht mitten im Loop pausieren. Du fängst das mit deinem eigenen Webhook ab, der den Token-Stream beobachtet.
+- **Google Vertex AI (Gemini)**: Projektweite Kontingente und Billing-Budgets (via Cloud Billing) sind asynchron — sie alarmieren, sie pausieren einen Agent nicht inline.
+- **AWS Bedrock**: Model-Invocation-Kontingente sind harte Pro-Sekunde-/Pro-Minute-Obergrenzen, keine Pro-Session-Dollar-Obergrenzen. Ausgaben-Gating auf Session-Ebene liegt in deiner Verantwortung.
+- **Third-Party-Gateways** (LiteLLM, OpenRouter, Portkey): Alle bieten Pro-Key-Budget-Obergrenzen, die einen HTTP-Fehler zurückgeben, wenn erreicht — der Form nach näher an Session-Budgets, aber das "Pause-und-Resume"-Verhalten ist kein First-Class-Primitiv.
+
+Wenn Kosten *der* Grund sind, warum du Managed Agents gegen einen selbstgebauten Loop mit einem Gateway abwägst, ist die harte Pro-Session-Obergrenze mit sanftem Pausieren diese Woche ein echter Differenzierungspunkt.
+
+<Callout type="takeaways" items={[
+  "Session-Budgets sind harte, plattformdurchgesetzte USD-Obergrenzen auf eine Managed-Agents-Session, bepreist zu öffentlichen Listenpreisen und nur bei der Session-Erstellung gesetzt",
+  "Der stop_reason ist budget_reached. Erwarte ein session.thread_status_idle, dann session.usage, dann session.status_idle — bau deinen Handler auf dieser Reihenfolge auf",
+  "Die verbrauchten Kosten können einen Bruchteil über der Obergrenze liegen (bis zu einem vollen Request pro Thread) — dimensioniere die Obergrenze mit diesem Überschuss im Hinterkopf",
+  "Ändere die Obergrenze auf einen Wert strikt größer als die aktuelle list_cost, um fortzusetzen; entferne sie ganz mit budget: null — aber das Entfernen ist einseitig",
+  "Deployment-Budgets sind pro Lauf, nicht kumulativ. Ein Tagesjob mit 20 $ Pro-Lauf-Obergrenze ist keine 20-$-Monatsobergrenze",
+  "Verwechsle Session-Budgets (hart, USD, plattformdurchgesetzt) nicht mit Task-Budgets der Messages-API (empfehlend, Tokens, modelldurchgesetzt)"
+]} />
+
+## Selbsttest
+
+<Quiz title="Selbsttest" questions={[
+  {
+    q: "Du erstellst eine Session mit max_list_cost von \"50\" (50 Cent). Die Session pausiert mit usage.list_cost als \"53\". Was ist passiert?",
+    options: [
+      "Ein Bug in der Plattform — du solltest ein Support-Ticket öffnen",
+      "Der Request, der die Summe über 50 Cent trug, wurde vor der Pause fertig; der Überschuss ist auf einen Model-Request pro Thread begrenzt",
+      "Deiner Organisation wurden versehentlich 53 Cent statt 50 Cent berechnet",
+      "Die Session hat das Budget ignoriert und wird weiterlaufen"
+    ],
+    answer: 1,
+    explain: "Die Obergrenze wird zwischen Model-Requests geprüft, nicht mitten im Request. Der Request, der lief, als die Summe die Obergrenze überschritt, läuft zu Ende, sodass die pausierte list_cost auf oder einen Bruchteil über max_list_cost sitzt. Auf einen Request pro Thread begrenzt."
+  },
+  {
+    q: "Eine Session, die ohne Budget erstellt wurde, läuft seit einer Stunde. Dir fällt ein, dass du sie begrenzen willst. Was kannst du tun?",
+    options: [
+      "Ein Update mit einem neuen Budget-Objekt senden — es wird angewandt",
+      "Nichts. Ein Budget kann nur bei der Session-Erstellung angehängt werden; eines zu einer Session ohne Budget hinzuzufügen gibt 400 zurück",
+      "Die Session löschen und mit einem Budget neu erstellen",
+      "Ein Org-Level-Budget setzen, das die Session rückwirkend begrenzt"
+    ],
+    answer: 1,
+    explain: "\"Ein Budget kann nur angehängt werden, wenn die Session erstellt wird. Ein Budget zu einer bestehenden Session ohne eines hinzuzufügen, wird mit einem 400-Fehler abgelehnt.\" Plane die Obergrenze im Voraus ein."
+  },
+  {
+    q: "Du hast ein Deployment mit einem Pro-Lauf-Budget von 20 $ auf einem täglichen Cron. Was sind die maximalen Listenkosten, die das Deployment über einen 30-Tage-Monat verursachen kann?",
+    options: [
+      "20 $ — das ist das Budget",
+      "600 $ — das Budget ist pro Lauf, nicht kumulativ",
+      "0 $ — Deployments können kein Budget tragen",
+      "Es hängt vom vertraglich vereinbarten Preis deiner Organisation ab"
+    ],
+    answer: 1,
+    explain: "Das Budget eines Deployments wird auf jede Session kopiert, die es startet — es begrenzt jeden Lauf einzeln, nicht die kumulierten Ausgaben des Deployments. 30 Läufe × 20 $ = bis zu 600 $ Listenkosten."
+  },
+  {
+    q: "Eine budgetierte Session ist bei budget_reached pausiert. Du sendest eine user.message und bittest sie fortzufahren. Was passiert?",
+    options: [
+      "Die Session wird mit der neuen Anweisung fortgesetzt",
+      "Die Nachricht wird eingereiht und feuert, wenn du die Obergrenze anhebst",
+      "Du bekommst einen 400-Fehler, der die vier akzeptierten Settle-Events nennt (tool_confirmation, tool_result, custom_tool_result, interrupt)",
+      "Die Session wird beendet"
+    ],
+    answer: 2,
+    explain: "An der Obergrenze werden nur Settle-Events akzeptiert. Eine user.message ist ein arbeitsstartendes Event und wird mit einem 400 abgelehnt, dessen Nachricht die erlaubte Liste nennt. Ändere oder entferne das Budget, um fortzusetzen."
+  }
+]} />
+
+## Weiter
+
+- [Managed Agents](/docs/api/managed-agents) — das Koordinator-+-Session-Mentalmodell, in das dieses Budget einhakt
+- [Managed-Agents-Memory-Stores](/docs/api/managed-agents-memory-stores) — die Beta für persistenten Speicher vom Juli 2026
+- [Effort-Tuning auf Managed Agents](/docs/api/effort-tuning) — der andere große Kostenhebel, gesetzt bei der Agent-Erstellung
+- [Das Advisor-Tool](/docs/api/advisor-tool) — Sonnet-macht-die-Arbeit, Opus-macht-das-Denken (seine Kosten zählen gegen Session-Budgets)
+- [Warum Agents Tokens verbrennen](/docs/models/why-agents-burn-tokens) — die Design-Muster, die einen 1-$-Turn in einen 50-$-Loop verwandeln
+- [Was KI bei den Anbietern kostet](/docs/models/what-ai-costs-across-providers) — der Cross-Model-Kontext
+- [Autonome Läufe härten](/docs/security/hardening-autonomous-runs) — weil eine Kostenobergrenze eines von drei Guardrails ist, nicht alle drei
