@@ -1,0 +1,270 @@
+---
+sidebar_position: 2.2
+title: "Codex Agent Plugins とカタログ連合 (v0.147.0): 実践ガイド"
+description: "2026年8月7日、OpenAI は Codex CLI v0.147.0 をリリースした。Skills を四層カタログ付きの可搬な Agent Plugins に変え、名前とは裏腹の挙動を持つ --approve-for-me フラグを導入し、--full-auto をひっそりと削除し、MCP 2026-07-28 をオプトインにする。各要素が実際に何をするのかを、Claude ユーザー向けに整理する。"
+keywords: [Codex CLI, Codex plugins, Agent Plugins, plugin catalog, --approve-for-me, MCP 2026-07-28, Codex vs Claude Code, Codex skills, workspace-write, --full-auto removed]
+---
+
+<LevelBadge level="intermediate" />
+
+**2026年8月7日**、OpenAI は Codex CLI **v0.147.0** をリリースした。多くの解説はこれを「プラグインが来た、便利」の一行に押し込めた。実際のリリースは 4 つのことを同時に変えており、そのうち 3 つは今日 CI にありそうなスクリプトを静かに壊す。可搬な **Agent Plugins** がアドホックな skill インストールを置き換え、四層カタログを跨いでマージされる。新しい **`--approve-for-me`** フラグは「全部自動承認」に読めるがそうではない。旧 **`--full-auto`** ショートカットは *削除された*。そして Codex は **オプトインで MCP 2026-07-28** を提供するようになり、MCP サーバー起動は非ブロッキングになった。それぞれにアップグレード前に知っておくべき落とし穴がある。
+
+このページは、Claude Code の Skills、subagents、MCP を既に理解している読者が、Codex 版が実際に何をし、どこが違い、月曜朝のワークフローで何を変えるべきかを知るための実践フィールドガイドである。
+
+<Callout type="objectives" items={[
+  "Codex CLI v0.146.1 (8月5日) と v0.147.0 (8月7日) で何が出荷されたのか、2 つを併せて読む意味を正確に把握する",
+  "四層プラグインカタログ (local, personal, workspace, remote) と、どのプラグインが実際に勝つかを決めるマージ / 重複排除ルールを理解する",
+  "`--approve-for-me` を正しく読む: これはレビューパスであってサンドボックス回避ではない。OS レベルのサンドボックスは有効なまま",
+  "削除された `--full-auto` フラグを、次の CI 実行が静かに落ちる前に移行する",
+  "Codex で MCP 2026-07-28 をオプトインにすべきタイミングと、非ブロッキングなサーバー起動が何をもたらすかを判断する"
+]} />
+
+<VerifyNote lastVerified="2026-08-13" source="github.com/openai/codex/releases (rust-v0.147.0, rust-v0.146.1); PR openai/codex#36373; danielvaughan.com v0.147 deep-dive" />
+
+## 2 リリース構図: 0.146.1 のあと 0.147.0
+
+8 月のドロップは実は 48 時間差の *2 つの* リリースであり、これを 1 つとして読むと何が変わったのか分からなくなる。
+
+<Steps items={[
+  {
+    title: "v0.146.1 — 2026年8月5日: cyber 対応モデル向けの安全側デフォルト",
+    body: "静かなポイントリリースだが、cyber 対応とタグ付けされたモデル (GPT-5.6-Cyber と同じクラス) の *初期姿勢* を変えた。自動承認のデフォルトが締まり、ネットワーク、認証情報の読み取り、プロセス管理は以前の緩いベースラインに頼るのではなく明示的なホワイトリストが必要になった。Codex はまた、パーミッション変更をターミナル上で説明するようになった — なぜリクエストがブロックされたのか、その *理由* が見える。"
+  },
+  {
+    title: "v0.147.0 — 2026年8月7日: 可搬 Agent Plugins、カタログ連合、--approve-for-me、MCP 2026-07-28",
+    body: "目玉のリリース。プラグインは四層カタログ上でインストール可能かつ検索可能になる。新しい `--approve-for-me` フラグは、人間にプロンプトを出す代わりに承認を自動レビューパスに通す。旧 `--full-auto` ショートカットは *削除* される — ほとんどの CI スクリプトが遭遇する破壊的変更である。そして MCP 2026-07-28 にオプトインでき、ページ分割された discovery、マルチラウンド リクエスト、非ブロッキングなサーバー起動が解放される。"
+  },
+  {
+    title: "0.148.0-alpha — 進行中のブランチ",
+    body: "2026年8月13日時点で Codex は 0.148.0-alpha ビルドを公開している (1 週間のうちに alpha.4 から alpha.12)。`latest` をインストールすると alpha に着地するかもしれない。0.148.0 が GA になるまでは、安定を求めるなら `rust-v0.147.0` にピン留めすること。"
+  }
+]} />
+
+## 可搬 Agent Plugins: ファイルレベルで何が変わったか
+
+Codex には Skills があった — `SKILL.md` とその兄弟ファイルからなるフォルダで、準拠する任意のエージェントがロードできる — 2026 年を通してずっと。v0.147.0 はその上に *パッケージ* 層を追加する: **Agent Plugins**。プラグインは、1 つ以上の skill、MCP サーバー、プロンプト、設定を 1 つのアーティファクトにまとめ、名前でカタログからインストールできる配布可能な単位である。Skills はエージェント間で可搬なまま。プラグインは Codex 独自のパッケージング / 配布層である。
+
+重要なシフトは、*どのように発見されるか* だ。v0.147.0 より前は、skill ディレクトリをプロジェクトや個人フォルダに手でコピーしていた。v0.147.0 以降、Codex は 4 つの場所を見て結果をマージする。
+
+## 四層カタログ — そして誰が勝つかを決めるマージルール
+
+Codex は固定された **優先順位** で 4 つのカタログを検索する。2 つのカタログに同名のプラグインがある場合、優先順位の高い方が勝ち、低い方のコピーは隠される。
+
+| 層 | 場所 | 所有者 | 典型的な用途 |
+| --- | --- | --- | --- |
+| **1. Local** | リポジトリ内の `.codex/plugins/` | プロジェクトにコミット済み | リポジトリ固有のツール群。ブランチと共に移動する |
+| **2. Personal** | `~/.codex/plugins/` | 自分だけ、自分のマシン上 | 自作、または実験的なプラグイン |
+| **3. Workspace** | チーム共有のワークスペーススコープ | あなたのチーム | 共有規約、レビューフロー、デプロイスクリプト |
+| **4. Remote** | 設定した marketplace ルート | ベンダー + コミュニティ | `marketplace.openai.com` や社内レジストリからの公開プラグイン |
+
+**マージルール:** 結果は **プラグイン名で** 重複排除され、最高優先度のコピーが最初に表示される。リポジトリの `.codex/plugins/terraform-drift/` にコミットされた `terraform-drift` プラグインは、同名のリモートカタログ版を *黙って影に隠す*。これは設計通りだ — リポジトリは既知の良いバージョンを固定できるべきだから — が、アップグレード時に「なぜプラグインがドキュメント通りに動かないのか?」と問う原因の第 1 位である。
+
+:::tip 挙動をデバッグする前に `codex plugin list` を読む
+`codex plugin list` はインストール済みプラグインを、それぞれの解決元 **ソース層とともに** 表示する。プラグインの挙動に驚いたら、これが最初に実行すべきコマンドだ — 使っているバージョンは、自分が思っているバージョンとは違うかもしれない。
+:::
+
+## カタログの設定 — 最小限の `config.toml`
+
+Marketplace エンドポイントと自動更新の挙動は Codex の `config.toml` で設定する。v0.147.0 のデフォルトは `auto_update = false` のまま — 再現性を考えれば正しい選択だが、更新は意図的に走らせる必要がある。
+
+```toml
+# ~/.codex/config.toml
+[plugins]
+enabled = true
+marketplace_roots = [
+  "https://plugins.internal.example.com",
+  "https://marketplace.openai.com"
+]
+auto_update = false
+update_check_interval_hours = 24
+```
+
+**カタログエントリ上限は 512 から 2,048 に引き上げられた** — v0.147.0 における小さな数字だが、大きな社内レジストリを指す場合には重要だ。512 未満では、上限を超えたプラグインが検索結果から静かに切り捨てられていた。エンタープライズチームは頻繁にこれに当たっていたため、OpenAI が上限を引き上げた。
+
+## プラグインを使う — 日常のコマンド
+
+<PromptCard title="マージ済みカタログを対話式ピッカーで閲覧">
+{`/plugins`}
+</PromptCard>
+
+<PromptCard title="全 4 層を一括検索">
+{`codex plugin marketplace search "terraform"`}
+</PromptCard>
+
+<PromptCard title="最高優先度のマッチを名前でインストール">
+{`codex plugin install terraform-drift`}
+</PromptCard>
+
+<PromptCard title="インストール済み一覧と、各プラグインが由来する層を確認">
+{`codex plugin list`}
+</PromptCard>
+
+<PromptCard title="全インストール済みプラグインを更新 (オプトイン — auto_update はデフォルト off)">
+{`codex plugin update`}
+</PromptCard>
+
+## プラグインインストール内の 3 つのセキュリティ強化
+
+v0.147.0 のプラグインインストールパスは、3 つのことをひっそり締めた — どれも「インストールが通った」の意味を変えるので知っておく価値がある。
+
+<Steps items={[
+  {
+    title: "シンボリックリンクのインストールは完全にスキップされる",
+    body: "プラグインパッケージにシンボリックリンクが含まれる場合、Codex はそれを辿らずスキップする。これでパストラバーサル攻撃の一クラス全体がブロックされる — 悪意あるプラグインが `plugin/config` → `/etc/passwd` のようにリンクすることは、もうできない。トレードオフ: 共有アセットにシンボリックリンクを使っていた正当なパッケージは、それらをインライン化する必要がある。"
+  },
+  {
+    title: "ポリシー検証に失敗するとネットワークアクセスが拒否される",
+    body: "プラグインが宣言したパーミッションはインストール時に検証される。不一致 (宣言: 読み取り専用; 実態: ソケットを開く) はネットワーク下り通信を警告ではなく拒否する。これによって最小権限がインストール時のデフォルト姿勢となり、ランタイムでのオプトインではなくなる。"
+  },
+  {
+    title: "ツール名の衝突はハードエラーであり、黙って影に隠れることはない",
+    body: "2 つのプラグインが同じ名前でツールを登録すると、インストールは声高に失敗する。v0.147.0 より前は、2 番目の登録が最初のものを静かに影に隠していた — そっくりな見た目のプラグインが本物のツールを置き換えられるサプライチェーンの落とし穴。今はリネームかアンインストールが必要である。"
+  }
+]} />
+
+## `--approve-for-me`: 実際には何をするのか (そして何をしないのか)
+
+名前は「あらゆるリクエストを自動承認」に読める。フラグの挙動はそうではない。`--approve-for-me` は承認リクエストを、あなたの有効なサンドボックスモードと承認ポリシー設定に照らして各リクエストを裁定する **自動レビューパス** に通す。ポリシーが「はい、これはホワイトリスト内」と言えば、リクエストはプロンプトなしで進む。ポリシーが「いいえ、または不明瞭」と言えば、リクエストは拒否される — ただ、実行の途中で人間に問い合わせないだけである。
+
+依然として真である 2 点:
+
+- **OS レベルのサンドボックスは引き続き強制される。** Linux では Bubblewrap 経由、macOS ではプラットフォームサンドボックス経由。`--approve-for-me` はサンドボックスを回避できない。サンドボックス *内で* プロンプトに自動応答するかどうかを決められるだけである。
+- **Cyber 対応モデルは v0.146.1 の安全側デフォルトを自動で受ける。** `--approve-for-me` が何を言っても、ネットワークアクセス、認証情報の読み取り、プロセス管理は明示的にホワイトリスト化されない限り拒否されたままだ。
+
+正しいメンタルモデル: `--approve-for-me` はあなたの **ポリシーファイル** を人間に据える。ポリシーが緩ければ、このフラグは危険。ポリシーが厳しければ、このフラグは無人実行のために欠けていたピースである。
+
+<PromptCard title="対話実行 — ポリシーが承認を裁定、サンドボックスは有効なまま">
+{`codex --approve-for-me --sandbox workspace-write "refactor auth and run tests"`}
+</PromptCard>
+
+<PromptCard title="Exec (非対話) 実行、構造化出力コントラクト付き">
+{`codex exec --approve-for-me --sandbox workspace-write \\
+  --output-schema '{"type":"object","properties":{"passed":{"type":"boolean"}}}' \\
+  "run the full test suite"`}
+</PromptCard>
+
+このフラグと理にかなって組み合わせる最小の承認ポリシー:
+
+```toml
+# ~/.codex/config.toml
+[approval_policy]
+sandbox_mode = "workspace-write"
+
+[approval_policy.network]
+allowed = ["api.github.com", "registry.npmjs.org"]
+```
+
+このアローリストにないものはすべて拒否される — `--approve-for-me` によっても。
+
+## 静かな破壊的変更: `--full-auto` が削除される
+
+CI や Makefile が `codex exec --full-auto` を呼んでいるなら、v0.147.0 で壊れる。フラグはなくなった。置き換えは明示的:
+
+```bash
+# v0.147.0 より前 (今は壊れる)
+codex exec --full-auto "run tests"
+
+# v0.147.0 の構文
+codex exec --sandbox workspace-write "run tests"
+```
+
+両者は同一ではない: `--full-auto` はサンドボックス選択 *と* 承認ポリシー選択を組み合わせていた。新しい形式はサンドボックスを明示的に述べる必要があり、「プロンプトを出さない」半分を戻したければ `--approve-for-me` を追加する。共有ランナーをアップグレードする前に grep する価値がある。
+
+## Codex での MCP 2026-07-28 — 実際に得られる 3 つのもの
+
+Codex は v0.147.0 で新しい MCP 仕様を **オプトイン** にした。依存するサーバーが移行したら有効にする。そうでなければオフのまま。スイッチを入れると 3 つの具体的な勝ちがある:
+
+- **ページ分割された discovery。** 200+ のツールを公開するサーバーはもはや巨大な一発リストを強制しない。クライアントはページ単位で辿る。最初のツールまでのレイテンシは大幅に低下する。
+- **マルチラウンド リクエスト。** 1 つの論理操作が複数のクライアント↔サーバー ラウンドにまたがれる — 対話フォーム、2 段階確認、フォローアップトークンを返すリソース読み取りを考えてほしい。2026-07-28 より前は、これを 1 つのペイロードに押し込む必要があった。
+- **非ブロッキングなサーバー起動。** Codex は自分の起動を遅い MCP サーバーでブロックしなくなった。ウォームアップに 4 秒かかるサーバーは以前 CLI 全体を凍らせていたが、今は Codex が起動し、サーバーは準備できたときに準備完了とマークされる。
+
+## これを Claude Code に対応付ける、1 表で
+
+Claude が直感なら、これが同じ概念の翻訳表である。
+
+| 概念 | Codex CLI (v0.147.0) | Claude Code |
+| --- | --- | --- |
+| 可搬な命令単位 | Skill (`SKILL.md` フォルダ) | Skill (`SKILL.md` フォルダ) — 同じオープン標準 |
+| パッケージング / 配布 | **Agent Plugin** (skill, MCP, 設定をバンドル) | Plugin marketplace + skill インストール |
+| Discovery スコープ | 四層カタログ (local → personal → workspace → remote) | Project + user + marketplace |
+| サンドボックス内での自動承認 | `--approve-for-me` + `approval_policy` | `~/.claude/settings.json` の permissions |
+| サンドボックス強制 | Bubblewrap (Linux) / macOS サンドボックス | 認証情報マスキング付きサンドボックス |
+| 長時間稼働 MCP サーバー | 非ブロッキング起動 (MCP 2026-07-28) | オプトインしない限りブロッキング起動 |
+| 「リポジトリ内の命令」 | `.codex/plugins/`, `AGENTS.md` | `.claude/`, `CLAUDE.md` |
+
+最大の実践的な違い: **リポジトリ内 `.codex/plugins/` の shadowing を持つ Codex の四層カタログは、Claude Code のデフォルトより強力である**。これは機能だ — リポジトリはプラグインバージョンをピン留めし、全員がそれを走らせると保証できる — が、これは「プラグインをアップグレードしたのに何も変わらない」がしばしば「あなたのリポジトリが古いコピーをピン留めしている」であることを意味する。
+
+## Codex 上のチーム向け移行チェックリスト
+
+<Steps items={[
+  {title: "CI と開発スクリプトを grep して `--full-auto` を探し、`--sandbox workspace-write` に置き換える (プロンプトなしにしたければ `--approve-for-me` を追加)。", body: "`codex --version` が上がった後にグリーンだった CI がレッドになる、最も一般的な原因である。"},
+  {title: ".codex/plugins/ を全リポジトリで監査し、更新済みリモートプラグインを影に隠している古いローカルコピーを探す。", body: "まっさらなチェックアウトで `codex plugin list` を実行し、各ソース層が期待と一致するか確認する。"},
+  {title: "プラグイン間のツール名衝突を解決する — インストールは以前 shadow していたところを今は堅く失敗する。", body: "一方のプラグインのツールをリネームするか、負けた方をアンインストールする。"},
+  {title: "Codex を社内レジストリに向けているなら、新しい 2,048 のカタログエントリ上限内に収まっているか確認し、`marketplace_roots` を明示的に設定する。", body: "512 を超えるエンタープライズレジストリは以前静かに切り捨てられていた。今は最大 2,048 まで見える。"},
+  {title: "サーバーごとに MCP 2026-07-28 をオプトインするかを決める。", body: "アップサイドはページ分割された discovery と非ブロッキング起動。要件は *サーバー* が仕様を実装していること。"},
+  {title: "本番で無人実行する前に、ステージングで承認ポリシーに対して `--approve-for-me` をテストする。", body: "緩いポリシー + このフラグ = サンドボックス内で好き放題するヘッドレスエージェント。"}
+]} />
+
+## Codex プラグインが Claude subagents に勝つとき — そして勝たないとき
+
+Codex プラグインが最も強いのは、再利用の単位が **ワークフローパッケージ** であるとき — レビューフロー、デプロイシーケンス、Terraform-drift スイープ — で、チーム全体に 1 つのアーティファクトとして、バージョニングと marketplace 付きで出荷したい場合だ。四層カタログは「プラットフォームチームが出荷したレビュープラグイン、ただし自分のリポジトリが上書きしなければ」を必要とする組織で本当に有用である。
+
+Claude Code の subagent + skill モデルが強いのは、再利用の単位が **役割** ("code-reviewer", "debugger") で、1 つの対話セッション内で自由に合成でき、同じファイルを ChatGPT、Cursor、Gemini CLI、Codex で再パッケージ化せずに走らせたい場合である。Skills は依然としてより可搬なプリミティブで、プラグインはより強力な配布層である。
+
+2026 年 8 月の大半のチームにとっての実務的な答えは **両方**: ファイルレベルのプリミティブとして skills を保ち、それらがエージェント間を移動できるようにし、marketplace、カタログ連合、ピン留めが必要な時に Codex Agent Plugin にラップする。
+
+<Quiz questions={[
+  {
+    q: "2 つのカタログに `terraform-drift` という名前のプラグインが存在する: 1 つはリポジトリの `.codex/plugins/` にコミット済み、もう 1 つは `marketplace.openai.com` にある。Codex はどちらを使うか?",
+    options: [
+      "リモートの marketplace 版 — 通常はより新しいから",
+      "リポジトリにコミットされたローカル版 — local が remote に勝つ",
+      "両方、1 つのツール名前空間にマージされる",
+      "Codex は曖昧性を解消するまで、どちらもロードすることを拒否する"
+    ],
+    answer: 1,
+    explain: "優先順位は local → personal → workspace → remote で、プラグイン名で重複排除される。リポジトリ内コピーが marketplace コピーを静かに影に隠す。"
+  },
+  {
+    q: "`codex exec --approve-for-me --sandbox workspace-write \"install curl and hit a random URL\"` を実行する。承認ポリシーは `api.github.com` だけを許可している。何が起こるか?",
+    options: [
+      "--approve-for-me を渡したので、リクエストは自動承認される",
+      "リクエストは拒否される — --approve-for-me はポリシー経由で裁定するため、その URL へのネットワーク下り通信はアローリストにない",
+      "リクエストはとにかく人間にプロンプトされる",
+      "workspace-write を設定したので、サンドボックスは回避される"
+    ],
+    answer: 1,
+    explain: "`--approve-for-me` はあなたのポリシーに対して裁定する。ポリシーや OS レベルのサンドボックスを回避しない。アローリスト外の URL はブロックされたまま。"
+  },
+  {
+    q: "CI の Makefile が今も `codex exec --full-auto \"run tests\"` を呼んでいる。v0.147.0 にアップグレードした後、ジョブが失敗する。旧来の意図を保つ最小の修正は?",
+    options: [
+      "v0.146.1 にダウングレードする — --full-auto は戻ってこない",
+      "`codex exec --sandbox workspace-write --approve-for-me \"run tests\"`",
+      "`codex exec --auto \"run tests\"` — フラグがリネームされた",
+      "`codex exec --sandbox unrestricted \"run tests\"`"
+    ],
+    answer: 1,
+    explain: "`--full-auto` はサンドボックス + 承認の選択をバンドルしていた。置き換えは明示的: サンドボックスは `--sandbox workspace-write`、「プロンプトを出さない」半分は `--approve-for-me`。"
+  },
+  {
+    q: "「1 つの MCP サーバーがウォームアップに時間がかかるせいで Codex の起動に 4 秒かかる」を最も直接的に修正する MCP 2026-07-28 機能はどれか?",
+    options: [
+      "ページ分割された discovery",
+      "マルチラウンド リクエスト",
+      "非ブロッキングなサーバー起動",
+      "バージョン付き拡張"
+    ],
+    answer: 2,
+    explain: "非ブロッキングなサーバー起動は Codex を即座に起動させ、パック内で最も遅いサーバーで凍る代わりに、遅いサーバーは準備できたときに準備完了とマークされる。"
+  }
+]} />
+
+## 情報源と参考文献
+
+- [openai/codex — GitHub releases](https://github.com/openai/codex/releases) (`rust-v0.146.1`, 2026年8月5日 · `rust-v0.147.0`, 2026年8月7日 · 進行中の `0.148.0-alpha.*`)
+- [openai/codex PR #36373 — Add an `--approve-for-me` CLI flag](https://github.com/openai/codex/pull/36373) (2026-07-31 マージ)
+- [ChatGPT と Codex の changelog — learn.chatgpt.com/docs/changelog](https://learn.chatgpt.com/docs/changelog)
+- [Codex CLI v0.147.0 詳細解説 — codex.danielvaughan.com (2026年8月10日)](https://codex.danielvaughan.com/2026/08/10/codex-cli-v0147-portable-agent-plugins-multi-catalog-federation-approve-for-me-conversation-sections/)
+- [Codex updates — 2026年8月、Releasebot](https://releasebot.io/updates/openai/codex)
+- 関連: [SKILL.md — クロスエージェントのオープン標準](/docs/models/skill-md-open-standard) · [コーディングエージェント CLI 比較](/docs/models/coding-agent-clis-compared) · [GPT-5.6-Cyber と Daybreak Red](/docs/security/gpt-5-6-cyber-daybreak-red)
