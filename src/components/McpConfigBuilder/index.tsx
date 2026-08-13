@@ -53,20 +53,41 @@ export default function McpConfigBuilder(): ReactNode {
     URL.revokeObjectURL(url);
   };
 
+  const count = selected.length;
   return (
     <div className={styles.wrap}>
+      <div className={styles.head}>
+        <span className={styles.kicker}>Servers</span>
+        <span className={styles.count} aria-live="polite">
+          {count} selected
+        </span>
+      </div>
       <div className={styles.options}>
         {SERVERS.map((s) => (
           <label key={s.id} className={`${styles.opt} ${on[s.id] ? styles.active : ''}`}>
-            <input type="checkbox" checked={!!on[s.id]} onChange={(e) => setOn((o) => ({...o, [s.id]: e.target.checked}))} />
-            <span>{s.label}{s.note && <em className={styles.note}> · {s.note}</em>}</span>
+            <input
+              type="checkbox"
+              className={styles.check}
+              checked={!!on[s.id]}
+              onChange={(e) => setOn((o) => ({...o, [s.id]: e.target.checked}))}
+            />
+            <span className={styles.optLabel}>
+              {s.label}
+              {s.note && <em className={styles.note}> · {s.note}</em>}
+            </span>
           </label>
         ))}
       </div>
       <div className={styles.outHead}>
-        <span>.mcp.json</span>
+        <span className={styles.outLabel}>.mcp.json</span>
         <div className={styles.actions}>
-          <button className={styles.btn} type="button" onClick={copy} data-copied={copied ? 'true' : undefined}>
+          <button
+            className={styles.btn}
+            type="button"
+            onClick={copy}
+            data-copied={copied ? 'true' : undefined}
+            aria-label={copied ? 'Copied to clipboard' : 'Copy .mcp.json to clipboard'}
+          >
             {copied ? (
               <>
                 <CheckIcon className={styles.btnIcon} />
@@ -76,7 +97,9 @@ export default function McpConfigBuilder(): ReactNode {
               'Copy'
             )}
           </button>
-          <button className={styles.btn} type="button" onClick={download}>Download</button>
+          <button className={styles.btn} type="button" onClick={download}>
+            Download
+          </button>
         </div>
       </div>
       <pre className={styles.out}>{output}</pre>
