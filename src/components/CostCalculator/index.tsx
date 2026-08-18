@@ -5,6 +5,7 @@ const n = (v: string) => {
   const x = parseFloat(v);
   return isFinite(x) && x >= 0 ? x : 0;
 };
+// Explicit en-US locale: identical output in SSR (Node) and browser -> no hydration mismatch.
 const money = (x: number) =>
   x.toLocaleString('en-US', {style: 'currency', currency: 'USD', maximumFractionDigits: x < 10 ? 4 : 2});
 
@@ -35,6 +36,8 @@ export default function CostCalculator(): ReactNode {
   const total = freshInputCost + cachedInputCost + outputCost;
   const baseline = baseInputCost + outputCost;
   const savings = baseline - total;
+  const savingsPct = baseline > 0 ? Math.round((savings / baseline) * 100) : 0;
+  const cachingActive = cached > 0 && savings > 0;
 
   const field = (label: string, value: string, set: (v: string) => void, suffix?: string) => (
     <label className={styles.field}>
@@ -48,6 +51,11 @@ export default function CostCalculator(): ReactNode {
 
   return (
     <div className={styles.wrap}>
+      <div className={styles.head}>
+        <span className={styles.kicker}>Monthly estimate</span>
+        <span className={styles.count} aria-label="6 configurable inputs">6 inputs</span>
+      </div>
+
       <div className={styles.grid}>
         {field('Input tokens / request', inTok, setInTok)}
         {field('Output tokens / request', outTok, setOutTok)}
@@ -57,7 +65,26 @@ export default function CostCalculator(): ReactNode {
         {field('Cached input', cachePct, setCachePct, '% of prefix')}
       </div>
 
-      <div className={styles.result} data-savings={cached > 0 && savings > 0 ? 'true' : undefined}>
+      <div className={styles.outHead}>
+        <span className={styles.outLabel}>Projected cost</span>
+        {cachingActive && (
+          <span className={styles.savingsChip} aria-label={`Saving ${savingsPct}% with caching`}>
+            <svg aria-hidden="true" viewBox="0 0 16 16" className={styles.chipIcon}>
+              <path
+                d="M3 8.5l3.2 3.2L13 4.9"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            −{savingsPct}% with caching
+          </span>
+        )}
+      </div>
+
+      <div className={styles.result} data-savings={cachingActive ? 'true' : undefined}>
         <div className={styles.big}>
           <span className={styles.num}>{money(total)}</span>
           <span className={styles.cap}>estimated / month</span>
