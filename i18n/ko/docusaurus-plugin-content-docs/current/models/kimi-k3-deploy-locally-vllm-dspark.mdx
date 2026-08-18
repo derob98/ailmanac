@@ -1,0 +1,248 @@
+---
+sidebar_position: 8.65
+title: "Kimi K3 로컬 실행: vLLM, DSpark & 실제 하드웨어 청구서"
+description: "2026년 Moonshot의 2.8T 오픈 웨이트 Kimi K3를 셀프 호스팅하기 위한 결정판 실전 가이드. DSpark speculative decoding이 실제로 하는 일, 최소 하드웨어(1× DGX B300 또는 16× DGX Spark), 정확한 vLLM serve 명령, 아무도 경고하지 않는 prefill/decode 비대칭, 호스팅 추론이 자체 랙을 언더컷할 때."
+keywords: [Kimi K3, vLLM, DSpark, speculative decoding, DGX Spark, GB10, B300, self host LLM, MLA, MoE inference, local frontier model, MXFP4, run Kimi K3 locally]
+---
+
+<LevelBadge level="advanced" />
+
+Moonshot은 2026년 7월 27일 **Kimi K3** — 2.8조 파라미터 Mixture-of-Experts 모델 — 를 오픈소스화했습니다. 며칠 만에 r/LocalLLaMA의 "집에서 16× DGX Spark 클러스터로 실행되는 전체 K3" 스레드가 800 업보트를 넘었습니다. 댓글은 감탄과 공황의 혼합이었습니다: 이것이 스턴트인지, 실제 레시피인지, 하드웨어 트랩인지 아무도 알 수 없었습니다.
+
+이 페이지가 그 레시피입니다. 오늘 유일하게 작동하는 로컬 서빙 경로(vLLM), 처리량을 견딜 만하게 만드는 speculative decoding 트릭(DSpark), 실제로 필요한 최소 하드웨어, 정확한 serve 명령, 첫 시도에서 물릴 함정, 그리고 그냥 Moonshot이나 Runpod의 호스팅 엔드포인트를 호출하는 것에 대한 손익분기 계산을 다룹니다. 모델 자체 — 아키텍처, 벤치마크, 가격 — 는 [Kimi K3: 세계 최대 오픈 웨이트 모델](/docs/models/kimi-k3-open-weight-frontier) 참조.
+
+<Callout type="objectives" items={[
+  "전체 K3의 최소 필수 하드웨어 파악 (1× DGX B300 노드 또는 16× B200 — 오늘 그 아래 경로는 없음)",
+  "DSpark를 한 문단으로 이해: block-diffusion 드래프팅, ~3.14배 스피드업, 스텝당 7 speculative 토큰",
+  "vLLM으로 두 명령으로 K3 서빙 — 대부분의 가이드가 잊는 플래그와 함께",
+  "prefill/decode 비대칭에 직면: 16× DGX Spark 클러스터에서 읽기 750 tok/s vs 쓰기 21 tok/s",
+  "손익분기 계산: 셀프 호스팅이 $0.95/M 호스팅을 이길 때, 그리고 확실히 그렇지 않을 때"
+]} />
+
+## 한 문단 버전
+
+오늘 K3를 위한 유일한 프로덕션 준비 서빙 스택은 **vLLM**으로, 2026년 7월 27일에 **DSpark**라는 새로운 speculative decoder와 함께 Day-0 지원을 추가했습니다. 최소 하드웨어는 한 개의 8× B300 노드(또는 16× B200); 영웅적인 커뮤니티 셋업은 집에서 **16× DGX Spark (GB10) 클러스터**로 전체 모델을 실행하며 ~$64k+ 자재 청구서를 내고 대략 **디코드 21 tok/s와 prefill 750 tok/s**를 제공합니다. 호스팅 추론(Runpod, Moonshot 자체 API)은 입력 $0.95/M, 출력 $4/M입니다 — 거의 모든 팀에게 이것이 옳은 답이며, 특별히 온프렘에 웨이트가 필요하지 않다면 그렇습니다.
+
+## 1단계 — 사이징 벽 이해
+
+K3는 2.8조 파라미터. Moonshot이 배송하는 형식인 MXFP4 웨이트 양자화에서도, 원시 웨이트는 KV 캐시를 할당하기 전에 약 **~1.4 TB VRAM 주소 지정 메모리**에 앉습니다. 그 숫자가 다른 모든 것을 결정합니다.
+
+<Callout type="note" items={[
+  "단일 컨슈머 GPU, Mac Studio, H100 두 개짜리 워크스테이션에서 전체 K3를 실행할 경로는 없음. 사이징은 계단 모양이지 매끄럽지 않음.",
+  "vLLM 가이드는 명확함: 최소 한 개의 8× B300 (또는 GB300 NVL72) 노드가 필요; 16× B200도 지원됨.",
+  "양자화된 커뮤니티 디스틸(Q2/Q3 또는 전문가 프루닝 배리언트)은 시간이 지나면서 이 바를 낮출 것 — 그러나 2026년 8월 기준 작동하는 레시피는 모두 프론티어 데이터센터 실리콘의 전정밀도 MXFP4."
+]} />
+
+| 하드웨어 프로필 | 현실적 사용 | 대략 자본비/운영비 |
+|---|---|---|
+| 1× DGX B300 (8× B300) | 프로덕션 셀프 호스팅, 단일 노드 | Runpod에서 ~$59/hr; 구매가 6자리 |
+| 16× B200 | 이전 세대 셀프 호스팅 | Runpod에서 ~$94/hr |
+| 16× DGX Spark (GB10) 클러스터 | 열성가 / 랩 | 자본비 ~$64k–$75k + 스위치 + 피크 2.3 kW |
+| 그 아래는 없음 | — | 호스팅 API 호출 중 |
+
+<VerifyNote lastVerified="2026-08-06" source="https://vllm-project.github.io/2026/07/27/k3.html" />
+
+## 2단계 — DSpark, 한 문단으로
+
+DSpark는 K3와 함께 배송되고 vLLM에서 네이티브로 지원되는 **block-diffusion speculative decoder**입니다. 한 번에 한 speculative 토큰을 드래프팅하는 대신(MEDUSA나 EAGLE처럼), DSpark는 5계층 비인과적 어텐션 백본을 사용해 **하나의 병렬 패스에서 7 토큰을 드래프트**한 다음 K3 타겟에 대해 블록 단위로 그것들을 검증합니다. 저랭크 마르코프 헤드가 블록 내 종속성을 모델링하고, 신뢰도 헤드가 수용 가능성을 예측해 스케줄러가 드래프팅이 가치 있을 때를 결정할 수 있게 합니다.
+
+vLLM 블로그의 구체적 수치:
+
+- **DSpark 없이:** 배치=1에서 118 tok/s (TP16)
+- **DSpark로:** 배치=1에서 370 tok/s (TP16) — **3.14배 스피드업**
+- **평균 수용 길이:** (14 벤치마크에 걸쳐) 3.85 토큰, **코딩에서 스텝당 4.73 토큰**으로 상승, **크리에이티브 라이팅에서 2.61**로 하락
+- **드래프트-타겟 호환성:** DSpark는 K3의 토큰당 576 요소 MLA 잠재를 공유하므로 드래프트 페이지가 타겟 KV 캐시와 통합됨 — 별도 페이지 포맷 없음, 두 번째 캐시를 위한 VRAM 세금 없음
+
+DSpark speculator 웨이트는 Hugging Face의 [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark)에 있으며; vLLM의 `--speculative-config` 플래그가 그 모델을 가리킵니다.
+
+## 3단계 — vLLM으로 K3 서빙
+
+vLLM ≥ 0.11.1이 필요합니다 (K3는 그 릴리스에서 Day-0 지원으로 착륙). 두 명령: 하나는 speculation 없음(움직이는 부품 적음, 스모크 테스트에 유용), 하나는 DSpark 있음(프로덕션에서 실제로 원하는 것).
+
+### 스모크 테스트 — 순수 K3
+
+<PromptCard title="DSpark 없이 K3 서빙 (베이스라인)">{`vllm serve moonshotai/Kimi-K3 \\
+  --tensor-parallel-size 8 \\
+  --enable-prefix-caching \\
+  --trust-remote-code`}</PromptCard>
+
+사람들이 놓치는 두 플래그: **`--enable-prefix-caching`**은 vLLM에서 기본으로 꺼져 있으며, K3 워크로드(특히 에이전틱 코딩)는 감당할 수 있게 되려면 캐시 히트에 의존합니다 — 이것을 끄면 첫 프롬프트가 매 턴마다 재처리됩니다. **`--trust-remote-code`**는 K3가 아직 스톡 transformers에 없는 커스텀 모델 코드(KDA 어텐션, LatentMoE 라우팅)를 배송하기 때문에 필수입니다.
+
+### 프로덕션 — K3 + DSpark
+
+<PromptCard title="DSpark speculative decoding으로 K3 서빙">{`vllm serve moonshotai/Kimi-K3 \\
+  --tensor-parallel-size 16 \\
+  --enable-prefix-caching \\
+  --trust-remote-code \\
+  --speculative-config '{"method": "dspark", "model": "Inferact/Kimi-K3-DSpark", "num_speculative_tokens": 7, "attention_backend": "FLASHINFER_MLA", "draft_sample_method": "probabilistic", "rejection_sample_method": "block"}'`}</PromptCard>
+
+`num_speculative_tokens: 7`은 DSpark speculator의 학습된 블록 크기와 일치 — 낮추지 마세요, block-diffusion 드래프팅의 요점을 낭비하게 됩니다. `attention_backend: FLASHINFER_MLA`는 MLA 네이티브 드래프트가 타겟과 캐시 페이지를 공유하려면 필수입니다. 결정적 샘플링을 원하면 `draft_sample_method`를 `"greedy"`로 전환하고 클라이언트 측에서 temperature=0을 설정하세요.
+
+## 4단계 — 아무도 경고하지 않는 prefill/decode 비대칭
+
+DSpark 활성화된 **16× DGX Spark (GB10)**에서 전체 K3를 실행하며 MikroTik CRS804-4DDQ 네트워킹과 2.3 kW 피크의 4×400→4×100 Gb 브레이크아웃 케이블을 사용한 커뮤니티 운영자가 게시한 실제 수치:
+
+| 워크로드 | 처리량 | 피크 |
+|---|---|---|
+| 4k 컨텍스트 @ Prefill | 655 tok/s | 8,288 tok/s |
+| 4k 컨텍스트 @ Decode | 21.7 tok/s | 37 tok/s |
+| 16k 컨텍스트 @ Prefill | 759 tok/s | 21,457 tok/s |
+| 16k 컨텍스트 @ Decode | 25.4 tok/s | 38 tok/s |
+
+읽기가 쓰기보다 30~40배 빠릅니다. 실용적으로 그것은:
+
+- **큰 코드 리포나 리서치 코퍼스에 대한 롱 컨텍스트 Q&A**가 아름답게 작동 — 벽 시간 분당 거의 백만 토큰으로 코퍼스를 수집.
+- **롱폼 생성, 스트리밍 어시스턴트, 채팅 스타일 UI**가 느껴짐 — 25 tok/s는 견딜 만하지만 호스팅 Sonnet/Fable 클래스 모델보다 눈에 띄게 뒤처짐.
+- **모델이 긴 도구 호출 체인을 생성하는 에이전틱 루프**는 디코드 병목을 확대. 더 간결한 추론 스타일과 구조화된 출력을 고려.
+- **배칭이 prefill보다 decode를 더 돕는다** — 동시 요청이 증가하면서 GPU 초당 처리량이 급격히 상승 (vLLM 블로그는 높은 동시성에서 GPU 초당 2K+ 토큰을 보고).
+
+<VerifyNote lastVerified="2026-08-06" source="https://forums.developer.nvidia.com/t/full-kimi-k3-running-on-16x-gb10-cluster/379174" />
+
+## 5단계 — 첫 주 운영 스레드의 다섯 함정
+
+<Steps items={[
+  {
+    title: "Prefix caching이 기본으로 꺼져 있음",
+    body: "vLLM 블로그를 제외한 모든 서빙 가이드가 이것을 잊음. --enable-prefix-caching 없이는 K3의 90% 이상 실제 캐시 히트율이 0%가 되고 매 턴마다 전체 프롬프트가 재처리됨. 비용과 지연 시간 둘 다 폭발. 한 번 설정, 영원히."
+  },
+  {
+    title: "도구 호출 스키마가 조용히 깨짐",
+    body: "K3는 도구 사용을 위해 학습됐지만 가끔 첫 토큰에서 파싱 불가한 JSON을 생성하거나 긴 인자 목록의 닫는 중괄호를 떨어뜨림. 도구 호출 파싱을 단일 재시도 검증기로 감싸세요 — vLLM 팀이 릴리스 노트에서 이것을 알려진 동작으로 명시적으로 플래그함."
+  },
+  {
+    title: "낮은 max_tokens에서 답이 잘림",
+    body: "K3는 평균적으로 K2.6보다 ~21% 적은 출력 토큰을 사용하지만, 개별 응답은 여전히 복잡한 추론에서 잘림에 부딪힐 수 있음. max_tokens를 관대하게 올리고(추론 트레이스를 위해 16k+) 답이 잘리면 추론 노력을 올리세요."
+  },
+  {
+    title: "MoE 라우팅이 높은 배치 크기에서 메모리 압력을 증폭",
+    body: "K3는 토큰당 896개 중 16개 전문가를 활성화 — 갑작스러운 동시 부하 하에서, 전문가 병렬 배포는 많은 요청이 겹치는 전문가 부분집합에 부딪히면서 VRAM을 급증시킬 수 있음. 여유 공간을 프로비저닝하거나 동시성 한도; 100% 메모리 활용도에서 실행하지 마세요."
+  },
+  {
+    title: "네트워킹이 컴퓨트 전에 처리량을 먹음",
+    body: "멀티 노드 셋업(16× GB10, 16× B200)에서 상호 연결 대역폭이 컴퓨트보다 훨씬 먼저 천장. 커뮤니티 GB10 셋업은 노드당 4×100 Gb로 이어지는 4×400 Gb 백홀을 사용. 스위치에서 아끼면, DSpark 드래프트가 KV 페이지를 기다리며 정체됨."
+  }
+]} />
+
+## 6단계 — 셀프 호스팅해야 할까?
+
+대부분의 팀에게 정직한 답은 아니오입니다. 워크로드별로 손익분기 계산을 하세요:
+
+| 경로 | 비용 | 이길 때 |
+|---|---|---|
+| **Moonshot API** | 입력 $3.00/M, 캐시 히트 $0.30/M, 출력 $15/M | 프로토타이핑, 저볼륨, 비민감 데이터 |
+| **Runpod 호스팅 K3** | 입력 $0.95/M, 출력 $4/M | 꾸준한 중간 볼륨, OpenAI 호환 엔드포인트 필요, 컴퓨트가 어디서 실행되는지 상관 없음 |
+| **Runpod 8× B300 시간당** | $59.12/hr | 갑작스러운 실행, 서빙 설정 제어 필요, 여전히 자본비 원치 않음 |
+| **하드웨어 소유** | 자본비 $80k–$500k+ | 엄격한 데이터 상주성, 24/7 포화, 또는 경쟁 추론 제품 구축 중 |
+
+16× GB10 클러스터의 디코드 ~21 tok/s에서, 한 노드는 시간당 ~76k 출력 tok를 생산. Runpod-K3 호스팅 가격으로 그것은 시간당 $0.30의 출력 토큰. $59/hr 호스팅 요금을 이기려면 **높은 배치에서 시간당 ~15M 출력 토큰**에 가까운 처리량과 100%에 가까운 활용도가 필요 — 동시성으로 달성 가능하지만, 실제로 그만큼의 수요가 있어야 함. 그 아래로는 호스팅이 자릿수로 이깁니다.
+
+2026년 K3를 셀프 호스팅할 올바른 이유:
+
+- **데이터 상주성 / 규제** — 프롬프트와 완성이 VPC를 떠날 수 없음.
+- **지속적 포화** — 24/7 실행되는 에이전트 함대가 있고 캐시 히트 가격이 여전히 아픔.
+- **모델 수정** — 커스텀 DSpark speculator 학습, MoE 전문가에서 LoRA 파인튜닝, 또는 라우팅 변경 실험.
+- **학습 가치** — 랩이나 프론티어 MoE 서빙을 메탈에서 특별히 이해하고 싶은 팀.
+
+그중 아무것도 적용되지 않으면, API를 호출하고 저장된 엔지니어링 시간을 더 나은 프롬프트, 더 나은 evals, 더 나은 [컨텍스트 엔지니어링](/docs/frontiers/context-engineering)으로 라우팅하세요.
+
+## 7단계 — 어떤 경로를 선택하든 최소 Python 클라이언트
+
+vLLM은 OpenAI 호환 엔드포인트를 노출하므로, 같은 클라이언트가 자체 랙, Runpod의 호스팅 K3, 또는 Moonshot의 API에 대해 작동합니다.
+
+<PromptCard title="OpenAI Python SDK로 K3 엔드포인트 호출">{`from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8000/v1",   # or Runpod / Moonshot base URL
+    api_key="EMPTY",                        # self-hosted vLLM ignores keys
+)
+
+resp = client.chat.completions.create(
+    model="moonshotai/Kimi-K3",
+    messages=[
+        {"role": "system", "content": "You are a terse coding assistant."},
+        {"role": "user",   "content": "Explain DSpark speculative decoding in three bullets."},
+    ],
+    max_tokens=8192,
+    temperature=0.2,
+)
+
+print(resp.choices[0].message.content)`}</PromptCard>
+
+## 플래시카드 — 차갑게 알아야 할 수치
+
+<Flashcards items={[
+  { front: "오늘 vLLM에서 전체 K3를 서빙할 최소 하드웨어", back: "1× 8-B300 노드, 또는 16× B200. 아직 서브 프론티어 경로 없음." },
+  { front: "DSpark 스피드업과 speculative 블록 크기", back: "~3.14× (TP16, 배치=1에서 118→370 tok/s), 병렬 패스당 7 토큰 드래프팅." },
+  { front: "DSpark 평균 수용 길이", back: "벤치마크에 걸쳐 3.85 토큰 — 코딩 4.73, 크리에이티브 라이팅 2.61." },
+  { front: "DSpark speculator가 상속하는 K3 KV 캐시 포맷", back: "토큰당 576 요소 잠재를 가진 MLA — 드래프트 페이지가 타겟 캐시와 통합됨." },
+  { front: "기본으로 조용히 꺼진 vLLM 플래그", back: "--enable-prefix-caching. K3는 90%+ 캐시 히트 워크로드 프로필이 유지되려면 필요." },
+  { front: "16× DGX Spark 홈 클러스터의 디코드 처리량", back: "평균 ~21 tok/s, 피크 38 tok/s — ~750 tok/s prefill보다 30~40× 느림." },
+  { front: "Runpod 호스팅 K3 가격", back: "입력 $0.95/M, 출력 $4/M — 대부분의 워크로드에서 하드웨어 소유보다 자릿수 저렴." }
+]} />
+
+## 퀴즈
+
+<Quiz questions={[
+  {
+    q: "분석가가 200k 토큰 리서치 코퍼스와 대화하게 하는 내부 도구를 초안 작성 중입니다. 첫 토큰 지연 시간이 중요하고 사용자당 토큰 볼륨은 낮습니다. K3를 셀프 호스팅해야 합니까?",
+    options: [
+      "예 — 코퍼스에 더 나은 프라이버시를 얻음",
+      "아니오 — 호스팅 API 호출; 워크로드는 prefill 위주, 저처리량, 정확히 호스팅이 이기는 곳",
+      "예 — 16× GB10 릭이 prefill에서 어떤 호스팅 API도 이길 것",
+      "달의 위상에 따라 다름"
+    ],
+    answer: 1,
+    explain: "이 워크로드는 prefill 지배적이고 저QPS. 클러스터의 ~750 tok/s prefill조차 호스팅 가격에 괜찮고, $59/hr 노드를 절대 포화시키지 못함. 셀프 호스팅은 프라이버시/상주성이 하드 요구사항일 때만 정당화됨 — 질문이 명시하지 않음."
+  },
+  {
+    q: "첫 프로덕션 K3 서빙에 가장 안전한 vLLM 플래그 조합은?",
+    options: [
+      "--tensor-parallel-size 8 --trust-remote-code",
+      "--tensor-parallel-size 8 --enable-prefix-caching --trust-remote-code",
+      "--tensor-parallel-size 1 --enable-prefix-caching",
+      "--tensor-parallel-size 8 --enable-prefix-caching --disable-log-stats"
+    ],
+    answer: 1,
+    explain: "TP-1은 K3를 담을 수 없음. --enable-prefix-caching을 건너뛰면 모델이 비용 싱크가 됨. --trust-remote-code는 K3의 커스텀 커널에 필수. 옵션 (2)가 최소 안전 베이스라인."
+  },
+  {
+    q: "DSpark는 하나의 병렬 패스에서 7 토큰을 드래프트합니다. 실제로 그 7 중 몇 개가 스텝당 K3에 의해 일반적으로 수용됩니까?",
+    options: [
+      "모든 7개, 항상",
+      "0개 — speculative decoding은 프론티어 모델에서 보통 실패",
+      "평균 약 3.85, 코딩은 더 높게(~4.73) 크리에이티브 라이팅은 더 낮게(~2.61)",
+      "정확히 1 — 자기 회귀와 동일"
+    ],
+    answer: 2,
+    explain: "vLLM DSpark 벤치마크는 스텝당 평균 수용 길이 3.85 토큰을 보고. 코딩은 매우 중복적(예측 가능한 문법)이고 크리에이티브 라이팅은 토큰당 엔트로피가 더 많음."
+  },
+  {
+    q: "16× DGX Spark 박스를 책상에 둡니다. 사용자에게 기대하라고 말해야 할 처리량 프로필은?",
+    options: [
+      "모든 것에서 빠름 — 이것은 개인 슈퍼컴퓨터",
+      "읽기 매우 빠름 (prefill ~750 tok/s), 쓰기 느림 (decode ~21 tok/s)",
+      "읽기 느림, 쓰기 빠름",
+      "단일 DGX B300과 동일"
+    ],
+    answer: 1,
+    explain: "GB10 노드는 일관된 통합 메모리를 갖지만 노드당 대역폭이 적당. 긴 컨텍스트 수집은 매우 빠름; 토큰별 생성은 prefill보다 30~40× 느리고 호스팅 API보다 실질적으로 느림."
+  }
+]} />
+
+## 대신 호스팅 경로를 잡을 때
+
+- **프로토타이핑과 데모** — Moonshot의 API 또는 Runpod 사용. 지연 시간과 가격 둘 다 괜찮음.
+- **비용 민감 고볼륨** — Moonshot의 캐시 히트 입력 $0.30/M 가격은 워크로드가 실제로 캐시할 때 이길 수 없음.
+- **Claude Code나 다른 하니스로 에이전틱 코딩** — [AI 게이트웨이 (LiteLLM / OpenRouter / Portkey)](/docs/models/ai-gateways-litellm-openrouter-portkey)를 통해 K3를 꽂고 하니스 변경 없이 모델 교체.
+- **모델 비교 작업** — K3가 옳은 선택일 때 vs Anthropic에 남을 때는 [모델 선택](/docs/models/choosing-a-model)과 [Claude 사용자를 위한 Kimi K3](/docs/models/kimi-k2-for-claude-users) 참조.
+
+<VerifyNote lastVerified="2026-08-06" source="https://www.runpod.io/kimi-k3" />
+
+## 출처 및 추가 자료
+
+- [Kimi K3 Is Here: Efficient Day-0 Support on vLLM — vLLM Blog (2026-07-27)](https://vllm-project.github.io/2026/07/27/k3.html) — 표준 서빙 가이드와 DSpark 벤치마크.
+- [Inferact/Kimi-K3-DSpark — Hugging Face 모델 카드](https://huggingface.co/Inferact/Kimi-K3-DSpark) — 드래프트 모델 아키텍처, 계층 선택 세부사항, 샘플링 플래그.
+- [16× GB10 클러스터에서 실행되는 전체 Kimi K3 — NVIDIA 개발자 포럼](https://forums.developer.nvidia.com/t/full-kimi-k3-running-on-16x-gb10-cluster/379174) — 위에서 인용한 커뮤니티 처리량 수치와 네트워킹 레시피.
+- [Runpod에 Kimi K3 배포](https://www.runpod.io/kimi-k3) — 호스팅 K3 가격과 B300/B200 시간당 요금.
+- [Moonshot AI — Kimi K3 블로그](https://www.kimi.com/blog/kimi-k3) — 공식 모델 카드, MoE 구성, MXFP4 양자화 노트.
+- [Kimi K3: 세계 최대 오픈 웨이트 모델](/docs/models/kimi-k3-open-weight-frontier) — 모델의 아키텍처, 벤치마크, 가격 계산을 다루는 동반 AILmanac 페이지.
