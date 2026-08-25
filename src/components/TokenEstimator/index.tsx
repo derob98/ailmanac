@@ -33,6 +33,21 @@ export default function TokenEstimator(): ReactNode {
 
   return (
     <div className={styles.wrap}>
+      <div className={styles.head}>
+        <span className={styles.kicker}>
+          <Translate id="tokenest.kicker">Token estimate</Translate>
+        </span>
+        <span
+          className={styles.count}
+          aria-label={translate({
+            id: 'tokenest.countAria',
+            message: 'Compared against a 200,000-token context window',
+          })}
+        >
+          <Translate id="tokenest.count">200K window</Translate>
+        </span>
+      </div>
+
       <textarea
         className={styles.area}
         rows={4}
@@ -40,47 +55,51 @@ export default function TokenEstimator(): ReactNode {
         onChange={(e) => setText(e.target.value)}
         aria-label={translate({id: 'tokenest.aria', message: 'Text to estimate tokens for'})}
       />
-      <div className={styles.stats}>
-        <div className={styles.stat}>
-          <span className={styles.num}>{words.toLocaleString('en-US')}</span>
-          <span className={styles.cap}><Translate id="tokenest.words">words</Translate></span>
+
+      <div className={styles.result} data-zone={zone}>
+        <div className={styles.stats}>
+          <div className={styles.stat}>
+            <span className={styles.num}>{words.toLocaleString('en-US')}</span>
+            <span className={styles.cap}><Translate id="tokenest.words">words</Translate></span>
+          </div>
+          <div className={styles.stat}>
+            <span className={styles.num}>{chars.toLocaleString('en-US')}</span>
+            <span className={styles.cap}><Translate id="tokenest.chars">characters</Translate></span>
+          </div>
+          <div className={`${styles.stat} ${styles.primary}`}>
+            <span className={styles.num}>
+              ~{low.toLocaleString('en-US')}–{high.toLocaleString('en-US')}
+            </span>
+            <span className={styles.cap}><Translate id="tokenest.tokens">estimated tokens</Translate></span>
+          </div>
         </div>
-        <div className={styles.stat}>
-          <span className={styles.num}>{chars.toLocaleString('en-US')}</span>
-          <span className={styles.cap}><Translate id="tokenest.chars">characters</Translate></span>
-        </div>
-        <div className={`${styles.stat} ${styles.primary}`}>
-          <span className={styles.num}>
-            ~{low.toLocaleString('en-US')}–{high.toLocaleString('en-US')}
+        <div
+          className={styles.meter}
+          data-zone={zone}
+          style={{'--fill': fill} as React.CSSProperties}
+          role="img"
+          aria-label={translate(
+            {
+              id: 'tokenest.meterAria',
+              message: 'Estimated {pct}% of a 200,000-token context window',
+            },
+            {pct},
+          )}
+        >
+          <div className={styles.meterTrack} aria-hidden="true">
+            <div className={styles.meterFill} />
+            <span className={styles.meterTick} style={{'--at': 0.25} as React.CSSProperties} />
+            <span className={styles.meterTick} style={{'--at': 0.5} as React.CSSProperties} />
+            <span className={styles.meterTick} style={{'--at': 0.75} as React.CSSProperties} />
+          </div>
+          <span className={styles.meterCap}>
+            <Translate id="tokenest.meterCap" values={{pct}}>
+              {'≈ {pct}% of a 200K-token context window'}
+            </Translate>
           </span>
-          <span className={styles.cap}><Translate id="tokenest.tokens">estimated tokens</Translate></span>
         </div>
       </div>
-      <div
-        className={styles.meter}
-        data-zone={zone}
-        style={{'--fill': fill} as React.CSSProperties}
-        role="img"
-        aria-label={translate(
-          {
-            id: 'tokenest.meterAria',
-            message: 'Estimated {pct}% of a 200,000-token context window',
-          },
-          {pct},
-        )}
-      >
-        <div className={styles.meterTrack} aria-hidden="true">
-          <div className={styles.meterFill} />
-          <span className={styles.meterTick} style={{'--at': 0.25} as React.CSSProperties} />
-          <span className={styles.meterTick} style={{'--at': 0.5} as React.CSSProperties} />
-          <span className={styles.meterTick} style={{'--at': 0.75} as React.CSSProperties} />
-        </div>
-        <span className={styles.meterCap}>
-          <Translate id="tokenest.meterCap" values={{pct}}>
-            {'≈ {pct}% of a 200K-token context window'}
-          </Translate>
-        </span>
-      </div>
+
       <p className={styles.note}>
         <Translate id="tokenest.note">
           A rough feel only (~chars ÷ 4, or words × 1.33). Token counts are
