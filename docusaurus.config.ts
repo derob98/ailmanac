@@ -179,20 +179,33 @@ const config: Config = {
           label: 'Guide',
           position: 'left',
           items: [
-            {label: 'Start Here', to: '/docs/start-here'},
-            {label: 'AI Foundations', to: '/docs/foundations'},
-            {label: 'Prompting', to: '/docs/prompting'},
-            {label: 'Claude.ai & Apps', to: '/docs/claude-app'},
-            {label: 'Claude Code', to: '/docs/claude-code'},
-            {label: 'Claude API & Building', to: '/docs/api'},
-            {label: 'AI Models & Assistants', to: '/docs/models'},
-            {label: 'Playbooks', to: '/docs/playbooks'},
-            {label: 'Walkthroughs', to: '/docs/walkthroughs'},
-            {label: 'Templates & Recipes', to: '/docs/templates'},
-            {label: 'Security & Responsible Use', to: '/docs/security'},
-            {label: 'Power User', to: '/docs/power-user'},
-            {label: 'Frontiers', to: '/docs/frontiers'},
-            {label: 'Contribute', to: '/docs/contribute'},
+            // Grouped to match the six macro-areas of the sidebar (see
+            // sidebars.ts). This used to be all 14 sections flat — the same
+            // "pick one of fourteen before you know what any of them are"
+            // problem the sidebar had, and worse: the two menus implied
+            // different shapes for the same site.
+            {label: 'Start here', to: '/docs/start-here'},
+
+            {label: 'Learn the fundamentals', to: '/docs/foundations'},
+            {label: '· AI Foundations', to: '/docs/foundations'},
+            {label: '· Prompting', to: '/docs/prompting'},
+
+            {label: 'Use Claude', to: '/docs/claude-app'},
+            {label: '· Claude.ai & Apps', to: '/docs/claude-app'},
+            {label: '· Claude Code', to: '/docs/claude-code'},
+            {label: '· Claude API & Building', to: '/docs/api'},
+
+            {label: 'Every other AI', to: '/docs/models'},
+
+            {label: 'Put it to work', to: '/docs/playbooks'},
+            {label: '· Playbooks', to: '/docs/playbooks'},
+            {label: '· Walkthroughs', to: '/docs/walkthroughs'},
+            {label: '· Templates & Recipes', to: '/docs/templates'},
+
+            {label: 'Go deeper', to: '/docs/power-user'},
+            {label: '· Power User', to: '/docs/power-user'},
+            {label: '· Security & Responsible Use', to: '/docs/security'},
+            {label: '· Frontiers', to: '/docs/frontiers'},
           ],
         },
         {
