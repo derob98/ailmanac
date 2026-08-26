@@ -1,0 +1,244 @@
+---
+sidebar_position: 11.7
+title: "Managed Agents Domain Restrictions"
+description: "The August 26, 2026 beta — allowed_domains, blocked_domains, max_content_tokens, and user_location on web_search and web_fetch inside Managed Agents. Format rules, multiagent semantics, mid-session updates, and the url_not_allowed error."
+keywords: [claude managed agents, allowed_domains, blocked_domains, web_search, web_fetch, url_not_allowed, agent_toolset_20260401, ssrf, prompt injection, agent web tools, max_content_tokens, user_location, subdomain matching, multiagent allowlist, punycode idn]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Understand which threats a per-tool allowed/blocked domain list actually stops in Managed Agents — and which it does not", "Pin web_search and web_fetch to specific hosts using the agent_toolset_20260401 configs array", "Read the ten domain-format rules Anthropic validates at creation time so a 400 doesn't ship your bug to production", "Reason about multiagent semantics — why allowlists intersect and blocklists add together across coordinator and roster", "Handle the url_not_allowed tool_result and session.error events at runtime, and know when re-validation happens", "Tell these settings apart from the Messages API server-tools domain filter and from the sandbox networking policy"]} />
+
+<VerifyNote lastVerified="2026-08-26" source="https://platform.claude.com/docs/en/managed-agents/tools#restrict-web-search-and-web-fetch-domains">
+Domain restrictions on Managed Agents' `web_search` and `web_fetch` shipped **August 26, 2026** in the `managed-agents-2026-04-01` beta. Field names, error codes, and validation messages here are quoted from the official reference — Managed Agents is still in beta, so confirm against Anthropic's docs before shipping.
+</VerifyNote>
+
+An [autonomous Managed Agents](/docs/api/managed-agents) session that carries `web_search` and `web_fetch` is a request forger with a search engine. Any string it can be nudged into believing is a "helpful reference URL" — a prompt-injection payload in a retrieved page, a link in a memory store, a raw model hallucination — becomes an outbound request Anthropic's crawler will make on your behalf. Until this beta, the *only* way to prevent that was to switch the tools off and reintroduce them as custom tools you validated yourself.
+
+The August 26 beta adds first-class per-tool `allowed_domains` and `blocked_domains` lists — plus `max_content_tokens` on fetches and `user_location` on searches — enforced on Anthropic's servers before the outbound request is made. Two things about that phrasing matter:
+
+- Enforcement is **on Anthropic's servers**, not inside your sandbox. So the sandbox `networking` policy (which controls what code *inside* the sandbox can reach) is unrelated. If you leave the toolset without domain lists but lock down the sandbox network, the agent's `web_fetch` still reaches wherever it wants — the fetch runs outside the sandbox.
+- **Organization-level web filters in the Claude Console apply only to the Messages API.** They don't attach to Managed Agents sessions. If your org has a console-level "block ads.example.com" rule and you never mirror it into the toolset, an agent session will fetch it.
+
+## Where the setting lives
+
+Every built-in tool sits inside the `agent_toolset_20260401` toolset object in the agent's `tools` array, and each tool is configured via an entry in that toolset's `configs` array. Entries are identified by `name` (`web_search`, `web_fetch`, `bash`, `read`, `write`, `edit`, `glob`, `grep`), typed by an optional `type` field with the same value, and — for the two web tools — accept `allowed_domains`, `blocked_domains`, `max_content_tokens`, and `user_location` alongside the usual `enabled` and `permission_policy`.
+
+The minimal shape:
+
+<PromptCard title="Pin web_search and web_fetch to two hosts, cap fetched content">{`{
+  "type": "agent_toolset_20260401",
+  "configs": [
+    {
+      "name": "web_search",
+      "allowed_domains": ["docs.example.com", "arxiv.org"],
+      "user_location": {
+        "type": "approximate",
+        "country": "US",
+        "timezone": "America/Los_Angeles"
+      }
+    },
+    {
+      "name": "web_fetch",
+      "blocked_domains": ["ads.example.com"],
+      "max_content_tokens": 50000
+    }
+  ]
+}`}</PromptCard>
+
+Each tool carries its **own** list — a search allowlist does not constrain fetches and vice versa. If you only want the two lists to move together, mirror them yourself.
+
+## A full agent create
+
+<PromptCard title="POST /v1/agents — the whole request">{`curl -fsSL https://api.anthropic.com/v1/agents \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: managed-agents-2026-04-01" \\
+  -H "content-type: application/json" \\
+  -d '{
+    "name": "Research Agent",
+    "model": "claude-opus-5",
+    "tools": [
+      {
+        "type": "agent_toolset_20260401",
+        "configs": [
+          {
+            "name": "web_search",
+            "allowed_domains": ["docs.example.com", "arxiv.org"],
+            "user_location": {
+              "type": "approximate",
+              "country": "US",
+              "timezone": "America/Los_Angeles"
+            }
+          },
+          {
+            "name": "web_fetch",
+            "blocked_domains": ["ads.example.com"],
+            "max_content_tokens": 50000
+          }
+        ]
+      }
+    ]
+  }'`}</PromptCard>
+
+In the Python, TypeScript, Go, Java, C#, Ruby, and PHP SDKs each `configs` entry is typed per-tool as a discriminated union (`BetaManagedAgentsWebSearchToolConfigParams`, `BetaManagedAgentsWebFetchToolConfigParams`, and so on). `type` is optional at construction because the server infers it from `name`, but it always comes back on responses. Requests that only set `name`, `enabled`, and `permission_policy` stay valid with or without `type` — old code doesn't need to be rewritten to hold this beta.
+
+## The ten domain-format rules
+
+Anthropic validates every listed domain at agent create/update time and at session create/update time, and returns a **400 `invalid_request_error`** with a message that names the list and the zero-based position of the offending entry (`allowed_domains.0: IP addresses are not supported…`). The rules are stricter than what the Messages API accepts, and each one is a foot-gun in the wild:
+
+<Steps items={[
+  {title: "Pick one list per entry", body: "Set either allowed_domains or blocked_domains on an entry — never both. An entry with both is rejected: \"Only one of allowed_domains or blocked_domains may be set.\""},
+  {title: "1 to 64 domains per list, 1 to 255 chars each", body: "An empty list is rejected as ambiguous — the platform will not guess whether you meant \"restrict to nothing\" or \"no restriction at all\". To lift a filter, omit the field or send null explicitly."},
+  {title: "Plain hostnames only — no scheme, port, credentials, wildcard, whitespace, or leading/trailing hyphen labels", body: "Write example.com, not https://example.com, example.com:443, or *.example.com. Hostnames match case-insensitively and a single trailing slash is ignored."},
+  {title: "A listed domain covers that host and its subdomains", body: "example.com covers docs.example.com. But docs.example.com does not cover example.com or api.example.com — subdomain coverage is only downward. Leading www. is a subdomain like any other, so www.example.com does not cover example.com. List the bare domain to cover both."},
+  {title: "IP addresses are rejected in every form", body: "IPv4, IPv6, bracketed, and numeric-shorthand forms like 127.1 are all rejected. There is no way to allow a raw IP through these lists — list the DNS name."},
+  {title: "Bare TLDs and registry suffixes are rejected", body: "com, co.uk, gov.uk, and single-label names like intranet all fail validation. List a full domain such as example.co.uk."},
+  {title: "localhost and internal suffixes are rejected", body: "localhost and any host ending in .localhost, .local, .internal, .localdomain, or .invalid are refused up front — the tools run on Anthropic's servers, so those hosts would never be reachable anyway."},
+  {title: "Punycode-only for internationalized names", body: "Managed Agents rejects Unicode entries. Convert café.example to xn--caf-dma.example before sending. This is stricter than the Messages API, which accepts (but advises against) Unicode."},
+  {title: "web_fetch entries cannot include a path", body: "Use example.com, not example.com/blog. web_search entries may carry a path suffix like example.com/blog, but the search provider treats it as a URL pattern, not a strict host rule — prefer plain hostnames for both tools if you want predictable matches."},
+  {title: "Duplicates are rejected", body: "Two identical entries fail validation. www.example.com and example.com are considered distinct — remember they cover different sets of hosts."}
+]} />
+
+Two extra checks depend on the underlying providers and are also enforced at create/update time: a domain that Anthropic's crawler cannot access is refused for `allowed_domains`, an unsupported `user_location.country` returns a message ending in `user_location.country: not a country the search provider supports`, and a `user_location.timezone` must be a valid IANA name.
+
+## Multiagent sessions — how the lists combine
+
+A [multiagent session](https://platform.claude.com/docs/en/managed-agents/multiagent-orchestration) can layer three sets of lists on a single tool call: the coordinator's current lists, the lists on any agent that called this one, and the roster agent's own lists. Every list that applies to the thread is enforced at the same time.
+
+- **Allowlists intersect.** The effective set is the domains that all applicable allowlists cover. A roster agent can *narrow* what a tool reaches but never *widen* it — set an allowlist on a roster agent that isn't inside the coordinator's allowlist and every call comes back with a `url_not_allowed` error whose message states no domain is permitted. The tool description tells the model so up front.
+- **Blocklists add.** Every blocklist that applies is enforced together, so any host on any level's blocklist is unreachable to that thread.
+- **`max_content_tokens` and `user_location` do not combine.** A thread reads its own tool config first, then the calling agent's, then the coordinator's current config — first non-null wins.
+- **`{"type": "self"}` roster entries have no web settings of their own** and follow the coordinator's current config.
+- **The grader in [outcome-driven sessions](https://platform.claude.com/docs/en/managed-agents/define-outcomes) runs without web tools at all** — no allow or block list matters, because the grader has no `web_search` or `web_fetch` to run.
+
+The consequence: if the coordinator's allowlist is `[docs.example.com, arxiv.org]` and a roster agent's allowlist is `[github.com]`, the roster agent gets zero reachable hosts. Design roster agents' allowlists as subsets of the coordinator's, or don't set them at all.
+
+## Mid-session updates and the second validation
+
+You can update an idle session's tools to change the domain lists — the new lists apply from that point on. In a multiagent session, each thread picks up the new lists on its next turn, but a roster agent's *own* lists are frozen at session-create time (they live on the agent definition, not the session).
+
+A second validation happens when the session first initializes the tool. A domain that passed the sync check at create time can still fail later (an allowlisted host might have lost crawler access in the interval). If the runtime check fails, the session emits a [`session.error`](https://platform.claude.com/docs/en/managed-agents/events-and-streaming) event, returns to `idle`, and does not retry. The fix is to [update the session's tools](https://platform.claude.com/docs/en/managed-agents/session-operations#updating-the-agent-configuration), update the agent as well so new sessions start clean, then send a fresh `user.message`.
+
+## The runtime error path
+
+At session time, the two tools behave differently when they encounter a URL their lists forbid.
+
+- **`web_fetch`** returns an error result to the agent: `is_error: true` on the `agent.tool_result` event, with a content block that names the error code `url_not_allowed`. The model sees it and can adapt (choose a different source, ask the user, or stop) — this is a normal tool failure, not a session failure.
+- **`web_search`** silently omits any result whose host the lists don't permit. The model doesn't see them at all. That's the right default for search — the alternative would leak the URLs of filtered results into the transcript — but it means a search that returns "no results" for what should be a good query is a signal to widen the allowlist, not just retry.
+
+Both signals belong in your session event handler. `session.error` for the initialization-time miss, `agent.tool_result` with `is_error: true` and `url_not_allowed` for the per-call miss, and — as a *rate* signal — any search turn whose result count drops to zero when the allowlist is small.
+
+## Differences from the Messages API server-tools domain filter
+
+Managed Agents deliberately runs a stricter regime than the Messages API's `server_tools` `web_search` and `web_fetch` filters. The vocabulary is the same, but four things are tighter and one thing is missing outright:
+
+- **List cap is 64 domains**, versus the Messages API's larger cap. Big allowlists don't port over — split them into multiple agents.
+- **`web_fetch` domains cannot include a path.** The Messages API accepts paths on both tools. Move any Messages-API-style `example.com/blog` entries to plain hostnames when porting.
+- **ASCII only — Punycode required for internationalized names.** The Messages API allows Unicode entries (while advising against them).
+- **`max_uses`, `citations`, and `cache_control` are not available on the toolset.** These are Messages-API-only knobs that the toolset chose not to surface. Design around per-session pricing and the `response_inclusion` parameter instead.
+
+If you're porting an existing Messages-API agent to Managed Agents, most existing filters transfer cleanly. Bare `example.com` entries, subdomain-inclusive matching, and the "one list per entry" rule are all identical.
+
+## Common gotchas — five that trip real teams
+
+1. **`www.example.com` is not `example.com`.** Listing only `www.example.com` won't allow the bare-apex `example.com`, and listing only `example.com` will still cover `www.example.com` (because `www.` is a subdomain like any other). List the bare domain to get both.
+2. **The sandbox `networking` policy does not affect these tools.** `web_search` and `web_fetch` run on Anthropic's servers, so an environment that denies all egress from the sandbox still cheerfully fetches whatever the toolset allows. If you want defense in depth, mirror the two policies.
+3. **Console-level org filters do not attach.** The org-wide web filters in the Console are Messages API only. A "block ads.example.com" rule set in the Console never touches Managed Agents.
+4. **Adding a session budget doesn't imply a domain restriction.** [Session budgets](/docs/api/managed-agents-session-budgets) cap dollars, not destinations. A budgeted session can burn its cap fetching one hostile page. Use both.
+5. **A `web_search` path suffix is a URL pattern, not a host rule.** Prefer plain hostnames — path filters on search are advisory-strength and the provider may match them looser than you expect.
+
+## What this actually mitigates
+
+Be specific about the threat model — over-claiming here bites teams that assume this is a full SSRF fix. It is not. The three concrete risks it *does* address:
+
+- **Prompt-injection navigation.** A poisoned page or memory-store entry that instructs the agent to "fetch this URL to continue" fails with `url_not_allowed` if the host isn't allowed, and the model sees the error and (usually) stops.
+- **Ad and telemetry destinations.** A blocklist keeps the agent's fetches out of tracking domains that a target page tries to hop the agent to.
+- **Data-exfil via fetch.** An agent tricked into building a `web_fetch` URL with sensitive query-string params (`?leaked=<memory>`) can't reach a hostile receiver whose host isn't allowed.
+
+What it does *not* stop: outbound requests from custom tools you define, from MCP-server tools, from code your sandbox runs, or from any tool that isn't `web_search`/`web_fetch`. Each of those has its own knob (sandbox `networking`, MCP server allowlists, custom-tool code). This one setting is one layer in a many-layer story.
+
+<Callout type="takeaways" items={[
+  "allowed_domains and blocked_domains live per-tool inside the agent_toolset_20260401 configs array; each tool carries its own list and they don't move together automatically",
+  "Ten format rules — no scheme, no port, no wildcard, no path on web_fetch, no bare TLDs, no localhost or .local, Punycode for IDNs, 1-64 domains, no duplicates, subdomain match is downward only",
+  "Multiagent semantics: allowlists intersect and blocklists add. A roster agent can narrow but never widen the coordinator's reach",
+  "Runtime: web_fetch fails a forbidden URL with is_error and url_not_allowed; web_search silently omits forbidden results",
+  "This is Managed-Agents-only. Console org filters don't attach, and sandbox networking policy doesn't affect these tools — mirror rules if you want defense in depth",
+  "Not the same as the Messages API server-tools filter: stricter (64-cap, no paths on web_fetch, ASCII only) and missing max_uses, citations, cache_control"
+]} />
+
+## Check yourself
+
+<Quiz title="Check yourself" questions={[
+  {
+    q: "You set allowed_domains: [\"example.com\"] on the web_fetch entry. Which of these URLs will the agent be allowed to fetch?",
+    options: [
+      "Only the exact host example.com",
+      "example.com and every subdomain like docs.example.com and api.example.com",
+      "example.com and its subdomains, but not www.example.com",
+      "Everything under any .com TLD"
+    ],
+    answer: 1,
+    explain: "A listed domain covers that host and all of its subdomains. www.example.com is a subdomain like any other and is covered by example.com; the asymmetric case is the other direction — listing docs.example.com does not cover example.com or api.example.com."
+  },
+  {
+    q: "A coordinator's web_fetch allowlist is [\"docs.example.com\", \"arxiv.org\"]. A roster agent sets its own web_fetch allowlist to [\"github.com\"]. What happens when the roster agent tries to fetch https://github.com/anthropic-ai/sdk?",
+    options: [
+      "The fetch succeeds — the roster agent's own allowlist overrides the coordinator's",
+      "The fetch fails with url_not_allowed — allowlists intersect and github.com is not in the coordinator's list",
+      "The fetch succeeds because github.com is in some allowlist that applies",
+      "The session errors out and the coordinator restarts the roster agent"
+    ],
+    answer: 1,
+    explain: "Allowlists across the coordinator, calling agents, and the roster agent all intersect. The effective allowlist is the set covered by every layer. Since the intersection of [docs.example.com, arxiv.org] and [github.com] is empty, every call from this thread fails with url_not_allowed."
+  },
+  {
+    q: "Your team has a policy of blocking ads.example.com at the Claude Console org level. You spin up a Managed Agents session with web_fetch enabled and no domain lists. The agent fetches https://ads.example.com. What happens?",
+    options: [
+      "The fetch is blocked — org-level Console filters apply to all Anthropic APIs",
+      "The fetch is blocked — the sandbox networking policy inherits Console rules",
+      "The fetch succeeds — Console-level web filters apply only to the Messages API, not to Managed Agents sessions",
+      "The fetch is blocked and the session errors out"
+    ],
+    answer: 2,
+    explain: "The docs are explicit: \"Organization-level web search and web fetch settings in the Claude Console apply to the Messages API and do not apply to Managed Agents sessions.\" You must configure allowed_domains or blocked_domains on the toolset to enforce a policy on agents."
+  },
+  {
+    q: "You submit an agent with allowed_domains: [\"https://docs.example.com\", \"127.0.0.1\", \"co.uk\"]. What does the API return?",
+    options: [
+      "Success — the API normalizes each entry",
+      "A 400 invalid_request_error naming the first bad entry only",
+      "A 400 invalid_request_error whose message names the list and the zero-based position of each violation",
+      "A 200 with a warning object in the response"
+    ],
+    answer: 2,
+    explain: "Format violations are rejected at agent create/update with a 400 invalid_request_error whose message names the list and the zero-based position of each offending entry (e.g. allowed_domains.0 for the scheme, allowed_domains.1 for the IP, allowed_domains.2 for the bare registry suffix). All three of these are separately non-conformant."
+  },
+  {
+    q: "A web_fetch call for a URL its list doesn't permit does what?",
+    options: [
+      "The session pauses with a session.error and needs manual intervention",
+      "The tool call returns is_error: true with the error code url_not_allowed on the agent.tool_result event, and the model can adapt",
+      "The call succeeds but the response body is stripped",
+      "The call is silently retried against a mirrored host"
+    ],
+    answer: 1,
+    explain: "For web_fetch, a forbidden URL comes back as a normal tool failure: is_error: true on the agent.tool_result event with error code url_not_allowed. The model sees it and can pick another source. web_search behaves differently — it silently omits forbidden results."
+  }
+]} />
+
+## Sources & further reading
+
+- [Restrict web search and web fetch domains](https://platform.claude.com/docs/en/managed-agents/tools#restrict-web-search-and-web-fetch-domains) — the primary reference for this beta, including format rules, multiagent semantics, and the Messages-API delta
+- [Claude Platform release notes](https://platform.claude.com/docs/en/release-notes/overview) — the August 26, 2026 entry that ships the feature
+- [Managed Agents overview](https://platform.claude.com/docs/en/managed-agents) — the coordinator + session + roster model this feature hooks into
+- [Server tools: domain filtering](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools#domain-filtering) — the sibling feature on the Messages API, with looser rules
+- [Session event stream](https://platform.claude.com/docs/en/managed-agents/events-and-streaming) — where `agent.tool_result` and `session.error` events live
+- [Environment networking](https://platform.claude.com/docs/en/managed-agents/environments#networking) — the sandbox-side setting, and why it does not affect web tools
+
+## Next
+
+- [Managed Agents](/docs/api/managed-agents) — the coordinator + session mental model these domain lists ride inside
+- [Managed Agents Session Budgets](/docs/api/managed-agents-session-budgets) — the hard-dollar cap that composes with domain lists as a second guardrail
+- [Prompt injection](/docs/security/prompt-injection) — the class of attack a well-scoped allowlist actually mitigates
+- [Hardening autonomous runs](/docs/security/hardening-autonomous-runs) — the three-layer guardrail model this fits into
