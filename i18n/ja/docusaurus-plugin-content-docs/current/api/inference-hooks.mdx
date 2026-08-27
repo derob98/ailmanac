@@ -1,0 +1,368 @@
+---
+sidebar_position: 19
+title: "Inference Hooks: Claude Enterprise 向けインライン DLP"
+description: "Claude Enterprise Inference Hooks のオペレーターガイド — チャット、Claude Code、Cowork のあらゆるプロンプトを、モデルが見る前に、あなたの DLP サーバーが許可・拒否できる HTTPS webhook。完全仕様、判定スキーマ、署名、ロールアウトプレイブック。"
+keywords: [claude inference hooks, claude enterprise dlp, anthropic inference hooks, standard webhooks, ai security server, claude compliance, prompt firewall, dlp claude code, claude cowork governance, whsec_ signing]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={[
+  "Inference Hooks の実体 — Anthropic から、あなたが運用するサーバーへの HTTPS POST。WebSocket でもデバイス内エージェントでもない",
+  "プロンプトフレームのスキーマ — あなたの AI セキュリティサーバーが正確に何を見るか(そして絶対に見ないもの: システムプロンプト、隠された推論、生バイト)",
+  "判定 JSON: allow、deny_reason 付きの deny、そして意図的に redact アクションが存在しない理由",
+  "署名モデル — Standard Webhooks HMAC-SHA256、最初の統合で必ずハマる 2 つの検証バグ、そして whsec_ シークレット形式",
+  "ユーザーをブロックするか、モデルに検査なしトラフィックを流すかを決める 3 つの運用レバー: 判定タイムアウト、失敗ハンドリング、サーキットブレーカー",
+  "初日に爆発しないロールアウトプレイブック — この順で: シャドウモード → パーセンテージロールアウト → ロール除外 → 施行",
+]} />
+
+<VerifyNote lastVerified="2026-08-06" source="https://claude.com/blog/claude-enterprise-inference-hooks">
+ベータは **2026 年 8 月 5 日**にローンチされました。フィールド名、リクエスト形状、ヘッダは GA 前に変わる可能性があります — ハードカットオーバーを出荷する前に、必ず [Inference Hooks エンドポイントリファレンス](https://platform.claude.com/docs/en/manage-claude/inference-hooks-endpoint) と相互チェックしてください。ベータの対象範囲は claude.ai、Cowork、Claude Code 上の Claude Enterprise です。Claude Platform、Bedrock、Google Cloud、または voice mode 経由の API アクセスは**対象外**です。
+</VerifyNote>
+
+2026 年 8 月 5 日に発表された **Inference Hooks** は、Claude Enterprise の席をロールアウトしたあらゆるセキュリティチームが聞く問い、*規制対象データを含むプロンプトがモデルに届く前に、どうやって止めるのか?* に対する Anthropic の一次回答です。これまでの答えは、`claude.ai` への TLS トラフィックを傍受するコーポレートプロキシでした — 脆く、不完全で、Claude Code CLI からは見えていませんでした。Inference Hooks は施行ポイントを Anthropic の境界内に移します: 統制対象のプロンプトごとに、Anthropic は推論を一時停止し、あなたの組織が運用するサーバーに transcript を POST し、`allow` か `deny` の返答を待ちます — モデルが何かを見る前にです。
+
+## 一段落バージョン
+
+あなたの組織は HTTPS エンドポイントを立ち上げます。Anthropic は統制対象のプロンプトを、署名付き `POST`(Standard Webhooks HMAC-SHA256)で毎回そこに送ります。あなたのサーバーが `{"action": "allow"}` を返せば推論が進み、`{"action": "deny", "deny_reason": "..."}` を返せばユーザーにその理由が表示されてモデルには一切届きません。1 つのエンドポイントで Claude Enterprise チャット、Claude Code、Cowork を単一設定でカバーします。サーバーがタイムアウトしたり 500 を返したりした場合、あなたの**失敗ハンドリング**設定がリクエストをブロックするか検査なしで通すかを決めます。**判定を施行 (Enforce verdicts)** をオンにする前に、シャドウモード + パーセンテージロールアウト + ロール除外で段階的に展開しましょう。
+
+## Inference Hooks と Compliance API の違い
+
+両者とも同じ対象向け — Claude Enterprise のセキュリティ、法務、コンプライアンスチーム — ですが、リクエストライフサイクルの正反対の端で動作します。
+
+|                | Inference Hooks                                             | [Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api) |
+| -------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **いつ**       | 推論実行前のインライン                                       | 事後                                                                                |
+| **何をする**   | 統制対象の各リクエストをリアルタイムで許可・拒否する          | 監査・エクスポートのために活動、チャット、ファイル、プロジェクト、ユーザーを取得する |
+| **方向**       | Anthropic → あなたのサーバー                                 | あなた → Anthropic                                                                  |
+| **使いどころ** | 漏洩を止める                                                 | 何が起きたかを証明する                                                              |
+
+ほとんどの企業は両方を運用します。Hooks はトリップワイヤ、Compliance API は監査ログです。
+
+## 判定ラウンドトリップの流れ
+
+<Steps items={[
+  {title: "ユーザーが統制対象サーフェスでプロンプトを送信", body: "対象は claude.ai チャット、Claude Code(web、デスクトップ、CLI)、Claude Cowork。会話タイトル生成のような付随リクエストは送信されません。voice mode はベータのスコープ外です。"},
+  {title: "Anthropic が推論を一時停止し、transcript をあなたのエンドポイントに POST", body: "管理者が構成した URL に 1 回の HTTPS POST。ヘッダには Content-Type: application/json、User-Agent: anthropic-dlp/1、そして 3 つの Standard Webhooks 署名ヘッダ(webhook-id、webhook-timestamp、webhook-signature)が含まれます。"},
+  {title: "あなたの AI セキュリティサーバーが署名を検証し transcript を評価", body: "base64 デコードした whsec_ シークレットで `{webhook-id}.{webhook-timestamp}.{生の body バイト}` の HMAC-SHA256 を計算します。時計から 5 分以上ずれているもの、または一致する署名がないものは拒否します。"},
+  {title: "サーバーが HTTP 200 で JSON 判定を返す", body: "{\"action\": \"allow\"} または {\"action\": \"deny\", \"deny_reason\": \"...\"} のいずれか。Anthropic はレスポンス body を最大 64 KiB まで読み、リダイレクトは追跡しません。"},
+  {title: "Anthropic が判定を施行", body: "allow なら推論は通常通り進みます。deny なら、あなたの deny_reason と管理者が構成した定型メッセージがユーザーに表示され、モデルはプロンプトを一切見ません。すべての拒否は組織の Activity Feed に記録されます。"},
+]} />
+
+ユーザーデバイスではなく Anthropic のサーバー上で動かす真の狙いは*均一性*です: 1 つの設定、1 つのサーバー、そしてあらゆるサーフェス上のすべての統制対象リクエストが同じように検査されます。従業員のラップトップにインストールするものはなく、同期を保つべきアプリごとの統合もありません。
+
+## プロンプトフレーム
+
+各リクエストは以下のトップレベルフィールドを持つ JSON body です:
+
+| フィールド    | 型             | 説明                                                                                                                                                                                                                                    |
+| ------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`       | string        | 現在は常に `"prompt"`。新しいイベントタイプが登場します — 未知の値には `allow` を返して、サーキットブレーカーに引っかからないようにしてください。                                                                                        |
+| `request_id` | string        | 推論呼び出しごとの不透明識別子。`webhook-id` ヘッダと等しい — べき等キーとして使ってください。                                                                                                                                             |
+| `tenant_id`  | string \| null | 組織の不透明識別子。                                                                                                                                                                                                                     |
+| `actor`      | object        | `type` で判別(現在は `"user"` のみ)。ユーザーのリクエスト間で安定するタグ付き `id` と、利用可能な場合は `email_address` を持つ。両フィールドとも null になりえます。                                                                     |
+| `source`     | object        | `{"application": "..."}`。既知の値: `claude-ai`、`claude-code`、`config-test`(管理者の「Test connection」ボタンで使用)。オープン enum — 新しい値が登場します。                                                                       |
+| `session_id` | string \| null | 不透明な会話識別子。パースしないでください。Claude Code ではベストエフォート。                                                                                                                                                            |
+| `model`      | string \| null | 利用可能な場合、このリクエストの公開モデル識別子。                                                                                                                                                                                       |
+| `messages`   | array         | 推論時点までの会話 transcript — [Content blocks](#content-blocks) を参照。                                                                                                                                                                |
+| `metadata`   | object        | 予約された拡張マップ。現在は空。未知のキーは寛容に扱ってください。                                                                                                                                                                       |
+
+実際のリクエスト最小例:
+
+```json
+{
+  "type": "prompt",
+  "request_id": "req_abc123",
+  "tenant_id": "11111111-1111-1111-1111-111111111111",
+  "actor": {
+    "type": "user",
+    "id": "user_01AbCdEfGhIjKlMnOpQrStUv",
+    "email_address": "alice@example.com"
+  },
+  "source": { "application": "claude-ai" },
+  "session_id": "22222222-2222-2222-2222-222222222222",
+  "model": "claude-sonnet-5",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "Summarize the attached report." },
+        {
+          "type": "attachment",
+          "file_name": "q2-report.pdf",
+          "media_type": "application/pdf",
+          "size_bytes": 48213,
+          "text": "Q2 revenue grew 14% quarter over quarter..."
+        }
+      ]
+    }
+  ],
+  "metadata": {}
+}
+```
+
+### コンテンツブロック
+
+各 `messages[].content[]` エントリは `type` を持ち、公開の Messages API コンテンツモデルに一致します。ツール結果は `user` ロールの下に現れます。
+
+| ブロック `type` | フィールド                                                                                                                                       |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `text`        | `text`                                                                                                                                             |
+| `tool_use`    | `id`、`tool_name`、`input`                                                                                                                         |
+| `tool_result` | `content`(テキスト、改行結合。バイナリ部分はプレースホルダマーカー)、`is_error`、`tool_name`、`tool_use_id`                                       |
+| `attachment`  | `file_name`、`media_type`、`size_bytes`、`text`(抽出テキスト、transcript、またはリンクメタデータ)                                                 |
+
+### transcript が絶対に含まないもの
+
+ここがプライバシーレビューでつまずくポイントです。
+
+- **システムプロンプトなし。** Anthropic の、あなたの(projects/skills 経由)、モデルの constitution — いずれも送信されません。
+- **隠された推論なし。** Claude の extended-thinking chain はあなたのサーバーが見る transcript に含まれません。
+- **ツール定義なし。** 呼び出しとその結果だけです。
+- **生バイトなし。** ファイルと画像はメタデータと抽出テキストで表現されます。画像のみのコンテンツ(ドキュメントのスクリーンショット)は検査されません。
+- **Anthropic 内部コンテキスト**や信頼境界なし。
+
+transcript は*エンドユーザーが見るとおりの*会話と、ツールトレースです。含まれる内容がすべて除外されるブロックやターンは丸ごとドロップされるので、パースするときは**厳密な user/assistant の交互を仮定しないでください**。
+
+### サイズの落とし穴
+
+transcript は **10 MB** の上限まで無切り詰めで送られます。よくあるデフォルトははるかに小さい — nginx `client_max_body_size` は **1 MB**、Express `express.json()` は **100 kB**、多くの PaaS リバースプロキシは数 MB でキャップします。サーバーが拒否した body は webhook 失敗であり、**Allow the request** 失敗ハンドリングの下ではその特大プロンプトが**検査なしで**モデルに届くことになります。施行する前に body 上限を上げてください。
+
+## 判定スキーマ
+
+どちらの結果でも HTTP 200 で応答します。`action` フィールドで判別します。
+
+Allow:
+
+```json
+{ "action": "allow" }
+```
+
+Deny:
+
+```json
+{
+  "action": "deny",
+  "deny_reason": "This prompt appears to contain customer payment card data, which your organization's policy does not allow.",
+  "reference_id": "scan_01HXPT4R9V"
+}
+```
+
+| フィールド        | 型と上限                                                        | セマンティクス                                                                                                                                                                                                                                     |
+| -------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `action`       | `"allow"` または `"deny"`; 必須                                 | `allow` は推論を進める。`deny` はリクエストを拒否する。                                                                                                                                                                                        |
+| `deny_reason`  | string または null。**最大 500 文字、超過分は切り詰められる**    | エンドユーザーに表示され、管理者が構成した定型メッセージに追記される。ユーザー向けに書くこと — スキャナルール名ではなく、ユーザーが何を変えるべきかを伝える。                                                                                     |
+| `reference_id` | string または null。**最大 50 文字、`[A-Za-z0-9._:/-]` から**    | この評価に対するあなた独自の識別子。拒否の `inference_hooks_request_denied` Activity Feed エントリに記録され、エンドユーザーには決して表示されない。不透明に保つこと — リクエスト内容や個人データを含めない。                                        |
+
+### なぜ redact アクションがないのか
+
+判定は意図的にバイナリです。Anthropic は `{"action": "redact", "rewritten_prompt": "..."}` を追加して DLP サーバーが transcript を飛行中にサニタイズできるようにすることもできました — が、それは Anthropic があなたの箱の返したものを、あなたの組織の権威でモデルに送ることを意味します。この設計はその信頼境界を鋭く保ちます: あなたのサーバーはコンテンツを*評価する*のであって*生成しない*。編集が必要なら、ユーザーが送信を押す前にクライアント側で行ってください。
+
+### deny がフォーマット由来で捨てられることはない
+
+特大の `deny_reason` は切り詰められ、不正な `reference_id` は黙って破棄されますが、`action` は尊重されます。逆は成立しません: パース可能な判定を伴う HTTP 200 以外は**webhook 失敗**であり、deny ではありません。もしブロックを `HTTP 403` で伝えていると、あなたの deny は失敗ハンドリング次第で静かに fail-open な allow(またはブロック)に化け、そのすべてがサーキットブレーカーにカウントされます。
+
+## 動作する最小サーバー
+
+<PromptCard title="Python 12 行の全許可 AI セキュリティサーバー">
+{`# Run with: python server.py — expose on an https:// URL your admin configures.
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+class VerdictHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # keep the connection open between verdicts
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        verdict = b'{"action": "allow"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(verdict)))
+        self.end_headers()
+        self.wfile.write(verdict)
+
+ThreadingHTTPServer(("", 8000), VerdictHandler).serve_forever()`}
+</PromptCard>
+
+これを 443 番ポートで TLS 終端リバースプロキシの背後に置き、エンドポイントとして構成し、管理コンソールで**Test connection**を押すと — allow 判定が見えます。これはまさにアーカイブ専用統合の形状です: 無条件に `allow` を返し、応答後にフレームを永続化する — Compliance API のポーリングに対するプッシュ代替。**しかしこれで施行してはいけません** — すべてのリクエスト(署名なしを含む)を受け入れるからです。**Enforce verdicts** をオンにする前に署名検証を追加してください。
+
+## 署名検証
+
+署名は [Standard Webhooks](https://www.standardwebhooks.com/) 仕様に従います。3 つのヘッダ、Anthropic は小文字で送りますが、ルックアップは大文字小文字を区別しません(プロキシがケースを変えるため)。
+
+| ヘッダ               | 内容                                                                                                                                                                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `webhook-id`        | 配信ごとに一意。body の `request_id` と等しい。べき等キーとして使う。                                                                                                                                                             |
+| `webhook-timestamp` | Unix 秒(10 進文字列)。時計から**5 分**以上どちらの方向にでもずれていれば拒否 — これがリプレイウィンドウ。                                                                                                                       |
+| `webhook-signature` | スペース区切りの `v1,<base64>` 値。それぞれはバイト列 `{webhook-id}.{webhook-timestamp}.{生の body バイト}` に対する HMAC-SHA256。いずれかの値が一致すればリクエストを受け入れる — 定数時間比較を使うこと。                          |
+
+### 最初の統合で必ずハマる 2 つのバグ
+
+<Callout type="warning" items={[
+  "生バイトを検証すること。再エンコードされた JSON ではない。パースや再シリアライズより前に、受信したままの body で HMAC を計算する。json.loads() → json.dumps() のラウンドトリップは空白を変えて死ぬ。",
+  "シークレットを**標準**の base64 デコーダでデコードすること。URL-safe ではない。署名シークレットは whsec_ プレフィックスの後の値で、標準アルファベット(+ と /)でエンコードされている。URL-safe デコーダはシークレットに + や / が含まれるたびに誤ったキーバイトを導く — つまりほとんどの場合 — そして失敗は静かな定数時間ミスマッチとなる。"
+]} />
+
+参考 Python 実装(Anthropic のドキュメントから圧縮):
+
+```python
+import base64, hashlib, hmac, time
+
+TOLERANCE_SECONDS = 300
+
+def verify(secret: str, headers: dict[str, str], body: bytes) -> bool:
+    h = {k.lower(): v for k, v in headers.items()}
+    try:
+        msg_id, ts, sigs = h["webhook-id"], h["webhook-timestamp"], h["webhook-signature"]
+    except KeyError:
+        return False  # unsigned, not from Anthropic
+    try:
+        signed_at = int(ts)
+    except ValueError:
+        return False
+    if abs(time.time() - signed_at) > TOLERANCE_SECONDS:
+        return False  # replayed, or clocks disagree
+    try:
+        key = base64.b64decode(secret.removeprefix("whsec_"), validate=True)
+    except ValueError:
+        return False  # misconfigured secret
+    payload = f"{msg_id}.{ts}.".encode() + body
+    expected = b"v1," + base64.b64encode(hmac.new(key, payload, hashlib.sha256).digest())
+    return any(hmac.compare_digest(expected, s.encode()) for s in sigs.split())
+```
+
+### シークレットローテーション
+
+ローテーションは管理者側では即時カットオーバーですが、**その後およそ 1 分間は旧シークレットで署名されたリクエストが届く可能性があり**、既に飛行中のものも同様です。ローテーションウィンドウ中は旧新両方のシークレットの署名を受け入れるようにサーバーを設定して、落ちこぼれが署名なしとして拒否されないようにしてください。
+
+### 一度きりの例外
+
+**組織が初回保存する前に**送られる接続テストは署名なしで届きます。署名シークレットがまだ存在しないからです。管理者がシークレットの存在を確認するまでは署名なしリクエストを受け入れ、その後は拒否してください。
+
+## 運用セマンティクス
+
+### タイムアウト
+
+管理者は判定タイムアウトを **1 ~ 10,000 ms** の間で設定し、デフォルトは **5,000 ms** です。この予算はラウンドトリップ全体をカバーします: 接続、TLS ハンドシェイク、リクエスト body アップロード、レスポンス body ダウンロード。
+
+### リトライ
+
+Anthropic は**接続試行が失敗した場合にのみ、100 ms 遅延の後にちょうど 1 回**リトライします。500 では、タイムアウトでは、パースエラーではリトライしません。サーバーが何かで応答してしまえば — 交換は終わりです。リトライは同じタイムアウト予算を共有し、同じ `webhook-id` と署名を運びます。なので `webhook-id` で重複排除するのが安全です。
+
+### 失敗ハンドリング
+
+判定付きのクリーンな 200 以外はすべて **webhook 失敗**です: タイムアウト、非 200 ステータス(リダイレクトを含む)、パース不可または特大のレスポンス body、到達不能なエンドポイント。失敗時、組織の設定が決定します:
+
+- **リクエストをブロック。** 高規制環境の安全なデフォルト。DLP サーバーがダウンすればユーザーはブロックされる。Claude の可用性 = あなたのスキャナの可用性。
+- **リクエストを許可。** サーバーが回復するまでユーザーは作業を続ける。障害中はプロンプトが検査なしで流れる — 多くの組織にとって受け入れられるトレードオフですが、監査証跡のギャップをどう調整するか計画しておきましょう。
+
+### サーキットブレーカー
+
+あなたの AI セキュリティサーバーに起因する持続的な webhook 失敗は**サーキットブレーカーをトリップ**して施行を止めます: Anthropic はあなたのサーバーを呼ばなくなり、失敗ハンドリングがすべてのリクエストに適用されます。回復は自動ではありません — サーバーを直してから、管理者に **Enforce verdicts** を再度オンにしてもらう必要があります。実務上これが意味するのは: **未知のトップレベル `type` は HTTP 500 ではなく `{"action": "allow"}` を返すべき** — 将来の新しいイベントタイプがロールアウト当日にあなたをサーキットブレーカー領域に叩き込むのを避けるためです。
+
+### レイテンシ
+
+組織内のあらゆる統制対象リクエストは、あなたの AI セキュリティサーバーのラウンドトリップ分の追加レイテンシを払います。大きな組織にロールアウトする前に負荷テストを — 4 秒のスキャナはチャットプロンプトでは見えませんが、多くのリクエストを連続で発火する Claude Code のツールループでは悪夢です。
+
+### ソース IP 許可リスト
+
+リクエストは `160.79.106.0/24` から発生します — これは Anthropic が公開している [outbound IP ranges](https://platform.claude.com/docs/en/api/ip-addresses) の一部です。このブロックを許可リストに、そのページ上の inbound 範囲は**入れないこと** — 別のリストです。そして許可リストは署名検証の代替にはなりません: このブロックは Inference Hooks を超えた Anthropic の egress も運びます。
+
+## ロールアウトプレイブック
+
+<Steps items={[
+  {title: "シャドウモード — 判定を観察するがブロックしない", body: "最初にオンにするもの。あなたのサーバーがすべてのリクエストを評価するが、deny は施行されない。1 人のユーザーもブロックする前に、実トラフィック 1 週間ぶんに対してルールをチューニングできる。"},
+  {title: "パーセンテージロールアウト — 一部を検査", body: "施行をオンにするとき、たとえば 10% から始めて登っていく。スキャナに誤検知スパイクがあってもブラスト半径を抑えられる。"},
+  {title: "ロールベース除外 — 必要なものを免除", body: "スキャナが追いつけない速度でプロンプトを回すことがわかっているロール(シニアエンジニアリング、オンコール SRE)はチューニング中は免除できる。永遠ではないが、ランプ中は役立つ。"},
+  {title: "Enforce verdicts — 本当に deny する", body: "前の 3 つを定めたソーク期間クリーンに走らせた後だけ。ここでようやくあなたの deny_reason 文字列がユーザーに届き始めるので、スイッチを入れる前にもう一度レビューを。"},
+]} />
+
+Anthropic のドキュメントははっきり言っています: *初日から従業員をブロックすることこそ DLP プログラムが死ぬ道だ。* シャドウモードはそのためにあります。
+
+## 統合を設計する
+
+<Callout type="tip" items={[
+  "webhook-id で重複排除。配信ごとに一意で body の request_id と一致する。接続失敗リトライはこれを再利用するので、きれいなべき等キー。",
+  "すべての判定を reference_id と共に保存。Anthropic は拒否ごとの Activity Feed エントリに reference_id を記録するので、拒否をあなたのシステム内の正確なスキャン決定に紐づけられる。",
+  "常時 allow のアーカイブ統合では、先に応答してから永続化。書き込み前に答えることでラウンドトリップをユーザーのクリティカルパスから外せる — ストレージシステムはホットパス上にない。",
+  "deny_reason は SIEM ではなく人間向けに書く。'PCI_REGEX_2A tripped, reference 4471' より 'プロンプトからクレジットカード番号を削除して再送してください' の方が良い。ユーザーは前者では動かない。"
+]} />
+
+## カバレッジマトリクス
+
+| サーフェス / アクセス                          | Inference Hooks で検査される?                                     |
+| -------------------------------------------- | ----------------------------------------------------------------- |
+| claude.ai(web、デスクトップ、モバイル)         | ✅ はい                                                             |
+| Claude Code(web、デスクトップ、CLI)           | ✅ はい(`session_id` はベストエフォート、クライアント主張)            |
+| Claude Cowork                                | ✅ はい                                                             |
+| Voice mode                                   | ❌ ベータでは対象外                                                 |
+| 会話タイトル生成、その他付随                    | ❌ 送信されない                                                    |
+| システムプロンプト、ツール定義                   | ❌ 決して送信されない                                                |
+| 生ファイル / 画像バイト                         | ❌ 決して送信されない(抽出テキストは送られる)                        |
+| 画像のみのコンテンツ(ドキュメントのスクリーンショットなど) | ❌ 検査されない                                                    |
+| Claude Platform API キー(デベロッパーアクセス)  | ❌ Inference Hooks のスコープ外(Platform 組織、Enterprise ではない) |
+| Amazon Bedrock / Google Cloud デプロイメント    | ❌ それらのプレーンでは利用不可                                        |
+
+## よくあるミス
+
+<Callout type="warning" items={[
+  "HTTP 403 でブロックを伝える。それは webhook 失敗であり deny ではない — あなたのポリシー判定は捨てられ、失敗ハンドリングが引き継ぐ。",
+  "'allow' または 'deny' 以外の action を返す。同じ話: webhook 失敗。3 番目の状態を追加したくなったら、判定ではなくあなたの監査ログでやること。",
+  "小さいデフォルト body 上限(Express 100 kB、nginx 1 MB)。大きい PDF の抽出テキストを含む 3 MB の transcript はリバースプロキシで 413 になる。10 MB 上限に合わせて上限を上げる。",
+  "whsec_ シークレットを URL-safe base64 でデコードする。すべてのリクエストで静かな定数時間ミスマッチが続き、全リクエストが「署名なし」だと気づくまで続く。",
+  "HMAC 前に body を再シリアライズする。受信したままの生バイトを検証すること。json.loads + json.dumps は空白を変えて署名を壊す。",
+  "未知のトップレベル `type` を 500 で拒否する。Anthropic が新イベントタイプを出荷した日にサーキットブレーカーをトリップさせる。未知の type には `allow` を返す。",
+  "認識できない `source.application` の値を拒否する。これはオープン enum。新しい値が登場し、古い統合はそれで壊れてはならない。",
+  "user/assistant 交互を仮定する。ブロックがすべて除外されるターンは `messages` からドロップされる。防衛的にパースすること。"
+]} />
+
+## Inference Hooks vs クライアント側プロキシの使い分け
+
+一部の組織は従業員がオンラインで行う*すべて*をカバーするために、まだ TLS 傍受プロキシを運用しています。Inference Hooks はプロキシの代替ではありません — Anthropic の境界の*内側*に座り、暗号化バイトしか見えないプロキシよりも豊かで構造化された会話ビューを見る、Claude 専用の施行ポイントです。
+
+- モデルが実際に見るもの(ツール呼び出し、添付、transcript)への構造化アクセス、チャット + Code + Cowork にわたる均一なカバレッジ、デバイスごとのインストール不要 — こういうときは **Inference Hooks** を使う。
+- 箱の上のそれ以外すべてには**ネットワーク DLP** を維持: 非 Claude サービスへのファイルアップロード、claude.ai 外のブラウザトラフィック、メール添付。両者は重ならない。
+- 事後の監査とエクスポートには **[Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api)** を追加。
+
+## クイズ
+
+<Quiz questions={[
+  {
+    q: "Anthropic はあなたの AI セキュリティサーバーにどうコンタクトしますか?",
+    options: [
+      "組織ごとに 1 本の永続接続で、署名付き WebSocket",
+      "統制対象リクエストごとに 1 回の HTTPS POST、Standard Webhooks に従って署名される",
+      "mTLS の gRPC ストリーム",
+      "ポーリングループ — あなたのサーバーが保留中の判定を取りに行く"
+    ],
+    answer: 1,
+    explain: "統制対象リクエストごとに 1 回の HTTPS POST。HMAC-SHA256 を使う 3 つの Standard Webhooks ヘッダ(webhook-id、webhook-timestamp、webhook-signature)で署名されます。"
+  },
+  {
+    q: "あなたの DLP スキャナがポリシー違反を検知しました。正しい応答はどれ?",
+    options: [
+      "HTTP 403 と { \"error\": \"blocked\" }",
+      "HTTP 200 と { \"action\": \"deny\", \"deny_reason\": \"...\" }",
+      "HTTP 200 と { \"action\": \"redact\", \"rewritten_prompt\": \"...\" }",
+      "HTTP 451 と理由をヘッダで"
+    ],
+    answer: 1,
+    explain: "deny は常に HTTP 200 と { \"action\": \"deny\", \"deny_reason\": \"...\" }。HTTP 403 は webhook 失敗であり — あなたの判定は捨てられて失敗ハンドリングが引き継ぐ。現在は redact アクションはない。判定は意図的にバイナリ。"
+  },
+  {
+    q: "あなたの AI セキュリティサーバーがローリングデプロイでダウンし、90 秒間 500 を返しました。そのウィンドウのユーザープロンプトはどうなりますか?",
+    options: [
+      "Anthropic 側でキューされ、サーバー回復時に処理される",
+      "あなたの失敗ハンドリング設定が決める — ブロックされるか、検査なしで進む",
+      "常にブロックされる。失敗は fail-closed がデフォルト",
+      "常に進む。失敗は fail-open がデフォルト"
+    ],
+    answer: 1,
+    explain: "500 は webhook 失敗。組織の失敗ハンドリング設定(Block the request vs Allow the request)がどちら側のトレードオフを取るかを選びます。持続的な失敗はサーキットブレーカーもトリップし、そこから先は管理者が施行を再度有効化するまで、失敗ハンドリングがすべてのリクエストに適用されます。"
+  }
+]} />
+
+## 次に
+
+- [Admin API: Claude 組織を自動化する](/docs/api/admin-api) — hooks と自然に組み合わされる Enterprise ユーザー管理と RBAC エンドポイント。
+- [MCP 2026-07-28: The Stateless Spec](/docs/api/mcp-2026-07-28-stateless) — あなたの hooks が `tool_use` と `tool_result` ブロックで見ることになるツール呼び出し側。
+- [Refusals & Safety](/docs/api/refusals-and-safety) — Claude 自身のモデル内拒否シグナル。あなたの hook がプロンプトを通した*後*に発火する。
+- [現在のモデルと料金](/docs/whats-new/models-and-pricing)
