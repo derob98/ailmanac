@@ -1,0 +1,167 @@
+---
+sidebar_position: 42
+title: "Perché un system prompt da 35 KB si rompe su un modello locale"
+description: "Spostare un grande system prompt Claude/GPT su Ollama o un altro runtime locale: l'aritmetica del budget di contesto, il troncamento silenzioso a metà prompt di Ollama, i segnali di esaurimento del contesto e la ristrutturazione che funziona davvero."
+keywords: [large system prompt local model, Ollama num_ctx, OLLAMA_CONTEXT_LENGTH, context shift truncation, migrate Claude prompt to Ollama, local agent context exhaustion, KV cache quantization, single objective prompting]
+---
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-09-14" source="https://github.com/ollama/ollama/blob/main/docs/context-length.mdx">
+I default di contesto e il comportamento di troncamento di Ollama sono stati letti dalla documentazione e dal sorgente del branch `main` alla data indicata. Le build più vecchie usavano un default fisso di 2.048 o 4.096 token indipendentemente dall'hardware; il default a scaglioni di VRAM descritto qui sotto è quello corrente alla data di verifica. Controlla `ollama --version` e la documentazione linkata prima di fidarti di un numero.
+</VerifyNote>
+
+<Callout type="objectives" items={[
+  "Fare l'aritmetica del budget di contesto prima di spostare un prompt, e capire perché un prompt da 35 KB invisibile su Claude è un quarto di una piccola finestra locale",
+  "Sapere esattamente cosa fa Ollama quando il prompt è troppo lungo: scarta la parte centrale, tiene pochi token di prefisso e lo dice solo al log del server",
+  "Riconoscere i cinque segnali comportamentali di esaurimento del contesto in un agente locale prima che sprechi un'ora",
+  "Ristrutturare un prompt monolitico in unità a obiettivo singolo che entrano nella finestra, passando lo stato tra loro su disco",
+  "Regolare le manopole del runtime che contano: OLLAMA_CONTEXT_LENGTH, quantizzazione della KV cache, flash attention e il moltiplicatore delle richieste parallele"
+]} />
+
+Un post arrivato in prima pagina su Hacker News il 13–14 settembre 2026 descriveva un'esperienza che molti stanno per fare: un system prompt da 35 KB che girava senza problemi su Claude Opus è stato puntato su un modello 27B self-hosted tramite Ollama e, nel giro di circa tre minuti, l'agente rileggeva file già letti, ripeteva chiamate a tool identiche e riscriveva lavoro già finito. Il modello non aveva niente che "non andasse". Il prompt più la cronologia della sessione avevano semplicemente superato una finestra da 65K token, e il runtime aveva iniziato a buttare via pezzi della conversazione.
+
+Questa pagina è la guida che l'autore avrebbe voluto trovare. Parla di **dimensione del prompt contro budget di contesto**, che è un problema diverso dalla *formulazione del prompt* tra modelli, trattata in [Portare i prompt tra modelli](/docs/models/porting-prompts-across-models), e da *quale modello locale scegliere*, trattato in [Eseguire modelli in locale con Ollama](/docs/models/run-models-locally-ollama).
+
+## L'aritmetica che nessuno fa per prima
+
+Su Claude un system prompt da 35 KB sono circa 9.000 token, dentro una finestra da 1.000.000 di token: meno dell'1 %. Non ci pensi mai. Su un runtime locale lo stesso prompt sono gli stessi 9.000 token, ma la finestra è quella che hai configurato, e il default è piccolo:
+
+| Contesto di default di Ollama (documentazione `main` corrente) | Macchina |
+|---|---|
+| 4K token | meno di 24 GiB di VRAM |
+| 32K token | 24–48 GiB di VRAM |
+| 256K token | 48 GiB di VRAM o più |
+
+A 4K, un system prompt da 9.000 token non entra proprio. A 32K è il 28 % della finestra prima che l'utente dica una parola. Ai 65K configurati dall'autore del post HN è il 14 %, che sembra accettabile finché non aggiungi ciò che una sessione agentica trasporta davvero: definizioni dei tool (da qualche centinaio a qualche migliaio di token), ogni file che l'agente legge, ogni risultato di tool e l'output del modello stesso. Un agente di coding che legge tre file medi ed esegue due comandi è di routine a 20–30K token di conversazione. Con un costo fisso di 9K, la memoria di lavoro utilizzabile sparisce in una manciata di turni.
+
+Le due abitudini del cloud che rendono tutto questo invisibile su Claude mancano in locale: la finestra è due ordini di grandezza più piccola, e non c'è nessuna compattazione integrata. Claude Code riassume la conversazione quando si avvicina al limite ([Gestione del contesto](/docs/claude-code/context-management)); un endpoint Ollama grezzo no. Alcuni harness per agenti locali fanno la propria compattazione, ma il runtime sotto di loro no.
+
+<PromptCard title="Misura il prompt prima di migrare (qualsiasi endpoint locale compatibile OpenAI)">{`# Count what the model will actually see, from Ollama's own tokenizer.
+# prompt_eval_count in the response is the tokenised prompt length.
+curl -s http://localhost:11434/api/chat -d '{
+  "model": "qwen3:32b",
+  "messages": [{"role":"system","content":"'"$(cat system-prompt.md | sed 's/"/\\\\"/g')"'"},
+               {"role":"user","content":"ping"}],
+  "stream": false,
+  "options": {"num_predict": 1}
+}' | jq '{prompt_tokens: .prompt_eval_count, cached: .prompt_eval_cached_count}'`}</PromptCard>
+
+Confronta quel numero con il `num_ctx` con cui giri, poi sottrai lo schema dei tool e una trascrizione realistica. Se il resto è sotto circa metà della finestra, il prompt è troppo grande per quella configurazione, e nessuna riformulazione lo sistemerà.
+
+## Cosa fa Ollama quando il prompt non entra
+
+Questo è il meccanismo che trasforma "leggermente troppo lungo" in "misteriosamente stupido", e non è documentato da nessuna parte in prosa; sta nel sorgente.
+
+Quando il prompt di una richiesta è più lungo del contesto e il troncamento è abilitato (lo è, di default, per `/api/chat` e `/api/generate`), il runner di Ollama basato su llama.cpp fa quanto segue, in `llm/llama_server.go`:
+
+1. Tiene i primi `num_keep` token del prompt. Il `num_keep` di default è **4**, impostato "per evitare problemi nei context shift".
+2. Calcola una lunghezza obiettivo che lascia libera circa **metà del contesto rimanente** per la generazione.
+3. Scarta i token **dal centro**: il prefisso conservato resta, la coda resta, il blocco tra i due viene rimosso.
+4. Scrive `truncating input prompt` con le dimensioni prima/dopo **nel log del server**. La risposta API non porta nessun flag, e una libreria client vede un completamento normale.
+
+La tabella di test del progetto stesso rende concreta la scala: con un contesto da 4.096 token e il `num_keep` di default, un prompt troppo lungo viene tagliato a **2.050 token**. Metà della finestra è riservata deliberatamente alla risposta. Quindi un system prompt da 9.000 token su una finestra da 4K arriva al modello come quattro token del suo inizio, poi un buco, poi quello che ci sta alla fine della conversazione. Le istruzioni sono sparite; l'ultimo messaggio utente sopravvive. È esattamente il comportamento "ripete gli obiettivi, ripete le chiamate ai tool" descritto nel post HN: al modello viene chiesto di agire su una conversazione le cui regole sono state cancellate in silenzio.
+
+Due vie d'uscita dalla versione silenziosa:
+
+- Invia `"truncate": false` nella richiesta. Ollama allora restituisce **HTTP 400** con un messaggio che dice che il prompt è più lungo del contesto attualmente disponibile, invece di tirare a indovinare. Per un harness agentico è il comportamento corretto: fallire rumorosamente, poi compattare o ripartire.
+- Alza `num_keep` alla lunghezza del tuo system prompt così il prefisso sopravvive a uno shift. Questo preserva le regole ma cancella comunque conversazione dal centro; è un cerotto, non una soluzione.
+
+L'endpoint chat ha un secondo livello, più gentile, sopra questo: quando la lista dei messaggi è troppo lunga per il limite, il costruttore di prompt di Ollama scarta prima i **messaggi più vecchi** tenendo il messaggio di sistema e l'ultimo turno (vedi `server/prompt.go`). Anche così puoi perdere risultati intermedi dei tool, ed è per questo che un agente può "dimenticare" di aver già letto un file. Guarda il log del server; con `OLLAMA_DEBUG=1` il taglio è visibile.
+
+:::note Non solo Ollama
+Il server di llama.cpp ha lo stesso comportamento di context shift sotto un flag diverso, vLLM rifiuta i prompt troppo lunghi di default, e LM Studio espone la lunghezza del contesto come impostazione per modello che è facile lasciare al suo piccolo default. Il pattern da interiorizzare è: **sapere se il tuo runtime tronca o va in errore, e preferire l'errore.**
+:::
+
+## I cinque segnali di fallimento
+
+L'autore del post HN ha tenuto una lista di come appariva dall'esterno l'esaurimento del contesto, e coincide con quello che si riporta su ogni agente con finestra piccola. Tratta ognuno di questi come "la finestra è piena", non come "il modello è scarso":
+
+1. **Chiamate a tool identiche consecutive.** Il modello non ha più in vista il risultato precedente, quindi chiede di nuovo.
+2. **Rilettura di un file già letto.** Stessa causa; il risultato della lettura è stato tagliato.
+3. **Riformulazione dell'obiettivo** con parole proprie a metà task, a volte con deriva. Il system prompt è stato tagliato, e il modello sta ricostruendo il compito dalla coda della conversazione.
+4. **Errori di parsing delle chiamate a tool** che compaiono dopo una serie di chiamate pulite. Una volta spariti gli esempi e lo schema nel prompt, i modelli piccoli tornano alla loro formattazione di default.
+5. **Numero di turni alto rispetto ai file effettivamente modificati.** Il rapporto è la metrica più economica da tracciare in un harness; quando schizza, fermati e riparti con contesto fresco.
+
+Se passi da un client compatibile OpenAI, logga `prompt_eval_count` a ogni turno. Quando smette di crescere mentre la conversazione continua a crescere, il troncamento è iniziato.
+
+## Ristrutturare: prompt a obiettivo singolo e stato su disco
+
+Un prompt da 35 KB di solito è l'intero regolamento di un prodotto: persona, standard di codice, etichetta dei tool, formati di output, casi limite e una lunga lista di "mai fare X". Su un modello da 1M di token funziona per forza bruta. Su un modello da 32K no, e la soluzione a cui è arrivato l'autore del post HN è la stessa sostenuta in modo indipendente dai commentatori più forti: **spezzare il prompt in unità a obiettivo singolo ed eseguire ciascuna nella propria sessione breve.**
+
+<Steps items={[
+  {title: "Inventaria il prompt per obiettivo", body: "Scorri i 35 KB e tagga ogni paragrafo con il lavoro che svolge: pianificare, modificare, testare, revisionare, scrivere il commit. La maggior parte dei monoliti contiene da cinque a otto lavori distinti più un nucleo condiviso (persona, fatti sul repo, regole di sicurezza) che sta sotto i 2 KB."},
+  {title: "Taglia un prompt per lavoro", body: "Ogni lavoro riceve il nucleo condiviso più solo le proprie regole ed esempi. Punta a 2–4K token ciascuno. Su Ollama, distribuiscili come Modelfile separati (`PARAMETER num_ctx` impostato esplicitamente, blocco `SYSTEM` per lavoro) o come file di prompt per agente nel tuo harness."},
+  {title: "Passa lo stato tra i lavori su disco, non nel contesto", body: "Ogni unità scrive un breve riepilogo strutturato (cosa ha fatto, cosa resta, quali file) in un file quando finisce; l'unità successiva legge solo quel file più la fetta di repo che le serve. La sessione termina. È l'equivalente per modelli locali della compattazione di Claude Code, fatta a mano."},
+  {title: "Sostituisci i negativi con i positivi", body: "I modelli piccoli seguono 'fai solo X' molto meglio di 'non fare Y', e le liste negative sono il punto in cui i prompt monolitici si gonfiano. Converti `never touch tests` in `edit only files under src/`."},
+  {title: "Riduci le chiamate a tool per passo", body: "Ogni risultato di tool è contesto che paghi finché non viene tagliato. Preferisci tool che restituiscono una fetta (una funzione, un hunk) a tool che restituiscono un file intero; la coppia `inspect_function` / `replace_function` di un commentatore HN è l'esempio canonico."},
+  {title: "Riparti al completamento, non al fallimento", body: "Finisci l'unità, scrivi il passaggio di consegne, chiudi la sessione. Non aspettare i segnali di fallimento; a quel punto il prompt è già stato troncato e l'output non è affidabile."}
+]} />
+
+<PromptCard title="Un file di passaggio di consegne che la prossima unità a obiettivo singolo legge per prima">{`# HANDOFF — written by unit 2 (implement), read by unit 3 (test)
+Objective completed: renamed getUser -> fetchUser across src/
+Files changed: src/api/user.ts, src/pages/profile.tsx, src/hooks/useUser.ts
+Not done: tests still reference getUser (tests/user.test.ts)
+Constraints carried forward: no new dependencies; keep TypeScript strict
+Next unit should: update tests, run \`npm test\`, write result to HANDOFF.md`}</PromptCard>
+
+Questa è anche la risposta onesta al commentatore che ha detto che un prompt da 35 KB è "confuso e sfocato su qualsiasi LLM". I modelli di frontiera nascondono il gonfiore; i modelli locali lo espongono. Spezzare per obiettivo di solito migliora i risultati anche su Claude, ed è il design che [Claude più modelli locali](/docs/models/claude-plus-local-models) presuppone quando instrada i passi economici in locale.
+
+## Regolare il runtime
+
+Una volta che il prompt ha la dimensione giusta, quattro manopole decidono quanta finestra puoi davvero permetterti. Tutte vengono dalla FAQ e dalla documentazione di Ollama.
+
+| Manopola | Cosa fa | Trappola |
+|---|---|---|
+| `OLLAMA_CONTEXT_LENGTH=65536 ollama serve` (oppure `num_ctx` per richiesta, oppure `PARAMETER num_ctx` in un Modelfile) | Imposta la finestra | Un contesto più grande costa memoria. La documentazione lo dice senza giri di parole; la KV cache cresce linearmente con esso |
+| `OLLAMA_KV_CACHE_TYPE=q8_0` | Quantizza la KV cache; circa metà della memoria dell'`f16` di default. `q4_0` è circa un quarto | Richiede flash attention; piccolo costo in qualità, maggiore con `q4_0` |
+| `OLLAMA_FLASH_ATTENTION=1` | Abilita flash attention; prerequisito per la quantizzazione della KV cache e riduce la memoria per contesti lunghi | Non tutti i backend/modelli la supportano; impostala e controlla il log del server |
+| `OLLAMA_NUM_PARALLEL` (default 1) | Richieste concorrenti per modello | **La memoria richiesta scala con `OLLAMA_NUM_PARALLEL × OLLAMA_CONTEXT_LENGTH`.** Due slot paralleli a 64K costano la memoria KV di uno a 128K |
+
+Un ordine di operazioni utile con un budget di memoria fisso: scegli il modello più grande che riesci a tenere con una finestra *piccola*, poi abilita flash attention e la KV cache `q8_0`, poi alza il contesto finché il log del server non mostra che trabocca sulla CPU. Il contesto diviso tra GPU e CPU è il punto in cui i token al secondo crollano; diversi commentatori HN hanno riportato modelli densi 27B–32B in FP8 con finestre molto lunghe su configurazioni a doppia GPU, ma su una singola macchina da 128 GB a memoria unificata il tetto pratico erano i 65K usati dall'autore.
+
+:::tip Il prefix caching aiuta, ma solo per il prefisso
+Ollama riporta `prompt_eval_cached_count` in ogni risposta. Un system prompt stabile proprio all'inizio della conversazione viene riutilizzato dalla KV cache tra una richiesta e l'altra, quindi il suo costo si paga una volta per sessione, non per turno. Tutto ciò che viene dopo il primo cambiamento nella conversazione viene ricalcolato. Metti il materiale fisso all'inizio e quello volatile alla fine, la stessa regola del prompt caching di Claude ([Economia del prompt caching](/docs/frontiers/prompt-caching-economics)).
+:::
+
+## Checklist di migrazione
+
+- [ ] Tokenizza il system prompt con il tokenizer *locale* e annota il numero.
+- [ ] Imposta `num_ctx` esplicitamente. Non affidarti mai al default; dipende dalla VRAM della macchina.
+- [ ] Decidi tra troncare o andare in errore. Per gli agenti, invia `"truncate": false` e gestisci il 400.
+- [ ] Spezza il prompt per obiettivo; nucleo condiviso sotto i 2K token; ogni unità 2–4K.
+- [ ] Passa le consegne tra unità tramite un file; chiudi la sessione dopo ogni unità.
+- [ ] Logga `prompt_eval_count` per turno e lancia un allarme quando si appiattisce.
+- [ ] Abilita flash attention e la KV cache `q8_0` prima di alzare la finestra.
+- [ ] Controlla il log del server alla ricerca di `truncating input prompt` durante la prima settimana.
+
+<Flashcards cards={[
+  {front: "Cosa tiene Ollama quando tronca un prompt troppo lungo?", back: "I primi num_keep token (default 4) e la coda. Il centro viene scartato. Lo sa solo il log del server."},
+  {front: "Con num_ctx 4096, quanto è lungo un prompt troncato?", back: "Circa 2.050 token: metà della finestra è riservata alla generazione."},
+  {front: "Come far andare Ollama in errore invece di troncare", back: "Invia \"truncate\": false nella richiesta; restituisce HTTP 400 quando il prompt supera il contesto disponibile."},
+  {front: "Lunghezza di contesto di default di Ollama", back: "A scaglioni di VRAM sulle build correnti: 4K sotto 24 GiB, 32K per 24–48 GiB, 256K da 48 GiB in su. Build più vecchie: 2K o 4K fissi."},
+  {front: "Regola di memoria di OLLAMA_NUM_PARALLEL", back: "La RAM richiesta scala con OLLAMA_NUM_PARALLEL × OLLAMA_CONTEXT_LENGTH."},
+  {front: "Single Objective Prompting", back: "Spezza un prompt monolitico in un prompt per lavoro, esegui ciascuno nella propria sessione breve, passa lo stato tra loro tramite un file."}
+]} />
+
+<Quiz title="Verifica quello che hai imparato" questions={[
+  {q: "Un system prompt da 9.000 token viene inviato a Ollama con num_ctx 4096 e impostazioni di default. Cosa arriva al modello?", options: ["L'intero prompt, il runtime alza il contesto automaticamente", "Un errore HTTP 400", "Circa 2.050 token: un prefisso di 4 token più la coda della conversazione, con il centro rimosso", "I primi 4.096 token"], answer: 2, explain: "Il troncamento è attivo di default. Ollama tiene num_keep (4) token di prefisso, libera circa metà della finestra per la generazione e scarta dal centro. Avvisa solo nel log del server."},
+  {q: "Quale segnale indica in modo più affidabile l'esaurimento del contesto in un agente locale?", options: ["Token al secondo più lenti", "Chiamate a tool identiche consecutive e rilettura di file già letti", "Risposte più lunghe", "Il modello rifiuta il task"], answer: 1, explain: "Chiamate ripetute significano che il risultato precedente è stato tagliato dalla finestra. Traccia turni contro file modificati come metrica economica."},
+  {q: "Vuoi che il runtime fallisca rumorosamente quando un prompt è troppo lungo. Cosa invii?", options: ["num_keep: -1", "\"truncate\": false", "OLLAMA_DEBUG=1", "num_ctx: 0"], answer: 1, explain: "Con truncate a false, Ollama restituisce un 400 invece di spostare il contesto in silenzio."},
+  {q: "Imposti OLLAMA_NUM_PARALLEL=4 e OLLAMA_CONTEXT_LENGTH=32768. Quanta memoria serve alla KV cache, rispetto a una singola richiesta a 32K?", options: ["La stessa", "Circa 2×", "Circa 4×", "Dipende solo dal modello"], answer: 2, explain: "La FAQ dice che la RAM richiesta scala con OLLAMA_NUM_PARALLEL × OLLAMA_CONTEXT_LENGTH."},
+  {q: "Quale cambiamento dà la soluzione più duratura per un prompt da 35 KB su un modello con finestra da 32K?", options: ["Alzare num_ctx a 128K", "Passare alla KV cache q4_0", "Spezzarlo in prompt a obiettivo singolo con passaggio di consegne su file e sessioni per unità", "Aggiungere altre regole 'mai fare X'"], answer: 2, explain: "Alzare la finestra costa memoria e velocità e si riempie comunque; spezzare per obiettivo mantiene ogni sessione piccola ed elimina il gonfiore che danneggia anche i modelli di frontiera."}
+]} />
+
+## Fonti e approfondimenti
+
+- [Notes on gotchas while migrating 35 KB preprompts from Opus to self-hosted Ollama](https://patrickmccanna.net/notes-on-migrating-large-prompts-away-from-anthropic-openai-to-self-hosted-llms/) — il post di settembre 2026 che ha motivato questa pagina (Ryzen AI MAX+ 395 da 128 GB, finestra da 65K, modello 27B, harness OpenCode), e la sua [discussione su Hacker News](https://news.ycombinator.com/item?id=49697014)
+- [Documentazione Ollama: context length](https://github.com/ollama/ollama/blob/main/docs/context-length.mdx) — i default a scaglioni di VRAM e `OLLAMA_CONTEXT_LENGTH`
+- [FAQ di Ollama](https://docs.ollama.com/faq) — `OLLAMA_KV_CACHE_TYPE`, `OLLAMA_FLASH_ATTENTION`, `OLLAMA_NUM_PARALLEL` e la regola di memoria
+- [Sorgente Ollama: `llm/llama_server.go`](https://github.com/ollama/ollama/blob/main/llm/llama_server.go) — il codice di context shift `truncating input prompt` e la sua tabella di test; [`api/types.go`](https://github.com/ollama/ollama/blob/main/api/types.go) per il default `num_keep: 4`; [`server/routes.go`](https://github.com/ollama/ollama/blob/main/server/routes.go) per `truncate` a true di default
+- [Riferimento API di Ollama](https://github.com/ollama/ollama/blob/main/docs/api.md) — `prompt_eval_count`, `prompt_eval_cached_count`, `options.num_ctx`, `keep_alive`
+
+## Prossimi passi
+
+- [Claude più modelli locali](/docs/models/claude-plus-local-models) — i pattern ibridi che tengono il prompt grande su Claude e mandano in locale i passi piccoli a obiettivo singolo
+- [Uno stack AI locale e privato](/docs/models/private-local-ai-stack) — le scelte di runtime, harness e modello una volta che il prompt entra nella finestra
+- [Gestione del contesto in Claude Code](/docs/claude-code/context-management) — cosa fa per te la compattazione su Claude, così sai cosa ricostruire a mano in locale
