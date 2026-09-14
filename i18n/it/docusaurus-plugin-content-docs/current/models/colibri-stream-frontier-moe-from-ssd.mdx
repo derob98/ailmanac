@@ -1,0 +1,221 @@
+---
+sidebar_position: 22.5
+title: "Colibrì: far girare un MoE da 744B dal tuo SSD (e cosa ti costa davvero)"
+description: "Colibrì è un engine in C puro, senza dipendenze, che esegue GLM-5.2 (744B), Kimi K3 (2.8T), DeepSeek V4.1 Flash e altri sei modelli MoE di frontiera su una macchina da 16–32 GB tenendo i layer densi in RAM e facendo streaming degli expert instradati da NVMe. Questa pagina spiega la gerarchia di memoria, i numeri che decidono se è usabile per te (da 0,05 a 6,8 tok/s), le insidie dell'usura SSD e dello speculative decoding, e i comandi esatti per ottenere il primo token."
+keywords: [Colibri, colibri inference, run GLM-5.2 locally, 744B on 25GB RAM, expert offloading, expert streaming, MoE inference CPU, NVMe streaming LLM, Kimi K3 local, DeepSeek V4.1 Flash local, Inkling local, pure C inference engine, llama.cpp alternative, local frontier model, router lookahead, MLA KV cache]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Capire il trucco a tre livelli — pesi densi in RAM, expert instradati su disco, livello VRAM opzionale — e perché il MoE lo rende possibile","Leggere onestamente la tabella dei benchmark: quale hardware ottiene 0,1 tok/s, quale ~2, quale ~6, e perché il tetto è la banda NVMe, non la CPU","Conoscere le quattro insidie che costano giorni: teste MTP in int8, O_DIRECT sul drive sbagliato, speculative decoding che perde, usura SSD","Passare da git clone al primo token in streaming su GLM-5.2 o DeepSeek V4.1 Flash","Decidere quando Colibrì batte un offload GGUF con Ollama, quando conviene noleggiare una GPU, e quando un'API hosted è semplicemente la risposta giusta"]} />
+
+Il 1° luglio 2026 uno sviluppatore che pubblica come JustVugg ha caricato un repository con una promessa in una riga: *far girare modelli MoE di frontiera su hardware che già possiedi — C puro, zero dipendenze, expert in streaming da disco*. Il thread Show HN ha raggiunto 453 punti nove giorni dopo. A metà settembre il progetto è a 30.8k stelle e la versione 1.11.0, rilasciata il 13 settembre, ha aggiunto una nona famiglia di modelli (DeepSeek V4.1 Flash, 552B) che legge il checkpoint pubblicato nativamente senza alcun passo di conversione. È il primo repository AI nella lista trending giornaliera di GitHub mentre questa pagina viene scritta.
+
+La proposta suona come un trucco, e in un certo senso lo è. Questa pagina spiega il trucco in modo abbastanza preciso da permetterti di prevedere cosa farà sulla *tua* macchina prima di scaricare 370 GB.
+
+## La versione in una frase
+
+Un modello mixture-of-experts tocca solo una piccola fetta dei suoi pesi per ogni token, quindi Colibrì tiene la parte sempre usata (attention, embedding, shared expert) residente in RAM e legge la parte usata raramente (gli expert instradati) da NVMe su richiesta — scambiando token al secondo con la possibilità di eseguire un modello da 744 miliardi di parametri su un laptop.
+
+## Perché il MoE lo rende possibile
+
+Prendi GLM-5.2 come caso di riferimento, dato che è il modello attorno a cui il progetto è stato costruito:
+
+| Quantità | Valore |
+|---|---|
+| Parametri totali | 744B |
+| Attivi per token | ~40B |
+| Parametri densi (sempre attivi) | ~17B → **~9,9 GB** residenti in int4 |
+| Expert instradati | circa ventimila su tutti i layer → **~370 GB** su disco in int4 |
+| Peso degli expert che cambia da token a token (cold) | **~11 GB** |
+| RAM minima / RAM comoda | 16 GB / 24 GB |
+
+Ogni token ha bisogno dei 9,9 GB densi più la manciata di expert che il router sceglie in ogni layer. La parte densa entra in RAM. Gli expert no — ma te ne servono solo pochi alla volta, e il token successivo spesso riusa molti degli stessi. Quindi l'engine tratta **VRAM, RAM e NVMe come un'unica gerarchia di memoria**: una cache LRU per layer degli expert usati di recente in RAM, un "pinned hot-store" appreso degli expert usati più spesso, un livello VRAM opzionale se c'è una GPU, e il disco come backing store per tutto il resto.
+
+La scelta di design che lo rende un singolo file C per modello invece di un framework: niente BLAS, niente Python a runtime, nessuna GPU richiesta. L'engine GLM è partito da circa 1.300 righe di C. Zero dipendenze significa anche che la page cache del sistema operativo diventa gratis un secondo livello di cache per le letture degli expert.
+
+## Quattro meccanismi che vale la pena capire
+
+### 1. Router lookahead: il routing è prevedibile al 71,6% un layer in anticipo
+
+La parte costosa dello streaming è *aspettare* il disco. Colibrì esegue un thread di lookahead (abilitato con `PILOT=1`) che prevede quali expert serviranno al layer *successivo* e avvia le letture in anticipo. La cifra misurata nel README è che le decisioni di routing sono prevedibili al 71,6% un layer in anticipo, abbastanza per nascondere gran parte della latenza I/O dietro il calcolo. Ecco perché "tok/s dopo il warmup" è un numero molto diverso da "tok/s cold".
+
+### 2. Streaming dual-SSD: due drive, un modello, banda sommata
+
+Metti una copia completa del modello su un secondo NVMe e l'engine fa streaming da entrambi contemporaneamente. Ogni expert viene assegnato deterministicamente via hash a un drive, pesato sulla banda *misurata* di ciascuno, così non c'è caching duplicato e la banda di lettura effettiva è circa la somma delle due. Il benchmark DeepSeek V4 Flash più sotto (RTX 5080 più due drive NVMe, ~1,6 tok/s) è una configurazione a due drive.
+
+### 3. Stato KV compresso che sopravvive a un riavvio
+
+I modelli con multi-head latent attention (MLA) permettono a Colibrì di memorizzare uno stato KV compresso — **576 float per token invece di 32.768, una riduzione di 57×**. L'engine persiste quello stato in un file `.coli_kv`, così riaprire una conversazione dopo un riavvio non fa alcun re-prefill ed è byte per byte identico a una sessione mai interrotta. Su una macchina dove il prefill va a velocità di streaming, non dover ri-prefillare un contesto lungo è la differenza tra usabile e non.
+
+### 4. La semantica è garantita, la velocità no
+
+Il contratto dichiarato dal progetto: memoria veloce insufficiente lo rende solo più lento; precisione e comportamento del router non cambiano mai in silenzio. Il forward pass è validato token per token contro un oracolo `transformers`. È il trade-off opposto rispetto alla maggior parte delle storie "entra in un laptop" basate sulla quantizzazione, dove ottieni velocità accettando un modello diverso.
+
+## La tabella dei benchmark, letta onestamente
+
+Numeri dal README del progetto (GLM-5.2 salvo diversa indicazione), cache calda dove indicato:
+
+| Hardware | Tok/s | Cosa significa |
+|---|---|---|
+| 6× RTX 5090, expert interamente residenti in VRAM | 5,8–6,8 (TTFT ~13 s) | Il tetto: nessun I/O su disco. È un rig GPU, non "hardware che già possiedi". |
+| Desktop con 128 GB di RAM, solo CPU, cache calda | ~1,8 | Il miglior caso realistico per una workstation grassa senza GPU. |
+| Singola RTX 5070 Ti (livello VRAM ~24 GB) | 1,07 | Una GPU di classe laptop raddoppia circa il pavimento cold-disk. |
+| RTX 5080 + 32 GB RAM + 2 NVMe, DeepSeek V4 Flash | ~1,6 a 3k di contesto, dopo il warmup | Il percorso dual-SSD su un modello più piccolo. |
+| Laptop con 25 GB di RAM, NVMe lento, cold | 0,05–0,1 | La configurazione da titolo "744B su 25 GB". Circa un token ogni 10–20 secondi. |
+
+La variabile che decide il tuo numero è la **banda in lettura casuale del drive**, non la CPU. Un token cold richiede nell'ordine di 11 GB di letture di expert; un NVMe PCIe 5.0 a 13–15 GB/s limita quindi un setup cold senza prefetch vicino a 1 tok/s, e sono lookahead e cache hit a portarti sopra. I commentatori nel thread di lancio hanno riportato hit rate di cache attorno al 23% su un Apple M5 Max da 128 GB e 0,091 tok/s su un vecchio dual-Xeon con 192 GB di DDR3 — "fattibile per job notturni".
+
+Quindi i casi d'uso onesti sono: batch notturni o asincroni, esperimenti privati offline con un modello di classe frontiera, ricerca su come si comporta davvero l'inferenza MoE, e chat multi-turno a cache calda su una macchina con 100 GB+ di RAM. Il pair-programming interattivo su un laptop da 32 GB non è nella lista.
+
+## Nove famiglie di modelli, e quanto costa ciascuna in disco
+
+| Modello | Totale / attivi | Disco | RAM min | Note |
+|---|---|---|---|---|
+| OLMoE | 7B / 1B | ~7 GB | 8 GB | Il modello "la mia build funziona?" |
+| Qwen3.6 | 35B / 3B | ~20 GB | 24 GB (residenza completa in RAM) | GPU opzionale; speedup 7× misurato su due schede da 8 GB |
+| Qwen3.8-Flash-Next | 125B + 51B n-gram / 6B | ~185,5 GB | 16 GB | Solo CPU |
+| DeepSeek V4 Flash | 284B / 13B | ~167 GB | 16 GB | Expert fp4 nativi; GPU opzionale (Pascal o più recente) |
+| GLM-5.3-Flash | 321B / 40B | ~195 GB | 25 GB | Con capacità visione |
+| DeepSeek V4.1 Flash | 552B / 16B | ~203 GB | 16 GB | Nuovo nella 1.11.0; legge il checkpoint rilasciato senza conversione |
+| GLM-5.2 / 5.3 | 744B / 40B | ~372 GB | 16 GB | Il modello di riferimento; pesi con licenza MIT |
+| Inkling | 975B / 41B | ~469 GB | 25 GB | Il denso bf16 è 49,4 GB residenti di default; uno strumento int4 lo porta su host da 25 GB |
+| Kimi K3 | 2.8T / 104B | ~1,6 TB | 32 GB+ | MXFP4 nativo; richiede il checkpoint grezzo, nessuna conversione disponibile |
+
+La quantizzazione è per famiglia, non un'impostazione globale: int4 group-scaled per GLM e Inkling, int8 o block-FP8 per OLMoE e Qwen3.8, MXFP4 nativo per Kimi K3, expert fp4 nativi con denso fp8-e4m3 per la linea DeepSeek V4. Se hai già i pesi di Kimi K3 o DeepSeek V4.1 Flash da un [deployment vLLM](/docs/models/kimi-k3-deploy-locally-vllm-dspark), Colibrì legge quegli stessi file.
+
+## Quattro insidie che costano giorni
+
+1. **Le teste MTP devono essere int8.** Le teste draft di multi-token-prediction quantizzate in int4 danno 0–4% di accettazione dei draft — lo speculative decoding non fa nulla in silenzio (issue #8). Il container GLM-5.2 pre-convertito su Hugging Face è int4 per il modello e int8 per MTP esattamente per questo motivo.
+2. **`O_DIRECT` aiuta su alcuni drive e danneggia su altri.** Bypassare la page cache ha misurato +34% su NVMe con cache DRAM e margine di banda, e da neutro a negativo su dischi QLC, DRAM-less e virtualizzati. Fai il benchmark di entrambi sul tuo drive; non copiare il flag di qualcun altro.
+3. **Lo speculative decoding è spesso una perdita netta nella chat reale.** Su conversazioni multi-turno i drafter MTP e grammaticale accettavano circa 1–10 token ogni 24, e rieseguire lo stato di attention ricorrente dell'engine per i suffissi rifiutati costava più di quanto i draft accettati facessero risparmiare. Per DeepSeek V4 il progetto ha misurato 495 secondi di replay dei suffissi rifiutati e viene distribuito con entrambi i drafter disattivi di default (`V4_DRAFT=0`, `V4_MTP=0`). Attivali solo se misuri un guadagno.
+4. **L'usura dell'SSD è reale.** Letture intensive degli expert fanno churn sulla page cache; il README avverte dell'usura sui drive consumer, e il consiglio nel thread di lancio era di disabilitare lo swap e considerare un mount in sola lettura per la directory del modello. Un modello da 370 GB in streaming per ore al giorno è un carico per cui gli NVMe consumer non sono stati venduti.
+
+Una in più, meno un'insidia che una limitazione: il pinning appreso degli expert può fare overfitting sulla tua storia di routing. Aiuta i carichi ripetuti; i maintainer dicono che servono ancora test A/B held-out, cross-session prima di fidarsi dei guadagni su prompt nuovi.
+
+## Dal clone al primo token
+
+<Steps items={[
+  {
+    title: "Build (controlla gcc e OpenMP, compila, esegue i self-test)",
+    body: "git clone https://github.com/JustVugg/colibri && cd colibri/c && ./setup.sh — poi make -C c glm per GLM-5.2, oppure make -C c inkling / make -C c kimi_k3 per gli altri. Parti da OLMoE (7 GB) per provare la build prima di impegnarti in centinaia di gigabyte di download."
+  },
+  {
+    title: "Ottieni i pesi nel formato container di Colibrì",
+    body: "./coli convert --model /nvme/glm52_i4 scarica e converte shard per shard, una volta sola. Per GLM-5.2 esiste su Hugging Face un container int4 pre-convertito con teste MTP int8 (mastouri/GLM-5.2-colibri-int4-g64-with-int8-mtp). DeepSeek V4.1 Flash e Kimi K3 non richiedono conversione: punta l'engine al checkpoint rilasciato."
+  },
+  {
+    title: "Controlla il posizionamento prima di aspettare",
+    body: "COLI_MODEL=/nvme/glm52_i4 ./coli plan mostra quali tensori finiscono in VRAM, RAM e disco per la tua macchina; ./coli doctor esegue un controllo di prontezza. Se plan dice che la maggior parte degli expert sarà cold su un drive lento, ora conosci i tuoi tok/s prima di spenderci una serata."
+  },
+  {
+    title: "Esegui: TUI, oppure API con una dashboard",
+    body: "COLI_MODEL=/nvme/glm52_i4 ./coli chat per una chat da terminale. ./coli web --model /nvme/glm52_i4 avvia un API server più una dashboard che mostra in tempo reale posizionamento per livello, hit rate della cache e I/O su disco; ./coli serve è la variante headless. Abilita PILOT=1 per il router lookahead su qualsiasi setup che fa streaming da disco."
+  },
+  {
+    title: "Regola le due manopole che contano, e misura",
+    body: "Prova O_DIRECT attivo e disattivo sul tuo drive specifico. Lascia lo speculative decoding disattivo finché un benchmark sui tuoi prompt non mostra che vince. Se hai un secondo NVMe, replica il modello su di esso per lo streaming dual-drive."
+  }
+]} />
+
+<PromptCard title="Una prima esecuzione minima su GLM-5.2 (Linux, un NVMe)">{`git clone https://github.com/JustVugg/colibri && cd colibri/c
+./setup.sh
+make -C c glm
+./coli convert --model /nvme/glm52_i4        # one-time download + convert
+COLI_MODEL=/nvme/glm52_i4 ./coli plan          # see what lands where
+COLI_MODEL=/nvme/glm52_i4 PILOT=1 ./coli chat  # first streamed tokens`}</PromptCard>
+
+## Colibrì contro le alternative che già conosci
+
+| Percorso | In cosa è bravo | Dove Colibrì differisce |
+|---|---|---|
+| **llama.cpp / Ollama con offload GGUF** ([la nostra guida a Ollama](/docs/models/run-models-locally-ollama)) | Catalogo enorme di modelli, offload GPU, tooling maturo; la [pagina su GLM-5.2](/docs/models/glm-5-2-open-weight-frontier) copre la via GGUF dinamica a 2 bit da 239 GB | L'offload GGUF richiede l'*intero* modello quantizzato in RAM più VRAM (256 GB per GLM-5.2 a 2 bit). Colibrì richiede 16–24 GB di RAM e un disco grande, alla stessa precisione rilasciata dal lab, non a 2 bit. |
+| **vLLM / SGLang su GPU noleggiate** ([guida al deploy di Kimi K3](/docs/models/kimi-k3-deploy-locally-vllm-dspark)) | Decine di token al secondo, batching, più utenti | Veloce perché tutto è residente in HBM. Colibrì esiste per il caso in cui quell'hardware non è disponibile o non è consentito. |
+| **API hosted** (DeepSeek, Z.ai, Moonshot) | Di gran lunga la più economica per token, nessun hardware | L'unica ragione per preferire Colibrì è che pesi e prompt non devono mai lasciare la macchina, oppure vuoi studiare l'inferenza MoE in sé. |
+
+Il modo giusto di pensare a Colibrì non è "un llama.cpp più veloce". È lo strumento che rende un modello open di *dimensione frontiera* disponibile su una macchina che altrimenti non potrebbe caricarlo, a una velocità attorno a cui pianifichi invece di aspettare. Per uno stack privacy-first che combina un modello locale piccolo e veloce per il lavoro interattivo con uno grande e lento per i job batch, vedi [Uno stack AI locale privato](/docs/models/private-local-ai-stack).
+
+<Flashcards cards={[
+  { front: "Expert streaming", back: "Tieni i pesi densi (attention, embedding, shared expert) residenti; leggi gli expert instradati da NVMe su richiesta tramite una cache LRU per layer e un pinned hot-store appreso. GLM-5.2: ~9,9 GB residenti, ~370 GB su disco." },
+  { front: "Router lookahead (PILOT=1)", back: "Un thread che fa prefetch degli expert del layer successivo. Il routing è misurato prevedibile al 71,6% un layer in anticipo, il che nasconde gran parte della latenza del disco." },
+  { front: "Streaming dual-SSD", back: "Copia completa del modello su ciascuno di due drive; ogni expert viene assegnato via hash a un drive pesato sulla banda misurata. Banda di lettura aggregata senza caching duplicato." },
+  { front: "KV compresso (.coli_kv)", back: "I modelli MLA memorizzano 576 float per token invece di 32.768 (57× più piccolo); persistito su disco così una conversazione riaperta non richiede alcun re-prefill." },
+  { front: "Tok/s cold vs tok/s warm", back: "Cold: ~11 GB di letture di expert per token, quindi la banda NVMe ti limita vicino a 1 tok/s anche su PCIe 5.0. Warm: cache hit e lookahead portano un box CPU da 128 GB a ~1,8 tok/s e un rig 6× 5090 a ~6." },
+  { front: "Regola MTP int8", back: "Teste di multi-token-prediction in int4 danno 0–4% di accettazione dei draft; tienile in int8 o lo speculative decoding è un no-op." },
+  { front: "O_DIRECT", back: "+34% su NVMe con cache DRAM e margine; neutro o peggio su drive QLC, DRAM-less o virtualizzati. Misura sul tuo hardware." }
+]} />
+
+<Quiz questions={[
+  {
+    q: "Perché un modello da 744B può girare su una macchina da 16–25 GB con Colibrì?",
+    options: [
+      "Perché il modello è quantizzato a 1 bit",
+      "Perché solo ~40B parametri sono attivi per token, la parte densa da ~17B entra in RAM in int4, e gli expert instradati vengono letti da NVMe man mano che il router li seleziona",
+      "Perché il modello è distribuito su internet",
+      "Perché la CPU ha 744 GB di cache"
+    ],
+    answer: 1,
+    explain: "La sparsità del MoE è tutto il trucco: attention, embedding e shared expert restano residenti (~9,9 GB), mentre i ~370 GB di expert instradati vivono su disco e solo quelli scelti dal router vengono caricati in streaming, con cache per layer."
+  },
+  {
+    q: "Qual è il vincolo dominante sui token al secondo quando gli expert vengono letti in streaming a freddo?",
+    options: [
+      "Il numero di core della CPU",
+      "La dimensione della finestra di contesto",
+      "La banda in lettura casuale del drive NVMe — circa 11 GB di letture di expert per token cold",
+      "La versione di gcc"
+    ],
+    answer: 2,
+    explain: "Un token cold richiede nell'ordine di 11 GB di pesi di expert. A 13–15 GB/s (PCIe 5.0) è circa un token al secondo prima che lookahead e cache hit aiutino; su un drive lento sono 0,05–0,1 tok/s."
+  },
+  {
+    q: "Perché il progetto distribuisce lo speculative decoding di DeepSeek V4 disattivo di default?",
+    options: [
+      "Non è implementato",
+      "L'accettazione dei draft nella chat multi-turno reale era bassa (~1–10 token su 24) e rieseguire lo stato di attention ricorrente per i suffissi rifiutati costava più di quanto i draft accettati facessero risparmiare — 495 s misurati",
+      "Richiede una GPU",
+      "DeepSeek lo vieta nella licenza"
+    ],
+    answer: 1,
+    explain: "La speculazione paga solo quando l'accettazione è alta e il rifiuto è economico. Qui rifiutare significa rieseguire lo stato ricorrente, che è stato misurato costare più di quanto fa risparmiare, quindi V4_DRAFT=0 e V4_MTP=0 sono i default."
+  },
+  {
+    q: "Hai quantizzato GLM-5.2 da solo, tutti i tensori in int4, e lo speculative decoding mostra ~2% di accettazione dei draft. Cosa è successo?",
+    options: [
+      "Il modello è rotto",
+      "Le teste MTP devono essere int8; teste MTP in int4 danno 0–4% di accettazione (issue #8)",
+      "Ti serve un secondo SSD",
+      "Manca PILOT=1"
+    ],
+    answer: 1,
+    explain: "Le teste draft sono sensibili alla precisione. Il container pre-convertito su Hugging Face è int4 per il modello e int8 per le teste MTP esattamente per questo motivo."
+  },
+  {
+    q: "Quale carico di lavoro è adatto a Colibrì su un laptop da 32 GB con un solo NVMe?",
+    options: [
+      "Pair-programming interattivo con un modello da 744B",
+      "Servire più utenti contemporaneamente",
+      "Job batch notturni e asincroni che devono restare completamente privati e offline",
+      "Sostituire un'API hosted per motivi di costo"
+    ],
+    answer: 2,
+    explain: "A 0,05–0,1 tok/s cold su quell'hardware, i casi d'uso onesti sono batch e ricerca. Il lavoro interattivo vuole un modello residente più piccolo o GPU noleggiate; sul puro costo per token vince un'API hosted."
+  }
+]} />
+
+<VerifyNote lastVerified="2026-09-14" source="JustVugg/colibri README and release notes v1.11.0 (Sept 13 2026), GitHub API (30,848 stars), Show HN thread (July 2026). Benchmarks are the project's own measurements; model list and minimums change with each release." />
+
+## Fonti e approfondimenti
+
+- JustVugg/colibri — repository, README con architettura, benchmark e tabelle per modello: https://github.com/JustVugg/colibri
+- Release di Colibrì (v1.11.0 aggiunge DeepSeek V4.1 Flash; fix v1.10.x): https://github.com/JustVugg/colibri/releases
+- Show HN: Colibrì — GLM-5.2 su 25 GB di RAM (discussione di luglio 2026, thread su usura SSD e mmap vs O_DIRECT): https://news.ycombinator.com/item?id=48842459
+- Container GLM-5.2 pre-convertito (int4 g64, MTP int8): https://huggingface.co/mastouri/GLM-5.2-colibri-int4-g64-with-int8-mtp
+- Issue #8 — teste MTP int4 e accettazione dei draft: https://github.com/JustVugg/colibri/issues/8
+- Articolo di Developers Digest sull'esecuzione di GLM-5.2 su un laptop da 32 GB: https://www.developersdigest.tech/blog/colibri-glm-52-slow-computer-local-inference
+
+## Prossimi passi
+
+- [GLM-5.2: modello di coding open-weight di frontiera](/docs/models/glm-5-2-open-weight-frontier) — il modello attorno a cui Colibrì è stato costruito, e i suoi altri percorsi di serving
+- [Eseguire Kimi K3 in locale: vLLM, DSpark e il vero conto dell'hardware](/docs/models/kimi-k3-deploy-locally-vllm-dspark) — l'alternativa GPU-resident per gli stessi pesi
+- [Uno stack AI locale privato](/docs/models/private-local-ai-stack) — dove un modello di frontiera lento si colloca accanto a uno piccolo e veloce
