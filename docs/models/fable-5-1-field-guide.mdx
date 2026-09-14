@@ -1,0 +1,297 @@
+---
+sidebar_position: 1.45
+title: "Claude Fable 5.1: What Changed and How to Migrate"
+description: "Anthropic shipped Claude Fable 5.1 and Mythos 5.1 on September 1, 2026: same $10/$50 price, cache reads cut to $0.25, three breaking API changes (forced tool_choice errors, one-way thinking blocks, append-only history) and five additive betas. The migration field guide for anyone pinning claude-fable-5 or claude-opus-5."
+keywords: [Claude Fable 5.1, claude-fable-5-1, Claude Mythos 5.1, Fable 5.1 migration, tool_choice any not supported, preserved thinking, prefix_mismatch_behavior, turn-scoped system messages, clear_at next_user_message, thinking display updates, per-message effort, cache read pricing, Fable 5.1 vs Opus 5, Fable 5.1 benchmarks]
+---
+
+<LevelBadge level="intermediate" />
+
+On **September 1, 2026** Anthropic shipped **Claude Fable 5.1** (`claude-fable-5-1`) and its Glasswing-only twin **Claude Mythos 5.1** (`claude-mythos-5-1`). If you skim the launch you'll file it as "Fable, but better" and move on. Don't. This is the first Claude point release where a plain model-ID swap can **return 400s in production**: forced `tool_choice` is gone, thinking blocks are now bound to the model and the conversation that produced them, and editing conversation history is enforced as an error for new accounts. It is also the first release where the *cheapest* line on the pricing table is the interesting one: cache reads dropped from $1 to **$0.25 per MTok**, which is why Anthropic can claim typical workloads cost about 25% less and heavily agentic ones up to 45% less at an unchanged $10 / $50 list price.
+
+This page is the migration field guide: what changed, what breaks, what you get, and a checklist you can run in an afternoon.
+
+<Callout type="objectives" items={[
+  "Know the three breaking changes that turn a claude-fable-5 → claude-fable-5-1 swap into a 400, and the fix for each",
+  "Use the five additive features: per-message effort, turn-scoped system messages, progress updates, cheaper cache reads, content provenance",
+  "Recognize the seven behavior shifts that show up with no code change (fewer parallel tool calls, less narration, denser prose, whole-file rewrites)",
+  "Read the launch benchmarks against Fable 5, Opus 5, and GPT-5.6 Sol without being sold to",
+  "Decide Fable 5.1 vs Opus 5 vs Fable 5 for your workload, then run the migration checklist",
+]} />
+
+<VerifyNote lastVerified="2026-09-14" source="https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1">
+Model IDs, pricing, breaking changes, beta headers, and behavior notes are from Anthropic's official "What's new in Claude Fable 5.1", the [model overview](https://platform.claude.com/docs/en/models/fable-5-1/overview), the [migration guide](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide), and the [pricing page](https://platform.claude.com/docs/en/about-claude/pricing), all read on September 14, 2026. Benchmark numbers are Anthropic's own from the [launch announcement](https://www.anthropic.com/claude-fable-and-mythos-5-1). The three betas named here can change shape; re-check the headers before shipping. For the live model table see [Current Models & Pricing](/docs/whats-new/models-and-pricing).
+</VerifyNote>
+
+## The one-paragraph version
+
+Fable 5.1 is the successor to [Fable 5](/docs/models/fable-5-mythos-5-flagship), same Mythos-class tier above Opus, same 1M-token context, same 128K max output, same $10 in / $50 out, same tokenizer, same always-on adaptive thinking, same in-band `stop_reason: "refusal"` behavior, same 30-day retention requirement (no ZDR). Anthropic's own guidance is unchanged in spirit: **start with Opus 5** for most work, reach for Fable 5.1 "for demanding reasoning and long-horizon agentic work, or when your evals on Claude Opus 5 at higher effort still fall short." What is new: three breaking changes, five additive features, a 75% cheaper cache read, and a set of behavioral shifts you should know about before your eval suite tells you.
+
+## Three breaking changes
+
+These are the reasons you cannot just flip the ID. Each is a 400, not a silent degradation.
+
+### 1. Forced tool use returns an error
+
+`tool_choice: {"type": "any"}` and `{"type": "tool", "name": "..."}` now return a 400 `invalid_request_error`:
+
+```text
+tool_choice: type "tool" and "any" are not supported for this model.
+```
+
+The reason is instructive: thinking is always on, and a forced tool call would skip it, so the model would do its working-out inside the tool arguments and argument quality would drop. The check applies on the Messages API, the Message Batches API, and the token-counting endpoint. `auto` (the default) and `none` are unchanged.
+
+**The fix** is a two-line change: keep `tool_choice` at `auto`, set `strict: true` on the tool with `additionalProperties: false` in the schema, and *say* in the prompt when the tool applies. Anthropic's note is that Fable 5.1 "follows explicit tool instructions reliably." If what you actually wanted was schema-valid JSON rather than a tool call, move to [structured outputs](/docs/api/structured-output) instead.
+
+<PromptCard title="Forced tool call → strict tool + explicit instruction">
+{`# Before (Fable 5) — now a 400 on Fable 5.1
+"tool_choice": {"type": "tool", "name": "record_summary"}
+
+# After (Fable 5.1)
+"tools": [{
+  "name": "record_summary",
+  "description": "Record the structured summary of the document.",
+  "strict": true,
+  "input_schema": {
+    "type": "object",
+    "properties": {"summary": {"type": "string"}},
+    "required": ["summary"],
+    "additionalProperties": false
+  }
+}],
+"tool_choice": {"type": "auto"},
+"messages": [{"role": "user",
+  "content": "Summarize: The meeting moved to Thursday. Call the record_summary tool with your result."}]`}
+</PromptCard>
+
+### 2. Thinking blocks are one-way
+
+Every thinking block now records which model produced it, and preservation is one-directional: **Fable 5.1 can read thinking blocks from Opus 5, Fable 5, Mythos 5, and every earlier Claude; none of those can read Fable 5.1's.** A conversation that moves *onto* Fable 5.1 keeps its reasoning. A conversation that moves *off* it (a router, a fallback to Opus 5, a cost-saving downgrade mid-session) loses the Fable 5.1 turns' reasoning.
+
+The API handles this by **dropping** blocks the target model can't read before the model sees them. Dropped blocks aren't billed and don't count toward `input_tokens`. Without the `thinking-binding-controls-2026-08-01` beta header the drop is **silent**; with it, the drop is reported in a top-level `input_transformations` array. If you route between models, send the header and log that array. Silent reasoning loss is exactly the kind of thing that shows up as "the model got dumber after step 12" in a bug report.
+
+### 3. Editing earlier turns invalidates thinking blocks
+
+This is the one to read twice. Modifying **anything** before a Fable 5.1 thinking block, meaning the `system` prompt, the `tools` array, or any earlier message, invalidates every later thinking block. Where the check is enforced, the next request is rejected with a 400 whose message says `The block is bound to a different conversation`.
+
+Enforcement rules as of today:
+
+- **Accounts created on or after August 31, 2026:** enforced.
+- **Older accounts:** the API records the mismatch but acts on it only when you set `thinking.block_binding.prefix_mismatch_behavior` yourself.
+- **Mythos 5.1** does not run this check at all.
+- Claude Code, claude.ai, Managed Agents, and the Agent SDK keep the prefix intact for you. **Only hand-built `messages` arrays are at risk.**
+
+Anthropic's own list of what invalidates blocks, paraphrased, is a list of common agent-harness habits:
+
+| Invalidates every later thinking block | Keeps them valid |
+| --- | --- |
+| Editing, reordering, or removing an earlier turn while keeping later ones | Removing a leading run of thinking blocks, oldest first |
+| Injecting a per-request reminder or status line into an earlier turn, then removing it next request | Server-side compaction or [context editing](/docs/api/memory-and-context-editing) trimming history |
+| Rebuilding the top-level `system` or `tools` between requests in one conversation | Moving `cache_control` markers |
+| An image or document URL that serves *different bytes* later (the check is on bytes, so a rotating signed URL for the same file is fine) | Changing `effort` between requests |
+
+The fixes all reduce to one rule: **treat the conversation as append-only.** Per-turn reminders become [turn-scoped system messages](#turn-scoped-system-messages-beta) (below). Tool and instruction changes become [mid-conversation system messages and tool changes](/docs/api/mid-conversation-system-messages). Trimming becomes server-side compaction. To continue instead of erroring, send the `thinking-binding-controls-2026-08-01` header with `prefix_mismatch_behavior: "drop_block"`; the drop is then reported in `input_transformations` with `reason: "prefix_binding_mismatch"`.
+
+Anthropic frames this partly as an **anti-distillation** measure: the launch post says new API accounts can no longer manually edit prior context while preserving the transcript, which closes a publicly documented distillation technique. The practical upside for you is that the same discipline also keeps the [prompt cache](/docs/api/prompt-caching) warm.
+
+## Five additive features
+
+### Per-message effort (beta)
+
+You can now change `effort` mid-conversation **without invalidating the prompt cache**. Raise it for the hard step, lower it for the routine ones. Send the `mid-conversation-output-config-2026-07-01` beta header and insert an effort-only system message; the new level takes effect from the next user turn. Supported on Fable 5.1, Mythos 5.1, and Opus 5 on the Claude API and Google Cloud.
+
+<PromptCard title="Drop effort for a summary turn without breaking the cache">
+{`{
+  "model": "claude-fable-5-1",
+  "max_tokens": 4096,
+  "output_config": {"effort": "high"},
+  "messages": [
+    {"role": "user", "content": "Plan a migration from SQLite to PostgreSQL in three short steps."},
+    {"role": "assistant", "content": "1. Export the SQLite data. 2. Create the PostgreSQL schema. 3. Import the data and verify row counts."},
+    {"role": "system", "content": [], "output_config": {"effort": "low"}},
+    {"role": "user", "content": "Summarize the plan in one sentence."}
+  ]
+}
+# header: anthropic-beta: mid-conversation-output-config-2026-07-01`}
+</PromptCard>
+
+This pairs with the effort guidance in [Thinking & Effort](/docs/api/thinking-and-effort) and [Effort tuning](/docs/api/effort-tuning): the default is `high`, and "one level for the whole session" is now the lazy option, not the only one.
+
+### Turn-scoped system messages (beta)
+
+Set `clear_at: "next_user_message"` on a `role: "system"` message and it carries system-prompt authority for the current turn only, then stops rendering once a later `user` message exists. You keep sending it back verbatim, so nothing earlier changes, the cache keeps matching, later thinking blocks stay valid, and a cleared message **costs no input tokens**. Header: `mid-conversation-system-clear-at-2026-08-21`.
+
+```json
+{
+  "role": "system",
+  "clear_at": "next_user_message",
+  "content": "Results have landed in your inbox. Check it before running more code."
+}
+```
+
+This is the sanctioned replacement for the "inject a reminder, delete it next request" pattern that breaking change 3 now punishes.
+
+### Progress updates between tool calls (beta)
+
+Fable 5.1, like Fable 5, writes short progress notes between tool calls, each as its own `thinking` block right before the call. Under the default `thinking.display: "omitted"` those come back **empty**, so a long agentic turn looks silent to your users. New: `display: "updates"` (header `thinking-display-updates-2026-08-18`) returns the progress notes as text while reasoning stays hidden. Any thinking block with non-empty text is then a status line you can render. `"summarized"` returns them too, mixed with summarized reasoning. Raw chain of thought is still never returned.
+
+### Cache reads at $0.25 per MTok
+
+| | Base input | 5m cache write | 1h cache write | **Cache read** | Output |
+| --- | --- | --- | --- | --- | --- |
+| Fable 5 | $10 | $12.50 | $20 | $1.00 | $50 |
+| **Fable 5.1** | $10 | $12.50 | $20 | **$0.25** | $50 |
+
+Cache reads are 0.025× base input on Fable 5.1 and Mythos 5.1 versus 0.1× on every other Claude model. Writes and the 512-token minimum cacheable prompt are unchanged; batch is still 50% off ($5 / $25). For a long agent loop that re-reads a big cached prefix on every turn, this is where the launch post's "up to 45% cheaper" comes from. Cross-model note: OpenAI's GPT-6 Astra, launched three days later at the same $10 / $50 list price, charges **$1.00** for cache reads, four times Fable 5.1's rate; see the [Astra field guide](/docs/models/openai-astra-preview).
+
+### Content provenance
+
+All Fable 5.1 and Mythos 5.1 text carries Anthropic's statistical text watermark on every platform. Files Claude produces (via code execution, for example) carry signed [C2PA](https://c2pa.org/) Content Credentials when retrieved through the Files API. Anthropic states the watermark adds no tokens or hidden characters, carries no information about you or your org, and needs no request changes. Context: Anthropic signed the EU AI Act Code of Practice on transparency of AI-generated content in July 2026, and a detection API is in private preview for regulators, fact-checkers, researchers, and enterprises that need verification.
+
+## Seven behavior shifts you'll see with no code change
+
+Anthropic documents these openly, and each has a prompting fix in the official [Prompting Claude Fable 5.1](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-1) guide. Watch for them in evals before your users do.
+
+<Flashcards cards={[
+  { front: "Parallel tool calling is more variable", back: "Fable 5.1 may issue ONE tool call per turn where Fable 5 batched several, especially in bash-and-editor harnesses and computer use where the next reads are only implied. Quality is unchanged; tokens, round trips, and wall-clock go up. Fix: a one-line 'batch independent tool calls' instruction in the system prompt." },
+  { front: "Fewer progress updates during long tool runs", back: "Less user-facing text between tool calls, more so at higher effort. Fix: set thinking.display to \"updates\" (beta), delete any prompt line that says 'hold findings for the final answer', and ask explicitly for an opening line, periodic updates, and a closing recap." },
+  { front: "Answers from memory more often at low effort", back: "At effort: low the model calls search/retrieval tools less often. Fix: raise effort for turns that need fresh data (per-message effort makes this cheap), or add a verification nudge." },
+  { front: "Denser prose", back: "Longer sentences, fewer paragraph breaks in some outputs. Fix: state the target density and paragraph length explicitly." },
+  { front: "Less formatting in chat", back: "Uses bold, headers, and lists LESS than earlier Claudes. Anti-formatting rules you wrote for Opus 4.x can now suppress structure the content needs. Audit and relax them." },
+  { front: "Unmarked quotations in summaries", back: "More likely to reproduce source passages without marking them as quotes. Fix: instruct it to mark verbatim spans, or post-check overlap for anything you publish." },
+  { front: "Whole-file rewrites for small edits", back: "More likely to rewrite an entire text file than make a targeted edit. Same result, more output tokens and time. Fix: instruct 'prefer targeted edits; never rewrite a file to change one line'." },
+]} />
+
+## What stays exactly the same as Fable 5
+
+If you already wired Fable 5 correctly, all of this carries over untouched:
+
+- Adaptive thinking is always on. `thinking: {"type": "enabled"}` with `budget_tokens`, and `{"type": "disabled"}`, both return 400. Omit `thinking` or send `{"type": "adaptive"}`.
+- `thinking.display` defaults to `"omitted"`; raw chain of thought is never returned.
+- Interleaved thinking is automatic, no beta header.
+- Prefill returns 400. Non-default `temperature`, `top_p`, `top_k` return 400.
+- Refusals arrive as HTTP 200 with `stop_reason: "refusal"` and a `stop_details.category`; you're not billed for a refusal that arrives before any output. Permitted fallback targets are **Opus 5 and Opus 4.8**, and [fallback credit](/docs/api/server-side-fallbacks) refunds the prompt-cache cost of the switch. Full pattern in [Refusals & Safety](/docs/api/refusals-and-safety).
+- 30-day retention is mandatory; a request from an org or workspace without it returns 400. Both models are Covered Models.
+- One divergence worth knowing: **neither Fable 5.1 nor Mythos 5.1 is supported on Priority Tier.** Fable 5 is. If you bought priority capacity, that's a reason to stay on Fable 5 for now.
+
+## The launch benchmarks, read honestly
+
+Anthropic's numbers, Anthropic's harnesses. Comparisons against GPT-5.6 Sol are the ones OpenAI would dispute first, and OpenAI's own GPT-6 Astra shipped three days later, so treat this as the state of play on September 1, not September 14.
+
+| Benchmark | Fable 5.1 | Fable 5 | Opus 5 | GPT-5.6 Sol |
+| --- | --- | --- | --- | --- |
+| Terminal-Bench 4.0 | **55.8%** (Mythos 5.1: 60.9%) | 42.0% | 52.3% | 37.3% |
+| Terminal-Bench-Science 0.1 | **52.6%** | 24.7% | 29.0% | 22.4% |
+| GDPval-AA v2 (Elo) | **1853** | 1723 | 1824 | 1711 |
+| OSWorld 2.0, partial / strict | **77.9% / 41.7%** | 72.9% / 36.1% | 75.4% / 39.6% | — |
+| Humanity's Last Exam, no tools / with tools | **60.9% / 65.0%** | 57.8% / 63.8% | 56.6% / 63.6% | — |
+| AutomationBench | **31.4%** | 17.1% | 26.9% | 19.6% |
+| CursorBench 3.2.0 | **73.4%** | 70.5% | 70.0% | 67.2% |
+
+Three readings that matter more than any single row:
+
+1. **The Fable 5 → 5.1 jump is largest on long-horizon agentic work** (Terminal-Bench-Science doubled, AutomationBench nearly doubled). That's consistent with Anthropic's own "use it when Opus 5 at higher effort still falls short" positioning: the win is on hours-long runs, not on chat.
+2. **Opus 5 is closer than the headline suggests** on several rows (Terminal-Bench 4.0: 52.3 vs 55.8; GDPval: 1824 vs 1853) at half the list price. Anthropic keeps telling you to start with Opus 5 for a reason.
+3. **Customer quotes are about tokens, not just accuracy.** Cognition, Rogo, Browserbase, and Block all cite fewer tokens for equal or better results. Combined with $0.25 cache reads, "Fable 5.1 is cheaper than Fable 5 for the same job" is the more defensible claim than "Fable 5.1 is smarter."
+
+The science examples in the launch post (protein binders with ~50% hit rate across 12 targets versus a typical 10–15%, a 2–3 km resolution Venus elevation map from 30-year-old Magellan radar data, 2.5× speedups on seven open-source genomics models) are Anthropic-reported research results, not benchmarks. Interesting signal for research workloads, not a procurement input.
+
+## Fable 5.1 vs Opus 5 vs Fable 5: the decision
+
+| Your situation | Pick | Why |
+| --- | --- | --- |
+| Most production work, cost-sensitive | **Opus 5** | Anthropic's own default recommendation; half the price; reads Fable 5.1 thinking blocks if you ever route up |
+| Hours-long autonomous coding, research, or document/spreadsheet/slide builds where Opus 5 at `high` effort still misses | **Fable 5.1** | Largest deltas are exactly here; cache reads make long loops cheaper than on Fable 5 |
+| You depend on Priority Tier | **Fable 5** (for now) | Fable 5.1 and Mythos 5.1 aren't on Priority Tier |
+| You force `tool_choice` and can't change the harness this sprint | **Fable 5** | Fable 5.1 returns 400; migrate the harness first, then the model |
+| You route or fall back between models mid-conversation | Any, but **send the thinking-binding header** | Downgrading off Fable 5.1 silently drops its reasoning otherwise |
+| Zero data retention is contractual | **Opus 5** | Fable 5.x and Mythos 5.x require 30-day retention |
+| Defensive cyber or life-science research needing fewer classifier interventions | **Mythos 5.1** via Glasswing, if approved | Same model, different safeguard configuration; US organizations, verification programs required |
+
+## Migration checklist
+
+Anthropic ships a bundled skill that does most of this in Claude Code. Run it first, then verify the items it can't see.
+
+<PromptCard title="Automate the ID swap and parameter fixes">
+{`/claude-api migrate this project to claude-fable-5-1`}
+</PromptCard>
+
+<Steps items={[
+  { title: "Swap the ID and grep for forced tool_choice", body: "claude-fable-5 → claude-fable-5-1 (Bedrock: anthropic.claude-fable-5-1). Then grep for tool_choice with type any or tool. Each hit becomes strict: true + additionalProperties: false + an explicit 'call the X tool' instruction, or a move to structured outputs. Don't forget token-counting calls: they validate too." },
+  { title: "Run the history-editing check", body: "If your code builds the messages array itself, run one real session with the thinking-binding-controls-2026-08-01 header and prefix_mismatch_behavior: \"drop_block\", and log input_transformations. Every prefix_binding_mismatch entry is a place you edit history. Fix the source: per-turn reminders → turn-scoped system messages; system/tools changes → mid-conversation system messages; trimming → server-side compaction. Then pick your production prefix_mismatch_behavior deliberately." },
+  { title: "Audit routing and fallback paths", body: "Anywhere a conversation can move from Fable 5.1 to Opus 5, Fable 5, or older, decide whether losing the Fable 5.1 reasoning is acceptable. Send the binding header so the drop is at least reported. Confirm your fallback target is Opus 5 or Opus 4.8 (the only permitted ones)." },
+  { title: "Re-tune effort, and consider per-message effort", body: "Default is high. For long loops, add the mid-conversation-output-config-2026-07-01 beta and drop effort on routine turns; raise it on turns that need fresh retrieval, since low effort answers from memory more often." },
+  { title: "Add the agent-loop prompt lines", body: "One line asking to batch independent tool calls; one line asking for an opening line, periodic updates, and a closing recap (and set thinking.display to updates if your UI shows progress); one line preferring targeted edits over whole-file rewrites. Relax any anti-formatting rules written for Opus 4.x." },
+  { title: "Re-run evals and re-check cost", body: "Refusals, fallback, fallback credit, and the tokenizer are unchanged, so the diff you see is real behavior. Compare cache-read spend before and after: if it didn't drop, your prefix isn't stable and step 2 isn't finished." },
+]} />
+
+## Mythos 5.1: same model, different safeguards
+
+Anthropic states Fable 5.1 and Mythos 5.1 are **the same underlying model with different safeguard configurations**, sharing specs and pricing. Mythos 5.1 is offered only to approved Project Glasswing participants, currently limited to US organizations, through a Cyber Verification Program for defensive security work and a Life Sciences Verification Program run with the US government. Two things changed for *everyone* on the safeguard side: Fable 5.1 is now permitted to identify software vulnerabilities for defensive work (Anthropic reports about 60% fewer cyber-safeguard interventions per session), while dual-use tasks like penetration testing, exploit generation, and binary vulnerability scanning are still redirected to Opus models; and biology safeguards fire about 85% less often on benign elementary biology and medical queries. Mythos 5.1 also skips the conversation-binding check on thinking blocks. If you can't get Glasswing access, Anthropic's instruction is simply: use Fable 5.1.
+
+Mind the naming: the [Fable 5 field guide](/docs/models/fable-5-mythos-5-flagship) explained Mythos 5 as "Fable 5 without the safety classifiers." For 5.1 Anthropic's wording is "different safeguard configurations," and Mythos 5.1 still powers Anthropic's own Claude Security product. Treat it as a differently-configured deployment, not an unfiltered one.
+
+## Quick check
+
+<Quiz questions={[
+  {
+    q: "You migrate a Fable 5 integration to claude-fable-5-1 and every request with tool_choice type \"tool\" now fails. What's the sanctioned fix?",
+    options: [
+      "Add the thinking-binding-controls beta header",
+      "Keep tool_choice auto, set strict: true on the tool with additionalProperties: false, and tell the model in the prompt when to call it (or switch to structured outputs)",
+      "Set thinking to disabled so the forced call can proceed",
+      "Downgrade to effort: low"
+    ],
+    answer: 1,
+    explain: "Fable 5.1 returns a 400 for tool_choice any and tool because a forced call would skip always-on thinking and push the working-out into the arguments. Anthropic's fix is strict tool use with auto plus an explicit instruction, or structured outputs. Disabling thinking is itself a 400 on this model."
+  },
+  {
+    q: "A router moves a conversation from Fable 5.1 down to Opus 5 to save cost. What happens to the Fable 5.1 thinking blocks?",
+    options: [
+      "Opus 5 reads them normally",
+      "The request fails with a 400",
+      "The API drops them before Opus 5 sees them; the drop is silent unless you send the thinking-binding-controls-2026-08-01 header, which reports it in input_transformations",
+      "They are converted to text blocks"
+    ],
+    answer: 2,
+    explain: "Preservation is one-way: Fable 5.1 reads earlier models' thinking; no earlier model reads Fable 5.1's. Unreadable blocks are dropped unbilled, silently by default, reported in input_transformations with the beta header."
+  },
+  {
+    q: "Your agent loop injects a one-line status reminder into the previous user turn on every request and removes it on the next. On a new API account this now errors. What replaces it?",
+    options: [
+      "A turn-scoped system message with clear_at: \"next_user_message\" (beta header mid-conversation-system-clear-at-2026-08-21)",
+      "Rebuilding the system prompt each request",
+      "Putting the reminder in tool_choice",
+      "Switching to Mythos 5.1"
+    ],
+    answer: 0,
+    explain: "Editing anything before a Fable 5.1 thinking block invalidates later blocks. Turn-scoped system messages carry system authority for one turn, stay in the history verbatim, cost no input tokens once cleared, and keep both the cache and the thinking blocks valid."
+  },
+  {
+    q: "Fable 5.1 keeps Fable 5's $10 / $50 list price. Where does Anthropic's 'up to 45% cheaper on highly agentic work' claim come from?",
+    options: [
+      "A batch discount increase to 75%",
+      "Cache reads dropping from $1.00 to $0.25 per MTok (0.025× base input instead of 0.1×), plus fewer tokens per task",
+      "A smaller tokenizer",
+      "Free thinking tokens"
+    ],
+    answer: 1,
+    explain: "The only pricing row that changed is cache reads, now a quarter of the Fable 5 rate. Long loops that re-read a cached prefix every turn are where that compounds; Anthropic's customers also report fewer tokens per task."
+  }
+]} />
+
+## Takeaways
+
+<Callout type="takeaways" items={[
+  "Fable 5.1 is a drop-in for Fable 5 ONLY if you never force tool_choice, never edit conversation history, and never route thinking blocks to an older model. Grep for all three before swapping the ID.",
+  "Treat conversations as append-only: turn-scoped system messages for per-turn reminders, mid-conversation messages for instruction and tool changes, server-side compaction for trimming. It keeps thinking blocks valid AND the cache warm.",
+  "The pricing story is cache reads at $0.25. Long agent loops get cheaper; short chats don't. Opus 5 at $5 / $25 is still Anthropic's own 'start here'.",
+  "Expect fewer parallel tool calls, less narration, denser prose, and whole-file rewrites; each has a one-line prompt fix, and thinking.display: \"updates\" restores visible progress.",
+  "Priority Tier and ZDR are the two contractual reasons to stay on Fable 5 or Opus 5.",
+]} />
+
+## Next
+
+- [Claude Fable 5 & Mythos 5: The Flagship Field Guide](/docs/models/fable-5-mythos-5-flagship) — the refusal / fallback wiring that carries over unchanged
+- [Mid-Conversation System Messages](/docs/api/mid-conversation-system-messages) — the append-only toolkit this release now assumes
+- [GPT-6 Astra: The Field Guide for Claude Users](/docs/models/openai-astra-preview) — the competitor that shipped three days later at the same list price
