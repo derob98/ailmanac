@@ -1,0 +1,235 @@
+---
+sidebar_position: 8.35
+title: "DeepSeek-V4.1-Flash: A 1M-Context Open Weight That Ties Opus 5 on DeepSWE (Sep 2026)"
+description: "On September 10, 2026 DeepSeek shipped V4.1-Flash — a 552B MIT-licensed MoE with native vision, a 1M-token window, a KV cache a quarter the size of V4-Flash's, and a 1–100 reasoning-effort dial. It ties Claude Opus 5 on DeepSWE v1.1 (74.2 vs 74.0) at $0.30 per million input tokens, and trails badly on Terminal-Bench. The numbers, the routing change that silently moved every deepseek-v4-pro call, and where Claude still wins."
+keywords: [DeepSeek V4.1 Flash, deepseek-flash, DeepSeek-V4.1-Flash, open weight 1M context, DeepSeek MIT license, Causal Encoder-Decoder, CSA2, KV cache 890 bytes, reasoning_effort, DeepSWE v1.1, DeepSeek vs Claude Opus 5, deepseek-v4-pro routing, run DeepSeek locally vLLM SGLang, off-peak pricing]
+---
+
+<LevelBadge level="intermediate" />
+
+At 04:00 UTC on **September 10, 2026**, DeepSeek flipped its API to a new model and published the weights the same day: **DeepSeek-V4.1-Flash**, served as `deepseek-flash`. It is the smallest member of a new architecture family, but it is not a small model: **552 billion parameters**, a **1-million-token context**, **native vision**, and a KV cache that costs **890 bytes per token**. On DeepSWE v1.1, the long-horizon software-engineering benchmark both Google and Anthropic now headline, DeepSeek reports **74.2**, one-fifth of a point above Claude Opus 5. On Terminal-Bench 4.0 it reports **31.2** against Opus 5's **51.8**. Both numbers are true, and the gap between them is the whole story.
+
+This page is the field guide for a Claude user: what actually changed, the routing change that quietly re-pointed every `deepseek-v4-pro` request, the effort dial and what it does to your bill, how to run the weights, and the workloads where Claude is still the right call.
+
+<Callout type="objectives" items={[
+  "Read the V4.1-Flash launch numbers the way they deserve: tied with Opus 5 on DeepSWE, far behind on Terminal-Bench, and why that split is not a contradiction",
+  "Understand the new Causal Encoder-Decoder + CSA2 design well enough to know what the 890-byte KV cache buys you (and what DeepSeek says it has not yet characterized)",
+  "Use the 1–100 reasoning_effort dial deliberately — 25 vs 100 is an 8-point DeepSWE swing for ~2.5× the output tokens",
+  "Do the honest cost math: $0.30 / $1.20 peak, half that off-peak, $0.003 per million on an off-peak cache hit — and the UTC peak window that decides which rate you pay",
+  "Know the September 14 routing change: deepseek-v4-pro now silently serves V4.1-Flash until V4.1-Pro ships",
+  "Pick a serving path (hosted API, vLLM, SGLang, Docker Model Runner) and the sampling defaults DeepSeek recommends"
+]} />
+
+<VerifyNote lastVerified="2026-09-15" source="https://api-docs.deepseek.com/news/news260910/">
+Model ID, routing dates, and pricing from DeepSeek's September 10 announcement and the [API pricing page](https://api-docs.deepseek.com/quick_start/pricing). Architecture, license, reasoning-effort range, and sampling defaults from the [Hugging Face model card](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash). Benchmark comparisons against Claude Opus 5 and GPT-5.6 Sol are DeepSeek's own launch table as reported by VentureBeat on September 10; treat them as vendor-run until an independent harness publishes. The 3.0/4.0 Terminal-Bench gaps come from the same table. DeepSeek's statement that the architecture has "robustness boundaries it has not fully characterized" is quoted from the same coverage.
+</VerifyNote>
+
+## The one-sentence version
+
+V4.1-Flash is DeepSeek's first model on a **new architecture** (a "Causal Encoder-Decoder" with **Compressed Sparse Attention 2**), released MIT-licensed with **native vision**, a **1M-token window**, **384K max output**, and a **continuously controllable reasoning effort from 1 to 100**. It replaces every V4-era Flash endpoint immediately and, since **September 14**, also answers every `deepseek-v4-pro` call at Flash prices until V4.1-Pro lands.
+
+## Three things a Claude user should not miss
+
+### 1. DeepSWE parity and Terminal-Bench deficit are the same fact seen twice
+
+DeepSeek's launch table, in the columns that matter for an agent shop:
+
+| Benchmark | DeepSeek-V4.1-Flash | Claude Opus 5 | GPT-5.6 Sol |
+| --- | --- | --- | --- |
+| **DeepSWE v1.1** (resolved) | **74.2** | 74.0 | 73.0 |
+| **Terminal-Bench 3.0** | 30.0 | **43.3** | — |
+| **Terminal-Bench 4.0** | 31.2 | **51.8** | — |
+| **CyberGym** | 88.1 | — | — |
+| **AutomationBench** | 54.8 | — | — |
+
+DeepSWE rewards a model that reads a repository, plans a patch, and lands it: long context, careful retrieval, a few large edits. Terminal-Bench rewards many short, adaptive shell turns where each decision depends on the last tool result. V4.1-Flash has 1M tokens of context and a cheap cache, so the first shape suits it. It runs **8B active parameters per token at prefill and 16B at decode**, which is a lot less "thinking per step" than a dense frontier model, so the second shape hurts. If your work looks like a pull request, the parity claim is credible and worth an eval. If your work looks like an interactive terminal session, the 20-point Terminal-Bench gap is the number to budget around. The same split shows up in Google's [Gemini 3.8 Flash](/docs/models/gemini-3-8-flash) launch a week earlier, and for the same architectural reasons.
+
+The base-model rows tell a quieter story: **MMLU-Pro 74.1** (V4-Flash 68.3, V4-Pro 73.5), **HumanEval 79.4** (V4-Flash 69.5), **GSM8K 93.0** (V4-Flash 90.8). The new "Flash" is a better base than last month's "Pro", which is why DeepSeek was comfortable routing Pro traffic onto it.
+
+### 2. The reasoning-effort dial is a real dial, and it is on your bill
+
+Unlike Claude's `effort` (`low`/`medium`/`high`/`max`), V4.1-Flash exposes an **integer from 1 to 100**. DeepSeek's own ablation on DeepSWE v1.1: **effort 25 scores 66.0%, effort 100 scores 74.2%**, and the top setting emits **roughly 2.5× as many output tokens**. They also say the **60–80 band delivers most of the maximum-effort accuracy at less than half the token budget**. Every benchmark row above was run at `reasoning_effort=100`. So the parity number is the expensive number. Reproduce it at 100 first, then walk down to the cheapest setting your evals still pass at. That is the same discipline we recommend for `thinking_level` on Gemini and `effort` on Claude in [Reasoning models compared](/docs/models/reasoning-models-compared).
+
+### 3. Two routing changes happened without a client-side change
+
+- From **September 10**, `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` **route to V4.1-Flash**, billed at Flash rates. The [V4-Flash-Vision-Exp](/docs/models/deepseek-v4-flash-vision-open-multimodal) page's numbers now describe the open weights, not the hosted endpoint.
+- From **04:00 UTC September 14**, every `deepseek-v4-pro` request **also routes to V4.1-Flash** at Flash rates, "until V4.1-Pro launches".
+
+If you have evals pinned to `deepseek-v4-pro`, your production model changed under you on Sunday morning. Re-run the suite. The upside is that the same call now costs roughly a quarter of the Pro rate; the downside is that any Pro-specific behavior you tuned for is gone. This is exactly the failure mode [Porting prompts across models](/docs/models/porting-prompts-across-models) warns about when a provider aliases model IDs.
+
+## Model card at a glance
+
+| Spec | DeepSeek-V4.1-Flash |
+| --- | --- |
+| **API model ID** | `deepseek-flash` |
+| **Release** | September 10, 2026 (API + open weights same day) |
+| **Parameters** | 552B total; 8B active at prefill, 16B at decode |
+| **MoE layout** | 384 routed + 1 shared expert per MoE layer; 6 routed experts active per token |
+| **Architecture** | Causal Encoder-Decoder, Compressed Sparse Attention 2 (CSA2) |
+| **KV cache** | 890 bytes per token (FP4, E2M1): ~1/4 of V4-Flash in HBM, ~1/8 in SSD storage; global KV cache lifetime at least 72 hours |
+| **Context / max output** | 1M tokens / 384K tokens |
+| **Vision** | Native; DeepSeek-ViT trained from scratch, 2D-RoPE, 3×3 pixel-unshuffle downsampling |
+| **Reasoning control** | `reasoning_effort` integer 1–100 |
+| **License** | MIT |
+| **Weights** | Safetensors in BF16, F32, F8_E4M3, I8 |
+| **Serving** | vLLM, SGLang, Docker Model Runner, Transformers; reference inference code in the `inference/` folder |
+| **Recommended sampling** | temperature 1.0, top_p 0.95 or 1.0, context 1M |
+| **API concurrency** | 2,500 |
+
+The KV-cache line is the architectural headline. A 1M-token conversation at 890 bytes per token is under a gigabyte of cache, which is why DeepSeek can promise a 72-hour cache lifetime and price cache hits at fractions of a cent. Anthropic's answer to the same problem is a cheaper cache-read rate on [Claude Fable 5.1](/docs/models/fable-5-1-field-guide); DeepSeek's is to make the cache physically small. Both push you toward the same habit: put the stable prefix first and never edit it mid-run. See [Prompt caching](/docs/api/prompt-caching).
+
+## Pricing: the peak-hour trap
+
+DeepSeek keeps a two-rate schedule. **Peak hours are 01:00–04:00 and 06:00–10:00 UTC, Monday through Friday**; everything else is off-peak at exactly **half** the peak rate.
+
+| Per 1M tokens | Peak | Off-peak |
+| --- | --- | --- |
+| Input, cache hit | $0.006 | $0.003 |
+| Input, cache miss | $0.30 | $0.15 |
+| Output | $1.20 | $0.60 |
+
+Two things follow. First, the "$0.003 per million" headline is the *off-peak cache-hit* price, the cheapest of six cells; a cold, peak-hour agent run pays 100× that on input. Second, the peak window is defined in UTC and covers the European morning and the tail of the U.S. night. A batch job scheduled at 09:00 UTC pays double what the same job pays at 11:00 UTC. If you can shift, shift. For a framework that puts these cells beside Anthropic, OpenAI, and Google list prices, use [What AI costs across providers](/docs/models/what-ai-costs-across-providers); current Claude list prices live on [Models and pricing](/docs/whats-new/models-and-pricing).
+
+## Running it yourself
+
+Hosted is right for almost everyone: the model is enormous, and the API is the cheapest thing on this page. Self-host when data cannot leave your network or when you want the effort dial and 1M window without a rate limit.
+
+<Steps items={[
+  { title: "Decide hosted vs self-hosted honestly", body: "552B parameters in BF16 is over a terabyte of weights; the F8_E4M3 and I8 safetensors halve or quarter that but still need a multi-GPU node. If you do not already run Kimi K3 or Colibrì-class MoEs, the hosted endpoint at $0.30 / $1.20 peak will beat your amortized hardware bill. See the hardware math on Running Kimi K3 locally." },
+  { title: "Pick a serving stack the card actually names", body: "vLLM, SGLang, Docker Model Runner, and Transformers are the four listed. The card ships no Jinja chat template; it uses a custom encoding implementation, so use the reference code in the repo's inference folder (or the deepseek-recipe toolkit) rather than hand-rolling the prompt format." },
+  { title: "Set the sampling defaults DeepSeek recommends", body: "temperature 1.0, top_p 0.95 or 1.0, context window 1M. These are the settings the benchmark rows were produced with. Do not port a Claude-tuned temperature of 0.2 over blindly." },
+  { title: "Start at reasoning_effort=100, then walk down", body: "Reproduce DeepSeek's number on your own eval first. Then try 80, 60, 40 and record accuracy vs output tokens. Most teams will land in the 60–80 band the vendor itself points at." },
+  { title: "Test long-context retrieval before you trust it", body: "DeepSeek says the new architecture has robustness boundaries it has not fully characterized, specifically sparse retrieval over very long contexts. Run a needle-in-haystack and a multi-hop retrieval test at the context length you will actually use. Treat the 1M number as a ceiling, not a promise." }
+]} />
+
+<PromptCard title="Hosted call with the effort dial (OpenAI-compatible endpoint)">
+{`curl https://api.deepseek.com/chat/completions \\
+  -H "Authorization: Bearer $DEEPSEEK_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "deepseek-flash",
+    "reasoning_effort": 70,
+    "messages": [
+      {"role": "system", "content": "You are a senior engineer. Reply with a unified diff and one paragraph of rationale."},
+      {"role": "user", "content": "The test suite in ./tests fails on macOS only. Here is the log and the relevant module: ..."}
+    ]
+  }'`}
+</PromptCard>
+
+<PromptCard title="Self-hosted with vLLM (shape only; check the model card for the exact flags)">
+{`# One node, tensor-parallel across all visible GPUs.
+# The card names vLLM, SGLang, Docker Model Runner and Transformers as supported.
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash \\
+  --tensor-parallel-size 8 \\
+  --max-model-len 1000000 \\
+  --trust-remote-code
+
+# Then hit http://localhost:8000/v1/chat/completions with the same body as above.`}
+</PromptCard>
+
+## When to reach for V4.1-Flash, and when to stay on Claude
+
+<Callout type="tip" items={[
+  "Reach for V4.1-Flash: repository-scale coding tasks that look like DeepSWE (read a lot, edit a little), where you can run at effort 60–100 and the cost per resolved issue still undercuts Claude by an order of magnitude.",
+  "Reach for V4.1-Flash: anything that needs a 1M-token window and a warm cache for days — a 72-hour global cache lifetime and 890-byte-per-token KV make 'keep the whole codebase in context' cheap.",
+  "Reach for V4.1-Flash: self-hosted or data-residency workloads where MIT licensing matters and you already run a multi-GPU MoE stack.",
+  "Stay on Claude: interactive terminal agents and any many-short-turns loop. A 20-point Terminal-Bench 4.0 gap (31.2 vs 51.8) is not noise, and it is the shape of most real Claude Code sessions.",
+  "Stay on Claude: work that needs Anthropic's tool-use loop, prefilled assistant turns, structured-output strictness, or the safety and retention guarantees of a first-party API. The DeepSeek API is OpenAI-shaped and the model has documented, uncharacterized long-context failure modes.",
+  "Cross-check both: for a coding agent, run your own eval at DeepSeek's effort=100 and Claude's default effort, then at the cheapest passing setting on each. The vendor tables were run at maximum effort; your bill will not be."
+]} />
+
+For the durable framework behind that list, [How to choose a model](/docs/models/choosing-a-model). For what changes when you move a prompt between an Anthropic-shaped and an OpenAI-shaped API, [Porting prompts across models](/docs/models/porting-prompts-across-models). For the Claude-side reference these comparisons hang off, [Claude Fable 5.1](/docs/models/fable-5-1-field-guide) and [Opus 5](/docs/models/opus-5-field-guide).
+
+## Quick check
+
+<Quiz questions={[
+  {
+    q: "DeepSeek reports V4.1-Flash at 74.2 on DeepSWE v1.1 (Opus 5: 74.0) and 31.2 on Terminal-Bench 4.0 (Opus 5: 51.8). What is the right reading?",
+    options: [
+      "One of the two numbers must be wrong",
+      "V4.1-Flash is strong at long-context, few-large-edits work and weak at many short adaptive tool turns — the benchmarks measure different shapes",
+      "Terminal-Bench is deprecated so only DeepSWE counts",
+      "V4.1-Flash beats Opus 5 overall"
+    ],
+    answer: 1,
+    explain: "DeepSWE rewards reading a repository and landing a patch; Terminal-Bench rewards many short shell turns where each step depends on the last result. A 1M-context, 8B/16B-active MoE suits the first and struggles with the second. Both numbers are DeepSeek's own and both are plausible."
+  },
+  {
+    q: "You pinned production to deepseek-v4-pro in August. What happened on September 14, 2026?",
+    options: [
+      "Nothing — the model ID still serves V4-Pro",
+      "Requests started returning an error asking you to migrate",
+      "Requests silently route to V4.1-Flash at Flash rates until V4.1-Pro launches",
+      "The endpoint was retired"
+    ],
+    answer: 2,
+    explain: "From 04:00 UTC on September 14, all deepseek-v4-pro requests route to V4.1-Flash and are billed at Flash rates. Cheaper, but a different model — re-run your evals."
+  },
+  {
+    q: "Which price is the '$0.003 per million tokens' headline?",
+    options: [
+      "Peak-hour input on a cache miss",
+      "Off-peak output",
+      "Off-peak input on a cache hit",
+      "The flat rate for all tokens"
+    ],
+    answer: 2,
+    explain: "It is the cheapest of six cells: off-peak (outside 01:00–04:00 and 06:00–10:00 UTC Mon–Fri), input, cache hit. A cold peak-hour input token costs $0.30 per million — 100× more."
+  },
+  {
+    q: "DeepSeek's DeepSWE ablation: effort 25 → 66.0%, effort 100 → 74.2%, at ~2.5× the output tokens. What should you do?",
+    options: [
+      "Always run at 100 — accuracy is what matters",
+      "Always run at 25 — cost is what matters",
+      "Reproduce the vendor number at 100, then walk down to the cheapest setting your own evals still pass at (DeepSeek itself points at 60–80)",
+      "Ignore the parameter; the default is fine"
+    ],
+    answer: 2,
+    explain: "The launch benchmarks were all run at reasoning_effort=100, so the parity claim is the expensive claim. DeepSeek says 60–80 keeps most of the accuracy at under half the tokens. Measure on your workload."
+  },
+  {
+    q: "What did DeepSeek explicitly say it has NOT fully characterized about the new architecture?",
+    options: [
+      "Its behavior on images",
+      "Robustness boundaries, particularly sparse retrieval over very long contexts",
+      "Its tool-calling format",
+      "Its performance on math"
+    ],
+    answer: 1,
+    explain: "The vendor flagged long-context sparse retrieval as an uncharacterized area. Run needle-in-haystack and multi-hop retrieval tests at your real context length before trusting the 1M ceiling."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "DeepSeek-V4.1-Flash — what and when", back: "September 10, 2026. API model ID deepseek-flash; open weights on Hugging Face same day under MIT. First model on DeepSeek's new architecture family; native vision; 1M context; 384K max output." },
+  { front: "Parameters and active compute", back: "552B total MoE. 384 routed + 1 shared expert per layer, 6 routed active per token. 8B active parameters at prefill, 16B at decode." },
+  { front: "KV cache", back: "890 bytes per token in FP4 (E2M1). About 1/4 of V4-Flash's HBM footprint and 1/8 of its SSD storage. Global cache lifetime at least 72 hours." },
+  { front: "reasoning_effort", back: "Integer 1–100. DeepSWE v1.1: 66.0% at 25, 74.2% at 100 with ~2.5× output tokens. DeepSeek: 60–80 gives most of max accuracy at under half the token budget. All launch benchmarks ran at 100." },
+  { front: "Pricing (per 1M tokens)", back: "Peak: cache hit $0.006, miss $0.30, output $1.20. Off-peak is exactly half. Peak = 01:00–04:00 and 06:00–10:00 UTC, Monday–Friday." },
+  { front: "Routing changes", back: "Sept 10: deepseek-v4-flash and deepseek-v4-flash-vision-exp route to V4.1-Flash. Sept 14, 04:00 UTC: deepseek-v4-pro routes to V4.1-Flash at Flash rates until V4.1-Pro launches." },
+  { front: "Where it ties Claude, where it trails", back: "DeepSWE v1.1: 74.2 vs Opus 5 74.0 (vendor-run). Terminal-Bench 3.0: 30.0 vs 43.3. Terminal-Bench 4.0: 31.2 vs 51.8." },
+  { front: "Recommended sampling and serving", back: "temperature 1.0, top_p 0.95 or 1.0, context 1M. vLLM, SGLang, Docker Model Runner, Transformers. No Jinja template — use the repo's inference code. Safetensors in BF16, F32, F8_E4M3, I8." }
+]} />
+
+<Callout type="takeaways" items={[
+  "V4.1-Flash is a repository-shaped model: parity with Opus 5 on DeepSWE, a 20-point deficit on Terminal-Bench 4.0. Match it to work that reads a lot and edits a little.",
+  "The 1–100 effort dial is the price lever. Every launch number is at 100; DeepSeek's own guidance is that 60–80 keeps most of the accuracy at under half the tokens.",
+  "Six price cells, not one. The $0.003 headline is off-peak cache-hit input; a cold peak-hour token is 100× that. Peak is 01:00–04:00 and 06:00–10:00 UTC on weekdays.",
+  "Two silent routing changes: V4-Flash endpoints on Sept 10, deepseek-v4-pro on Sept 14. If you pinned Pro, your model changed — re-run evals.",
+  "The 890-byte KV cache and 72-hour cache lifetime make long-lived 1M-token contexts cheap, but DeepSeek itself flags long-context sparse retrieval as uncharacterized. Test before you trust."
+]} />
+
+## Sources & further reading
+
+- [DeepSeek API docs — Introducing DeepSeek-V4.1-Flash (September 10, 2026)](https://api-docs.deepseek.com/news/news260910/) — model ID, routing, pricing effective date
+- [DeepSeek API docs — Models & pricing](https://api-docs.deepseek.com/quick_start/pricing) — the six-cell price table, peak-hour definition, context and output limits, concurrency
+- [Hugging Face — deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) — license, architecture, evaluation tables, reasoning-effort range, recommended sampling, serving stacks
+- [VentureBeat — DeepSeek-V4.1-Flash debuts with $0.003/1M off-peak cached-input rate](https://venturebeat.com/technology/deepseek-v4-1-flash-debuts-with-0-003-1m-off-peak-cached-input-rate-and-benchmarks-eclipsing-gpt-5-6-sol-claude-opus-5) — launch-table comparisons vs Opus 5 and GPT-5.6 Sol, effort ablation, the uncharacterized-robustness quote
+- Related on AILmanac: [DeepSeek V4-Flash-Vision: the first native-vision open weight](/docs/models/deepseek-v4-flash-vision-open-multimodal) — the predecessor this endpoint now routes away from
+- Related on AILmanac: [Running Kimi K3 locally: vLLM, DSpark and the real hardware bill](/docs/models/kimi-k3-deploy-locally-vllm-dspark) — the self-hosting math for frontier-scale MoEs
+
+## Next
+
+- [Gemini 3.8 Flash for Claude users](/docs/models/gemini-3-8-flash) — the other September workhorse that ties Opus 5 on DeepSWE, and the same Terminal-Bench gap
+- [DeepSeek, Qwen & the open-weight wave](/docs/models/deepseek-qwen-open-models) — the landscape this model sits in
+- [How to choose a model](/docs/models/choosing-a-model) — the durable framework
