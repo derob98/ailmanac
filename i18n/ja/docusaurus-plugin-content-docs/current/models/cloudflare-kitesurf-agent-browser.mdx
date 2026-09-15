@@ -1,0 +1,198 @@
+---
+sidebar_position: 21.7
+title: "Cloudflare Kitesurf：AI エージェント（人間ではなく）のために作られた初のブラウザランタイム"
+description: "2026 年 8 月 6 日、Cloudflare は Kitesurf をリリースしました。Workers 上の V8 isolate だけで動くステートレスなエージェントファーストのブラウザです。一般的なエージェントタスクで Chromium より CPU とメモリを 3〜7 倍少なく使い、その代償として実時間は約 1.7 倍かかります。Rust で書かれ、Firefox の CSS パーサー（Stylo）と Blitz レンダリングエンジンを使い、Chrome DevTools Protocol 経由で Puppeteer/Playwright とそのまま互換です。このページでは、何が変わったのか、ヘッドレス Chrome の代わりにいつ選ぶべきか、Claude Code / Codex / MCP クライアントにどう組み込むか、そして現時点でまったくできない 4 つのことを解説します。"
+keywords: [Cloudflare Kitesurf, agent-first browser, Browser Run, Chrome DevTools Protocol, headless browser alternative, Chromium alternative, Blitz rendering engine, Stylo CSS parser, V8 isolate browser, Puppeteer, Playwright, chrome-devtools-mcp, agent web automation, stateless browser, browser-for-agents]
+---
+
+<LevelBadge level="intermediate" />
+
+この 10 年間、「プログラムから操作するブラウザ」といえば Chromium を意味してきました。Puppeteer、Playwright、Selenium、あるいはホスト型 Chromium サービスの下で動くヘッドレス Chrome です。Web をブラウズするあらゆるエージェントは、人間にとってピクセルが正しく見えるように設計されたレンダリングエンジンの代金を払ってきました。タブ、拡張機能、テーマ、JIT コンパイルされた JavaScript、GPU コンポジット、アニメーション、その他すべてです。AI エージェントにはそのどれも必要ありません。**2026 年 8 月 6 日**、Cloudflare は [**Kitesurf**](https://blog.cloudflare.com/kitesurf/) を出荷しました。エージェントのためにゼロから書かれ、Workers 上の V8 isolate だけで動くステートレスなブラウザランタイムで、トレードオフを堂々と認めています。**Chromium より CPU とメモリを 3〜7 倍少なく使い、その代わりにタスクあたりの実時間は約 1.7 倍かかる。** 秒単位で課金される自律エージェントのフリートにとって、この計算はしばしば逆方向に転びます。
+
+このページは実践的な読み物です。Kitesurf が実際には何なのか（プロダクトではなくランタイム）、数字がどう分解されるのか、トレードオフがいつ有利に働くのか、Puppeteer や Playwright を 1 行でどう向けるのか、現時点でまったくできないことは何か、そして Cloudflare 自身の Browser Run プロダクトの中で Chromium とどう並んでいるのかを扱います。
+
+<Callout type="objectives" items={[
+  "ブラウザが人間ではなくエージェントのために作られると何が変わるのか、そしてそれが CPU/メモリ/実時間の計算をどう変えるのかを理解する",
+  "Kitesurf 対 Chromium のベンチマーク数値を、あなたが引き受けることになる 1.7 倍の実時間スローダウンも含めて正直に読む",
+  "Kitesurf が現時点でできない 4 つのこと（動画、WebGL、TLS ボットチャレンジ、永続的な認証済みセッション）を知る",
+  "既存の Puppeteer/Playwright/chrome-remote-interface コードに、エンドポイントの変更 1 つだけで Kitesurf を組み込む",
+  "chrome-devtools-mcp クライアントを設定して、Claude Code、Codex、あるいは任意の MCP 対応エージェントが Chromium ではなく Kitesurf を操作するようにする",
+  "Kitesurf が勝つ場面（バースト的、短時間、HTML 中心）と、Chromium が依然として勝つ場面（動画、WebGL、実際のユーザーセッション）のメンタルモデルを構築する",
+]} />
+
+## 「エージェントのために作られた」が実際に意味すること
+
+Kitesurf は珍しいトレードオフの組み合わせを選んでおり、そのすべてが同じ前提から導かれています。**読み手は人間ではなく言語モデルである**ということです。これがブラウザが最適化すべき対象を組み替えます。
+
+- **タブなし、テーマなし、拡張機能なし、ピクセルパーフェクトなレンダリングなし。** エージェントはタブを切り替えず、ダークモードを気にせず、たいていは DOM、抽出したテキスト、あるいは証拠としてのスクリーンショットを欲しがるだけです。美しくアンチエイリアスされたフレームではありません。
+- **デフォルトでステートレス。** すべてのセッションは一時的です。ウォームアップすべき永続プロファイルも、長寿命のログインもありません。短いエージェント実行のフリートには合いますが、「私としてログインして 1 時間ログイン状態を保つ」には合いません。
+- **重量級の OS プロセスではなく、Workers 上の V8 isolate の中で動く。** Chromium はブラウザインスタンスごとに複数のプロセスを立ち上げ、空白ページを開くだけで数百メガバイトを消費します。Kitesurf はあなたの Workers を配信するのと同じランタイムの中で起動するため、コールドスタートのコストは Chrome の起動よりもサーバーレス関数に近くなります。
+- **JS は V8 の JIT ではなく Boa（Rust の JS インタープリター）で動く。** これが実時間スローダウンの起源であり、意図的な選択です。V8 isolate の*内側*で Boa を動かすことでサンドボックスの一貫性を保てますが、Boa は JIT ではなくインタープリターなので、数値計算の重い JS は実際のコストを払います。ほとんどのエージェントタスクは計算ではなく DOM の操作であり、それが平均スローダウンが約 1.7 倍にとどまる理由です。
+- **重要なところでは互換：Chrome DevTools Protocol を話す。** CDP は Puppeteer、Playwright、そしてあらゆる本格的なブラウザ自動化ツールが実際に話しているものです。あなたのコードが CDP を話すなら、Kitesurf はエンドポイントの 1 行差し替えで届く距離にあります。
+
+## 数字と、その読み方
+
+Kitesurf のローンチにおける唯一最重要の表は、[Cloudflare 自身のベンチマーク](https://blog.cloudflare.com/kitesurf/)からのものです。
+
+| タスク | Kitesurf | Chromium | 方向 |
+|------|----------|----------|-----------|
+| CPU、スクリーンショット取得 | **380 ms** | 1,173 ms | **CPU 3.1 倍少ない** |
+| CPU、HTML 抽出 | **229 ms** | 877 ms | **CPU 3.8 倍少ない** |
+| メモリ、スクリーンショット取得 | **57.8 MiB** | 271.0 MiB | **メモリ 4.7 倍少ない** |
+| メモリ、HTML 抽出 | **39.4 MiB** | 273.7 MiB | **メモリ 7.0 倍少ない** |
+| 実時間、スクリーンショット | 1,148 ms | **637 ms** | Chromium が約 1.8 倍速い |
+| 実時間、HTML 抽出 | 820 ms | **472 ms** | Chromium が約 1.7 倍速い |
+
+ほとんどの解説記事が見落としている 2 つの観察があります。
+
+1. **CPU 時間と実時間が乖離するのは、Chromium の JIT が実行中により激しく CPU を奪い合っているから**です。Chromium は先に終わりますが、そこに至るまでに 3〜4 倍の CPU ミリ秒を消費します。共有サーバーレスランタイムで支払うのは実時間ではなく CPU 時間です。だから Kitesurf は同時に安く*かつ*遅いのであり、それは矛盾ではありません。
+2. **差が最も大きいのはメモリであり、メモリこそが同時実行数の上限を決めます。** HTML 抽出でメモリが 7 倍少ないという数字は、「1 つの Worker が 4 ではなく 30 の同時エージェントセッションを保持できる」を解き放つものです。切り替える本当の理由はしばしば CPU の数字ではなく、こちらです。
+
+`★` **ヒューリスティック：** 少数の長いインタラクティブなセッション（個人のエージェントが実際のサイトを操作する）を動かしているなら、Chromium の実時間の速さが依然として勝ちます。多数の短くバースト的な抽出を並列に動かしているなら（評価、スクレイピング、URL リストのスクリーンショット）、Kitesurf のメモリと CPU の効率が支配的になります。タスクあたり約 500 ms の実時間差は、5 倍多く同時に走らせられるようになれば見えなくなります。
+
+## アーキテクチャ：目の前に隠れていた Rust と Firefox
+
+Kitesurf は「もう 1 つのヘッドレスブラウザ」ではありません。ほとんどの人が存在を知らなかった部品から手作りされたランタイムです。ローンチ記事の完全なコンポーネント図は次のとおりです。
+
+- **Engine** — 外向きの Worker で、Chrome DevTools Protocol を話し、セッション状態を保持します。
+- **PageScript** — ページごとに隔離されたセッションを立ち上げます。HTML は **[Blitz](https://github.com/DioxusLabs/blitz)**（Dioxus チームによるモジュラーな Rust レンダリングエンジン）で、CSS は **[Stylo](https://github.com/servo/stylo)** でパースします。Stylo は Firefox の中に同梱されているまさにその CSS エンジンです。フォークでも模倣品でもなく、同じ Rust クレートです。
+- **PageRenderer** — スタイル適用済みの DOM を、Blitz のペイントモジュールとテキスト整形用の **Parley** を使ってピクセルに変換します。PNG、JPEG、PDF を出力します。
+- **SandboxOutbound** — ネットワーク I/O を隔離し、ブラウザプロセスを信頼するのではなく Worker レイヤーで CORS と Cookie の境界を強制します。
+
+決定的な驚きは Stylo です。Firefox の CSS エンジンは、本番環境で最も実戦で鍛えられた Rust コードの 1 つであり、Cloudflare はそれを直接使っています。それが、Kitesurf が開発 12 週間で **235,000 以上の Web Platform Test サブテスト**（DOM 97%、HTML 96%、SVG 97%、XHR と CORS 95%）にすでに合格できる大きな理由です。標準準拠を書き直したのではなく、借りてきたのです。
+
+<Callout type="warning" items={[
+  "Kitesurf の JS ランタイムは V8 の JIT ではなく Boa です。自動化が数値計算や暗号処理の重いクライアントサイド JS（たとえばブラウザ内で何かをマイニングするページや、重い計算をする canvas）を実行するなら、平均の約 1.7 倍より悪いスローダウンを覚悟してください。DOM 操作とフレームワークのコード（React のハイドレーション、Vue、TodoMVC 風）が平均値の成り立つ領域です。"
+]} />
+
+## Kitesurf を選ぶべき時と、そうでない時
+
+<Steps items={[
+  {title: "タスクが短く、ステートレスで、HTML 中心なら Kitesurf を優先する", body: "URL リストのスクリーンショット。静的ページからの構造化データ抽出。PDF 請求書のレンダリング。モダンな React ランディングページをスナップショットとしてモデルに渡す。これらはベンチマークが測定対象としているタスクであり、メモリ節約が実際の同時実行性を解き放つ場面です。"},
+  {title: "CPU 時間やメモリフットプリントで課金されるなら Kitesurf を優先する", body: "Cloudflare Workers、Lambda、Cloud Run、その他あらゆるリクエスト単位の課金モデル。請求書に現れるのは 1.7 倍の実時間コストではなく、3〜7 倍少ない CPU/メモリの数字です。"},
+  {title: "タスクに動画、WebGL、実際のログインが必要なら Chromium を優先する", body: "Kitesurf はまだ動画をレンダリングできず、WebGL を実行できず、モダンな TLS フィンガープリントのボットチャレンジ（Cloudflare 自身の Turnstile、Akamai、PerimeterX など）を通過できず、呼び出し間で認証済みセッションを保持しません。ego lite のような共有ログイン型のブラウジングパターン（/docs/models/browser-agents-shared-login を参照）は、別の仕事のための別のツールです。"},
+  {title: "単一呼び出しのレイテンシがスループットより重要なら Chromium を優先する", body: "1 回のページ読み込みを待つユーザー向けエージェントは、追加の 500ms を体感します。夜間に 10,000 の URL を処理するバックグラウンドパイプラインは体感しません。"},
+  {title: "可能なら両者の間でルーティングする", body: "Cloudflare の Browser Run プロダクトは両方を公開しており、browser=kitesurf パラメータでリクエストごとに選べます。プラットフォームを構築しているなら、単純な抽出は Kitesurf に、難しい/インタラクティブなタスクは Chromium に送るようルーターを配線してください。これは LLM で見られるのと同じルーティングの規律です（/docs/models/model-routing-patterns を参照）。小さいモデルを先に、失敗したらエスカレーション。"},
+]} />
+
+## Puppeteer や Playwright に 1 行で組み込む
+
+重要な API 契約はこれです。Kitesurf はヘッドレス Chrome と同じく、WebSocket 上で **Chrome DevTools Protocol** を話します。CDP を話すものすべて（Puppeteer、Playwright、`chrome-remote-interface`、Chrome DevTools フロントエンドそのもの）が変更なしに接続できます。唯一の違いは接続先の WebSocket URL です。
+
+<PromptCard title="Puppeteer — ローカル Chromium の代わりに Kitesurf へ接続する">{`import puppeteer from "puppeteer";
+
+const browser = await puppeteer.connect({
+  browserWSEndpoint:
+    "wss://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/browser-run/devtools/browser?browser=kitesurf",
+  headers: { Authorization: "Bearer <API_TOKEN>" },
+});
+
+const page = await browser.newPage();
+await page.goto("https://example.com");
+await page.screenshot({ path: "example.png" });
+await browser.disconnect();`}</PromptCard>
+
+<PromptCard title="Playwright — 同じ考え方、connectOverCDP">{`import { chromium } from "playwright";
+
+const browser = await chromium.connectOverCDP(
+  "wss://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/browser-run/devtools/browser?browser=kitesurf",
+  { headers: { Authorization: "Bearer <API_TOKEN>" } },
+);
+
+const context = browser.contexts()[0];
+const page = await context.newPage();
+await page.goto("https://news.ycombinator.com");
+console.log(await page.title());
+await browser.close();`}</PromptCard>
+
+セッションをまったく開いたままにしたくないワンショットのタスクには、**Quick Actions** エンドポイントを使えば、URL を POST するだけで 1 回の HTTP 呼び出しでスクリーンショット、PDF、あるいは HTML 文字列が返ってきます。CDP クライアントは不要です。
+
+<PromptCard title="Quick Actions — curl でワンショットのスクリーンショット">{`curl -X POST \\
+  'https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/browser-run/screenshot?browser=kitesurf' \\
+  -H 'Authorization: Bearer <API_TOKEN>' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"url": "https://example.com"}' \\
+  --output screenshot.png`}</PromptCard>
+
+## Claude Code（または任意の MCP エージェント）に Kitesurf を操作させる
+
+2026 年半ばにおいてエージェントにブラウザを与える慣用的な方法は **Model Context Protocol** 経由です。具体的には Chrome DevTools チームがメンテナンスする [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) サーバーで、任意の MCP 対応クライアント（Claude Code、Codex、Cursor、MCP Inspector など）にブラウザを公開します。このサーバーの `--wsEndpoint` フラグを使えば、任意の CDP 互換 WebSocket（Kitesurf のものを含む）に向けられるので、エージェントが行うすべてのツール呼び出しがローカル Chrome ではなく Kitesurf 上で実行されます。まさにこの設定が Cloudflare 自身の [Browser Run ドキュメント](https://developers.cloudflare.com/browser-run/kitesurf/)に記載されています。
+
+<PromptCard title="Claude Code — Kitesurf を MCP ブラウザとして追加する .claude.json スニペット">{`{
+  "mcpServers": {
+    "kitesurf": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@latest",
+        "--wsEndpoint=wss://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/browser-run/devtools/browser?browser=kitesurf",
+        "--wsHeaders={\\"Authorization\\":\\"Bearer <API_TOKEN>\\"}"
+      ]
+    }
+  }
+}`}</PromptCard>
+
+配線が済んだら、Claude Code に *「Hacker News を開いてトップ 5 の記事を要約して」* と頼んでみてください。ブラウジングはローカルの Chromium ではなく Kitesurf の Worker 上で走ります。コールドスタートは数秒ではなく数十ミリ秒で、ラップトップのメモリを食うブラウザプロセスもありません。
+
+<Callout type="warning" items={[
+  "wsHeaders に API トークンを設定した MCP サーバーは、エージェントが行うすべてのツール呼び出しにそのトークンを引き継ぎます。トークンは他のエージェントから見えるシークレットと同様に扱ってください。Browser Run のみにスコープを絞り、疑わしければローテーションし、.claude.json を自分のマシンの外に共有しないこと。より完全なチェックリストは /docs/security/vetting-agent-skills を参照してください。"
+]} />
+
+## Kitesurf がまだできない 4 つのこと
+
+ギャップを明示しておくことは重要です。どれかに当たったとき、設定の問題だと思い込んで 1 時間を無駄にしたくないからです。
+
+- **動画再生なし。** `<video>` 要素のデコードはありません。動画の裏にコンテンツを隠しているページは動きませんが、単に動画要素を*含んでいる*だけのページなら、他はすべてレンダリングされます。
+- **WebGL なし。** 3D canvas も、GPU アクセラレーションされたレンダリングも、起動に WebGL を必要とするライブラリ（一部の地図、一部の可視化フレームワーク）もありません。
+- **ボットチャレンジの TLS フィンガープリント交渉なし。** Kitesurf の TLS プロファイルは Chrome のものではなくサーバーレス Worker のプロファイルです。そのため JA3/JA4 フィンガープリントでゲートしているページ（多くの Cloudflare 保護サイト、Akamai、DataDome、PerimeterX を含む）は、エージェントが DOM を見る前にエッジで弾き返します。
+- **永続的な認証済みセッションなし。** ステートレスはバグではなく機能ですが、「一度ログインして、その後の 100 回のスクレイピングで Cookie を再利用する」は Kitesurf がサポートするワークフローではありません。そのパターンには[共有ログイン型ブラウザ](/docs/models/browser-agents-shared-login)か、独自の Cookie 管理を伴う Chromium セッションを検討してください。
+
+この 4 つのどれかが当てはまるなら、同じ Browser Run プロダクト内でそのタスクを Chromium にルーティングするか、ユーザー寄りのタスクには共有ログインのパターンを使ってください。
+
+<VerifyNote lastVerified="2026-08-24" source="https://blog.cloudflare.com/kitesurf/ and https://developers.cloudflare.com/browser-run/kitesurf/">
+Kitesurf は 2026 年 8 月 24 日時点、ローンチから約 18 日後で無料のパブリックベータです。ベータとは、アカウントごとの制限が適用され（正確な数値は未公開）、CDP のサーフェスはまだ拡大中で、レンダリング忠実度は週ごとに改善中であることを意味します。ベンチマーク表と「できない 4 つのこと」のリストはローンチ当日の状態を反映しています。どちらかにアーキテクチャ上の賭けをする前に公式ドキュメントを確認してください。
+</VerifyNote>
+
+## このローンチがエージェント向けブラウザの風景をどう変えるか
+
+Kitesurf は「より小さく、より安く、エージェント向けの形をしたブラウザ」という継ぎ目に取り組んでいる唯一のプロジェクトではありません。名前をつける価値のある 2 軸の空間の、特定の座標に位置しています。
+
+- **ステートレス vs 共有ログイン。** Kitesurf は本番環境で最も強力なステートレスの一手です。共有ログインの軸では、[ego lite](/docs/models/browser-agents-shared-login) が現在のリファレンスです。両者は補完関係にあります。自動化にはステートレス、「私として振る舞う」には共有ログインです。
+- **カスタムエンジン vs ラップした Chromium。** Cloudflare の同業者（Browserbase、Anchor Browser、Steel）は依然として Chromium をラップしています。Kitesurf はラッパー方式を大規模に拒否した初の事例です。Cloudflare のベンチマークが実環境でも成り立ち、（計画されている）オープンソース公開が実現すれば、ラッパー系ベンダーは 2 四半期以内にセッション単価への圧力を感じることになるでしょう。
+
+より深い主張、そして「すごい数字だ」という即座の反応を超えてこのローンチについて書く価値がある理由はこれです。**人間向けのブラウザスタックとエージェント向けのブラウザスタックは、2 つのプロダクトへと分岐しつつあります。** エージェントが人間と同じブラウザを使うという前提で構築するものはすべて、必要ないかもしれない複雑さを買っていることになります。同じ分岐はすでに LLM レイヤーで起きています（エージェント専用モデル、エージェント専用 API）。Kitesurf は同じ分岐がブラウザレイヤーに到達したものです。
+
+AILmanac の関連ページ：Claude 自身のブラウザ操作機能との比較は[コンピュータ操作エージェント](/docs/models/computer-use-agents)、エージェントがブラウザを操作するときに変わるセキュリティ姿勢は[エージェント型ブラウザと同一オリジンのリスク](/docs/security/agentic-browsers-same-origin)、そして Kitesurf 対 Chromium のルーティングに直接対応する「小さいものを先に、失敗したらエスカレーション」という一般的な規律は[モデルルーティングのパターン](/docs/models/model-routing-patterns)を参照してください。
+
+<Quiz title="理解度チェック" questions={[
+  {q: "Kitesurf のベンチマークは、Chromium より CPU とメモリを 3〜7 倍少なく使う一方で、タスクあたりの実時間は約 1.7 倍かかることを示しています。このトレードオフから最も恩恵を受けるワークロードはどれですか？", options: ["フォアグラウンドで 1 回のページ読み込みを待つユーザー向けエージェント", "CPU 秒単位で課金され、数千の短い URL 抽出を並列に走らせるバックグラウンドパイプライン", "1 つのサイトに 1 時間ログインし続ける長時間のスクレイピングセッション"], answer: 1, explain: "Kitesurf のメモリフットプリントこそが同時実行性の勝利を解き放つものです。1 つの Worker がはるかに多くのセッションを同時に保持できます。タスクあたりの実時間コストは 5 倍多く並列に走らせられれば見えなくなり、CPU 秒単位の課金は高い実時間の数字ではなく低い CPU の数字に報います。"},
+  {q: "現在のベータ版の Kitesurf が処理できないタスクは次のうちどれですか？", options: ["静的な React ランディングページをレンダリングして HTML を返す", "Wikipedia の記事のスクリーンショットを撮る", "Cloudflare Turnstile / ボットフィンガープリントのチャレンジを通過して保護されたページに到達する", "Hacker News から構造化データを抽出する"], answer: 2, explain: "Kitesurf の TLS プロファイルは Chrome のものではなく Worker のプロファイルです。そのため JA3/JA4 フィンガープリントでゲートしているページ（Turnstile、Akamai、DataDome を含む）はエッジで弾き返します。ボットゲートのないページでの静的レンダリング、スクリーンショット、HTML 抽出は、まさに設計対象のワークロードです。"},
+  {q: "CPU 時間は少ないのに、Kitesurf の JavaScript がタスクあたりで Chromium より遅いのはなぜですか？", options: ["まだ最適化されていない JIT を使っているから", "JS が V8 の JIT ではなく Rust のインタープリターである Boa で動くから。Worker isolate の内側にサンドボックスを保つための意図的なトレードオフ", "ネットワーク I/O が Cloudflare 経由でプロキシされるから"], answer: 1, explain: "Boa は JIT ではなくインタープリターなので、数値計算の重い JS は実際のコストを払います。しかしインタープリター方式なら、すべてを V8 isolate のサンドボックス内に保てます。別のブラウザプロセスも、別の JIT 層もありません。だから実時間は悪化するが CPU 時間は大幅に良くなるのです。"},
+  {q: "Claude Code に MCP 経由でブラウザとして Kitesurf を使わせたいとします。最小の正しい変更は何ですか？", options: ["kitesurf-mode という Claude Code プラグインをインストールする", "MCP サーバーのリストに chrome-devtools-mcp を追加し、--wsEndpoint を Kitesurf の CDP URL に向ける", "エージェントのコードを Rust で書き直す"], answer: 1, explain: "Kitesurf は Chrome DevTools Protocol を話すので、標準の chrome-devtools-mcp サーバーが変更なしにそれを操作できます。--wsEndpoint をローカル Chromium のソケットではなく Cloudflare の Kitesurf CDP URL に向けるだけです。"},
+  {q: "Kitesurf は Rust/Firefox エコシステムから 2 つのコンポーネントをそのまま借用しています。それはどれですか？", options: ["JS 用の V8 と HTML 用の Servo", "レンダリング用の Blitz と CSS 用の Stylo（Firefox の CSS エンジン）", "自動化用の Playwright と CDP 用の Puppeteer"], answer: 1, explain: "Blitz は Dioxus チームによるモジュラーな Rust レンダリングエンジンで、Stylo は Firefox の中に同梱されているのと同じ Rust の CSS エンジンです。標準準拠の Rust クレートを借用したからこそ、Kitesurf は開発 12 週間で 235,000 以上の WPT サブテストにすでに合格できるのです。"},
+]} />
+
+<Callout type="takeaways" items={[
+  "Kitesurf は、ユーザーが人間ではないことを認めた初の大規模ブラウザランタイムです。ステートレス、タブなし、テーマなし、JIT なし。その代わりに一般的なエージェントタスクで Chromium より CPU とメモリが 3〜7 倍少ない。",
+  "あなたがしているトレードオフ：タスクあたり約 1.7 倍の実時間と引き換えに、同じハードウェアではるかに多くのタスクを並列に走らせる能力を得る。CPU 秒単位の課金では、Kitesurf は同時に安く、かつ遅い。",
+  "重要なところでは互換：Chrome DevTools Protocol を話すので、Puppeteer、Playwright、chrome-remote-interface、chrome-devtools-mcp がすべて変更なしに動く。エンドポイントの差し替え 1 つ。",
+  "万能ではない：動画なし、WebGL なし、TLS フィンガープリントのボットチャレンジ交渉なし、永続的な認証済みセッションなし。それらは同じ Browser Run プロダクト内の Chromium にルーティングする。",
+  "より大きなパターン：人間向けのブラウザスタックとエージェント向けのブラウザスタックは 2 つのプロダクトへ分岐しつつある。長寿命のものを設計するときは分岐を前提にする。",
+]} />
+
+## 出典と参考文献
+
+- [Introducing Kitesurf — Cloudflare Blog（2026 年 8 月 6 日）](https://blog.cloudflare.com/kitesurf/) — 完全なベンチマーク表、アーキテクチャ図、コンポーネント解説を含むローンチ記事。
+- [Kitesurf on Cloudflare Browser Run — 公式ドキュメント](https://developers.cloudflare.com/browser-run/kitesurf/) — CDP エンドポイント、Quick Actions、MCP 設定、現在の制限リストの API リファレンス。
+- [Cloudflare changelog — Kitesurf on Browser Run](https://developers.cloudflare.com/changelog/post/2026-08-06-kitesurf/) — 初期パラメータと無料ベータの状況を記した出荷通知。
+- [Kitesurf インタラクティブプレイグラウンド — kitesurf.cloudflare.app](https://kitesurf.cloudflare.app/) — コードを書かずにスクリーンショット、HTML 抽出、Chrome DevTools での検査を試せます。
+- [Blitz — モジュラーな Rust レンダリングエンジン（Dioxus Labs）](https://github.com/DioxusLabs/blitz) — Kitesurf が使うレンダリングエンジン。
+- [Stylo — スタンドアロンの Rust クレートとしての Firefox の CSS エンジン](https://github.com/servo/stylo) — Kitesurf が変更なしに使う CSS エンジン。
+- [chrome-devtools-mcp — CDP をエージェントに公開する MCP サーバー](https://github.com/ChromeDevTools/chrome-devtools-mcp) — Chrome DevTools チームがメンテナンス。Cloudflare の Browser Run ドキュメントに記載のとおり、`--wsEndpoint` フラグ経由で Kitesurf と互換。
+- AILmanac の関連ページ：[エージェント向け共有ログイン型ブラウザ](/docs/models/browser-agents-shared-login) · [コンピュータ操作エージェント](/docs/models/computer-use-agents) · [エージェント型ブラウザと同一オリジンのリスク](/docs/security/agentic-browsers-same-origin) · [モデルルーティングのパターン](/docs/models/model-routing-patterns)。
+
+
+## 次へ
+
+- [SKILL.md：クロスエージェントのオープン標準](/docs/models/skill-md-open-standard)

@@ -1,0 +1,179 @@
+---
+sidebar_position: 22.7
+title: "OpenAI Agents API vs Claude Managed Agents: ホスト型エージェントループの比較"
+description: "2026 年 9 月 10 日、OpenAI は Codex ハーネスを単一の API 呼び出しの背後に置いた: Agents API パブリックベータ — 永続セッション、ホスト型またはセルフホスト型のサンドボックス、自動コンパクション、ツール検索、サブエージェント。Anthropic は 4 月から同じ形を Managed Agents として運用している。両者は同じ 4 つのプリミティブを使うが、権限、シークレット、予算、ネットワークポリシー、サンドボックスのコストで異なる。並べて比較し、リクエストの形、6 つの落とし穴、どちらをいつ選ぶかを示す。"
+keywords: [OpenAI Agents API, Codex harness, hosted sandboxes, self-hosted sandbox, codex exec-server, Claude Managed Agents, Anthropic Managed Agents, agent sessions, environments, compaction, tool search, programmatic tool calling, subagents, max_concurrent_subagents, permission policy, vaults, session budgets, agent runtime comparison, Blaxel, Cloudflare, Daytona, DigitalOcean, E2B, Modal, Runloop, Vercel]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["2 つのスタックを同じ 4 つのプリミティブ — エージェント、環境、セッション、イベント — に対応付け、各ベンダーがどこにつまみを置いたかを知る", "両側で最小の create-session 呼び出しを書き、どのフィールドがエージェントに属し、どれがセッションに属するかを知る", "実務で異なる点を比較する: 権限モード、シークレットの置き場所、ハード予算、ネットワークポリシー、データレジデンシー、サンドボックスの請求", "「自動コンパクション」と「ツール検索」がコンテキストとキャッシュに実際に何をするのか、そして両側の SSE ストリームに再接続戦略が必要な理由を理解する", "ワークロードごとにランタイムを選ぶ: Agents API、Managed Agents、Responses/Messages API 上の自前ループ、または Agents SDK / Claude Agent SDK"]} />
+
+2 年間、「エージェントループ」— モデルを呼び、ツールを実行し、結果を追加し、繰り返し、満杯になったらコンパクションする — は、どのチームも作り直すものでした。Anthropic は **2026 年 4 月 8 日**に **Managed Agents** でそれをサーバー側に移しました。**2026 年 9 月 10 日**、OpenAI は **Agents API** パブリックベータで同じことを行いました。自らの言葉で言えば、1 つの API 呼び出しの背後にある Codex ハーネスです。7 月の [Responses マルチエージェントベータ](/docs/models/native-multi-agent-apis)を使ったことがあれば、これはその一段上の層です。「モデルが 1 つのリクエスト内でサブエージェントを展開する」ではなく、「OpenAI がファイルシステム付きでエージェント全体を何時間も生かしておく」のです。
+
+2 つの製品は今、驚くほど似て見えます。このページは実際のリクエストの形とともに両者を並べ、紙幅の大半を異なる点に費やします。なぜなら、そこがあなたのエージェントに本番の認証情報を任せられるかどうかを決める場所だからです。
+
+<VerifyNote lastVerified="2026-09-14" source="OpenAI Agents API docs (overview, quickstart, hosted and self-hosted environments, multi-agent) as of Sept 14, 2026; Anthropic Managed Agents docs and the managed-agents-overview reference in anthropics/skills; Sept 10 Anthropic release notes for the auto permission mode. Both APIs are in beta — field names, defaults and limits move. Sandbox prices are from OpenAI's container rates as reported by third parties on launch day." />
+
+## 同じ 4 つのプリミティブ、2 つの語彙
+
+| 概念 | OpenAI Agents API | Claude Managed Agents |
+|---|---|---|
+| 定義 | `agent`(model、instructions、tools、MCP サーバー、`multi_agent`)— 各セッションにインライン | **Agent オブジェクト**。`POST /v1/agents` で永続化・バージョン管理され、セッションは id で参照する |
+| ツールの実行場所 | `environment` — `openai_hosted` または `self_hosted` | **Environment オブジェクト** — `cloud` または `self_hosted` |
+| 動いているもの | `session` — 永続的、再開可能、数時間から数日 | **Session** — 永続的、イベントをストリームし、エージェントのバージョンに固定される |
+| ワイヤ | events + items。ストリームまたは webhook | events。`/v1/sessions/{id}/events/stream` の SSE ストリーム |
+| ベータゲート | ヘッダー `OpenAI-Beta: agents=v1` | ヘッダー `managed-agents-2026-04-01` |
+| セルフホストワーカー | `codex exec-server` が制限付き executor キーで WebSocket 経由にダイヤルアウト | `EnvironmentWorker.run()` または environment キー付きの `ant beta:worker poll` |
+
+★ 他のすべてを形作る唯一の構造的な違い: **OpenAI はエージェント定義をセッションにインラインで置き、Anthropic はそれをファーストクラスのバージョン管理されたオブジェクトにしている。** Anthropic 側で `sessions.create()` に `model`、`system`、`tools` を渡している自分に気づいたら、それは逆です。それらは `agents.create()` に属し、実行中のセッションは開始時のバージョンに固定されたままです。OpenAI 側には整理すべきエージェントレジストリはありませんが、400 個の実行中セッションのどれが先週の instructions で動いているかを教えてくれるものもありません。
+
+## 各側での最小の呼び出し
+
+OpenAI、Python、ホスト型サンドボックス、ストリーミング:
+
+```python
+from openai import OpenAI
+
+with OpenAI() as client:
+    with client.beta.agents.sessions.create(
+        agent={
+            "model": "gpt-6-astra",
+            "instructions": "Write clean code, run it, and report the actual output.",
+            "tools": [{"type": "web_search"}],
+            "multi_agent": {"enabled": True, "max_concurrent_subagents": 3},
+        },
+        environment={
+            "type": "openai_hosted",
+            "packages": {"python": ["pandas==2.2.3"]},
+            "network_policy": {"access": "restricted", "allowed_domains": ["pypi.org", "files.pythonhosted.org"]},
+        },
+        input="Create tree.py that prints a readable tree of /workspace, run it, paste the output.",
+        stream=True,
+    ) as events:
+        for event in events:
+            print(event.to_json(indent=None), flush=True)
+```
+
+Anthropic は、エージェントが独立したオブジェクトなので 2 回の呼び出し:
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()
+
+agent = client.beta.agents.create(
+    model="claude-fable-5-1",
+    system="Write clean code, run it, and report the actual output.",
+    tools=[{
+        "type": "agent_toolset_20260401",
+        "configs": [{"name": "web_fetch", "allowed_domains": ["pypi.org"]}],
+    }],
+    permission_policy={"mode": "auto"},
+)
+
+session = client.beta.sessions.create(
+    agent=agent.id,
+    environment_id="env_...",
+    budget={"type": "limit", "max_list_cost": {"amount": "500", "currency": "USD"}},
+)
+# then stream GET /v1/sessions/{id}/events/stream and send user events
+```
+
+どちらも、ループ、コンパクション、リトライロジック、サンドボックスのプロビジョニングを省いてくれます。どちらもトークンに加えてサンドボックスにかかる費用を請求します。ここからが違いです。
+
+## 異なる点
+
+### 1. 権限: OpenAI は API 層に(まだ)ない。Anthropic には 3 つのモードがある
+
+Managed Agents はエージェントごと、MCP ツールセットごとに **permission policy** を備え、3 つのモードがあります。`always_allow`(エージェント自身のツールのデフォルト)、`always_ask`(MCP ツールセットのデフォルト — クライアントが `user.tool_confirmation` を送るまで、セッションは呼び出しのたびに一時停止する)、そして **2026 年 9 月 10 日**以降の `auto` です。`auto` では、サーバーが**個々の呼び出しごとに** — ツール、その呼び出しの入力、それまでのセッション — を run、deny、`pending_approval` に分類します。同じツールへの 2 回の呼び出しが異なる判定を受けることもあり、すべてのイベントに `evaluated_permission` フィールドが付き、クライアントは拒否を覆せません(拒否された呼び出しへの確認は 400 を返します)。
+
+Agents API にはまだ同等のものがありません。手元のレバーは、ツールリスト、ネットワークポリシー、MCP サーバー認証です。ある呼び出しを人間がゲートしなければならないなら、自前のイベントループに組み込むか、代わりに Agents SDK を使います。OpenAI のドキュメントが「approvals」について指し示すのはそちらです。
+
+### 2. シークレット: vault 対環境変数
+
+「エージェントはどうやって認証付き MCP サーバーを呼ぶのか」に対する Anthropic の答えは **vault** です。エージェントの `mcp_servers` エントリは `{type, name, url}` だけを宣言し、認証情報(自動リフレッシュ付きの `mcp_oauth`、`static_bearer`、または `environment_variable`)はセッション作成時にアタッチされる vault に置かれ、**egress 時に**置換されるため、モデルは一度もそれを目にしません。
+
+OpenAI のホスト型サンドボックスは文字列変数の `env` マップを受け取り、いくつかの予約名(`PATH`、`CODEX_*`、`OPENAI_API_KEY`)を拒否します。そこに置いた他のものはすべて、エージェントが実行するコードから読めます。毎時ローテーションするビルドトークンならそれで構いませんが、顧客の OAuth リフレッシュトークンを置く場所としては間違っています。セルフホスト環境については、executor の**制限付きキー**は environment の接続だけができ、漏洩しても API の他の部分は呼べません。これは正しい設計であり、真似する価値があります。
+
+### 3. ハード予算 対 自前のメーター
+
+Managed Agents は**セッションにドル建ての予算**を受け付けます。到達するとセッションは `budget_reached` で一時停止し、上限を引き上げるか撤廃するまで settle イベントしか受け付けません。Deployment(スケジュールされたセッション)も予算を取ります。[セッション予算](/docs/api/managed-agents-session-budgets)を参照してください。
+
+Agents API には、ローンチ時のドキュメントにセッションごとの支出上限がありません。usage 付きのストリーミングイベントとコンテナ時間が得られ、天井は自分で設定します。暴走ループでは、「5 ドルで一時停止」と「請求書で気づく」の違いになります。
+
+### 4. ネットワークポリシー: 両方にあるが、層が異なる
+
+OpenAI のホスト型サンドボックスには 3 つの状態を持つ **`network_policy`** があります。`enabled`(テンプレートを継承しない限りデフォルト)、`disabled`、そして **1〜100 個の完全一致ホスト名**の `allowed_domains` リストを持つ `restricted` です。ワイルドカードなし、ポートなし、パスなしで、リダイレクト先とサブドメインはそれぞれ独自のエントリが必要です。ドキュメントからの 2 つの落とし穴: stdio MCP サーバーは現在 `enabled` を必要とし、保存済みの `environment_template_id` はデフォルトをネットワークなしに反転させます。
+
+Anthropic は代わりに**ツール**層で制限します。`web_search` と `web_fetch` のツール設定にある `allowed_domains` / `blocked_domains` / `max_content_tokens` で、環境にではありません。Bash ツールの egress は環境のネットワーク設定に従います。完全なマトリクスは[ドメイン制限](/docs/api/managed-agents-domain-restrictions)を参照してください。[GemStuffer](/docs/security/rubygems-gemstuffer-rogue-agents) の教訓が「egress はプロンプトではなくネットワークで強制せよ」なら、OpenAI の `restricted` ポリシーはより文字通りの実装で、Anthropic のものはツールごとに考えやすい実装です。
+
+### 5. データレジデンシーと保持
+
+Agents API ベータはデータレジデンシーが **US のみ**で、**Zero Data Retention をサポートしません**。さらに明示的に、セルフホストサンドボックスを使ってもセッションは ZDR 対象になりません。Managed Agents では、エージェントまたはセッションごとの `model.inference_geo` で**推論の実行場所**を固定できます。規制対象のワークロードでは、これは今日において決定的な要素であり、些細な違いではありません。
+
+### 6. サンドボックスのコスト
+
+OpenAI のホスト型サンドボックスは**トークンとは別に、標準コンテナレート**で課金されます。分単位で 5 分の最低課金があり、ローンチ日の報道によれば、**1 GB コンテナで 20 分あたり約 0.03 ドルから 64 GB で 1.92 ドル**(1 時間あたり約 0.09 ドルから 5.76 ドル)です。アイドル状態のサンドボックスは**アクティビティやキープアライブなしで 1 時間後に削除され、このタイムアウトは設定変更できません。** `/workspace/outputs` 配下のファイルはターン完了時に不変のアーティファクトとして公開され、サンドボックスより長く残ります。Anthropic のクラウド環境はセッションごとに 1 コンテナで、トークンに加えてコンピュートとして課金されます。この段落ではなく現在の料金ページを確認してください。
+
+OpenAI のアナウンススレッドの下で開発者が最初に書いたのは、ループでサンドボックスを立ち上げる前にコンテナコストを計算せよという警告でした。文字通りに受け取ってください。16 GB イメージで 6 つのサブエージェントを展開すれば、コンテナは 6 つです。
+
+## 誰もが尋ねる 2 つの機能
+
+**自動コンパクション。** 両方のランタイムは、セッションが上限に近づくと以前のコンテキストを要約するので、要約器を書かなくてもセッションを何時間も動かせます。どちらもしてくれないのは、*正しい*ものを残すことです。コンパクションをまたいで重要な事実があるなら、要約を信頼するのではなく、ワークスペースのファイル(OpenAI)やメモリストア(Anthropic)に書いてください。[長時間実行エージェントのハーネス](/docs/frontiers/long-running-agent-harnesses)のハーネスパターンはそのまま適用できます。
+
+**ツール検索とプログラマティックツール呼び出し**(OpenAI)。ツール検索は、すべてのスキーマをプロンプトに詰め込む代わりに、ツール定義をオンデマンドで読み込みます。数十の MCP ツールがあるときにキャッシュされたプレフィックスを安定に保てます。`{"type": "programmatic_tool_calling"}` で有効にするプログラマティックツール呼び出しは、モデルが複数のツールを呼び、ループし、結果をフィルタリングするコードを書いてから、何かをコンテキストに戻すことを可能にします。Anthropic の同等物は Bash とファイルのツールセットで、モデルはただスクリプトを書きます。同じ効果、より少ない儀式、より少ない構造です。
+
+**サブエージェント。** OpenAI: `multi_agent.enabled` と、コーディネーターを除いて**デフォルト 6** の `max_concurrent_subagents`。サブエージェントは独自のコンテキストを持ち、MCP ツール、認証情報、ファイルを継承しますが、**function tool は使えず**、調整イベントはメッセージ内容を省略することがあります。ストリームでサブエージェントの完全なトランスクリプトは見られません。Anthropic: Managed Agents は対称的なつまみを公開していません。セッションを組み合わせるか、クライアント側で Claude Agent SDK のサブエージェントを使います。[ネイティブマルチエージェントのページ](/docs/models/native-multi-agent-apis)には、今も当てはまるコスト計算があります。
+
+## ドキュメントからの 6 つの落とし穴、両側
+
+<Steps items={[
+  {title: "ストリームは信頼できる唯一の情報源ではない", body: "OpenAI: ストリームが切断されたら、リトライの前にセッションと保存された items を取得する。ターンの完了はすべてのツールが成功したことを意味しない。agent.session.turn.completed を探す。Anthropic: SSE ストリームにリプレイはない。切断時は GET /v1/sessions/{id}/events を呼び、イベント id で重複排除してから再接続する。"},
+  {title: "エージェントのフィールドをセッションに置かない(Anthropic)", body: "model、system、tools、mcp_servers、skills は agents.create() に属する。エージェントを一度作り、その id とバージョンを保存して参照する。実行ごとにエージェントを作ると孤立した設定が残り、レイテンシが増える。"},
+  {title: "setup コマンドの失敗はエージェントなしを意味する(OpenAI)", body: "setup_commands はエージェント開始前に順番に実行され、非ゼロ終了はセッションをブロックする。推移的なアップグレードがすべてのセッションを一度に落とさないよう、python / npm / system のリストでパッケージバージョンを固定する。"},
+  {title: "restricted ネットワークは完全一致のみ(OpenAI)", body: "1〜100 個のホスト名、ワイルドカードなし。api.github.com と github.com は 2 つのエントリで、objects.githubusercontent.com へのリダイレクトは 3 つ目。頼る前にドライセッションで許可リストをテストする。"},
+  {title: "アーカイブは永久(Anthropic)", body: "エージェント、環境、セッション、vault、メモリストアをアーカイブすると読み取り専用になり、アーカイブ解除はできない。実行中のセッションは継続するが、新しいものは参照できない。本番のものをアーカイブする前に確認する。"},
+  {title: "タイムアウトはセッション単位ではなくチャンク単位", body: "両側とも HTTP クライアントのタイムアウトはストリームされたチャンクごとにリセットされるため、実時間の上限ではない。ハードストップには、プラットフォームの予算(Anthropic)か、自前の期限とセッション削除(OpenAI)を使う。"}
+]} />
+
+## どの仕事にどのランタイムか
+
+OpenAI 自身のドキュメントは今、選択を 3 つに分けています。OpenAI にエージェントを管理させ進捗を保存させるなら Agents API、アプリ内でデプロイ、ストレージ、承認を制御する必要があるなら Agents SDK、モデルと直接やり取りするなら Responses API。Anthropic の分け方は Managed Agents 対 Claude Agent SDK 対 素の Messages API です。ワークロードに対応付けると:
+
+| ワークロード | 選択 | 理由 |
+|---|---|---|
+| 使い捨てサンドボックスでの長いコーディング/データタスク、数分から数時間、顧客のシークレットなし | どちらのホスト型ランタイムでも | 両方がまさにこのために作られた。モデルと、MCP サーバーが既にどのエコシステムにあるかで選ぶ |
+| エージェントが顧客の認証付き MCP サーバーに触れる | Managed Agents | vault が認証情報をサンドボックスの外に保つ。`auto` 権限がすべてを一時停止せずに危険な呼び出しをゲートする |
+| 自社の VPC 内で自社のコンピュートで動かす必要がある | どちらのセルフホストモードでも | 同じ形: 制限付きキーを持つアウトバウンドワーカー。OpenAI には 9 つのパートナーサンドボックスが接続済み(Blaxel、Cloudflare、Daytona、DigitalOcean、E2B、Modal、Oracle、Runloop、Vercel) |
+| 規制対象データ、EU レジデンシーまたは ZDR が必要 | Managed Agents、または自前のループ | Agents API ベータは US のみで ZDR 対象外 |
+| 幅広い調査の展開、多数の独立した読み取り | `multi_agent` 付きの Agents API | 同時実行上限付きのネイティブサブエージェント。クライアント側オーケストレーションより書くのが安い |
+| 特定のアクションに人間の承認 | Managed Agents の `auto` / `always_ask`、または Agents SDK | Agents API には今日、API 層に承認プリミティブがない |
+| エージェントがしたことをすべて見てリプレイする必要がある | Responses / Messages 上の自前ループ | 両方のホスト型ランタイムはトランスクリプトの一部を要約または省略する |
+
+## 理解度チェック
+
+<Quiz questions={[
+  {q: "エージェント定義が、セッションが id で参照する永続化・バージョン管理されたオブジェクトであるのはどちら側か?", options: ["OpenAI Agents API", "Claude Managed Agents", "両方", "どちらでもない — 両方とも定義をインラインで受け取る"], answer: 1, explain: "Managed Agents は POST /v1/agents でエージェントを一度作り、セッションはそれを参照して作成時のバージョンに固定される。Agents API はすべての sessions.create 呼び出しでエージェントオブジェクトをインラインで受け取る。"},
+  {q: "Managed Agents の「auto」権限モードは何をするか?", options: ["すべてのツール呼び出しを許可する", "すべてのツール呼び出しの前に人間に尋ねる", "ツール、その入力、それまでのセッションに基づき、個々の呼び出しをサーバー側で run、deny、pending_approval に評価する", "MCP ツールを無効にする"], answer: 2, explain: "2026 年 9 月 10 日に追加。各呼び出しは個別に分類され、イベントは evaluated_permission を持ち、クライアントは拒否を覆せない。"},
+  {q: "OpenAI ホスト型サンドボックスで network_policy.access を「restricted」にし、allowed_domains: ['github.com'] とした。エージェントが api.github.com を取得するとどうなるか?", options: ["動作する — サブドメインは含まれる", "ブロックされる — エントリは完全一致のホスト名で、サブドメインとリダイレクトは独自のエントリが必要", "HTTPS の場合だけ動作する", "セッションの起動に失敗する"], answer: 1, explain: "restricted モードはワイルドカードなしの 1〜100 個の完全一致ホスト名を受け付ける。サブドメインとリダイレクト先は別途リストする必要がある。"},
+  {q: "ローンチ時点の Agents API ベータについて正しいものはどれか?", options: ["セルフホスト時は Zero Data Retention をサポートする", "EU データレジデンシーを提供する", "データレジデンシーは US のみで、セルフホストサンドボックスでも ZDR はサポートされない", "セッションの支出をドルで上限設定する"], answer: 2, explain: "概要ドキュメントは、環境タイプに関わらず US のみのレジデンシーと ZDR 対象外を明記している。セッションごとのドル建て予算は Anthropic の機能。"},
+  {q: "Agents API の max_concurrent_subagents のデフォルトは何で、サブエージェントができないことは何か?", options: ["3。MCP ツールを使えない", "6(コーディネーターを除く)。function tool を使えない", "10。ファイルにアクセスできない", "無制限。さらにサブエージェントを生成できない"], answer: 1, explain: "マルチエージェントのドキュメントはコーディネーターを除いてデフォルト 6 とし、サブエージェントは MCP ツール、認証情報、ファイルを継承するが function tool は使えないと記している。"},
+  {q: "モデルが決して目にしないよう、顧客の OAuth リフレッシュトークンはどこに置くべきか?", options: ["OpenAI ホスト型サンドボックスの env マップ", "エージェントの instructions", "Managed Agents の vault に mcp_oauth 認証情報として置き、egress 時に置換する", "/workspace 配下のファイル"], answer: 2, explain: "vault の認証情報はネットワークエッジで注入され、サンドボックスもモデルも保持しない。OpenAI の env マップはエージェントが実行するあらゆるコードから読める。"}
+]} />
+
+## 出典と参考資料
+
+- OpenAI — *Introducing the Agents API*(2026 年 9 月 10 日): https://openai.com/index/introducing-the-agents-api/ — 開発者フォーラムのアナウンス: https://community.openai.com/t/introducing-the-agents-api-and-hosted-sandboxes/1396481
+- OpenAI ドキュメント — Agents API 概要: https://developers.openai.com/api/docs/guides/agents-api/overview — クイックスタート: https://developers.openai.com/api/docs/guides/agents-api/quickstart — ホスト型サンドボックス: https://developers.openai.com/api/docs/guides/agents-api/environments/openai-hosted — セルフホスト型サンドボックス: https://developers.openai.com/api/docs/guides/agents-api/environments/self-hosted — マルチエージェント: https://developers.openai.com/api/docs/guides/agents-api/multi-agent — ランタイム比較: https://developers.openai.com/api/docs/guides/agents
+- MarkTechPost — *OpenAI Launches the Agents API in Public Beta*(2026 年 9 月 10 日): https://www.marktechpost.com/2026/09/10/openai-launches-the-agents-api-in-public-beta-putting-the-codex-harness-behind-one-api-call/
+- Anthropic ドキュメント — Managed Agents 概要: https://platform.claude.com/docs/en/managed-agents/overview — permission policy: https://platform.claude.com/docs/en/managed-agents/permission-policies — API リリースノート: https://platform.claude.com/docs/en/release-notes/api
+- anthropics/skills — `managed-agents-overview.md` リファレンス(プリミティブ、ヘッダー、アンチパターン): https://github.com/anthropics/skills/blob/main/skills/claude-api/shared/managed-agents-overview.md
+- AI/TLDR — *Claude Managed Agents add 'auto' mode*(2026 年 9 月 10 日): https://ai-tldr.dev/releases/anthropic-managed-agents-auto-permissions/
+- OpenAI Codex CLI(`codex exec-server` executor): https://github.com/openai/codex
+
+## 次のステップ
+
+- [Managed Agents](/docs/api/managed-agents) — Anthropic 側を深掘り: エージェント対セッション、vault、スケジュールされた deployment
+- [ネイティブマルチエージェント API](/docs/models/native-multi-agent-apis) — この基盤となる 7 月の Responses マルチエージェントベータと、サブエージェントのコスト計算
+- [エージェントランタイム: Isolate 対コンテナ](/docs/frontiers/agent-runtimes-isolates-vs-containers) — 下にあるサンドボックスが実際には何なのか、そしてそれが egress にとってなぜ重要か

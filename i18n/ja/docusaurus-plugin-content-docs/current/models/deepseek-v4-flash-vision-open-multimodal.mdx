@@ -1,0 +1,281 @@
+---
+sidebar_position: 8.3
+title: "DeepSeek V4-Flash-Vision:初のネイティブビジョン・フロンティアオープンウェイト"
+description: "2026年8月31日、DeepSeek は V4-Flash-Vision-Exp をオープンソース化しました。テキストエージェントのスコアを損なわずに V4-Flash にネイティブビジョンを追加した 305B MoE で、ApexBench / Agents' Last Exam / ZeroBench で Claude Opus 4.8 に匹敵または上回り、価格はごく一部、ライセンスは MIT です。具体的な数字、ほとんどのガイドが無視する画像あたり384トークンの厳格な上限、そして実際に動かす具体的な方法を解説します。"
+keywords: [DeepSeek V4, DeepSeek V4-Flash-Vision, V4-Flash-Vision-Exp, DeepSeek vision model, open weight multimodal, MoE vision, DSpark, native vision model, DeepSeek MIT license, ApexBench, Agents Last Exam, ZeroBench, DeepSeek vs Claude Opus, run DeepSeek V4 locally, DeepSeek 305B, hybrid attention CSA HCA]
+---
+
+<LevelBadge level="intermediate" />
+
+2026年8月31日 00:00 UTC、DeepSeek は Hugging Face に新しいリポジトリを静かにプッシュしました:`deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`。同じモデルが API で公開されてから(8月21日)10日後、重みは今や MIT ライセンスで公開されています。これは**ネイティブビジョン**を備えた初の V4 ファミリーモデルです。後付けアダプターを付けたテキストモデルではなく、共同学習されたマルチモーダル MoE であり、ビジョン側のエージェントスコアは ApexBench で 26.2 から 36.5 に跳ね上がった一方、テキストのみのエージェントスコアはまったく動いていません。いくつかのエージェントベンチマークでは **Claude Opus 4.8** に匹敵、あるいはわずかに上回り、API の価格は入力100万トークンあたり $0.22 です。
+
+このページは、ローンチに付いてこなかった実践的なフィールドガイドです:アーキテクチャ上何が変わったか、重要な数字、誰も警告してくれない一つの厳格な制限、動かし方、そして Claude が依然として正解である場面。
+
+<Callout type="objectives" items={[
+  "ここでの「ネイティブビジョン」の意味を理解する ― V4-Flash バックボーンに、後から貼り付けたのではなく一緒に学習されたビジョンエンコーダー + アライナー",
+  "リリースが意図した通りにベンチマーク表を読む:テキストのみのエージェントは維持、ビジョンエージェントは大幅向上、どちらも Claude Opus 4.8 に肉薄",
+  "画像あたり384トークンという厳格なアーキテクチャ上の上限と、それがプロンプトの書き方をどう変えるかを知る",
+  "正直なコスト計算をする:100万トークンあたり $0.22 / $0.66 / $0.007(キャッシュ)と Claude Opus 4.8 の $15 / $75",
+  "適切なサービング経路を選ぶ ― ほぼ全員にはホスト型 API、本格的なセルフホストには vLLM + DSpark"
+]} />
+
+## 一文で言うと
+
+**DeepSeek V4-Flash-Vision-Exp** は3050億パラメータのスパース MoE マルチモーダルモデル(トークンあたり 13B アクティブ、1.048M トークンのコンテキスト)で、V4-Flash テキストバックボーンに共同学習されたビジョンを追加し、2026年8月31日に Hugging Face で MIT ライセンスのオープンとして公開され、Claude Opus 4.8 のトークン単価のおよそ40分の1でエージェント級のマルチモーダル性能を提供します。
+
+## リリースノートに書かれていない V4-Flash-Vision の4つのこと
+
+### 1. テキストエージェントを壊さずにビジョンが追加された ― それがすべて
+
+強力なテキストモデルにビジョンを後付けしたオープンラボはすべて、テキストベンチマークで代償を払ってきました。DeepSeek のリリース表はその見せ場です:**Terminal Bench 2.1** でビジョンモデルは **83.9**(テキストのみの V4-Flash-0731 は 82.7)、**DeepSWE** では **59.3**(54.4 から上昇)、**Toolathlon-Verified** では **75.9**(70.3 から上昇)。これらはどれもビジョンタスクではなく、純粋なコードとツール使用のエージェント評価です。ビジョン版はテキストエージェント作業でテキストのみのチェックポイントより*優れて*おり、劣ってはいません。
+
+これが重要なのは、Chameleon 以来この分野が待ち望んでいた「実証」だからです:ビジョンヘッドが十分に遅い段階で入り、ルーターがテキストエキスパートの特化を続けられる限り、巨大 MoE をテキストとビジョンで共同学習しても、マルチモーダル追加によるテキスト退行は起きません。
+
+### 2. ビジョンエンコーダーには画像あたり384トークンの厳格な予算がある
+
+これは最初のプロンプトを書く前に学ぶべき最も重要な一点です。V4-Flash-Vision-Exp のビジョンエンコーダーは**画像あたり最大384トークン**を割り当てます。そしてこの上限はアーキテクチャ上のもので、商業的なポリシーではありません。これ以上を解放する「高詳細」モードは存在しません。実際的な帰結:
+
+- **大きなスクリーンショットは細かい文字を失う。** 2560×1440 のダッシュボード、画像化された密な CSV、長い PDF ページは、384トークンの視覚特徴で表現できる解像度でエンコードされます。つまり小さいフォントの文字は往復を生き延びません。
+- **拡大縮小ではなく、切り抜く。** チャートから数字を読み取る必要があるなら、ページ全体ではなく、関心領域に切り抜いたチャートを送ってください。
+- **1枚の巨大な画像より複数画像。** 大きな文書は領域ごとのタイルに分割してください。各タイルがそれぞれ384トークンの予算を得ます。
+
+Chartography が 64.3(Claude Opus 4.8 の 65.0 に匹敵)に達する理由であり、同時にフルページのスクリーンショットで12ポイントフォントの脚注をモデルがやはり見落とす理由でもあります。構築するすべてのビジョンエージェントワークフローは、この上限を前提にすべきです。
+
+<VerifyNote lastVerified="2026-09-01" source="https://rits.shanghai.nyu.edu/ai/deepseek-v4-flash-vision-exp-open-weights" />
+
+### 3. MoE ルーティングが異常にスパース ― トークンあたり256のうち6エキスパートが発火
+
+公開されているほとんどの MoE レシピは、32 または 64 のうち 8 エキスパートを活性化します。V4-Flash-Vision-Exp ははるかに広いエキスパートバンクを使います:**256 のルーティングエキスパート + 1 の共有エキスパート**で、**トークンあたり発火するルーティングエキスパートは6つだけ**、活性化率 2.3% です。モデルは **43層、隠れサイズ 4,096** で、ハイブリッドアテンションスタックは2つの仕組みを組み合わせています:
+
+- **Compressed Sparse Attention(CSA)** ― 長距離の読み取りのためのスパースパターン。
+- **Heavily Compressed Attention(HCA)** ― 深いコンテキストの末尾のための積極的に圧縮された形式。
+
+その上に、**Manifold-Constrained Hyper-Connections(mHC)** が標準的な残差接続を制約付き多様体への射影で置き換えており、論文によれば43層スタックを通じた信号伝播を安定させます。これらが合わさって、二次的なアテンションコストなしに **1,048,576 トークンのコンテキストウィンドウ**を謳える理由になっています。
+
+### 4. 価格こそが本当の話
+
+定価、すべて100万トークンあたり:
+
+| モデル | 入力 | 出力 | キャッシュ読み取り |
+|---|---|---|---|
+| **DeepSeek V4-Flash-Vision-Exp**(API) | **$0.22** | **$0.66** | **$0.007** |
+| Claude Opus 4.8 | $15.00 | $75.00 | $1.50 |
+| Kimi K3(キャッシュミス / キャッシュヒット) | $3.00 / $0.30 | $15.00 | $0.30 |
+
+キャッシュ読み取り **$0.007/M** は誤植ではありません。1,000トークンあたりおよそ200分の1セントです。繰り返しのシステムプロンプトや長いコンテキストが再送されるワークロード(エージェントループ、静的コーパスに対する RAG、固定ペルソナとのチャット)では、実効入力価格は崩壊します。生の品質が数ポイント以内であっても、V4-Flash-Vision-Exp がエージェントコスト表で Claude Opus 4.8 のタスクあたりコストのごく一部として登場しているのはこのためです。
+
+<VerifyNote lastVerified="2026-09-01" source="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp">
+価格、コンテキストウィンドウ、MoE ルーティングはリリース時点の公式モデルカードによるものです。これらの数字がどれだけ速く変わるかについては[鮮度の半減期](/docs/frontiers/freshness-half-life)を参照してください。
+</VerifyNote>
+
+## ベンチマーク ― 見出しではなく表を読む
+
+| ベンチマーク | V4-Flash-Vision-Exp | V4-Flash-0731 | Claude Opus 4.8 |
+|---|---|---|---|
+| **テキストエージェント** | | | |
+| Terminal Bench 2.1 | **83.9** | 82.7 | 85.0 |
+| NL2Repo | 57.7 | 54.2 | **69.7** |
+| DeepSWE | **59.3** | 54.4 | 58.0 |
+| Toolathlon-Verified | 75.9 | 70.3 | **76.2** |
+| **マルチモーダルエージェント** | | | |
+| ApexBench(Pass@1) | 36.5 | 26.2† | **39.4** |
+| Agents' Last Exam | **27.3** | 25.2† | 25.7 |
+| Chartography | 64.3 | — | **65.0** |
+| ZeroBench(Pass@5) | **35.0** | — | 34.0 |
+
+*† 以前のテキストのみのチェックポイントを、ネイティブに読めない画像で採点したもの ― 下限であって、公平な勝負ではない。*
+
+表を素直に読むと:
+
+- **テキストエージェント作業**では、V4-Flash-Vision-Exp は全体的に Claude Opus 4.8 から数ポイント以内にあり、すべての評価で **V4-Flash-0731 を確実に上回って**います。ビジョンは退行なしで追加されました。
+- **マルチモーダルエージェント**では、**Agents' Last Exam** と **ZeroBench Pass@5** で Claude Opus 4.8 を上回り、**ApexBench** と **Chartography** ではわずかに後れを取ります。「マルチモーダルエージェントで Opus に匹敵」がマーケティング文句ではない、初のオープンウェイトリリースです。
+- 接戦ではない唯一のベンチマークは **NL2Repo**(57.7 対 69.7)です。リポジトリ全体のコード変換は、クローズドなフロンティアが依然として本物の差を保っている領域です。
+
+<VerifyNote lastVerified="2026-09-01" source="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp" />
+
+## リリースパターン ― API が先、重みは10日後
+
+V4-Flash-Vision-Exp は **2026年8月21日**に DeepSeek API でローンチし、オープンウェイトとして Hugging Face に着地したのは **8月31日**でした。この10日間のギャップが DeepSeek の新しいデフォルトです。API と重みを同時に出荷してきた Z.ai(GLM)と比べると、DeepSeek は意図的に順序付けしています。
+
+業界の読み:ラボは今や、巨大なオープン MoE が出荷されることで一致しています。残る問題はリリースサイクルの*いつ*重みが届くかです。本番計画にとってこれが意味するのは:
+
+- 初日からオンプレミスが必要なら、GLM ファミリーのリリースを注視する。
+- API から始めて1〜2週間後にセルフホストに切り替えられるなら、DeepSeek がそのパターン。
+
+## V4-Flash-Vision-Exp を動かす
+
+現実的な経路は3つあります。実際に重要な2つの制約で選んでください:重みを自分のインフラに置く必要があるか、そして VRAM(または RAM)にいくら払えるか。
+
+<Steps items={[
+  {
+    title: "経路 A ― DeepSeek のホスト型 API(ほぼ全員のデフォルト)",
+    body: "api.deepseek.com の OpenAI 互換エンドポイント。モデル ID は deepseek-v4-flash-vision-exp。価格は100万トークンあたり $0.22 / $0.66 / $0.007。データレジデンシーやエアギャップの制約がない限り、これが正解です。"
+  },
+  {
+    title: "経路 B ― GB300 × 4 上の vLLM(単一ノードのセルフホスト)",
+    body: "vLLM コンテナは day-0 サポートと deepseek_v4 ツールコールパーサーを同梱しています。GB300 × 4(または同等の B300 構成)のノードが1台必要です。DSpark 投機的デコーディングは --speculative-config で有効化します。DeepSeek が公開したスループット数値には FP8 KV キャッシュと block-size 256 の両方が必須です。"
+  },
+  {
+    title: "経路 C ― llama.cpp / Ollama 経由のコミュニティ GGUF(ワークステーション級)",
+    body: "unsloth/DeepSeek-V4-Flash-Vision-Exp-GGUF は2つの動的量子化を提供しています:155 GB の UD-Q4_K_XL と 162 GB の UD-Q8_K_XL。どちらも 24/48/80 GB の単一 GPU には収まりません。動くのは、192 GB 以上のシステム RAM とオフロードを備えた太いワークステーション、または CPU スピルオーバー付きの小さなマルチ GPU リグです。"
+  }
+]} />
+
+<PromptCard title="ホスト型 API ― Python(OpenAI 互換)">
+{`import openai
+
+client = openai.OpenAI(
+    api_key="YOUR_DEEPSEEK_KEY",
+    base_url="https://api.deepseek.com/v1",
+)
+
+response = client.chat.completions.create(
+    model="deepseek-v4-flash-vision-exp",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What does this chart claim, and what's the one thing it hides?"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/chart.png"}},
+            ],
+        }
+    ],
+)
+print(response.choices[0].message.content)`}
+</PromptCard>
+
+<PromptCard title="セルフホスト ― GB300 × 4 上の vLLM と DSpark">
+{`docker run --gpus all -p 8000:8000 \\
+  vllm/vllm-openai:deepseekv4-flash-vision \\
+  deepseek-ai/DeepSeek-V4-Flash-Vision-Exp \\
+  --kv-cache-dtype fp8 \\
+  --block-size 256 \\
+  --tensor-parallel-size 4 \\
+  --tool-call-parser deepseek_v4 \\
+  --speculative-config '{"method":"dspark","model":"deepseek-ai/DeepSeek-V4-Flash-Vision-Exp","num_speculative_tokens":3}'`}
+</PromptCard>
+
+<PromptCard title="ローカル ― コミュニティ GGUF を使った Ollama">
+{`ollama run hf.co/unsloth/DeepSeek-V4-Flash-Vision-Exp-GGUF:UD-Q4_K_XL
+
+# Compact image syntax the model was trained to accept:
+# <image>path/to/screenshot.png</image>  followed by your prompt`}
+</PromptCard>
+
+## V4-Flash-Vision を選ぶべきとき ― そして Claude に留まるべきとき
+
+**V4-Flash-Vision を選ぶべきとき:**
+
+- Opus 4.8 級のマルチモーダルエージェント品質が必要で、コストが要因になる場合。キャッシュ読み取り価格はクローズドなフロンティアのあらゆるものを圧倒します。
+- ワークロードが 1M トークンのコンテキストから恩恵を受ける場合(長文書 VQA、動画フレーム全体の分析、スクリーンショット付きの大規模リポジトリレビュー)。
+- コンプライアンス、エアギャップ作業、ファインチューニングのためにオープンウェイトが必要で、フロンティア級のハードウェアを持っている(または借りる)場合。
+- 画像のタイリングを制御できる、チャート中心またはダッシュボード解析のパイプラインを構築している場合。
+
+**Claude Opus 4.8(または Sonnet 5)に留まるべきとき:**
+
+- 仕事がリポジトリ全体のコード変換や合成である場合 ― NL2Repo は差が本物である外れ値です(57.7 対 69.7)。
+- Claude 固有の機能が必要な場合:予算付きの拡張思考、[スキル](/docs/claude-code/skills)、[Claude Code](/docs/claude-code/what-is-claude-code) でのサブエージェントオーケストレーション、または [Managed Agents のセッション予算制御](/docs/api/managed-agents-session-budgets)。
+- プロンプトに極小の重要な文字を含む画像があり、タイリングできない場合 ― 384トークンの上限にぶつかって精度を失います。
+- 単一のベンダー / SLA / サポート窓口が欲しく、すでに Anthropic のツール群に投資している場合。
+
+より広いモデル選択のフレームワークについては、[モデルの選び方](/docs/models/choosing-a-model)を参照してください。オープンウェイトの波全体の比較には、[DeepSeek、Qwen とオープンウェイトの波](/docs/models/deepseek-qwen-open-models)が息の長い概観です。
+
+## 最初に噛みつかれる落とし穴
+
+1. **384トークンの上限を忘れる。** 最初に構築する3つのビジョンエージェントは解像度を超過し、小さい文字で静かに精度を失います。計測を仕込んでください:画像ごとの寸法をログに残し、意図的にダウンスケール + タイリングする。
+2. **`--speculative-config` を省くと DSpark は黙って落ちる。** フラグなしでは、vLLM はリリースが発表したスループットの1/3で平然とモデルをサービングします。本番では必ず投機設定を渡してください。
+3. **GGUF はノートPC用モデルではない。** UD-Q4_K_XL は 155 GB です。より小さいマシンで「動いている」と示すコミュニティスレッドは、SSD スワップで秒間1トークン未満で動かしています ― 技術的には動作していても、使い物にはなりません。
+4. **API と重みのバージョン整合は保証されない。** API モデルは黙って更新されることがあります。Hugging Face の重みは `Vision-Exp` に固定されています。API 上でベンチマークが月ごとに数ポイント動くなら、それが理由です。
+5. **`Exp` は実験的という意味。** ビジョン版が本番の V4 リリースまで生き残る保証はありません。この特定のチェックポイントが1年後も存在するという前提で重要なパイプラインを構築しないでください。
+
+## クイズ
+
+<Quiz questions={[
+  {
+    q: "DeepSeek V4-Flash-Vision-Exp では、トークンごとにいくつのパラメータが活性化しますか?",
+    options: [
+      "3050億すべて ― 密なフォワードパス",
+      "およそ130億 ― MoE が256のルーティングエキスパートのうち6つと1つの共有エキスパートにルーティングする",
+      "ちょうど半分 ― 1525億",
+      "画像トークンにはビジョンエンコーダーのみが発火し、テキストはスキップされる"
+    ],
+    answer: 1,
+    explain: "V4-Flash-Vision-Exp はスパースな Mixture-of-Experts モデルです。トークンごとに256のルーティングエキスパートのうち6つと1つの共有エキスパートだけが発火し、アクティブなフットプリントは総数 305B のうち約13B です。これほど大きなモデルが妥当なトークン単価で動くのはそのためです。"
+  },
+  {
+    q: "ビジョンエンコーダーが1枚の画像に割り当てるトークン数のアーキテクチャ上の厳格な上限は?",
+    options: [
+      "1,024トークン ― ほとんどのクローズドなフロンティアモデルと同じ",
+      "384トークン ― 商業的なポリシーではなくアーキテクチャ上の予算",
+      "上限はない。エンコーダーは画像解像度に応じてスケールする",
+      "1M トークンのコンテキストウィンドウによってのみ制限される"
+    ],
+    answer: 1,
+    explain: "各画像は最大384トークンの視覚特徴にエンコードされます。これはアーキテクチャ上のものです。小さい文字のある大きなスクリーンショットは細部を失います。有効な手法は、関心領域に切り抜くか大きな画像をタイリングして、各タイルにそれぞれ384トークンの予算を与えることです。"
+  },
+  {
+    q: "リリース表のどのベンチマークで、V4-Flash-Vision-Exp は実際に Claude Opus 4.8 を上回っていますか?",
+    options: [
+      "掲載されたすべてのベンチマークで Opus を上回る",
+      "どれもない ― すべてで Opus に劣る",
+      "Agents' Last Exam と ZeroBench Pass@5",
+      "NL2Repo と Terminal Bench 2.1"
+    ],
+    answer: 2,
+    explain: "V4-Flash-Vision-Exp は Agents' Last Exam で 27.3 対 25.7、ZeroBench Pass@5 で 35.0 対 34.0 を記録し、両方で Opus 4.8 をわずかに上回ります。ApexBench(36.5 対 39.4)と Chartography(64.3 対 65.0)ではわずかに後れを取り、本物の差は NL2Repo(57.7 対 69.7)に残っています。"
+  },
+  {
+    q: "このモデルの DeepSeek API におけるキャッシュ読み取り入力価格は?",
+    options: [
+      "100万トークンあたり $0.22 ― 標準の入力価格",
+      "100万トークンあたり $0.007 ― 1,000トークンあたりおよそ200分の1セント",
+      "100万トークンあたり $1.50 ― Claude Opus のキャッシュヒット料金と同じ",
+      "100,000トークン未満のキャッシュ読み取りは無料"
+    ],
+    answer: 1,
+    explain: "キャッシュ読み取りは $0.007/M で課金されます。1,000トークンあたりおよそ200分の1セントです。システムプロンプトを繰り返したり静的コンテキストを保持したりするエージェントループでは、これが実効入力コストを崩壊させ、独立した評価で V4-Flash-Vision-Exp が Opus のタスクあたりコストのごく一部に収まる大きな理由になっています。"
+  },
+  {
+    q: "V4-Flash-Vision-Exp を本番でセルフホストする際、vLLM が推奨する単一ノードのハードウェア構成はどれですか?",
+    options: [
+      "24 GB のコンシューマ GPU 1枚",
+      "192 GB のユニファイドメモリを持つ Mac Studio 1台",
+      "GB300 × 4 のノード1台(tensor-parallel-size 4、FP8 KV キャッシュ、DSpark 有効)",
+      "任意の H100 × 8 ノード ― オープンウェイトモデルの標準"
+    ],
+    answer: 2,
+    explain: "公開されたサーブコマンドは、GB300 × 4 のノードで --tensor-parallel-size 4、fp8 KV キャッシュ、block-size 256 を使い、さらに約3倍のスループット向上のために DSpark 投機的デコーディングを加えています。より小さいマシンはコミュニティ GGUF と重い CPU/SSD オフロードでのみ動き、本番では使い物になりません。"
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "DeepSeek V4-Flash-Vision-Exp とは?", back: "DeepSeek の V4 ファミリーで初のネイティブビジョンモデル ― V4-Flash テキストバックボーンに共同学習されたビジョンを追加した 305B スパース MoE(トークンあたり 13B アクティブ)。2026年8月31日に Hugging Face で MIT ライセンスで公開。" },
+  { front: "トークンごとに発火するエキスパート数は?", back: "256のルーティングエキスパートのうち6つと1つの共有エキスパート(活性化率 2.3%)― 典型的な 8/32 や 8/64 の MoE レシピよりはるかにスパース。" },
+  { front: "画像あたりのトークン予算は?", back: "画像あたり384トークン ― ポリシーではなくアーキテクチャ上のもの。細かい文字のある大きなスクリーンショットは細部を失う。対処法は切り抜きかタイリング。" },
+  { front: "CSA + HCA とは?", back: "V4-Flash のハイブリッドアテンションスタック:長距離の読み取りのための Compressed Sparse Attention と、深いコンテキストの末尾のための Heavily Compressed Attention。合わせて二次的なコストなしに 1.048M トークンのコンテキストを可能にする。" },
+  { front: "mHC(Manifold-Constrained Hyper-Connections)とは?", back: "標準的な残差接続の置き換えで、制約付き多様体に射影する。DeepSeek は43層スタックを通じた信号伝播を安定させると報告している。" },
+  { front: "DSpark とは?", back: "V4 ファミリーとともに出荷された投機的デコーディング方式で、vLLM がネイティブにサポート。--speculative-config で有効化する。フラグを忘れるとスループットはリリースが謳う値の約1/3に落ちる。" },
+  { front: "V4-Flash-Vision-Exp の API 価格は?", back: "入力100万トークンあたり $0.22、出力100万トークンあたり $0.66、キャッシュ読み取り100万トークンあたり $0.007。定価ベースで Claude Opus 4.8 の料金のおよそ40分の1。" },
+  { front: "V4-Flash-Vision-Exp が Claude Opus 4.8 を上回るのはどこ?", back: "Agents' Last Exam(27.3 対 25.7)と ZeroBench Pass@5(35.0 対 34.0)。Chartography でも Opus に匹敵(64.3 対 65.0)。" },
+  { front: "Claude Opus 4.8 が依然として本物の差を保っているのはどこ?", back: "NL2Repo(69.7 対 57.7)― リポジトリ全体のコード変換は、クローズドなフロンティアが依然として明確にリードしている領域。" },
+  { front: "Unsloth の2つの GGUF 量子化は?", back: "155 GB の UD-Q4_K_XL と 162 GB の UD-Q8_K_XL。どちらもコンシューマ GPU 1枚には収まらず、ワークステーション級のマルチ GPU か大容量 RAM のオフロードが必要。" },
+  { front: "なぜ DeepSeek は API と重みの間に10日待ったのか?", back: "DeepSeek の新たなリリースパターン ― API が先、重みは10日後。両方を同時に出荷する Z.ai(GLM)と対照的。業界は「巨大なオープン MoE は出荷される」で落ち着いており、残る変数はリリースの順序付け。" }
+]} />
+
+## 出典と参考資料
+
+- [DeepSeek-V4-Flash-Vision-Exp モデルカード](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp) ― 公式のアーキテクチャ、ベンチマーク、トークナイザー、推論例
+- [Unsloth DeepSeek-V4-Flash-Vision-Exp GGUF 量子化](https://huggingface.co/unsloth/DeepSeek-V4-Flash-Vision-Exp-GGUF) ― llama.cpp / Ollama 向けの2つの動的量子化とそのサイズ
+- [分析:DeepSeek が API ローンチの10日後に V4-Flash-Vision-Exp をオープンソース化](https://rits.shanghai.nyu.edu/ai/deepseek-v4-flash-vision-exp-open-weights) ― リリースパターン、384トークンの画像上限、コミュニティの4ビットサイズ
+- [DeepSeek-V4-Flash ベースモデルカード](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) ― V4-Flash-Vision が拡張するテキストバックボーン
+- 関連:[DeepSeek、Qwen とオープンウェイトの波](/docs/models/deepseek-qwen-open-models) ― 息の長い全体像の概観
+- 関連:[Kimi K3:世界最大のオープンウェイトモデル](/docs/models/kimi-k3-open-weight-frontier) ― 2026年のもう一つのオープン MoE の旗艦
+- 関連:[Kimi K3 をローカルで動かす:vLLM、DSpark、そして本当のハードウェア費用](/docs/models/kimi-k3-deploy-locally-vllm-dspark) ― DSpark と正確な vLLM 設定の深掘り
+- 関連:[モデルの選び方](/docs/models/choosing-a-model) ― 息の長いフレームワーク
+- 関連:[プロバイダー横断の AI コスト](/docs/models/what-ai-costs-across-providers) ― これらの価格がより広い市場のどこに位置するか
+
+## 次へ
+
+- [DeepSeek、Qwen とオープンウェイトの波](/docs/models/deepseek-qwen-open-models) ― このモデルが組み込まれるより広いオープンウェイトの風景
+- [Kimi K3:世界最大のオープンウェイトモデル](/docs/models/kimi-k3-open-weight-frontier) ― 比較対象となるもう一つのフロンティアオープン MoE
+- [モデルの選び方](/docs/models/choosing-a-model) ― V4-Flash-Vision が合うときと Claude に留まるべきとき
