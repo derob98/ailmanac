@@ -1,0 +1,224 @@
+---
+sidebar_position: 9.2
+title: "Message Batches — Asynchrone Jobs mit 50 % Rabatt"
+description: "Kosten halbieren und Durchsatz steigern, indem du Massenarbeit in die asynchrone Batches API verlagerst — mit den Fallen, über die Leute stolpern."
+keywords: [message batches, batch api, anthropic batch, 50% discount, async claude, bulk generation, evals]
+---
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={[
+  "Die Arbeitslasten erkennen, bei denen sich die Message Batches API innerhalb eines Tages bezahlt macht",
+  "Einen Batch einreichen, abfragen und die Ergebnisse zurückstreamen — von Anfang bis Ende",
+  "Den Batch-Rabatt mit Prompt Caching stapeln, ohne eines von beiden kaputt zu machen",
+  "Die vier Features vermeiden, die einen Request stillschweigend vom Batching ausschließen",
+  "Dasselbe Muster auf OpenAI und Gemini übertragen — alle geben 50 % Rabatt auf asynchrone Arbeit"
+]} />
+
+Die Hälfte deiner Anthropic-Rechnung muss wahrscheinlich gar nicht synchron sein. Nächtliche Evals, Backfills, Moderationsläufe und Massen-Content-Generierung interessiert es nicht, ob eine Antwort in 800 ms oder 40 Minuten zurückkommt — und Anthropic berechnet **50 % weniger**, wenn du diesen Kompromiss akzeptierst. Die Message Batches API ist der Weg, ihn zu nutzen.
+
+## Wann sich Batching bezahlt macht
+
+Greif zu Batches, wenn *alle* diese Punkte zutreffen — ein einziges "Nein", und du willst wahrscheinlich stattdessen die reguläre Messages API.
+
+| Signal | Batch passt, wenn… |
+|---|---|
+| **Latenz** | Du kannst bis zu 24 Stunden warten. Die meisten Batches sind in unter 1 Stunde fertig, aber die SLA liegt bei 24. |
+| **Volumen** | Du hast mindestens ein paar hundert Requests zu senden. Die API akzeptiert bis zu 100.000 pro Batch. |
+| **Interaktivität** | Kein Nutzer schaut auf einen Spinner. Das ist für Offline-Arbeit. |
+| **Ergebnisform** | Du kannst eine JSONL-Ergebnisdatei verarbeiten — keinen Live-Token-Stream. |
+
+Die klassischen Gewinne:
+
+- **Evals** — 5.000 Modellausgaben vor einem Release gegen eine Rubrik bewerten.
+- **Backfills** — einen bestehenden Datensatz neu klassifizieren, wenn sich dein Prompt ändert.
+- **Massengenerierung** — Produktbeschreibungen, Zusammenfassungen, Meta-Tags, Übersetzungen im Katalogmaßstab.
+- **Moderation / Labeling** — Nutzerinhalte täglich nach Zeitplan durchsehen.
+- **Synthetische Daten** — Trainingspaare für ein kleineres nachgelagertes Modell erzeugen.
+
+## Die Limits, die deinen Job prägen
+
+<VerifyNote lastVerified="2026-08-20" source="https://platform.claude.com/docs/en/build-with-claude/batch-processing">
+Batch-Limits, Rabattprozentsatz und nicht unterstützte Parameter können sich verschieben — prüfe die Anthropic-Docs zur Batch-Verarbeitung, bevor du deine Architektur auf eine bestimmte Zahl auslegst.
+</VerifyNote>
+
+| Limit | Wert |
+|---|---|
+| **Rabatt** | 50 % auf die Standardpreise für Input- *und* Output-Tokens, bei jedem unterstützten Modell. |
+| **Batch-Größe** | 100.000 Requests oder 256 MB, je nachdem, was zuerst erreicht wird. |
+| **Durchlaufzeit** | Die meisten unter 1 Stunde; hartes Ablaufdatum nach 24 Stunden — alles, was nach 24 h unverarbeitet ist, kommt als `expired` zurück. |
+| **Aufbewahrung der Ergebnisse** | 29 Tage nach Batch-Erstellung, danach sind die Ergebnisse nicht mehr verfügbar (Batch-Metadaten bleiben). |
+| **Modellunterstützung** | Alle aktiven Claude-Modelle — Fable 5, Mythos 5, Opus 5, Opus 4.x, Sonnet 5, Sonnet 4.x, Haiku 4.5. |
+| **Geltungsbereich** | Pro Workspace. Ein Key aus Workspace A kann die Batches von Workspace B nicht sehen. |
+| **Ausgabenlimit** | Batches können dein konfiguriertes Workspace-Ausgabenlimit wegen paralleler Verarbeitung leicht überschreiten. |
+
+## Die Drei-Schritte-Schleife
+
+Jeder Batch-Job folgt derselben Form — erstellen, abfragen, Ergebnisse streamen.
+
+<Steps items={[
+  {title: "Den Batch erstellen", body: "POST /v1/messages/batches mit einem requests-Array. Jedes Element hat eine eindeutige custom_id (dein Join-Schlüssel zurück zu deinen Daten) plus einen params-Block, der genau wie ein regulärer Messages-Aufruf aussieht. Die API gibt eine Batch-id und einen processing_status von in_progress zurück."},
+  {title: "Auf Abschluss pollen", body: "GET /v1/messages/batches/[id] in einer Schleife — Intervalle von sechzig Sekunden reichen völlig; Batches sind keine Sub-Sekunden-Arbeit. Hör auf, wenn processing_status auf ended springt. Beobachte request_counts für eine Live-Fortschrittsanzeige (processing / succeeded / errored / canceled / expired)."},
+  {title: "Die Ergebnisse streamen", body: "Die Batch-Antwort stellt eine results_url bereit, die eine JSONL-Datei liefert — eine Zeile pro Request, markiert mit deiner custom_id. Streame sie, puffere sie nicht: Eine Ergebnisdatei für 100k Requests kann Hunderte Megabyte groß sein, und die SDKs iterieren zeilenweise, damit du nie alles in den Speicher lädst."}
+]} />
+
+## Einen Batch erstellen (cURL)
+
+Der minimal funktionsfähige Batch — zwei Opus-5-Aufrufe, jeder markiert, damit du die Ergebnisse zu deinen Quellzeilen zurückführen kannst.
+
+<PromptCard title="POST /v1/messages/batches">{`curl https://api.anthropic.com/v1/messages/batches \\
+  --header "x-api-key: $ANTHROPIC_API_KEY" \\
+  --header "anthropic-version: 2023-06-01" \\
+  --header "content-type: application/json" \\
+  --data '{
+    "requests": [
+      {
+        "custom_id": "row-00001",
+        "params": {
+          "model": "claude-opus-5",
+          "max_tokens": 1024,
+          "messages": [
+            {"role": "user", "content": "Summarize: ..."}
+          ]
+        }
+      },
+      {
+        "custom_id": "row-00002",
+        "params": {
+          "model": "claude-opus-5",
+          "max_tokens": 1024,
+          "messages": [
+            {"role": "user", "content": "Summarize: ..."}
+          ]
+        }
+      }
+    ]
+  }'`}</PromptCard>
+
+`custom_id` muss `^[a-zA-Z0-9_-]{1,64}$` entsprechen und innerhalb des Batches eindeutig sein. Behandle sie als deinen Fremdschlüssel — die meisten setzen sie auf ihre Zeilen-ID oder einen Hash der Eingabe, damit sich die Ergebnisse sauber zurückführen lassen.
+
+## Status abfragen (Python)
+
+<PromptCard title="Warten, bis der Batch fertig ist">{`import time, anthropic
+
+client = anthropic.Anthropic()
+batch_id = "msgbatch_..."
+
+while True:
+    batch = client.messages.batches.retrieve(batch_id)
+    if batch.processing_status == "ended":
+        break
+    print(batch.request_counts)  # live progress
+    time.sleep(60)`}</PromptCard>
+
+## Ergebnisse streamen und jeden Typ behandeln
+
+Jeder Request landet in einem von vier Eimern. **Abgerechnet wird nur `succeeded`** — Fehler, Abbrüche und Abläufe sind kostenlos.
+
+| Ergebnistyp | Was er bedeutet | Aktion |
+|---|---|---|
+| `succeeded` | Eine Message ist zurückgekommen. | Über `custom_id` zusammenführen. |
+| `errored` | Ungültiger Request oder vorübergehender Serverfehler. | Bei `invalid_request_error` korrigieren und neu einreichen; bei Serverfehlern direkt erneut versuchen. |
+| `canceled` | Du hast den Batch abgebrochen, bevor dieser Request lief. | Neu einreichen, falls noch nötig. |
+| `expired` | Das 24-Stunden-Fenster ist abgelaufen, bevor dieser Request lief. | Neu einreichen — meist ein Zeichen, dass der Batch zu groß war oder die Plattform ausgelastet war. |
+
+<PromptCard title="Ergebnisse streamen (Python)">{`for r in client.messages.batches.results(batch_id):
+    match r.result.type:
+        case "succeeded":
+            save(r.custom_id, r.result.message)
+        case "errored":
+            if r.result.error.error.type == "invalid_request_error":
+                log_bad_row(r.custom_id, r.result.error)
+            else:
+                retry_queue.append(r.custom_id)
+        case "expired":
+            retry_queue.append(r.custom_id)`}</PromptCard>
+
+Lade die gesamte Ergebnisdatei NICHT mit einem naiven `requests.get(...).text` herunter — bei großen Batches erschöpft das den RAM. Die SDK-Helfer iterieren bereits zeilenweise; das cURL-Äquivalent ist, die Antwort in `jq -c` zu pipen, statt sie zu materialisieren.
+
+## Verstärkung: Batching mit Prompt Caching stapeln
+
+Der Rabatt stapelt sich mit [Prompt Caching](/docs/api/prompt-caching), und hier wird die Ökonomie absurd. Ein Cache-Treffer kostet 10 % des Input-Preises; Batching halbiert das dann. Bei einem großen Eval, in dem jeder Request denselben 20k-Token-System-Prompt und dieselbe Rubrik teilt, fällt der Input-Posten auf **5 % des Listenpreises** — eine 20-fache Reduktion.
+
+Zwei Dinge, die du wissen musst:
+
+1. **Nutze die 1-Stunden-Cache-Dauer.** Die Standard-TTL von 5 Minuten läuft in der Regel ab, bevor ein großer Batch sie durchgearbeitet hat. Anthropics eigene Docs empfehlen den 1-Stunden-Cache ausdrücklich fürs Batching.
+2. **`max_tokens: 0` (Cache-Vorwärmen) ist innerhalb eines Batches *nicht* erlaubt** — ein während der Batch-Verarbeitung geschriebener ephemerer Eintrag würde ablaufen, bevor der Folgeaufruf läuft, also lehnt die Plattform ihn direkt ab.
+
+Die Gewinnerform: Den Cache mit einem einzigen regulären Messages-Aufruf vorwärmen, warten, bis er geschrieben ist, und dann den Batch abfeuern, der dieses Cache-Präfix in der nächsten Stunde wiederverwendet.
+
+## Was in einen Batch darf — und was nicht
+
+**Ja, batchbar:** Vision, alle Server-Tools (Web Search, Web Fetch, Code Execution, MCP-Connectors, Advisor, Tool Search), System-Messages, Multi-Turn, Extended Thinking, die meisten Beta-Features. Wenn es in der regulären Messages API funktioniert, funktioniert es mit ziemlicher Sicherheit auch in einem Batch.
+
+**Nein, bei der Validierung abgelehnt:**
+
+| Parameter | Warum blockiert |
+|---|---|
+| `stream: true` | Ergebnisse kommen als Datei zurück, nicht als Live-Stream. |
+| `speed` (Fast Mode) | Fast Mode optimiert synchrone Latenz — asynchron bedeutungslos. |
+| `store` / `previous_thread_event_id` (Threads) | Threads sind zustandsbehaftet; Batches nicht. |
+| `cache_hint` / `context_hint` | Routing-Hinweise beeinflussen nur die synchrone Planung. |
+| `max_tokens: 0` | Würde einen Cache-Eintrag schreiben, der abläuft, bevor du ihn nutzt. |
+| `research_preview_2026_02: "active"` | Der Research-Preview-Modus ist nicht auf dem Batch-Pfad. |
+
+Die Validierung läuft **asynchron**, ein fehlerhafter Request meldet sich also erst, wenn der gesamte Batch endet. Bevor du 50.000 Requests einreichst, schick einen durch die einfache Messages API, um sicherzustellen, dass die Form validiert.
+
+## Dasselbe Muster bei allen Anbietern
+
+Die Batch-Preise haben sich angeglichen. Alle drei großen Frontier-Anbieter bieten heute dieselbe Grundform — 50 % Rabatt, ~24 h SLA, JSONL rein und raus —, was es zu einem wirklich portablen Muster statt einem reinen Claude-Trick macht.
+
+| Anbieter | Rabatt | SLA | Einreichung | Querverweise |
+|---|---|---|---|---|
+| **Anthropic** — Message Batches | 50 % auf Input+Output | Die meisten unter 1 h, hartes Ablaufdatum nach 24 h | JSON-Body (`requests[]`), max. 100k / 256 MB | [Docs](https://platform.claude.com/docs/en/build-with-claude/batch-processing) |
+| **OpenAI** — Batch API | 50 % auf Input+Output | Die meisten 1–6 h, 24 h SLA | JSONL-Datei-Upload, bis zu 50k Requests pro Batch | [Docs](https://developers.openai.com/api/docs/guides/batch) |
+| **Google** — Gemini Batch API | 50 % auf Input+Output | Die meisten unter 24 h SLA | Inline- oder GCS-gestützter Batch-Job; Context Caching unterstützt | [Docs](https://ai.google.dev/gemini-api/docs/batch-api) |
+
+<VerifyNote lastVerified="2026-08-20" source="https://developers.openai.com/api/docs/guides/batch">
+Anbieterübergreifende Batch-Preise und -Limits sind stabil, aber nicht fix — bestätige die Seite jedes Anbieters erneut, bevor du eine Routing-Schicht um bestimmte Zahlen herum entwirfst.
+</VerifyNote>
+
+Die übertragbare Architektur: ein kleiner "Job Runner", der eine Quelltabelle liest, Zeilen in 10k-Zeilen-Batches aufteilt, pro Anbieter einreicht, pollt und die Ergebnisse über deine `custom_id` zusammenführt. Nur die Submit-/Poll-/Results-Aufrufe unterscheiden sich — der Rest deiner Pipeline ist anbieterunabhängig. Siehe [Cross-AI Prompt-Übersetzung](/docs/prompting/cross-ai-translation) für dieselbe Idee, angewandt auf den Prompt selbst.
+
+## Häufige Fehler
+
+- **Interaktiven Traffic batchen.** Ein Nutzer ist auf der Seite — selbst 60 Sekunden Wartezeit sind ein kaputtes Produkt. Batches sind für Offline-Arbeit nach Zeitplan.
+- **Winzige Jobs batchen.** 20 Requests sind die Polling-Schleife und die 24-Stunden-Obergrenze nicht wert. Unter ein paar hundert Requests nutze einfach die reguläre Messages API mit Parallelität.
+- **Auf den ganzen Batch blockieren, obwohl du streamen könntest.** Die vollständige JSONL-Datei in den Speicher zu laden funktioniert bei 50 Zeilen und läuft bei 50.000 in einen OOM. Iteriere.
+- **`expired`-Ergebnisse ignorieren.** Sie sind kostenlos, aber sie sind unerledigte Arbeit. Verfolge sie und stelle sie neu in die Warteschlange — sonst verliert deine Pipeline in Spitzenlastzeiten stillschweigend Zeilen.
+- **Annehmen, die Validierung sei synchron.** Ein fehlerhafter Request in einer Zeile schlägt nicht sofort fehl; er kommt am Ende mit dem Rest zurück. Teste zuerst eine Zeile über die einfache Messages API.
+- **Den Join-Schlüssel verlieren.** Batches werden in beliebiger Reihenfolge fertig, und die Ergebnisdatei ist nicht nach Eingabereihenfolge sortiert. Wenn du keine aussagekräftige `custom_id` setzt, kannst du die Ergebnisse nicht zuverlässig zu deinen Quelldaten zurückführen.
+- **Die 29-Tage-Aufbewahrung vergessen.** Danach liefert `results_url` nichts mehr. Lade die Ergebnisse herunter und persistiere sie als Teil der Pipeline in deinem eigenen Speicher.
+
+<Flashcards title="Das Wesentliche" cards={[
+  {front: "Rabatt", back: "50 % auf die Standardpreise für Input- UND Output-Tokens, bei jedem aktuell unterstützten Claude-Modell. Stapelt sich mit Prompt Caching."},
+  {front: "Batch-Größenlimits", back: "100.000 Requests ODER 256 MB pro Batch — je nachdem, welche Obergrenze zuerst erreicht wird."},
+  {front: "Durchlaufzeit-SLA", back: "Die meisten Batches sind in unter 1 Stunde fertig. Hartes Ablaufdatum nach 24 Stunden; unverarbeitete Requests kommen als expired zurück."},
+  {front: "Aufbewahrung der Ergebnisse", back: "29 Tage ab Batch-Erstellung. Batch-Metadaten bleiben dauerhaft sichtbar, aber results_url liefert nach diesem Fenster keine Daten mehr."},
+  {front: "Abrechnungsregel", back: "Abgerechnet werden NUR succeeded-Requests. Errored, canceled und expired Requests sind kostenlos."},
+  {front: "Die Ausschlusskriterien", back: "stream:true, Fast Mode (speed), Threads (store / previous_thread_event_id), cache_hint / context_hint, max_tokens:0 und der aktuelle Research-Preview-Modus werden alle bei der Validierung abgelehnt."},
+  {front: "Custom ID", back: "Dein Fremdschlüssel zurück zu den Quelldaten. Muss dem Muster [Caret a-zA-Z 0-9 Unterstrich Bindestrich, Länge 1 bis 64, Dollar] entsprechen und innerhalb des Batches eindeutig sein. Ergebnisse kommen unsortiert zurück — du brauchst sie zum Zusammenführen."},
+  {front: "Cache-Dauer für Batches", back: "Nutze die 1-Stunden-TTL des Prompt Caching, nicht die Standard-5-Minuten-TTL — ein großer Batch überdauert das kürzere Fenster in der Regel."}
+]} />
+
+<Quiz title="Prüfe dich selbst" questions={[
+  {q: "Welche Arbeitslast passt SCHLECHT zur Batches API?", options: ["Ein nächtlicher Job, der 8.000 Eval-Prompts neu bewertet", "Ein einmaliger Backfill von 40.000 Produktbeschreibungen", "Ein Live-Chat-Feature, bei dem ein Nutzer auf die Antwort wartet"], answer: 2, explain: "Batches haben eine 24-Stunden-SLA und keinen Live-Stream. Alles, worauf ein Mensch schaut, sollte auf der regulären Messages API bleiben."},
+  {q: "Du hast 10.000 Requests gebatcht. 9.200 succeeded, 500 errored, 200 canceled, 100 expired. Für wie viele zahlst du?", options: ["10.000", "9.700", "9.200"], answer: 2, explain: "Nur succeeded-Requests werden abgerechnet. Errored, canceled und expired sind alle kostenlos — aber die 100 expired sind unerledigte Arbeit, die du neu in die Warteschlange stellen musst."},
+  {q: "Du willst einen riesigen System-Prompt über einen Batch mit 40.000 Requests wiederverwenden. Welche Cache-TTL solltest du nutzen?", options: ["Den Standard-5-Minuten-Cache", "Den 1-Stunden-Cache", "Keinen Cache — Batches überspringen das Caching"], answer: 1, explain: "Ein Batch mit 40k Requests läuft mit ziemlicher Sicherheit länger als 5 Minuten. Anthropic empfiehlt ausdrücklich die 1-Stunden-Cache-Dauer fürs Batching, und Batches stapeln den Caching-Rabatt mit dem 50-%-Batch-Rabatt."},
+  {q: "Deine Batch-Ergebnisdatei für einen großen Job ist 400 MB groß. Wie verarbeitest du sie richtig?", options: ["Die ganze Datei mit einem einzigen HTTP GET herunterladen und parsen", "Die JSONL zeilenweise über den SDK-Helfer streamen", "results_url überspringen und den Batch erneut pollen, bis er Inline-Ergebnisse liefert"], answer: 1, explain: "Batches stellen eine results_url bereit, die auf eine JSONL-Datei zeigt, und die offiziellen SDKs iterieren gerade deshalb zeilenweise, weil diese Dateien Hunderte MB groß sein können. Sie ganz herunterzuladen riskiert einen OOM."}
+]} />
+
+<Callout type="takeaways" items={[
+  "Batching ist der größte einzelne Hebel für Anthropic-Ausgaben bei Offline-Arbeitslasten — 50 % Rabatt, kein Umschreiben des Prompts nötig.",
+  "Der Tausch betrifft Latenz und Interaktivität, nicht Qualität. Gleiches Modell, gleiche Ausgabeform, gleiche Features.",
+  "Stapel es mit Prompt Caching und der 1-Stunden-TTL für die echte Ökonomie — 5 % des Listen-Input-Preises sind bei Arbeitslasten mit gemeinsamem Präfix erreichbar.",
+  "Setze immer eine aussagekräftige custom_id; streame immer die Ergebnisdatei; stelle expired-Zeilen immer neu in die Warteschlange.",
+  "Das Muster ist portabel: OpenAI und Gemini geben beide 50 % Rabatt auf asynchrone Arbeit mit ~24 h SLA — bau einen Job Runner, route über Anbieter hinweg."
+]} />
+
+## Weiter
+
+- Den Verstärkungsrabatt stapeln → [Prompt Caching & Kostenoptimierung](/docs/api/prompt-caching)
+- Ein Offline-Eval entwerfen, das Batches nutzt → [Evals](/docs/foundations/evals)
+- Denselben Job Runner auf andere Anbieter übertragen → [Cross-AI Prompt-Übersetzung](/docs/prompting/cross-ai-translation)
+- Kosten Ende-zu-Ende beobachten, bevor du hochskalierst → [Tokens & Preise](/docs/api/tokens-and-pricing)

@@ -1,0 +1,198 @@
+---
+sidebar_position: 21.7
+title: "Cloudflare Kitesurf: Die erste Browser-Runtime, die für KI-Agenten gebaut wurde (nicht für Menschen)"
+description: "Am 6. August 2026 hat Cloudflare Kitesurf gestartet, einen zustandslosen, agentenorientierten Browser, der vollständig in V8-Isolates auf Workers läuft. Er verbraucht bei gängigen Agentenaufgaben 3-7x weniger CPU und Speicher als Chromium — um den Preis von ~1,7x mehr Wanduhrzeit. In Rust geschrieben, nutzt Firefox' CSS-Parser (Stylo) und die Blitz-Rendering-Engine, Drop-in-kompatibel mit Puppeteer/Playwright über das Chrome DevTools Protocol. Diese Seite: was sich geändert hat, wann man ihn statt Headless Chrome nehmen sollte, wie man ihn in Claude Code / Codex / deinen MCP-Client einbindet, und die vier Dinge, die er schlicht noch nicht kann."
+keywords: [Cloudflare Kitesurf, agent-first browser, Browser Run, Chrome DevTools Protocol, headless browser alternative, Chromium alternative, Blitz rendering engine, Stylo CSS parser, V8 isolate browser, Puppeteer, Playwright, chrome-devtools-mcp, agent web automation, stateless browser, browser-for-agents]
+---
+
+<LevelBadge level="intermediate" />
+
+Ein Jahrzehnt lang bedeutete „programmatischer Browser“ Chromium — Headless Chrome unter Puppeteer, Playwright, Selenium oder einem der gehosteten Chromium-Dienste. Jeder Agent, der im Web surft, hat für eine Rendering-Engine bezahlt, die dafür entworfen wurde, Pixel für einen Menschen richtig aussehen zu lassen: Tabs, Erweiterungen, Themes, JIT-kompiliertes JavaScript, GPU-Compositing, Animationen, das volle Programm. KI-Agenten brauchen nichts davon. Am **6. August 2026** hat Cloudflare [**Kitesurf**](https://blog.cloudflare.com/kitesurf/) ausgeliefert — eine zustandslose Browser-Runtime, von Grund auf für Agenten geschrieben, die vollständig in V8-Isolates auf Workers läuft und den Kompromiss offen zugibt: **3–7× weniger CPU und Speicher als Chromium, im Tausch gegen etwa 1,7× mehr Wanduhrzeit pro Aufgabe.** Für eine autonome Flotte, die pro Sekunde zahlt, kippt diese Rechnung oft in die andere Richtung.
+
+Diese Seite ist die praktische Lektüre: was Kitesurf tatsächlich ist (eine Runtime, kein Produkt), wie sich die Zahlen aufschlüsseln, wann der Kompromiss zu deinen Gunsten wirkt, wie du Puppeteer oder Playwright in einer Zeile darauf zeigen lässt, was er schlicht noch nicht kann und wie er neben Chromium in Cloudflares eigenem Browser-Run-Produkt steht.
+
+<Callout type="objectives" items={[
+  "Verstehen, was sich ändert, wenn ein Browser für Agenten statt für Menschen gebaut wird — und warum das die CPU-/Speicher-/Wanduhrzeit-Rechnung verändert",
+  "Die Kitesurf-vs-Chromium-Benchmarkzahlen ehrlich lesen, einschließlich der 1,7x-Wanduhrzeit-Verlangsamung, auf die du dich einlässt",
+  "Die vier Dinge kennen, die Kitesurf heute nicht kann (Video, WebGL, TLS-Bot-Challenges, persistente authentifizierte Sitzungen)",
+  "Kitesurf mit einer einzigen Endpunktänderung in deinen bestehenden Puppeteer-/Playwright-/chrome-remote-interface-Code einbinden",
+  "Den chrome-devtools-mcp-Client so konfigurieren, dass Claude Code, Codex oder jeder MCP-fähige Agent Kitesurf statt Chromium steuert",
+  "Ein mentales Modell dafür aufbauen, wann Kitesurf gewinnt (stoßweise, kurz, HTML-lastig) und wann Chromium weiterhin gewinnt (Video, WebGL, echte Nutzersitzungen)",
+]} />
+
+## Was „für Agenten gebaut“ tatsächlich bedeutet
+
+Kitesurf trifft eine ungewöhnliche Reihe von Kompromissen, und jeder folgt aus derselben Prämisse: **Der Leser ist ein Sprachmodell, kein Mensch**. Das definiert neu, worauf der Browser optimieren muss.
+
+- **Keine Tabs, keine Themes, keine Erweiterungen, kein pixelgenaues Rendering.** Ein Agent wechselt keine Tabs, interessiert sich nicht für deinen Dark Mode und will meist das DOM, den extrahierten Text oder einen Screenshot als Beleg — nicht einen wunderschön geglätteten Frame.
+- **Standardmäßig zustandslos.** Jede Sitzung ist flüchtig. Es gibt kein persistentes Profil zum Aufwärmen, kein langlebiges Login. Das passt zu einer Flotte kurzer Agentenläufe; es passt nicht zu „melde dich als ich an und bleib eine Stunde eingeloggt“.
+- **Läuft in V8-Isolates auf Workers, nicht als schwergewichtiger OS-Prozess.** Chromium startet mehrere Prozesse pro Browserinstanz und frisst Hunderte Megabyte, nur um eine leere Seite zu öffnen. Kitesurf bootet in derselben Runtime, die deine Workers bedient, sodass die Kaltstartkosten näher an einer Serverless-Funktion liegen als am Start von Chrome.
+- **JS läuft auf Boa (einem Rust-JS-Interpreter), nicht auf V8s JIT.** Das ist der Ursprung der Wanduhrzeit-Verlangsamung, und es ist eine bewusste Entscheidung: Boa *innerhalb* des V8-Isolates laufen zu lassen, hält das Sandboxing kohärent, aber Boa ist ein Interpreter, kein JIT — numerisch anspruchsvolles JS zahlt also einen echten Preis. Die meisten Agentenaufgaben sind DOM-Umschichten, kein Rechnen; deshalb liegt die durchschnittliche Verlangsamung nur bei ~1,7×.
+- **Kompatibel, wo es zählt: Er spricht das Chrome DevTools Protocol.** CDP ist das, womit Puppeteer, Playwright und jedes ernsthafte Browser-Automatisierungstool tatsächlich sprechen. Wenn dein Code CDP spricht, ist Kitesurf nur einen einzeiligen Endpunkt-Tausch entfernt.
+
+## Die Zahlen und wie man sie liest
+
+Die wichtigste Tabelle des Kitesurf-Launches, aus [Cloudflares eigenen Benchmarks](https://blog.cloudflare.com/kitesurf/):
+
+| Aufgabe | Kitesurf | Chromium | Richtung |
+|------|----------|----------|-----------|
+| CPU, Screenshot erstellen | **380 ms** | 1.173 ms | **3,1× weniger CPU** |
+| CPU, HTML extrahieren | **229 ms** | 877 ms | **3,8× weniger CPU** |
+| Speicher, Screenshot erstellen | **57,8 MiB** | 271,0 MiB | **4,7× weniger Speicher** |
+| Speicher, HTML extrahieren | **39,4 MiB** | 273,7 MiB | **7,0× weniger Speicher** |
+| Wanduhrzeit, Screenshot | 1.148 ms | **637 ms** | Chromium ~1,8× schneller |
+| Wanduhrzeit, HTML-Extraktion | 820 ms | **472 ms** | Chromium ~1,7× schneller |
+
+Zwei Beobachtungen, die die meisten Berichte übersehen:
+
+1. **CPU und Wanduhrzeit driften auseinander, weil Chromiums JIT während des Laufs härter um die CPU kämpft.** Chromium ist früher fertig, verbraucht aber 3–4× mehr CPU-Millisekunden, um dorthin zu kommen. Auf einer geteilten Serverless-Runtime zahlst du für CPU-Zeit, nicht für Wanduhrzeit — Kitesurf ist also gleichzeitig günstiger *und* langsamer, und das ist kein Widerspruch.
+2. **Beim Speicher ist die Lücke am größten — und Speicher ist das, was deine Parallelitätsobergrenze begrenzt.** 7× weniger Speicher für die HTML-Extraktion ist die Zahl, die „ein Worker kann 30 gleichzeitige Agentensitzungen halten statt 4“ freischaltet. Das ist oft der eigentliche Grund zu wechseln, nicht die CPU-Zahl.
+
+`★` **Die Heuristik:** Wenn du eine kleine Zahl langer, interaktiver Sitzungen betreibst (der eigene Agent einer Person, der eine echte Website steuert), gewinnt Chromiums Wanduhrzeit-Geschwindigkeit weiterhin. Wenn du viele kurze, stoßweise Extraktionen parallel betreibst (Evaluierungen, Scraping, Screenshots einer URL-Liste), dominieren Kitesurfs Speicher- und CPU-Effizienz — und der Unterschied von ~500 ms Wanduhrzeit pro Aufgabe ist unsichtbar, sobald du 5× mehr davon gleichzeitig ausführen kannst.
+
+## Architektur: Rust und Firefox, versteckt vor aller Augen
+
+Kitesurf ist nicht „noch ein Headless-Browser“. Er ist eine handgebaute Runtime aus Teilen, von denen die meisten nicht wussten, dass es sie gibt. Das vollständige Komponentendiagramm aus dem Launch-Post:
+
+- **Engine** — der nach außen gerichtete Worker, der das Chrome DevTools Protocol spricht und den Sitzungszustand hält.
+- **PageScript** — startet eine isolierte Sitzung pro Seite. Parst HTML mit **[Blitz](https://github.com/DioxusLabs/blitz)** (einer modularen Rust-Rendering-Engine vom Dioxus-Team) und CSS mit **[Stylo](https://github.com/servo/stylo)** — genau der CSS-Engine, die in Firefox ausgeliefert wird. Das ist kein Fork und kein Nachbau; es ist dieselbe Rust-Crate.
+- **PageRenderer** — verwandelt das gestylte DOM mit Blitz' Paint-Modul plus **Parley** für Text-Shaping in Pixel. Gibt PNG, JPEG oder PDF aus.
+- **SandboxOutbound** — isoliert Netzwerk-I/O und setzt CORS- und Cookie-Grenzen auf der Worker-Ebene durch, statt dem Browserprozess zu vertrauen.
+
+Die tragende Überraschung ist Stylo. Firefox' CSS-Engine ist eines der am härtesten erprobten Rust-Stücke, das irgendwo in Produktion läuft, und Cloudflare nutzt es direkt. Das ist ein großer Teil des Grundes, warum Kitesurf nach zwölf Wochen Entwicklung bereits **235.000+ Web-Platform-Test-Subtests** besteht — 97 % bei DOM, 96 % bei HTML, 97 % bei SVG, 95 % bei XHR und CORS. Sie haben die Standardkonformität nicht neu geschrieben; sie haben sie ausgeliehen.
+
+<Callout type="warning" items={[
+  "Kitesurfs JS-Runtime ist Boa, nicht V8s JIT. Wenn deine Automatisierung numerisch oder kryptografisch anspruchsvolles clientseitiges JS ausführt (etwa eine Seite, die im Browser etwas mined, oder ein Canvas mit schwerer Berechnung), rechne mit mehr als der durchschnittlichen ~1,7x-Verlangsamung. DOM-Umschichten und Framework-Code (React-Hydration, Vue, TodoMVC-artig) ist der Bereich, in dem der Durchschnitt gilt."
+]} />
+
+## Wann man zu Kitesurf greifen sollte — und wann nicht
+
+<Steps items={[
+  {title: "Bevorzuge Kitesurf, wenn die Aufgabe kurz, zustandslos und HTML-förmig ist", body: "Eine Liste von URLs screenshotten. Strukturierte Daten aus einer statischen Seite extrahieren. Eine PDF-Rechnung rendern. Eine moderne React-Landingpage als Snapshot an ein Modell füttern. Das sind die Aufgaben, an denen die Benchmarks gemessen werden und bei denen die Speicherersparnis echte Parallelität freischaltet."},
+  {title: "Bevorzuge Kitesurf, wenn du nach CPU-Zeit oder Speicherbedarf zahlst", body: "Cloudflare Workers, Lambda, Cloud Run, jedes Abrechnungsmodell pro Anfrage. 3-7x weniger CPU/Speicher ist die Zahl, die auf deiner Rechnung auftaucht, nicht die 1,7x Wanduhrzeit-Kosten."},
+  {title: "Bevorzuge Chromium, wenn die Aufgabe Video, WebGL oder ein echtes Login braucht", body: "Kitesurf kann noch kein Video rendern, kein WebGL ausführen, keine modernen TLS-Fingerprint-Bot-Challenges bestehen (Cloudflares eigenes Turnstile, Akamai, PerimeterX usw.) und bewahrt authentifizierte Sitzungen nicht zwischen Aufrufen. Ein Shared-Login-Browsing-Muster wie ego lite (siehe /docs/models/browser-agents-shared-login) ist ein anderes Werkzeug für eine andere Aufgabe."},
+  {title: "Bevorzuge Chromium, wenn die Latenz eines einzelnen Aufrufs wichtiger ist als der Durchsatz", body: "Ein nutzerorientierter Agent, der auf einen einzelnen Seitenaufruf wartet, spürt die zusätzlichen 500 ms. Eine Hintergrund-Pipeline, die nachts 10.000 URLs verarbeitet, nicht."},
+  {title: "Route zwischen beiden, wenn du kannst", body: "Cloudflares Browser-Run-Produkt bietet beide an; du wählst pro Anfrage mit einem browser=kitesurf-Parameter. Wenn du eine Plattform baust, verdrahte deinen Router so, dass einfache Extraktionen an Kitesurf und schwere/interaktive Aufgaben an Chromium gehen. Das ist dieselbe Routing-Disziplin, die bei LLMs auftaucht (siehe /docs/models/model-routing-patterns) — kleines Modell zuerst, bei Fehlschlag eskalieren."},
+]} />
+
+## In einer Zeile in Puppeteer oder Playwright einbinden
+
+Der API-Vertrag, der zählt: Kitesurf spricht das **Chrome DevTools Protocol** über WebSocket, genau wie Headless Chrome. Alles, was CDP spricht — Puppeteer, Playwright, `chrome-remote-interface`, das Chrome-DevTools-Frontend selbst — verbindet sich unverändert. Der einzige Unterschied ist die WebSocket-URL, mit der du dich verbindest.
+
+<PromptCard title="Puppeteer — mit Kitesurf statt mit einem lokalen Chromium verbinden">{`import puppeteer from "puppeteer";
+
+const browser = await puppeteer.connect({
+  browserWSEndpoint:
+    "wss://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/browser-run/devtools/browser?browser=kitesurf",
+  headers: { Authorization: "Bearer <API_TOKEN>" },
+});
+
+const page = await browser.newPage();
+await page.goto("https://example.com");
+await page.screenshot({ path: "example.png" });
+await browser.disconnect();`}</PromptCard>
+
+<PromptCard title="Playwright — dieselbe Idee, connectOverCDP">{`import { chromium } from "playwright";
+
+const browser = await chromium.connectOverCDP(
+  "wss://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/browser-run/devtools/browser?browser=kitesurf",
+  { headers: { Authorization: "Bearer <API_TOKEN>" } },
+);
+
+const context = browser.contexts()[0];
+const page = await context.newPage();
+await page.goto("https://news.ycombinator.com");
+console.log(await page.title());
+await browser.close();`}</PromptCard>
+
+Für einmalige Aufgaben, bei denen du überhaupt keine Sitzung offen halten willst, lassen dich die **Quick-Actions**-Endpunkte eine URL per POST senden und in einem einzigen HTTP-Aufruf einen Screenshot, ein PDF oder einen HTML-String zurückbekommen — kein CDP-Client nötig:
+
+<PromptCard title="Quick Actions — einmaliger Screenshot mit curl">{`curl -X POST \\
+  'https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/browser-run/screenshot?browser=kitesurf' \\
+  -H 'Authorization: Bearer <API_TOKEN>' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"url": "https://example.com"}' \\
+  --output screenshot.png`}</PromptCard>
+
+## Claude Code (oder jeden MCP-Agenten) Kitesurf steuern lassen
+
+Der idiomatische Weg, einem Agenten Mitte 2026 einen Browser zu geben, führt über das **Model Context Protocol** — konkret den [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)-Server, gepflegt vom Chrome-DevTools-Team, der jedem MCP-fähigen Client (Claude Code, Codex, Cursor, MCP Inspector und so weiter) einen Browser zugänglich macht. Das `--wsEndpoint`-Flag des Servers lässt dich ihn auf jeden CDP-kompatiblen WebSocket zeigen — einschließlich dem von Kitesurf — sodass jeder Tool-Aufruf des Agenten gegen Kitesurf statt gegen ein lokales Chrome läuft. Genau diese Konfiguration ist in Cloudflares eigenen [Browser-Run-Docs](https://developers.cloudflare.com/browser-run/kitesurf/) dokumentiert.
+
+<PromptCard title="Claude Code — .claude.json-Snippet, um Kitesurf als MCP-Browser hinzuzufügen">{`{
+  "mcpServers": {
+    "kitesurf": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@latest",
+        "--wsEndpoint=wss://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/browser-run/devtools/browser?browser=kitesurf",
+        "--wsHeaders={\\"Authorization\\":\\"Bearer <API_TOKEN>\\"}"
+      ]
+    }
+  }
+}`}</PromptCard>
+
+Sobald das verdrahtet ist, bitte Claude Code *„öffne Hacker News und fasse die Top-5-Stories zusammen“*, und das Browsen läuft auf Kitesurfs Worker statt auf einem lokalen Chromium — Kaltstart in Dutzenden Millisekunden statt Sekunden, und kein Browserprozess, der auf deinem Laptop Speicher frisst.
+
+<Callout type="warning" items={[
+  "MCP-Server, die mit einem API-Token in wsHeaders konfiguriert sind, erben dieses Token für jeden Tool-Aufruf, den der Agent macht. Behandle das Token wie jedes andere für den Agenten sichtbare Geheimnis: beschränke es auf Browser Run, rotiere es bei Verdacht und teile die .claude.json nie außerhalb deines Rechners. Siehe /docs/security/vetting-agent-skills für die vollständigere Checkliste."
+]} />
+
+## Die vier Dinge, die Kitesurf noch nicht kann
+
+Die Lücken explizit zu benennen ist wichtig, denn wenn du auf eine stößt, willst du nicht eine Stunde damit verbringen, es für ein Konfigurationsproblem zu halten.
+
+- **Keine Videowiedergabe.** Keine Dekodierung von `<video>`-Elementen. Eine Seite, die Inhalte hinter einem Video verbirgt, wird nicht funktionieren; eine Seite, die lediglich ein Video-Element *enthält*, rendert alles andere trotzdem.
+- **Kein WebGL.** Kein 3D-Canvas, kein GPU-beschleunigtes Rendering, keine Bibliotheken, die WebGL zum Booten brauchen (einige Karten, einige Visualisierungs-Frameworks).
+- **Keine Bot-Challenge-TLS-Fingerprint-Aushandlung.** Kitesurfs TLS-Profil ist ein Serverless-Worker-Profil, nicht Chromes — Seiten, die auf JA3-/JA4-Fingerprints prüfen (einschließlich vieler Cloudflare-geschützter Websites, Akamai, DataDome, PerimeterX), werfen dich am Edge raus, bevor dein Agent überhaupt das DOM sieht.
+- **Keine persistenten authentifizierten Sitzungen.** Zustandslos ist ein Feature, kein Bug — aber es bedeutet, dass „einmal einloggen und die Cookies über hundert nachfolgende Scrapes wiederverwenden“ kein Workflow ist, den Kitesurf unterstützt. Für dieses Muster schau dir [Shared-Login-Browser](/docs/models/browser-agents-shared-login) oder eine Chromium-Sitzung mit eigener Cookie-Verwaltung an.
+
+Wenn eines dieser vier zutrifft, route diese Aufgabe entweder im selben Browser-Run-Produkt an Chromium, oder greife für die nutzerähnlichen Aufgaben zu einem Shared-Login-Muster.
+
+<VerifyNote lastVerified="2026-08-24" source="https://blog.cloudflare.com/kitesurf/ and https://developers.cloudflare.com/browser-run/kitesurf/">
+Kitesurf ist mit Stand 24. August 2026, ~18 Tage nach dem Launch, in kostenloser öffentlicher Beta. Beta bedeutet: Es gelten Limits pro Konto (nicht in exakten Zahlen veröffentlicht), die CDP-Oberfläche wächst noch, und die Rendering-Treue verbessert sich noch von Woche zu Woche. Die Benchmark-Tabelle und die Liste der „vier Dinge, die er nicht kann“ spiegeln den Stand am Launch-Tag wider; prüfe die offiziellen Docs, bevor du eine architektonische Wette auf eines von beiden eingehst.
+</VerifyNote>
+
+## Was dieser Launch an der Browser-für-Agenten-Landschaft verändert
+
+Kitesurf ist nicht das einzige Projekt, das an der Naht „kleinerer, günstigerer, agentenförmiger Browser“ arbeitet. Es sitzt an einer bestimmten Koordinate in einem zweiachsigen Raum, den zu benennen sich lohnt:
+
+- **Zustandslos vs. Shared-Login.** Kitesurf ist der stärkste zustandslose Ansatz in Produktion. Auf der Shared-Login-Achse ist [ego lite](/docs/models/browser-agents-shared-login) die aktuelle Referenz. Die beiden ergänzen sich: zustandslos für Automatisierung, Shared-Login für „handle als ich“.
+- **Eigene Engine vs. verpacktes Chromium.** Cloudflares Wettbewerber (Browserbase, Anchor Browser, Steel) verpacken weiterhin Chromium. Kitesurf ist die erste Ablehnung des Wrapper-Ansatzes im großen Maßstab. Wenn Cloudflares Benchmarks in freier Wildbahn standhalten und die (geplante) Open-Source-Veröffentlichung Wirklichkeit wird, ist innerhalb von zwei Quartalen mit Druck auf die Pro-Sitzung-Preise der Wrapper-Anbieter zu rechnen.
+
+Die tiefere Behauptung, und der Grund, warum es sich lohnt, über diesen Launch jenseits der unmittelbaren „coole Zahlen“-Reaktion zu schreiben: **Der Browser-Stack für Menschen und der Browser-Stack für Agenten divergieren in zwei Produkte.** Alles, was du unter der Annahme baust, dass Agenten denselben Browser wie Menschen nutzen, kauft Komplexität ein, die du vielleicht nicht brauchst. Dieselbe Divergenz hat auf der LLM-Ebene bereits stattgefunden (agentenspezifische Modelle, agentenspezifische APIs); Kitesurf ist dieselbe Divergenz, die auf der Browser-Ebene ankommt.
+
+Verwandt auf AILmanac: [Computer-Use-Agenten](/docs/models/computer-use-agents) dazu, wie Claudes eigene Browser-Steuerungsfunktion im Vergleich abschneidet, [Agentische Browser und Same-Origin-Risiko](/docs/security/agentic-browsers-same-origin) für die Sicherheitshaltung, die sich ändert, wenn ein Agent deinen Browser steuert, und [Modell-Routing-Muster](/docs/models/model-routing-patterns) für die allgemeine „klein zuerst, bei Fehlschlag eskalieren“-Disziplin, die sich direkt auf das Kitesurf-vs-Chromium-Routing abbildet.
+
+<Quiz title="Prüfe dich selbst" questions={[
+  {q: "Kitesurfs Benchmarks zeigen, dass er 3-7x weniger CPU und Speicher als Chromium verbraucht, aber pro Aufgabe ~1,7x länger Wanduhrzeit braucht. Welcher Workload profitiert am meisten von diesem Kompromiss?", options: ["Ein nutzerorientierter Agent, der im Vordergrund auf einen einzelnen Seitenaufruf wartet", "Eine Hintergrund-Pipeline, die Tausende kurzer URL-Extraktionen parallel ausführt, abgerechnet pro CPU-Sekunde", "Eine lang laufende Scraping-Sitzung, die eine Stunde lang bei einer Website eingeloggt bleibt"], answer: 1, explain: "Kitesurfs Speicherbedarf ist das, was den Parallelitätsgewinn freischaltet — ein Worker kann viel mehr Sitzungen gleichzeitig halten. Die Wanduhrzeit-Kosten pro Aufgabe sind unsichtbar, sobald du 5x mehr davon parallel ausführen kannst, und die Abrechnung pro CPU-Sekunde belohnt die niedrigere CPU-Zahl, nicht die höhere Wanduhrzeit-Zahl."},
+  {q: "Welche dieser Aufgaben wird Kitesurf in seiner aktuellen Beta NICHT bewältigen können?", options: ["Eine statische React-Landingpage rendern und das HTML zurückgeben", "Einen Screenshot eines Wikipedia-Artikels erstellen", "Eine Cloudflare-Turnstile-/Bot-Fingerprint-Challenge bestehen, um die geschützte Seite zu erreichen", "Strukturierte Daten aus Hacker News extrahieren"], answer: 2, explain: "Kitesurfs TLS-Profil ist ein Worker-Profil, nicht Chromes — Seiten, die auf JA3-/JA4-Fingerprints prüfen (einschließlich Turnstile, Akamai, DataDome), werfen ihn am Edge raus. Statisches Rendering, Screenshots und HTML-Extraktion auf nicht bot-geschützten Seiten sind genau die Workloads, für die er entworfen wurde."},
+  {q: "Warum ist Kitesurfs JavaScript pro Aufgabe langsamer als das von Chromium, obwohl die CPU-Zeit niedriger ist?", options: ["Weil er einen JIT nutzt, der noch nicht optimiert ist", "Weil JS auf Boa läuft, einem Rust-Interpreter — nicht auf V8s JIT — als bewusster Tausch, um das Sandboxing innerhalb des Worker-Isolates zu halten", "Weil Netzwerk-I/O durch Cloudflare geproxyt wird"], answer: 1, explain: "Boa ist ein Interpreter, kein JIT, also zahlt numerisch anspruchsvolles JS einen echten Preis. Aber das Interpretieren hält alles innerhalb der Sandbox des V8-Isolates — kein separater Browserprozess, keine separate JIT-Stufe. Deshalb ist die Wanduhrzeit schlechter, die CPU-Zeit aber viel besser."},
+  {q: "Du willst, dass Claude Code Kitesurf über MCP als Browser nutzt. Was ist die kleinste korrekte Änderung?", options: ["Ein Claude-Code-Plugin namens kitesurf-mode installieren", "chrome-devtools-mcp zu deiner MCP-Server-Liste hinzufügen, mit --wsEndpoint auf die Kitesurf-CDP-URL zeigend", "Deinen Agentencode in Rust neu schreiben"], answer: 1, explain: "Kitesurf spricht das Chrome DevTools Protocol, also steuert ihn der Standard-chrome-devtools-mcp-Server unverändert — du zeigst mit --wsEndpoint einfach auf Cloudflares Kitesurf-CDP-URL statt auf einen lokalen Chromium-Socket."},
+  {q: "Kitesurf leiht sich zwei Komponenten direkt aus dem Rust-/Firefox-Ökosystem. Welche sind das?", options: ["V8 für JS und Servo für HTML", "Blitz für das Rendering und Stylo (Firefox' CSS-Engine) für CSS", "Playwright für die Automatisierung und Puppeteer für CDP"], answer: 1, explain: "Blitz ist eine modulare Rust-Rendering-Engine vom Dioxus-Team; Stylo ist dieselbe Rust-CSS-Engine, die in Firefox ausgeliefert wird. Standardkonforme Rust-Crates auszuleihen ist der Grund, warum Kitesurf nach 12 Wochen Entwicklung bereits 235.000+ WPT-Subtests besteht."},
+]} />
+
+<Callout type="takeaways" items={[
+  "Kitesurf ist die erste Browser-Runtime im großen Maßstab, die zugibt, dass ihr Nutzer kein Mensch ist. Zustandslos, keine Tabs, keine Themes, kein JIT — eingetauscht gegen 3-7x weniger CPU und Speicher als Chromium bei gängigen Agentenaufgaben.",
+  "Der Tausch, den du eingehst: ~1,7x mehr Wanduhrzeit pro Aufgabe im Austausch für die Fähigkeit, viel mehr Aufgaben parallel auf derselben Hardware auszuführen. Bei Abrechnung pro CPU-Sekunde ist Kitesurf gleichzeitig günstiger UND langsamer.",
+  "Kompatibel, wo es zählt: spricht das Chrome DevTools Protocol, sodass Puppeteer, Playwright, chrome-remote-interface und chrome-devtools-mcp alle unverändert funktionieren. Ein Endpunkt-Tausch.",
+  "Nicht für jede Aufgabe: kein Video, kein WebGL, keine TLS-Fingerprint-Bot-Challenge-Aushandlung, keine persistenten authentifizierten Sitzungen. Route diese im selben Browser-Run-Produkt an Chromium.",
+  "Das größere Muster: Der Browser-Stack für Menschen und der Browser-Stack für Agenten divergieren in zwei Produkte. Gehe von Divergenz aus, wenn du etwas Langlebiges entwirfst.",
+]} />
+
+## Quellen & weiterführende Lektüre
+
+- [Introducing Kitesurf — Cloudflare Blog (6. Aug. 2026)](https://blog.cloudflare.com/kitesurf/) — der Launch-Post mit der vollständigen Benchmark-Tabelle, dem Architekturdiagramm und der Komponentenaufschlüsselung.
+- [Kitesurf auf Cloudflare Browser Run — offizielle Docs](https://developers.cloudflare.com/browser-run/kitesurf/) — API-Referenz für CDP-Endpunkte, Quick Actions, MCP-Konfiguration und die aktuelle Liste der Einschränkungen.
+- [Cloudflare-Changelog — Kitesurf auf Browser Run](https://developers.cloudflare.com/changelog/post/2026-08-06-kitesurf/) — die Auslieferungsnotiz mit den anfänglichen Parametern und dem Status der kostenlosen Beta.
+- [Interaktiver Kitesurf-Playground — kitesurf.cloudflare.app](https://kitesurf.cloudflare.app/) — Screenshots, HTML-Extraktion und Chrome-DevTools-Inspektion ausprobieren, ohne Code zu schreiben.
+- [Blitz — modulare Rust-Rendering-Engine (Dioxus Labs)](https://github.com/DioxusLabs/blitz) — die Rendering-Engine, die Kitesurf nutzt.
+- [Stylo — Firefox' CSS-Engine als eigenständige Rust-Crate](https://github.com/servo/stylo) — die CSS-Engine, die Kitesurf unverändert nutzt.
+- [chrome-devtools-mcp — MCP-Server, der Agenten CDP zugänglich macht](https://github.com/ChromeDevTools/chrome-devtools-mcp) — gepflegt vom Chrome-DevTools-Team. Kitesurf-kompatibel über das `--wsEndpoint`-Flag, wie in Cloudflares Browser-Run-Docs dokumentiert.
+- Verwandt auf AILmanac: [Shared-Login-Browser für Agenten](/docs/models/browser-agents-shared-login) · [Computer-Use-Agenten](/docs/models/computer-use-agents) · [Agentische Browser und Same-Origin-Risiko](/docs/security/agentic-browsers-same-origin) · [Modell-Routing-Muster](/docs/models/model-routing-patterns).
+
+
+## Weiter
+
+- [SKILL.md: Der agentenübergreifende offene Standard](/docs/models/skill-md-open-standard)

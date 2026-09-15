@@ -1,0 +1,244 @@
+---
+sidebar_position: 11.7
+title: "Managed Agents Domain-Beschränkungen"
+description: "Die Beta vom 26. August 2026 — allowed_domains, blocked_domains, max_content_tokens und user_location auf web_search und web_fetch in Managed Agents. Formatregeln, Multiagent-Semantik, Updates mitten in der Session und der url_not_allowed-Fehler."
+keywords: [claude managed agents, allowed_domains, blocked_domains, web_search, web_fetch, url_not_allowed, agent_toolset_20260401, ssrf, prompt injection, agent web tools, max_content_tokens, user_location, subdomain matching, multiagent allowlist, punycode idn]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Verstehen, welche Bedrohungen eine Allow-/Block-Domainliste pro Tool in Managed Agents tatsächlich stoppt — und welche nicht", "web_search und web_fetch mit dem configs-Array von agent_toolset_20260401 auf bestimmte Hosts festnageln", "Die zehn Domain-Formatregeln lesen, die Anthropic beim Erstellen validiert, damit ein 400 deinen Bug nicht in die Produktion trägt", "Die Multiagent-Semantik durchdenken — warum sich Allowlists schneiden und Blocklists über Koordinator und Roster hinweg addieren", "Das url_not_allowed-tool_result und session.error-Events zur Laufzeit behandeln und wissen, wann die Re-Validierung stattfindet", "Diese Einstellungen vom Domainfilter der Messages-API-Server-Tools und von der Sandbox-Netzwerkrichtlinie unterscheiden"]} />
+
+<VerifyNote lastVerified="2026-08-26" source="https://platform.claude.com/docs/en/managed-agents/tools#restrict-web-search-and-web-fetch-domains">
+Domain-Beschränkungen für `web_search` und `web_fetch` in Managed Agents wurden am **26. August 2026** in der Beta `managed-agents-2026-04-01` ausgeliefert. Feldnamen, Fehlercodes und Validierungsmeldungen hier sind aus der offiziellen Referenz zitiert — Managed Agents ist noch in der Beta, also prüfe vor dem Ausliefern gegen Anthropics Docs.
+</VerifyNote>
+
+Eine [autonome Managed-Agents-Session](/docs/api/managed-agents), die `web_search` und `web_fetch` mitführt, ist ein Request-Fälscher mit Suchmaschine. Jeder String, den man ihr als "hilfreiche Referenz-URL" unterschieben kann — eine Prompt-Injection-Nutzlast in einer abgerufenen Seite, ein Link in einem Memory Store, eine reine Modell-Halluzination — wird zu einer ausgehenden Anfrage, die Anthropics Crawler in deinem Namen stellt. Bis zu dieser Beta war die *einzige* Möglichkeit, das zu verhindern, die Tools abzuschalten und sie als selbst validierte Custom Tools wieder einzuführen.
+
+Die Beta vom 26. August fügt erstklassige `allowed_domains`- und `blocked_domains`-Listen pro Tool hinzu — plus `max_content_tokens` bei Fetches und `user_location` bei Suchen — durchgesetzt auf Anthropics Servern, bevor die ausgehende Anfrage gestellt wird. Zwei Dinge an dieser Formulierung sind wichtig:
+
+- Die Durchsetzung erfolgt **auf Anthropics Servern**, nicht in deiner Sandbox. Die Sandbox-`networking`-Richtlinie (die steuert, was Code *innerhalb* der Sandbox erreichen kann) hat also nichts damit zu tun. Wenn du das Toolset ohne Domainlisten lässt, aber das Sandbox-Netzwerk abriegelst, erreicht das `web_fetch` des Agents trotzdem, was es will — der Fetch läuft außerhalb der Sandbox.
+- **Organisationsweite Webfilter in der Claude Console gelten nur für die Messages API.** Sie hängen sich nicht an Managed-Agents-Sessions. Wenn deine Organisation eine Console-Regel "ads.example.com blockieren" hat und du sie nie ins Toolset spiegelst, wird eine Agent-Session sie abrufen.
+
+## Wo die Einstellung lebt
+
+Jedes eingebaute Tool sitzt im Toolset-Objekt `agent_toolset_20260401` im `tools`-Array des Agents, und jedes Tool wird über einen Eintrag im `configs`-Array dieses Toolsets konfiguriert. Einträge werden über `name` identifiziert (`web_search`, `web_fetch`, `bash`, `read`, `write`, `edit`, `glob`, `grep`), über ein optionales `type`-Feld mit demselben Wert typisiert und akzeptieren — für die beiden Web-Tools — `allowed_domains`, `blocked_domains`, `max_content_tokens` und `user_location` neben den üblichen `enabled` und `permission_policy`.
+
+Die minimale Form:
+
+<PromptCard title="web_search und web_fetch auf zwei Hosts festnageln, abgerufenen Inhalt deckeln">{`{
+  "type": "agent_toolset_20260401",
+  "configs": [
+    {
+      "name": "web_search",
+      "allowed_domains": ["docs.example.com", "arxiv.org"],
+      "user_location": {
+        "type": "approximate",
+        "country": "US",
+        "timezone": "America/Los_Angeles"
+      }
+    },
+    {
+      "name": "web_fetch",
+      "blocked_domains": ["ads.example.com"],
+      "max_content_tokens": 50000
+    }
+  ]
+}`}</PromptCard>
+
+Jedes Tool trägt seine **eigene** Liste — eine Such-Allowlist beschränkt keine Fetches und umgekehrt. Wenn die beiden Listen gemeinsam laufen sollen, musst du sie selbst spiegeln.
+
+## Ein vollständiger Agent-Create
+
+<PromptCard title="POST /v1/agents — der ganze Request">{`curl -fsSL https://api.anthropic.com/v1/agents \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: managed-agents-2026-04-01" \\
+  -H "content-type: application/json" \\
+  -d '{
+    "name": "Research Agent",
+    "model": "claude-opus-5",
+    "tools": [
+      {
+        "type": "agent_toolset_20260401",
+        "configs": [
+          {
+            "name": "web_search",
+            "allowed_domains": ["docs.example.com", "arxiv.org"],
+            "user_location": {
+              "type": "approximate",
+              "country": "US",
+              "timezone": "America/Los_Angeles"
+            }
+          },
+          {
+            "name": "web_fetch",
+            "blocked_domains": ["ads.example.com"],
+            "max_content_tokens": 50000
+          }
+        ]
+      }
+    ]
+  }'`}</PromptCard>
+
+In den SDKs für Python, TypeScript, Go, Java, C#, Ruby und PHP ist jeder `configs`-Eintrag pro Tool als Discriminated Union typisiert (`BetaManagedAgentsWebSearchToolConfigParams`, `BetaManagedAgentsWebFetchToolConfigParams` und so weiter). `type` ist beim Erstellen optional, weil der Server es aus `name` ableitet, kommt aber in Antworten immer zurück. Requests, die nur `name`, `enabled` und `permission_policy` setzen, bleiben mit oder ohne `type` gültig — alter Code muss für diese Beta nicht umgeschrieben werden.
+
+## Die zehn Domain-Formatregeln
+
+Anthropic validiert jede gelistete Domain beim Erstellen/Aktualisieren des Agents und beim Erstellen/Aktualisieren der Session und gibt einen **400 `invalid_request_error`** zurück, dessen Meldung die Liste und die nullbasierte Position des fehlerhaften Eintrags nennt (`allowed_domains.0: IP addresses are not supported…`). Die Regeln sind strenger als das, was die Messages API akzeptiert, und jede einzelne ist in der Praxis eine Stolperfalle:
+
+<Steps items={[
+  {title: "Eine Liste pro Eintrag wählen", body: "Setze auf einem Eintrag entweder allowed_domains oder blocked_domains — nie beides. Ein Eintrag mit beiden wird abgelehnt: \"Only one of allowed_domains or blocked_domains may be set.\""},
+  {title: "1 bis 64 Domains pro Liste, 1 bis 255 Zeichen pro Domain", body: "Eine leere Liste wird als mehrdeutig abgelehnt — die Plattform rät nicht, ob du \"auf nichts beschränken\" oder \"gar keine Beschränkung\" meintest. Um einen Filter aufzuheben, lass das Feld weg oder sende explizit null."},
+  {title: "Nur reine Hostnamen — kein Schema, Port, Zugangsdaten, Wildcard, Leerzeichen oder Labels mit führendem/abschließendem Bindestrich", body: "Schreibe example.com, nicht https://example.com, example.com:443 oder *.example.com. Hostnamen matchen ohne Beachtung der Groß-/Kleinschreibung, ein einzelner abschließender Schrägstrich wird ignoriert."},
+  {title: "Eine gelistete Domain deckt diesen Host und seine Subdomains ab", body: "example.com deckt docs.example.com ab. Aber docs.example.com deckt weder example.com noch api.example.com ab — Subdomain-Abdeckung gilt nur nach unten. Ein führendes www. ist eine Subdomain wie jede andere, also deckt www.example.com nicht example.com ab. Liste die nackte Domain, um beides abzudecken."},
+  {title: "IP-Adressen werden in jeder Form abgelehnt", body: "IPv4, IPv6, in Klammern und numerische Kurzformen wie 127.1 werden alle abgelehnt. Es gibt keine Möglichkeit, eine rohe IP über diese Listen zuzulassen — liste den DNS-Namen."},
+  {title: "Nackte TLDs und Registry-Suffixe werden abgelehnt", body: "com, co.uk, gov.uk und einteilige Namen wie intranet scheitern alle an der Validierung. Liste eine vollständige Domain wie example.co.uk."},
+  {title: "localhost und interne Suffixe werden abgelehnt", body: "localhost und jeder Host, der auf .localhost, .local, .internal, .localdomain oder .invalid endet, wird von vornherein verweigert — die Tools laufen auf Anthropics Servern, diese Hosts wären also ohnehin nie erreichbar."},
+  {title: "Nur Punycode für internationalisierte Namen", body: "Managed Agents lehnt Unicode-Einträge ab. Wandle café.example vor dem Senden in xn--caf-dma.example um. Das ist strenger als die Messages API, die Unicode akzeptiert (aber davon abrät)."},
+  {title: "web_fetch-Einträge dürfen keinen Pfad enthalten", body: "Verwende example.com, nicht example.com/blog. web_search-Einträge dürfen ein Pfadsuffix wie example.com/blog tragen, aber der Suchanbieter behandelt es als URL-Muster, nicht als strikte Host-Regel — bevorzuge für beide Tools reine Hostnamen, wenn du vorhersehbare Treffer willst."},
+  {title: "Duplikate werden abgelehnt", body: "Zwei identische Einträge scheitern an der Validierung. www.example.com und example.com gelten als verschieden — denk daran, dass sie unterschiedliche Host-Mengen abdecken."}
+]} />
+
+Zwei zusätzliche Prüfungen hängen von den zugrunde liegenden Anbietern ab und werden ebenfalls beim Erstellen/Aktualisieren durchgesetzt: Eine Domain, auf die Anthropics Crawler nicht zugreifen kann, wird für `allowed_domains` verweigert, ein nicht unterstütztes `user_location.country` liefert eine Meldung, die auf `user_location.country: not a country the search provider supports` endet, und `user_location.timezone` muss ein gültiger IANA-Name sein.
+
+## Multiagent-Sessions — wie sich die Listen kombinieren
+
+Eine [Multiagent-Session](https://platform.claude.com/docs/en/managed-agents/multiagent-orchestration) kann drei Listensätze auf einen einzigen Tool-Aufruf schichten: die aktuellen Listen des Koordinators, die Listen jedes Agents, der diesen aufgerufen hat, und die eigenen Listen des Roster-Agents. Jede Liste, die für den Thread gilt, wird gleichzeitig durchgesetzt.
+
+- **Allowlists schneiden sich.** Die wirksame Menge sind die Domains, die alle anwendbaren Allowlists abdecken. Ein Roster-Agent kann *einengen*, was ein Tool erreicht, aber nie *erweitern* — setze auf einem Roster-Agent eine Allowlist, die nicht in der Allowlist des Koordinators liegt, und jeder Aufruf kommt mit einem `url_not_allowed`-Fehler zurück, dessen Meldung besagt, dass keine Domain erlaubt ist. Die Tool-Beschreibung sagt das dem Modell von vornherein.
+- **Blocklists addieren sich.** Jede anwendbare Blocklist wird gemeinsam durchgesetzt, sodass jeder Host auf der Blocklist irgendeiner Ebene für diesen Thread unerreichbar ist.
+- **`max_content_tokens` und `user_location` kombinieren sich nicht.** Ein Thread liest zuerst seine eigene Tool-Konfiguration, dann die des aufrufenden Agents, dann die aktuelle Konfiguration des Koordinators — der erste Nicht-Null-Wert gewinnt.
+- **Roster-Einträge mit `{"type": "self"}` haben keine eigenen Web-Einstellungen** und folgen der aktuellen Konfiguration des Koordinators.
+- **Der Grader in [Outcome-getriebenen Sessions](https://platform.claude.com/docs/en/managed-agents/define-outcomes) läuft ganz ohne Web-Tools** — keine Allow- oder Blocklist spielt eine Rolle, weil der Grader weder `web_search` noch `web_fetch` ausführen kann.
+
+Die Konsequenz: Wenn die Allowlist des Koordinators `[docs.example.com, arxiv.org]` ist und die eines Roster-Agents `[github.com]`, hat der Roster-Agent null erreichbare Hosts. Entwirf die Allowlists der Roster-Agents als Teilmengen der Koordinator-Allowlist oder setze sie gar nicht.
+
+## Updates mitten in der Session und die zweite Validierung
+
+Du kannst die Tools einer inaktiven Session aktualisieren, um die Domainlisten zu ändern — die neuen Listen gelten ab diesem Zeitpunkt. In einer Multiagent-Session übernimmt jeder Thread die neuen Listen bei seinem nächsten Zug, aber die *eigenen* Listen eines Roster-Agents sind beim Erstellen der Session eingefroren (sie leben auf der Agent-Definition, nicht auf der Session).
+
+Eine zweite Validierung findet statt, wenn die Session das Tool erstmals initialisiert. Eine Domain, die beim Erstellen die synchrone Prüfung bestanden hat, kann später trotzdem scheitern (ein erlaubter Host könnte in der Zwischenzeit den Crawler-Zugang verloren haben). Scheitert die Laufzeitprüfung, sendet die Session ein [`session.error`](https://platform.claude.com/docs/en/managed-agents/events-and-streaming)-Event, kehrt zu `idle` zurück und versucht es nicht erneut. Die Lösung: [die Tools der Session aktualisieren](https://platform.claude.com/docs/en/managed-agents/session-operations#updating-the-agent-configuration), zusätzlich den Agent aktualisieren, damit neue Sessions sauber starten, und dann eine frische `user.message` senden.
+
+## Der Laufzeit-Fehlerpfad
+
+Zur Session-Laufzeit verhalten sich die beiden Tools unterschiedlich, wenn sie auf eine URL stoßen, die ihre Listen verbieten.
+
+- **`web_fetch`** gibt dem Agent ein Fehlerergebnis zurück: `is_error: true` auf dem `agent.tool_result`-Event, mit einem Content-Block, der den Fehlercode `url_not_allowed` nennt. Das Modell sieht ihn und kann sich anpassen (eine andere Quelle wählen, den Nutzer fragen oder aufhören) — das ist ein normaler Tool-Fehlschlag, kein Session-Fehlschlag.
+- **`web_search`** lässt stillschweigend jedes Ergebnis weg, dessen Host die Listen nicht erlauben. Das Modell sieht sie überhaupt nicht. Das ist der richtige Standard für die Suche — die Alternative würde die URLs gefilterter Ergebnisse ins Transkript durchsickern lassen —, bedeutet aber, dass eine Suche, die für eine eigentlich gute Anfrage "keine Ergebnisse" liefert, ein Signal ist, die Allowlist zu erweitern, nicht nur erneut zu versuchen.
+
+Beide Signale gehören in deinen Session-Event-Handler. `session.error` für den Fehlschlag bei der Initialisierung, `agent.tool_result` mit `is_error: true` und `url_not_allowed` für den Fehlschlag pro Aufruf und — als *Raten*-Signal — jeder Suchzug, dessen Ergebnisanzahl auf null fällt, wenn die Allowlist klein ist.
+
+## Unterschiede zum Domainfilter der Messages-API-Server-Tools
+
+Managed Agents fährt bewusst ein strengeres Regime als die `web_search`- und `web_fetch`-Filter der `server_tools` in der Messages API. Das Vokabular ist dasselbe, aber vier Dinge sind enger und eines fehlt ganz:
+
+- **Die Listenobergrenze liegt bei 64 Domains**, gegenüber der größeren Obergrenze der Messages API. Große Allowlists lassen sich nicht übertragen — teile sie auf mehrere Agents auf.
+- **`web_fetch`-Domains dürfen keinen Pfad enthalten.** Die Messages API akzeptiert Pfade bei beiden Tools. Wandle beim Portieren alle Messages-API-artigen `example.com/blog`-Einträge in reine Hostnamen um.
+- **Nur ASCII — Punycode für internationalisierte Namen erforderlich.** Die Messages API erlaubt Unicode-Einträge (rät aber davon ab).
+- **`max_uses`, `citations` und `cache_control` sind im Toolset nicht verfügbar.** Das sind reine Messages-API-Stellschrauben, die das Toolset bewusst nicht anbietet. Plane stattdessen mit der Preisgestaltung pro Session und dem `response_inclusion`-Parameter.
+
+Wenn du einen bestehenden Messages-API-Agent zu Managed Agents portierst, lassen sich die meisten vorhandenen Filter sauber übertragen. Nackte `example.com`-Einträge, Subdomain-inklusives Matching und die Regel "eine Liste pro Eintrag" sind alle identisch.
+
+## Häufige Fallen — fünf, über die echte Teams stolpern
+
+1. **`www.example.com` ist nicht `example.com`.** Nur `www.example.com` zu listen erlaubt nicht das nackte Apex `example.com`, und nur `example.com` zu listen deckt trotzdem `www.example.com` ab (weil `www.` eine Subdomain wie jede andere ist). Liste die nackte Domain, um beides zu bekommen.
+2. **Die Sandbox-`networking`-Richtlinie beeinflusst diese Tools nicht.** `web_search` und `web_fetch` laufen auf Anthropics Servern, also ruft eine Umgebung, die jeglichen Egress aus der Sandbox verweigert, trotzdem munter alles ab, was das Toolset erlaubt. Wenn du Defense in Depth willst, spiegle die beiden Richtlinien.
+3. **Console-seitige Org-Filter hängen sich nicht an.** Die organisationsweiten Webfilter in der Console gelten nur für die Messages API. Eine in der Console gesetzte Regel "ads.example.com blockieren" berührt Managed Agents nie.
+4. **Ein Session-Budget impliziert keine Domain-Beschränkung.** [Session-Budgets](/docs/api/managed-agents-session-budgets) deckeln Dollar, nicht Ziele. Eine budgetierte Session kann ihr Limit mit dem Abruf einer einzigen feindlichen Seite verbrennen. Nutze beides.
+5. **Ein `web_search`-Pfadsuffix ist ein URL-Muster, keine Host-Regel.** Bevorzuge reine Hostnamen — Pfadfilter bei der Suche haben nur beratende Stärke, und der Anbieter kann sie lockerer matchen, als du erwartest.
+
+## Was das tatsächlich abmildert
+
+Sei präzise beim Bedrohungsmodell — Übertreibung an dieser Stelle rächt sich bei Teams, die annehmen, das sei eine vollständige SSRF-Lösung. Das ist es nicht. Die drei konkreten Risiken, die es *tatsächlich* adressiert:
+
+- **Prompt-Injection-Navigation.** Eine vergiftete Seite oder ein Memory-Store-Eintrag, der den Agent anweist, "diese URL abzurufen, um fortzufahren", scheitert mit `url_not_allowed`, wenn der Host nicht erlaubt ist, und das Modell sieht den Fehler und hört (meistens) auf.
+- **Werbe- und Telemetrie-Ziele.** Eine Blocklist hält die Fetches des Agents von Tracking-Domains fern, zu denen eine Zielseite den Agent weiterleiten will.
+- **Datenexfiltration per Fetch.** Ein Agent, der dazu gebracht wird, eine `web_fetch`-URL mit sensiblen Query-String-Parametern (`?leaked=<memory>`) zu bauen, kann keinen feindlichen Empfänger erreichen, dessen Host nicht erlaubt ist.
+
+Was es *nicht* stoppt: ausgehende Anfragen von Custom Tools, die du definierst, von MCP-Server-Tools, von Code, den deine Sandbox ausführt, oder von jedem Tool, das nicht `web_search`/`web_fetch` ist. Jedes davon hat seine eigene Stellschraube (Sandbox-`networking`, MCP-Server-Allowlists, Custom-Tool-Code). Diese eine Einstellung ist eine Schicht in einer vielschichtigen Geschichte.
+
+<Callout type="takeaways" items={[
+  "allowed_domains und blocked_domains leben pro Tool im configs-Array von agent_toolset_20260401; jedes Tool trägt seine eigene Liste, und sie laufen nicht automatisch gemeinsam",
+  "Zehn Formatregeln — kein Schema, kein Port, keine Wildcard, kein Pfad bei web_fetch, keine nackten TLDs, kein localhost oder .local, Punycode für IDNs, 1-64 Domains, keine Duplikate, Subdomain-Match nur nach unten",
+  "Multiagent-Semantik: Allowlists schneiden sich, Blocklists addieren sich. Ein Roster-Agent kann die Reichweite des Koordinators einengen, aber nie erweitern",
+  "Laufzeit: web_fetch scheitert an einer verbotenen URL mit is_error und url_not_allowed; web_search lässt verbotene Ergebnisse stillschweigend weg",
+  "Das gilt nur für Managed Agents. Console-Org-Filter hängen sich nicht an, und die Sandbox-Netzwerkrichtlinie beeinflusst diese Tools nicht — spiegle Regeln, wenn du Defense in Depth willst",
+  "Nicht dasselbe wie der Messages-API-Server-Tools-Filter: strenger (64er-Obergrenze, keine Pfade bei web_fetch, nur ASCII) und ohne max_uses, citations, cache_control"
+]} />
+
+## Prüfe dich selbst
+
+<Quiz title="Prüfe dich selbst" questions={[
+  {
+    q: "Du setzt allowed_domains: [\"example.com\"] auf dem web_fetch-Eintrag. Welche dieser URLs darf der Agent abrufen?",
+    options: [
+      "Nur den exakten Host example.com",
+      "example.com und jede Subdomain wie docs.example.com und api.example.com",
+      "example.com und seine Subdomains, aber nicht www.example.com",
+      "Alles unter jeder .com-TLD"
+    ],
+    answer: 1,
+    explain: "Eine gelistete Domain deckt diesen Host und alle seine Subdomains ab. www.example.com ist eine Subdomain wie jede andere und wird von example.com abgedeckt; der asymmetrische Fall ist die andere Richtung — docs.example.com zu listen deckt weder example.com noch api.example.com ab."
+  },
+  {
+    q: "Die web_fetch-Allowlist eines Koordinators ist [\"docs.example.com\", \"arxiv.org\"]. Ein Roster-Agent setzt seine eigene web_fetch-Allowlist auf [\"github.com\"]. Was passiert, wenn der Roster-Agent versucht, https://github.com/anthropic-ai/sdk abzurufen?",
+    options: [
+      "Der Fetch gelingt — die eigene Allowlist des Roster-Agents überschreibt die des Koordinators",
+      "Der Fetch scheitert mit url_not_allowed — Allowlists schneiden sich, und github.com ist nicht in der Liste des Koordinators",
+      "Der Fetch gelingt, weil github.com in irgendeiner anwendbaren Allowlist steht",
+      "Die Session bricht mit Fehler ab und der Koordinator startet den Roster-Agent neu"
+    ],
+    answer: 1,
+    explain: "Die Allowlists von Koordinator, aufrufenden Agents und Roster-Agent schneiden sich alle. Die wirksame Allowlist ist die Menge, die jede Ebene abdeckt. Da die Schnittmenge von [docs.example.com, arxiv.org] und [github.com] leer ist, scheitert jeder Aufruf aus diesem Thread mit url_not_allowed."
+  },
+  {
+    q: "Dein Team blockiert per Richtlinie ads.example.com auf Org-Ebene in der Claude Console. Du startest eine Managed-Agents-Session mit aktiviertem web_fetch und ohne Domainlisten. Der Agent ruft https://ads.example.com ab. Was passiert?",
+    options: [
+      "Der Fetch wird blockiert — Org-Filter der Console gelten für alle Anthropic-APIs",
+      "Der Fetch wird blockiert — die Sandbox-Netzwerkrichtlinie erbt die Console-Regeln",
+      "Der Fetch gelingt — Console-seitige Webfilter gelten nur für die Messages API, nicht für Managed-Agents-Sessions",
+      "Der Fetch wird blockiert und die Session bricht mit Fehler ab"
+    ],
+    answer: 2,
+    explain: "Die Docs sind eindeutig: \"Organization-level web search and web fetch settings in the Claude Console apply to the Messages API and do not apply to Managed Agents sessions.\" Du musst allowed_domains oder blocked_domains im Toolset konfigurieren, um eine Richtlinie für Agents durchzusetzen."
+  },
+  {
+    q: "Du reichst einen Agent mit allowed_domains: [\"https://docs.example.com\", \"127.0.0.1\", \"co.uk\"] ein. Was gibt die API zurück?",
+    options: [
+      "Erfolg — die API normalisiert jeden Eintrag",
+      "Einen 400 invalid_request_error, der nur den ersten fehlerhaften Eintrag nennt",
+      "Einen 400 invalid_request_error, dessen Meldung die Liste und die nullbasierte Position jedes Verstoßes nennt",
+      "Einen 200 mit einem Warnobjekt in der Antwort"
+    ],
+    answer: 2,
+    explain: "Formatverstöße werden beim Erstellen/Aktualisieren des Agents mit einem 400 invalid_request_error abgelehnt, dessen Meldung die Liste und die nullbasierte Position jedes fehlerhaften Eintrags nennt (z. B. allowed_domains.0 für das Schema, allowed_domains.1 für die IP, allowed_domains.2 für das nackte Registry-Suffix). Alle drei sind jeweils für sich nicht regelkonform."
+  },
+  {
+    q: "Was macht ein web_fetch-Aufruf für eine URL, die seine Liste nicht erlaubt?",
+    options: [
+      "Die Session pausiert mit einem session.error und braucht manuellen Eingriff",
+      "Der Tool-Aufruf gibt is_error: true mit dem Fehlercode url_not_allowed auf dem agent.tool_result-Event zurück, und das Modell kann sich anpassen",
+      "Der Aufruf gelingt, aber der Antwortkörper wird entfernt",
+      "Der Aufruf wird stillschweigend gegen einen gespiegelten Host wiederholt"
+    ],
+    answer: 1,
+    explain: "Bei web_fetch kommt eine verbotene URL als normaler Tool-Fehlschlag zurück: is_error: true auf dem agent.tool_result-Event mit dem Fehlercode url_not_allowed. Das Modell sieht ihn und kann eine andere Quelle wählen. web_search verhält sich anders — es lässt verbotene Ergebnisse stillschweigend weg."
+  }
+]} />
+
+## Quellen und weiterführende Lektüre
+
+- [Web-Search- und Web-Fetch-Domains beschränken](https://platform.claude.com/docs/en/managed-agents/tools#restrict-web-search-and-web-fetch-domains) — die primäre Referenz für diese Beta, inklusive Formatregeln, Multiagent-Semantik und dem Delta zur Messages API
+- [Claude Platform Release Notes](https://platform.claude.com/docs/en/release-notes/overview) — der Eintrag vom 26. August 2026, der das Feature ausliefert
+- [Managed Agents Überblick](https://platform.claude.com/docs/en/managed-agents) — das Koordinator-+-Session-+-Roster-Modell, in das sich dieses Feature einhängt
+- [Server-Tools: Domainfilterung](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools#domain-filtering) — das Schwesterfeature in der Messages API, mit lockereren Regeln
+- [Session-Event-Stream](https://platform.claude.com/docs/en/managed-agents/events-and-streaming) — wo die Events `agent.tool_result` und `session.error` leben
+- [Umgebungs-Networking](https://platform.claude.com/docs/en/managed-agents/environments#networking) — die Sandbox-seitige Einstellung und warum sie Web-Tools nicht beeinflusst
+
+## Weiter
+
+- [Managed Agents](/docs/api/managed-agents) — das mentale Modell aus Koordinator + Session, in dem diese Domainlisten mitfahren
+- [Managed Agents Session-Budgets](/docs/api/managed-agents-session-budgets) — die harte Dollar-Obergrenze, die sich mit Domainlisten als zweite Leitplanke kombinieren lässt
+- [Prompt Injection](/docs/security/prompt-injection) — die Angriffsklasse, die eine gut abgegrenzte Allowlist tatsächlich abmildert
+- [Autonome Läufe absichern](/docs/security/hardening-autonomous-runs) — das dreischichtige Leitplankenmodell, in das sich das einfügt
