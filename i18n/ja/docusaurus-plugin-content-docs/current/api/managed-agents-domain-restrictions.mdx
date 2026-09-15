@@ -1,0 +1,244 @@
+---
+sidebar_position: 11.7
+title: "Managed Agents のドメイン制限"
+description: "2026 年 8 月 26 日のベータ — Managed Agents 内の web_search と web_fetch における allowed_domains、blocked_domains、max_content_tokens、user_location。書式ルール、マルチエージェントのセマンティクス、セッション途中の更新、url_not_allowed エラー。"
+keywords: [claude managed agents, allowed_domains, blocked_domains, web_search, web_fetch, url_not_allowed, agent_toolset_20260401, ssrf, prompt injection, agent web tools, max_content_tokens, user_location, subdomain matching, multiagent allowlist, punycode idn]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Managed Agents におけるツール単位の許可／ブロックドメインリストが実際にどの脅威を止め、どの脅威を止めないかを理解する", "agent_toolset_20260401 の configs 配列を使って web_search と web_fetch を特定のホストに固定する", "Anthropic が作成時に検証する 10 のドメイン書式ルールを読み、400 エラーがバグを本番に持ち込まないようにする", "マルチエージェントのセマンティクスを理解する — コーディネーターとロスターの間で許可リストが交差し、ブロックリストが加算される理由", "実行時の url_not_allowed tool_result と session.error イベントを処理し、再検証がいつ行われるかを知る", "これらの設定を Messages API のサーバーツールのドメインフィルターおよびサンドボックスのネットワークポリシーと区別する"]} />
+
+<VerifyNote lastVerified="2026-08-26" source="https://platform.claude.com/docs/en/managed-agents/tools#restrict-web-search-and-web-fetch-domains">
+Managed Agents の `web_search` と `web_fetch` に対するドメイン制限は、`managed-agents-2026-04-01` ベータで **2026 年 8 月 26 日**にリリースされました。ここに記載するフィールド名、エラーコード、検証メッセージは公式リファレンスから引用したものです — Managed Agents はまだベータであるため、リリース前に Anthropic のドキュメントで確認してください。
+</VerifyNote>
+
+`web_search` と `web_fetch` を持つ[自律型 Managed Agents](/docs/api/managed-agents) セッションは、検索エンジン付きのリクエスト偽造装置です。「役に立つ参照 URL」だと信じ込ませられる文字列 — 取得したページ内のプロンプトインジェクションのペイロード、メモリストア内のリンク、モデルの純粋なハルシネーション — はすべて、Anthropic のクローラーがあなたの代わりに実行する外向きリクエストになります。このベータ以前は、それを防ぐ*唯一の*方法は、ツールを無効化し、自分で検証したカスタムツールとして再導入することでした。
+
+8 月 26 日のベータでは、ツール単位のファーストクラスな `allowed_domains` と `blocked_domains` リスト — さらに fetch に対する `max_content_tokens` と search に対する `user_location` — が追加され、外向きリクエストが行われる前に Anthropic のサーバー上で強制されます。この表現について 2 つの重要な点があります：
+
+- 強制は**Anthropic のサーバー上**で行われ、あなたのサンドボックス内ではありません。したがって、サンドボックスの `networking` ポリシー（サンドボックス*内部*のコードがどこに到達できるかを制御するもの）とは無関係です。ツールセットにドメインリストを設定せず、サンドボックスのネットワークだけをロックダウンした場合、エージェントの `web_fetch` は依然として好きな場所に到達します — fetch はサンドボックスの外で実行されるからです。
+- **Claude Console の組織レベルの Web フィルターは Messages API にのみ適用されます。** Managed Agents セッションには結び付きません。組織に Console レベルの「ads.example.com をブロック」というルールがあっても、それをツールセットに反映しなければ、エージェントセッションはそれを取得します。
+
+## 設定の置き場所
+
+すべての組み込みツールは、エージェントの `tools` 配列内の `agent_toolset_20260401` ツールセットオブジェクトの中にあり、各ツールはそのツールセットの `configs` 配列のエントリで設定されます。エントリは `name`（`web_search`、`web_fetch`、`bash`、`read`、`write`、`edit`、`glob`、`grep`）で識別され、同じ値を持つ省略可能な `type` フィールドで型付けされ、2 つの Web ツールについては、通常の `enabled` と `permission_policy` に加えて `allowed_domains`、`blocked_domains`、`max_content_tokens`、`user_location` を受け付けます。
+
+最小の形：
+
+<PromptCard title="web_search と web_fetch を 2 つのホストに固定し、取得コンテンツに上限を設ける">{`{
+  "type": "agent_toolset_20260401",
+  "configs": [
+    {
+      "name": "web_search",
+      "allowed_domains": ["docs.example.com", "arxiv.org"],
+      "user_location": {
+        "type": "approximate",
+        "country": "US",
+        "timezone": "America/Los_Angeles"
+      }
+    },
+    {
+      "name": "web_fetch",
+      "blocked_domains": ["ads.example.com"],
+      "max_content_tokens": 50000
+    }
+  ]
+}`}</PromptCard>
+
+各ツールは**独自の**リストを持ちます — search の許可リストは fetch を制約せず、逆も同様です。2 つのリストを常に連動させたい場合は、自分でミラーリングしてください。
+
+## エージェント作成の全体
+
+<PromptCard title="POST /v1/agents — リクエスト全体">{`curl -fsSL https://api.anthropic.com/v1/agents \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: managed-agents-2026-04-01" \\
+  -H "content-type: application/json" \\
+  -d '{
+    "name": "Research Agent",
+    "model": "claude-opus-5",
+    "tools": [
+      {
+        "type": "agent_toolset_20260401",
+        "configs": [
+          {
+            "name": "web_search",
+            "allowed_domains": ["docs.example.com", "arxiv.org"],
+            "user_location": {
+              "type": "approximate",
+              "country": "US",
+              "timezone": "America/Los_Angeles"
+            }
+          },
+          {
+            "name": "web_fetch",
+            "blocked_domains": ["ads.example.com"],
+            "max_content_tokens": 50000
+          }
+        ]
+      }
+    ]
+  }'`}</PromptCard>
+
+Python、TypeScript、Go、Java、C#、Ruby、PHP の各 SDK では、`configs` の各エントリはツールごとに判別可能なユニオン（`BetaManagedAgentsWebSearchToolConfigParams`、`BetaManagedAgentsWebFetchToolConfigParams` など）として型付けされています。サーバーが `name` から推論するため、構築時の `type` は省略可能ですが、レスポンスには常に含まれます。`name`、`enabled`、`permission_policy` のみを設定するリクエストは `type` の有無に関わらず有効なままです — このベータを扱うために古いコードを書き直す必要はありません。
+
+## 10 のドメイン書式ルール
+
+Anthropic は、エージェントの作成／更新時とセッションの作成／更新時に、リストされたすべてのドメインを検証し、リスト名と問題のあるエントリの 0 始まりの位置を示すメッセージ（`allowed_domains.0: IP addresses are not supported…`）とともに **400 `invalid_request_error`** を返します。ルールは Messages API が受け付けるものより厳格で、それぞれが現場でよく踏む地雷です：
+
+<Steps items={[
+  {title: "エントリごとにリストは 1 つだけ", body: "1 つのエントリには allowed_domains か blocked_domains のどちらかを設定します — 両方は不可です。両方を持つエントリは拒否されます：\"Only one of allowed_domains or blocked_domains may be set.\""},
+  {title: "リストごとに 1〜64 ドメイン、各 1〜255 文字", body: "空のリストは曖昧として拒否されます — プラットフォームは「何も許可しない」なのか「制限なし」なのかを推測しません。フィルターを解除するには、フィールドを省略するか明示的に null を送ります。"},
+  {title: "プレーンなホスト名のみ — スキーム、ポート、認証情報、ワイルドカード、空白、先頭／末尾ハイフンのラベルは不可", body: "https://example.com、example.com:443、*.example.com ではなく example.com と書きます。ホスト名は大文字小文字を区別せずにマッチし、末尾のスラッシュ 1 つは無視されます。"},
+  {title: "リストされたドメインはそのホストとサブドメインをカバーする", body: "example.com は docs.example.com をカバーします。しかし docs.example.com は example.com や api.example.com をカバーしません — サブドメインのカバーは下方向のみです。先頭の www. も他と同じサブドメインなので、www.example.com は example.com をカバーしません。両方をカバーするには、ベアドメインをリストしてください。"},
+  {title: "IP アドレスはあらゆる形式で拒否される", body: "IPv4、IPv6、角括弧付き、127.1 のような数値の省略形はすべて拒否されます。これらのリストで生の IP を許可する方法はありません — DNS 名をリストしてください。"},
+  {title: "ベア TLD とレジストリサフィックスは拒否される", body: "com、co.uk、gov.uk、および intranet のような単一ラベルの名前はすべて検証に失敗します。example.co.uk のような完全なドメインをリストしてください。"},
+  {title: "localhost と内部サフィックスは拒否される", body: "localhost と、.localhost、.local、.internal、.localdomain、.invalid で終わるホストは事前に拒否されます — ツールは Anthropic のサーバー上で実行されるため、これらのホストにはいずれにせよ到達できません。"},
+  {title: "国際化ドメイン名は Punycode のみ", body: "Managed Agents は Unicode のエントリを拒否します。送信前に café.example を xn--caf-dma.example に変換してください。これは Unicode を（推奨しないものの）受け付ける Messages API より厳格です。"},
+  {title: "web_fetch のエントリにパスは含められない", body: "example.com/blog ではなく example.com を使います。web_search のエントリは example.com/blog のようなパスサフィックスを持てますが、検索プロバイダーはそれを厳密なホストルールではなく URL パターンとして扱います — 予測可能なマッチを望むなら、両方のツールでプレーンなホスト名を優先してください。"},
+  {title: "重複は拒否される", body: "同一のエントリが 2 つあると検証に失敗します。www.example.com と example.com は別物とみなされます — カバーするホストの集合が異なることを忘れないでください。"}
+]} />
+
+さらに 2 つのチェックが基盤となるプロバイダーに依存し、これも作成／更新時に強制されます：Anthropic のクローラーがアクセスできないドメインは `allowed_domains` で拒否され、サポートされていない `user_location.country` は `user_location.country: not a country the search provider supports` で終わるメッセージを返し、`user_location.timezone` は有効な IANA 名でなければなりません。
+
+## マルチエージェントセッション — リストの結合方法
+
+[マルチエージェントセッション](https://platform.claude.com/docs/en/managed-agents/multiagent-orchestration)では、1 回のツール呼び出しに 3 組のリストが重なることがあります：コーディネーターの現在のリスト、このエージェントを呼び出したエージェントのリスト、ロスターエージェント自身のリストです。スレッドに適用されるすべてのリストが同時に強制されます。
+
+- **許可リストは交差します。** 有効な集合は、適用されるすべての許可リストがカバーするドメインです。ロスターエージェントはツールの到達範囲を*狭める*ことはできますが、*広げる*ことは決してできません — コーディネーターの許可リストに含まれない許可リストをロスターエージェントに設定すると、すべての呼び出しが、許可されたドメインがないことを示すメッセージ付きの `url_not_allowed` エラーで返ります。ツールの説明はこのことをモデルに事前に伝えます。
+- **ブロックリストは加算されます。** 適用されるすべてのブロックリストが一緒に強制されるため、いずれかのレベルのブロックリストにあるホストは、そのスレッドから到達不能です。
+- **`max_content_tokens` と `user_location` は結合されません。** スレッドはまず自身のツール設定を読み、次に呼び出し元エージェントの設定、次にコーディネーターの現在の設定を読みます — 最初の非 null 値が採用されます。
+- **`{"type": "self"}` のロスターエントリは独自の Web 設定を持たず**、コーディネーターの現在の設定に従います。
+- **[アウトカム駆動セッション](https://platform.claude.com/docs/en/managed-agents/define-outcomes)のグレーダーは Web ツールをまったく持たずに実行されます** — グレーダーには実行する `web_search` も `web_fetch` もないため、許可リストもブロックリストも関係ありません。
+
+結果として：コーディネーターの許可リストが `[docs.example.com, arxiv.org]` で、ロスターエージェントの許可リストが `[github.com]` の場合、ロスターエージェントが到達できるホストはゼロになります。ロスターエージェントの許可リストはコーディネーターのサブセットとして設計するか、まったく設定しないでください。
+
+## セッション途中の更新と 2 回目の検証
+
+アイドル状態のセッションのツールを更新してドメインリストを変更できます — 新しいリストはその時点から適用されます。マルチエージェントセッションでは、各スレッドは次のターンで新しいリストを取り込みますが、ロスターエージェント*自身*のリストはセッション作成時に凍結されます（それらはセッションではなくエージェント定義に属します）。
+
+セッションが最初にツールを初期化するときに 2 回目の検証が行われます。作成時の同期チェックを通過したドメインが、後で失敗することもあります（許可リストにあるホストがその間にクローラーのアクセスを失っている可能性があります）。実行時チェックが失敗すると、セッションは [`session.error`](https://platform.claude.com/docs/en/managed-agents/events-and-streaming) イベントを発行し、`idle` に戻り、リトライしません。修正方法は、[セッションのツールを更新](https://platform.claude.com/docs/en/managed-agents/session-operations#updating-the-agent-configuration)し、新しいセッションがクリーンに開始できるようエージェントも更新し、その後新しい `user.message` を送ることです。
+
+## 実行時のエラーパス
+
+セッション実行時、リストで禁止された URL に遭遇したときの 2 つのツールの振る舞いは異なります。
+
+- **`web_fetch`** はエージェントにエラー結果を返します：`agent.tool_result` イベントで `is_error: true` となり、エラーコード `url_not_allowed` を示すコンテンツブロックが含まれます。モデルはそれを見て適応できます（別のソースを選ぶ、ユーザーに尋ねる、停止する） — これは通常のツール失敗であり、セッションの失敗ではありません。
+- **`web_search`** はリストで許可されないホストの結果を静かに省略します。モデルはそれらをまったく見ません。これは検索にとって正しいデフォルトです — そうでなければフィルターされた結果の URL がトランスクリプトに漏れてしまいます — が、良いクエリのはずなのに「結果なし」が返る検索は、単にリトライするのではなく許可リストを広げるべきシグナルであることを意味します。
+
+両方のシグナルはセッションイベントハンドラーに組み込むべきです。初期化時のミスには `session.error`、呼び出しごとのミスには `is_error: true` と `url_not_allowed` を伴う `agent.tool_result`、そして — *比率*のシグナルとして — 許可リストが小さいときに結果数がゼロになる検索ターンです。
+
+## Messages API のサーバーツールのドメインフィルターとの違い
+
+Managed Agents は、Messages API の `server_tools` における `web_search` と `web_fetch` のフィルターより意図的に厳格な体制で動作します。語彙は同じですが、4 つの点がより厳しく、1 つの点が完全に欠けています：
+
+- **リストの上限は 64 ドメイン**で、Messages API のより大きな上限とは異なります。大きな許可リストはそのまま移植できません — 複数のエージェントに分割してください。
+- **`web_fetch` のドメインにパスを含められません。** Messages API は両方のツールでパスを受け付けます。移植時には、Messages API スタイルの `example.com/blog` エントリをプレーンなホスト名に変更してください。
+- **ASCII のみ — 国際化ドメイン名には Punycode が必須。** Messages API は Unicode のエントリを（推奨しないものの）許可します。
+- **`max_uses`、`citations`、`cache_control` はツールセットでは利用できません。** これらは Messages API 専用のノブで、ツールセットでは公開されていません。代わりにセッション単位の料金と `response_inclusion` パラメーターを中心に設計してください。
+
+既存の Messages API エージェントを Managed Agents に移植する場合、既存のフィルターの大半はそのまま移行できます。ベアの `example.com` エントリ、サブドメインを含むマッチング、「エントリごとにリストは 1 つ」のルールはすべて同一です。
+
+## よくある落とし穴 — 実際のチームがつまずく 5 つ
+
+1. **`www.example.com` は `example.com` ではありません。** `www.example.com` のみをリストしてもベアの `example.com` は許可されず、`example.com` のみをリストすれば `www.example.com` もカバーされます（`www.` は他と同じサブドメインだからです）。両方を得るにはベアドメインをリストしてください。
+2. **サンドボックスの `networking` ポリシーはこれらのツールに影響しません。** `web_search` と `web_fetch` は Anthropic のサーバー上で実行されるため、サンドボックスからのすべての外向き通信を拒否する環境でも、ツールセットが許可するものは平然と取得します。多層防御が必要なら、2 つのポリシーをミラーリングしてください。
+3. **Console レベルの組織フィルターは結び付きません。** Console の組織全体の Web フィルターは Messages API 専用です。Console で設定した「ads.example.com をブロック」ルールは Managed Agents に一切影響しません。
+4. **セッション予算を追加してもドメイン制限は含まれません。** [セッション予算](/docs/api/managed-agents-session-budgets)は金額の上限であり、宛先の上限ではありません。予算付きのセッションでも、1 つの悪意あるページを取得して上限を使い切ることがあります。両方を使ってください。
+5. **`web_search` のパスサフィックスは URL パターンであり、ホストルールではありません。** プレーンなホスト名を優先してください — 検索に対するパスフィルターは助言程度の強度で、プロバイダーは予想よりも緩くマッチさせることがあります。
+
+## 実際に何を緩和するのか
+
+脅威モデルについては具体的に考えてください — これを完全な SSRF 対策だと思い込むチームは、過大評価によって痛い目を見ます。そうではありません。これが*実際に*対処する 3 つの具体的なリスク：
+
+- **プロンプトインジェクションによるナビゲーション。** 「続けるにはこの URL を取得してください」とエージェントに指示する汚染されたページやメモリストアのエントリは、ホストが許可されていなければ `url_not_allowed` で失敗し、モデルはエラーを見て（通常は）停止します。
+- **広告とテレメトリの宛先。** ブロックリストは、対象ページがエージェントを飛ばそうとするトラッキングドメインへの fetch を防ぎます。
+- **fetch 経由のデータ漏洩。** 機密性のあるクエリ文字列パラメーター（`?leaked=<memory>`）を含む `web_fetch` URL を組み立てるよう騙されたエージェントは、ホストが許可されていない悪意ある受信者には到達できません。
+
+止め*られない*もの：あなたが定義するカスタムツール、MCP サーバーのツール、サンドボックスが実行するコード、および `web_search`／`web_fetch` 以外のツールからの外向きリクエストです。それぞれに固有のノブがあります（サンドボックスの `networking`、MCP サーバーの許可リスト、カスタムツールのコード）。この 1 つの設定は、多層構造の物語における 1 つの層です。
+
+<Callout type="takeaways" items={[
+  "allowed_domains と blocked_domains は agent_toolset_20260401 の configs 配列内にツール単位で置かれる。各ツールは独自のリストを持ち、自動的に連動はしない",
+  "10 の書式ルール — スキームなし、ポートなし、ワイルドカードなし、web_fetch にパスなし、ベア TLD なし、localhost や .local なし、IDN は Punycode、1〜64 ドメイン、重複なし、サブドメインのマッチは下方向のみ",
+  "マルチエージェントのセマンティクス：許可リストは交差し、ブロックリストは加算される。ロスターエージェントはコーディネーターの到達範囲を狭めることはできても広げることはできない",
+  "実行時：web_fetch は禁止 URL に対して is_error と url_not_allowed で失敗し、web_search は禁止された結果を静かに省略する",
+  "これは Managed Agents 専用。Console の組織フィルターは結び付かず、サンドボックスのネットワークポリシーもこれらのツールに影響しない — 多層防御が必要ならルールをミラーリングする",
+  "Messages API のサーバーツールフィルターとは別物：より厳格（64 の上限、web_fetch にパスなし、ASCII のみ）で、max_uses、citations、cache_control がない"
+]} />
+
+## 理解度チェック
+
+<Quiz title="理解度チェック" questions={[
+  {
+    q: "web_fetch エントリに allowed_domains: [\"example.com\"] を設定しました。エージェントが取得を許可される URL は次のどれですか？",
+    options: [
+      "正確に example.com というホストのみ",
+      "example.com と、docs.example.com や api.example.com などすべてのサブドメイン",
+      "example.com とそのサブドメイン。ただし www.example.com は除く",
+      ".com TLD 配下のすべて"
+    ],
+    answer: 1,
+    explain: "リストされたドメインはそのホストとすべてのサブドメインをカバーします。www.example.com は他と同じサブドメインであり、example.com によってカバーされます。非対称なのは逆方向です — docs.example.com をリストしても example.com や api.example.com はカバーされません。"
+  },
+  {
+    q: "コーディネーターの web_fetch 許可リストは [\"docs.example.com\", \"arxiv.org\"] です。ロスターエージェントは独自の web_fetch 許可リストを [\"github.com\"] に設定しています。ロスターエージェントが https://github.com/anthropic-ai/sdk を取得しようとすると何が起きますか？",
+    options: [
+      "取得は成功する — ロスターエージェント自身の許可リストがコーディネーターのものを上書きする",
+      "取得は url_not_allowed で失敗する — 許可リストは交差し、github.com はコーディネーターのリストにない",
+      "適用されるいずれかの許可リストに github.com があるので取得は成功する",
+      "セッションがエラーになり、コーディネーターがロスターエージェントを再起動する"
+    ],
+    answer: 1,
+    explain: "コーディネーター、呼び出し元エージェント、ロスターエージェントの許可リストはすべて交差します。有効な許可リストは、すべての層がカバーする集合です。[docs.example.com, arxiv.org] と [github.com] の交差は空なので、このスレッドからのすべての呼び出しは url_not_allowed で失敗します。"
+  },
+  {
+    q: "チームには Claude Console の組織レベルで ads.example.com をブロックするポリシーがあります。web_fetch を有効にし、ドメインリストなしで Managed Agents セッションを起動しました。エージェントが https://ads.example.com を取得します。何が起きますか？",
+    options: [
+      "取得はブロックされる — 組織レベルの Console フィルターはすべての Anthropic API に適用される",
+      "取得はブロックされる — サンドボックスのネットワークポリシーが Console のルールを継承する",
+      "取得は成功する — Console レベルの Web フィルターは Messages API にのみ適用され、Managed Agents セッションには適用されない",
+      "取得はブロックされ、セッションがエラーになる"
+    ],
+    answer: 2,
+    explain: "ドキュメントは明確です：\"Organization-level web search and web fetch settings in the Claude Console apply to the Messages API and do not apply to Managed Agents sessions.\" エージェントにポリシーを強制するには、ツールセットに allowed_domains または blocked_domains を設定する必要があります。"
+  },
+  {
+    q: "allowed_domains: [\"https://docs.example.com\", \"127.0.0.1\", \"co.uk\"] を持つエージェントを送信しました。API は何を返しますか？",
+    options: [
+      "成功 — API が各エントリを正規化する",
+      "最初の不正なエントリのみを示す 400 invalid_request_error",
+      "リスト名と各違反の 0 始まりの位置をメッセージで示す 400 invalid_request_error",
+      "レスポンスに warning オブジェクトを含む 200"
+    ],
+    answer: 2,
+    explain: "書式違反はエージェントの作成／更新時に、リスト名と問題のある各エントリの 0 始まりの位置をメッセージで示す 400 invalid_request_error で拒否されます（例：スキームには allowed_domains.0、IP には allowed_domains.1、ベアのレジストリサフィックスには allowed_domains.2）。これら 3 つはそれぞれ個別に規則違反です。"
+  },
+  {
+    q: "リストで許可されていない URL に対する web_fetch 呼び出しはどうなりますか？",
+    options: [
+      "セッションが session.error で一時停止し、手動での介入が必要になる",
+      "ツール呼び出しは agent.tool_result イベントで is_error: true とエラーコード url_not_allowed を返し、モデルは適応できる",
+      "呼び出しは成功するがレスポンスボディが取り除かれる",
+      "呼び出しはミラーホストに対して静かにリトライされる"
+    ],
+    answer: 1,
+    explain: "web_fetch では、禁止された URL は通常のツール失敗として返ります：agent.tool_result イベントで is_error: true、エラーコードは url_not_allowed です。モデルはそれを見て別のソースを選べます。web_search は異なる振る舞いをします — 禁止された結果を静かに省略します。"
+  }
+]} />
+
+## 出典と参考資料
+
+- [Restrict web search and web fetch domains](https://platform.claude.com/docs/en/managed-agents/tools#restrict-web-search-and-web-fetch-domains) — このベータの主要リファレンス。書式ルール、マルチエージェントのセマンティクス、Messages API との差分を含む
+- [Claude Platform リリースノート](https://platform.claude.com/docs/en/release-notes/overview) — この機能をリリースした 2026 年 8 月 26 日のエントリ
+- [Managed Agents 概要](https://platform.claude.com/docs/en/managed-agents) — この機能が組み込まれるコーディネーター + セッション + ロスターのモデル
+- [サーバーツール：ドメインフィルタリング](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools#domain-filtering) — Messages API 側の兄弟機能。ルールはより緩い
+- [セッションイベントストリーム](https://platform.claude.com/docs/en/managed-agents/events-and-streaming) — `agent.tool_result` と `session.error` イベントの所在
+- [環境のネットワーキング](https://platform.claude.com/docs/en/managed-agents/environments#networking) — サンドボックス側の設定と、それが Web ツールに影響しない理由
+
+## 次のステップ
+
+- [Managed Agents](/docs/api/managed-agents) — これらのドメインリストが乗るコーディネーター + セッションのメンタルモデル
+- [Managed Agents セッション予算](/docs/api/managed-agents-session-budgets) — ドメインリストと組み合わせて第 2 のガードレールとなる金額のハードキャップ
+- [プロンプトインジェクション](/docs/security/prompt-injection) — 適切にスコープされた許可リストが実際に緩和する攻撃の分類
+- [自律実行のハードニング](/docs/security/hardening-autonomous-runs) — これが収まる 3 層のガードレールモデル
