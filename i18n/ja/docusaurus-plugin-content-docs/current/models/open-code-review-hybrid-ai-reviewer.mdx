@@ -1,0 +1,156 @@
+---
+sidebar_position: 9.05
+title: "Open Code Review：AlibabaのハイブリッドAIレビュアー vs Claude Code、Codex、あらゆるモデル（2026年）"
+description: "Alibabaのopen-code-review（ocr）は、GitHubでトレンド入りしているAIコードレビュアーです。決定論的なファイル選択、ルールマッチング、行アンカリングでLLMエージェントを囲むGo製CLIです。同じClaudeモデルで、自社ベンチマーク上ではClaude Codeのレビューに比べて精度4.7倍・トークン1/15 — ただし再現率は最良でも20%。仕組み、Claude・GPT・Qwen・ローカルモデルでの実行方法、委任モード、CI、そして落とし穴を解説します。"
+keywords: [open-code-review, Alibaba open code review, ocr CLI, AI code review, AACR-Bench, Claude Code code review, Codex code review, deterministic engineering, LLM agent hybrid, delegation mode, precision vs recall, pull_request_target, GitHub Actions AI review, Qwen code review, local model code review]
+---
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-09-15" source="github.com/alibaba/open-code-review (README, action.yml, docs under pages/src/content/docs/en, release v1.12.2 of Sept 15, 2026; 27.5k stars on that date); AACR-Bench leaderboard image in the README; Hacker News thread item 48406358; the maintainers' July 29, 2026 retrospective post. Benchmark rows were measured on older versions (OCR v1.3.1/v1.8.7, Claude Code v2.1.169, Codex v0.140.0) and on Alibaba's own dataset. Treat every number as the vendor's, not an independent result." />
+
+<Callout type="objectives" items={[
+  "open-code-reviewが、Claude CodeやCodexに「PRをレビューして」と頼むのと何が違うのかを説明する：どのステップがコードで、どのステップがモデルなのか",
+  "ベンチマークを正直に読む — 4.7倍という精度の見出し、20%という再現率の上限、そしてなぜ新しいClaudeモデルのスコアが低かったのか",
+  "任意のプロバイダー（Claude、GPT、Gemini、Qwen、DeepSeek、ローカルのOllamaモデル）で最初のレビューを実行し、トークンを1つも使わずにファイルフィルターをプレビューする",
+  "OCR管理のレビューと、Claude CodeやCodexのサブスクリプションが思考を担う委任モードのどちらかを選ぶ",
+  "pull_request_targetと誤検知の罠にはまらずにCIへ組み込む"
+]} />
+
+2026年にコーディングエージェントを導入したチームはどこも同じ壁にぶつかりました。コードが、誰かが読めるよりも速く届くのです。「レビューもエージェントに頼めばいい」というのは当然の答えですが、たいていは誰も信用しないコメントの山を生むだけです。**[open-code-review](https://github.com/alibaba/open-code-review)**（`ocr` CLI）はAlibabaの答えです。社内で約2年間使われた後、2026年5月18日にオープンソース化され、今週27.5kスターと9月15日のリリースで再びGitHub Trendingに登場しています。
+
+1ページを割く価値があるのは、その核となる考え方が、Claude、GPT、オープンモデルで構築するあらゆるものに応用できるからです：**間違ってはならないステップはモデルから取り上げ、モデルには判断だけを任せる。**
+
+## 考え方：レールはコードで、判断はモデルで
+
+メンテナーは、汎用エージェントがスキルやプロンプトでコードをレビューするときに見た3つの失敗モードを挙げており、それはClaude Codeユーザーの不満とほぼ一対一で対応します：
+
+| 純粋なエージェントレビューの失敗 | OCRが代わりにコードで行うこと |
+|---|---|
+| **カバレッジの欠落** — 大きな差分では、エージェントが一部のファイルだけをレビューし、他を黙って飛ばす | 決定論的な**5段階のファイルフィルター**がレビュー対象のファイルを正確に決め、それぞれがディスパッチされる。モデルがファイルを「忘れる」ことはできない |
+| **位置のずれ** — コメントが間違った行やファイルを指す | 独立した**ポジショニングモジュール**が、モデルが引用したコード片を差分と、次にファイル全体と照合して各コメントをアンカーし、それでも駄目な場合にのみモデルに再配置を依頼する |
+| **品質の不安定さ** — プロンプトの小さな変更で結果が大きく揺れる | **ルールはglobパターンでファイルにマッチされ**、モデルが選ぶのではない。関連ファイル（例えば`message_en.properties`と`message_zh.properties`）は**バンドル**され、各バンドルは独立したサブエージェントとして実行される |
+
+モデルには本当に得意な部分が残ります：次に何を見るかを決め、コンテキストを取り込むことです。モデルには小さく目的特化したツールセットが与えられます — ファイルの範囲を読む、別ファイルの差分を読む、リポジトリをgrepする、名前でファイルを探す、コメントを出力する、終了する — チームによれば、これは本番のツール呼び出しトレースから抽出したものです。最後の**リフレクション／フィルター工程**が、あなたの目に触れる前に弱いコメントを捨てます。
+
+<Steps items={[
+  {title: "1. 差分を構築する", body: "ワークスペース（ステージ済み、未ステージ、未追跡）、merge-baseから計算したブランチ範囲、単一コミット、または差分なしでファイル全体を対象にする`ocr scan`。Git 2.41以上が必要です。"},
+  {title: "2. コードでファイルをフィルターする", body: "順に5つのゲート：バイナリ、除外リスト（常に優先）、包含リスト（残りをバイパス）、拡張子の許可リスト、組み込みのテストファイルパターン。`vendor/`、`node_modules/`などはゲートの前に除外され、決して含めることはできません。"},
+  {title: "3. ルールをマッチしてバンドルする", body: "各ファイルは優先順位の連鎖からルールを得ます（CLIの`--rule`、次にプロジェクトの`.opencodereview/rule.json`、次にユーザーファイル、最後に組み込みルール）。関連ファイルはグループ化され、グループはデフォルトで8つずつ並列に実行されます。"},
+  {title: "4. 計画し、ラウンドでレビューする", body: "読み取り専用の計画呼び出しは大きな変更（変更行50行以上の1ファイル、または合計100行以上の2ファイル以上）の場合にのみ実行されます。その後、メインのツールループが`--effort`に応じて1、2、3ラウンド実行されます。後のラウンドは前の指摘を参照し、計画をスキップします — ドキュメントによれば、計画はそうしないとカバレッジの上限として働いてしまうためです。"},
+  {title: "5. アンカー、フィルター、出力", body: "コメントは行にアンカーされ、弱いものはフィルターされ、結果はテキスト、JSON、SARIFで出力されます — またはCIレシピを通じてPRに戻されます。"}
+]} />
+
+## ベンチマークを注意深く読む
+
+Alibabaは結果を**AACR-Bench**で公開しています。これはHugging Face上の自社データセットで、50のオープンソースリポジトリ、200件の実際のプルリクエスト、10言語、そして80人以上のシニアエンジニアが注釈付けとクロスチェックを行った1,505件の問題から成ります。README内のリーダーボードから選んだ行：
+
+| レビュアー | モデル | F1 | 精度 | 再現率 | レビューあたりトークン | 時間 |
+|---|---|---|---|---|---|---|
+| OCR v1.3.1 | Claude Opus 4.6 | **25.1%** | 33.9%（889件中301件） | 20.0% | 385K | 1m23s |
+| OCR v1.8.7 | Qwen3.8-Max | 23.0% | 33.9% | 17.4% | 334K | 5m14s |
+| OCR v1.3.1 | GPT-5.5 | 21.0% | 32.1% | 15.5% | 422K | 2m51s |
+| OCR v1.3.1 | Claude Opus 4.8 | 17.9% | **37.8%** | 11.7% | 352K | 1m06s |
+| Claude Code v2.1.169 | Claude Opus 4.8 | 14.1% | 15.9% | 12.7% | 2,062K | 5m38s |
+| Claude Code v2.1.169 | Claude Opus 4.6 | 11.6% | 7.2%（5,980件中435件） | **28.9%** | 5,664K | 13m06s |
+| Codex v0.140.0 | GPT-5.5 | 8.4% | 27.8% | 4.9% | 525K | 2m58s |
+
+この表には、見出しよりも興味深い点が3つあります。
+
+**1. 精度の差は、実はコメント量の差です。** Opus 4.6では、Claude Codeは200件のPRに5,980件 — PRあたり約30件 — のコメントを投稿し、そのうち7%が実際に注釈された問題と一致しました。OCRは889件（PRあたり約4.4件）を投稿し、34%が一致しました。実はClaude Codeのほうが*より多くの本物の問題を見つけています*（435件 vs 301件、つまり再現率が高い）。違いはノイズであり、ノイズこそがAIレビュアーを無効化される原因です。あるHacker Newsのコメント投稿者はこう表現しました：「指摘の8件中7件が問題なしなら、人は警告を無視するようになる」。
+
+**2. ボード上で最良のレビュアーでも、本物の問題を5件に1件しか見つけません。** 全体での最高再現率はClaude Codeの28.9%で、OCRの最高は20%です。厳格で主観的な正解データ（HNで指摘された点）を考慮しても、ここにあるどの構成もマージゲートにはなりません。どんなAIレビュアーも、一部のバグを安価に捕まえるフィルターとして扱い、PRが安全だと判定するものとしては扱わないでください。これはAILmanacが[検証のボトルネック](/docs/frontiers/the-verification-bottleneck)で扱うより大きなパターンに合致します。
+
+**3. 新しいモデルのスコアが低く、見出しの倍率もそれとともに縮みます。** OCR内部では、Opus 4.8がボード上で最高の精度（37.8%）を記録しましたが、再現率（11.7%）はOpus 4.6より低く、F1は25.1%から17.9%に下がりました。より強力なモデルほど保守的でした — HNのテスターがGPT-5.xで報告したのと同じ現象です。Opus 4.8のClaude Codeと比べると、OCRの優位は精度約2.4倍、トークン約6分の1であり、Opus 4.6の行から得られる4.7倍・約1/15ではありません（READMEは全体の主張を「~1/9」に丸めています）。また、Claude CodeとCodexの行は数バージョン古いものです。
+
+さらに、これはツールを作っているチーム自身が作ったベンダーのベンチマークであることも忘れないでください。HNでの初期の独立テスト（別のベンチマークの10件のPR）では精度はおよそ12%でした。メンテナーはその原因を壊れたツール呼び出しに突き止め、修正済みだと述べています。どの行を信じる前にも、自分の最近のPRで実行してみてください。
+
+## 任意のモデルで最初のレビューを実行する
+
+`ocr`はnpm経由で配布されるGoバイナリです。Anthropic、OpenAI Chat Completions、OpenAI Responses、Bedrockの各プロトコルに対応し、Anthropic、OpenAI、Gemini、DeepSeek、Kimi、Z.ai、MiniMax、xAI、DashScope（Qwen）などのプリセットを備えています。それ以外は、URLとプロトコルを指定するカスタムプロバイダーになります。
+
+<PromptCard title="インストール、設定、フィルターのドライラン">{`npm install -g @alibaba-group/open-code-review
+
+# Interactive: pick a provider, paste a key, pick a model; it runs a connectivity test
+ocr config provider
+ocr config model
+ocr llm test
+
+cd your-repo
+# See exactly which files would be reviewed, and why others are excluded — no LLM call
+ocr review --preview
+
+# Review your branch against main, with context the model can't infer
+ocr review --from main --to my-branch --background "Adds rate limiting to the public API"`}</PromptCard>
+
+ドキュメントに明記されている、午後の時間を節約してくれるポイント：
+
+- **すでにClaude Codeを使っていますか？** 設定ファイルも`OCR_LLM_*`変数も設定されていない場合、`ocr`は`ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL`にフォールバックします。見つけた**最初の**完全なURL・トークン・モデルの組を使うため、古い設定ファイルが環境変数を黙って上書きします。
+- **ローカルモデルにはネイティブのツール呼び出しが必要です。** OCRはレビュー全体をツール呼び出しで駆動します。ツール呼び出しをテキストとして*書く*だけのモデル（FAQでは`deepseek-r1`が挙げられています）は「No tool calls parsed」でループし、コメントを0件返します。`qwen3`のようなツール対応タグのOllamaモデルを選んでください。[モデルをローカルで実行する](/docs/models/run-models-locally-ollama)を参照してください。
+- **`--effort`は品質とコストのダイヤルです。** `low`は1ラウンド、`medium`（デフォルト）は2、`high`は3で、グループごとのタイムアウトもそれに比例します。`--max-tokens-budget`は総トークンにハード上限をかけ、それでも部分的な結果を公開します。
+- **`--background`は重要です。** CLIリファレンスはこれを最も効果の高いフラグの1つと呼んでいます：モデルが見るのは差分と自分で読むことにしたものだけで、あなたのチケットは見えません。
+- **`start_line: 0`のコメント**は本物ですが、アンカーできなかったものです — たいていはモデルがコードを引用せずに言い換えたか、差分にCRLFや混在したインデントがあります。
+
+## カスタムルール
+
+ルールはglobでマッチされるプレーンなJSONです。プロジェクトファイルは`.opencodereview/rule.json`で、各エントリには`path`パターン、`rule`テキスト、そしてそのファイルに組み込みルールも残すための`merge_system_rule`があります。**最初にマッチしたパターンが優先される**ため、具体的なパスを一般的なパスより前に置いてください。`ocr rules check <file>`は、どのレイヤーとパターンがマッチしたかを表示します。リポジトリ自身のルールファイルは良いテンプレートです：フィールド順序の強制、4つの翻訳ドキュメントをコード表と同期させること、新しいプロバイダーごとに名前付きテストを必須にすることをレビュアーに指示しています — 汎用モデルには推測できない社内ルールです。
+
+組み込みのカバレッジはAlibabaのスタック寄りです（Javaのnullポインターとスレッドセーフティのチェック、JS/TSのXSS、mapper XMLファイルのSQLインジェクション）。その後、コミュニティのPRによってPython、Rust、Kotlin、C/C++、Terraformなどが追加されています。
+
+## OCR管理モードか委任モードか
+
+コーディングエージェントの中から実行する方法は2つあり、違いは**誰が思考の費用を払うか**です。
+
+| | OCR管理（プラグイン、スキル、CLI） | 委任モード |
+|---|---|---|
+| モデルを呼び出すのは誰か | `ocr`（自身のAPIキーで） | ホストエージェント（Claude Code、Codex、Cursor、OpenCode…） |
+| OCRが行うこと | 上記のパイプライン全体 | ファイル選択とルール解決のみ |
+| コスト | 従量課金のAPIトークン | エージェントのサブスクリプションの枠 |
+| ベンチマークの保証を維持するか | はい — アンカリング、ラウンド、リフレクションフィルター | 部分的に — カバレッジとルールは維持されるが、レビュー自体はエージェント次第 |
+
+Claude Codeでは、`/plugin marketplace add alibaba/open-code-review`の後に`/plugin install open-code-review@open-code-review`を実行すると、`/open-code-review:review`（OCR管理、自動修正ステップ付き）と`/open-code-review:delegate-review`が使えるようになります。Codexは同じリポジトリをプラグインマーケットプレイスとしてインストールします。
+
+<PromptCard title="手動での委任モード（スキルが自動化する内容）">{`# 1. Which files, in which mode, and why others were excluded
+ocr delegate preview --from main --to my-branch
+
+# 2. The rule checklist for those files, grouped so shared rules appear once
+ocr delegate rule src/api/handler.go src/api/limits.go
+
+# 3. Your agent then reads each diff with git (git diff <merge_base>..<to> -- <path>),
+#    reviews each file against its rule group, and reports
+#    Critical/High always, Medium with context, Low only if clearly valuable.`}</PromptCard>
+
+OCRをインストールしなくても、委任は良いパターンです：どのファイルをカバーし、どのチェックリストを適用するかを*正確に*エージェントに伝える小さな決定論的ヘルパーが、「これをレビューして」を願望から、エージェントが途中で打ち切れないループへと変えます。
+
+## CI：2つの罠
+
+同梱のGitHubワークフローは`pull_request_target`と`/open-code-review`コメントで起動し、`ocr`をインストールし、範囲をJSON（`--format json --audience agent`）でレビューし、インラインコメントを投稿します。行のない指摘はサマリーにまとめられます。`llm_model`や`llm_reasoning_effort`などの入力を持つコンポジット`action.yml`もあります。コピーする前に決めておくべきことが2つあります：
+
+- **`pull_request_target`はフォークからのPRにシークレットへのアクセスを与えます。** ドキュメントはフォークでもレビューが動くようにこれを選んでおり、OCRは差分を読むだけでPRのコードを実行しないと注記しています。しかし差分は、投稿用トークンを持つモデルにそのまま渡される信頼できないテキストです。*推論であり、文書化されたインシデントではありません：* 悪意あるPRは、レビュアーにプロンプトインジェクションを仕掛けて黙らせたり、誤解を招くコメントを投稿させたりしようとする可能性があります。ジョブの権限は投稿に必要な範囲に留め、AIレビューをマージの承認者にしないでください。そして[GitHubのissueがCIシークレット漏洩につながった経緯](/docs/security/github-issue-to-ci-secrets-blackhat-2026)を読んでください。
+- **展開する前にノイズを見込んでおきましょう。** Actionのデフォルトのリクエストボディは互換性のためにモデルの「thinking」をオフにしており、推論モデルの挙動がローカル実行時と変わります。`ocr`のバージョンを固定し（入力のデフォルトは`latest`）、少数のリポジトリでコメント専用トリガーから始め、チームが実際に対応したコメントの数を数えてください。
+
+<Quiz title="理解度チェック" questions={[
+  {q: "Claude Opus 4.6を使ったAACR-Benchで、Claude Codeの精度は7.2%、OCRは33.9%でした。注釈付きの本物の問題をより多く見つけたのはどちらのレビュアーですか？", options: ["OCR。精度が高いから", "Claude Code — 本物の問題は435件 vs 301件だが、約5,980件のコメントに埋もれている", "同じ数を見つけた", "表からはわからない"], answer: 1, explain: "精度とは、コメントのうち本物である割合です。Claude Codeははるかに多くコメントしたため、ほとんどがノイズである一方で、より多くの本物の問題を見つけました（再現率が高い）。"},
+  {q: "公開リーダーボードで、いずれかのレビュアーが達した最高の再現率はどれですか？", options: ["約95%", "約60%", "30%未満（28.9%、Opus 4.6のClaude Code）", "ちょうど20%"], answer: 2, explain: "ボード上のどれも、注釈付き問題の3分の1すら捕まえられません。AIレビュアーは安価なフィルターであって、マージゲートではありません。"},
+  {q: "OCR内部で、Claude Opus 4.8のF1はOpus 4.6より低くなりました。なぜですか？", options: ["一部のPRでクラッシュした", "より保守的だった：ボード上で最高の精度（37.8%）だが、再現率は11.7%に落ちた", "10倍のトークンを使った", "OCRはOpus 4.8をサポートしていない"], answer: 1, explain: "より強力なモデルは、より少なく、より正確なコメントを投稿しました。F1は再現率の低下を罰します。"},
+  {q: "OCRをローカルのOllamaモデルに向けたところ、すべてのファイルが「Max tool requests reached」とコメント0件で終わります。最も可能性の高い原因は？", options: ["タイムアウトが短すぎる", "モデルがネイティブのツール呼び出しをできない — ツール呼び出しをテキストとして書くだけ", "rule.jsonが不正", "ローカルモデルがブロックされている"], answer: 1, explain: "OCRは完全にツール呼び出しで動作します。ネイティブの関数呼び出しに対応したモデル（例えばqwen3）を使い、まず生のtoolsリクエストでテストしてください。"},
+  {q: "委任モードでは、何がOCRからコーディングエージェントに移りますか？", options: ["ファイル選択", "ルール解決", "実際のレビューの推論 — つまりモデルのコスト", "GitHubへの投稿"], answer: 2, explain: "OCRは引き続きどのファイルとどのルールかを決め、サブスクリプションのエージェントが差分を読んでレビューを行うため、OCRのAPIキーは不要です。"},
+  {q: "シェルでOCR_LLM_MODELを設定したのに、ocr llm testが別のモデルを表示します。なぜですか？", options: ["環境変数はサポートされていない", "OCRは最初の完全なURL・トークン・モデルの組を使い、設定ファイルにすでにそれがある", "常にANTHROPIC_MODELを優先する", "モデル名は大文字小文字を区別する"], answer: 1, explain: "~/.opencodereview/config.json内の完全な組が環境変数より優先されます。それらのキーを削除するか、ocr config setで変更してください。"}
+]} />
+
+## 出典とさらに読む
+
+- [GitHub上のalibaba/open-code-review](https://github.com/alibaba/open-code-review) — README（設計の根拠、ベンチマーク表）、Apache-2.0
+- [Hugging Face上のAACR-Benchデータセット](https://huggingface.co/datasets/Alibaba-Aone/aacr-bench) — 数値の裏付けとなる200件のPRベンチマーク
+- [アーキテクチャドキュメント](https://github.com/alibaba/open-code-review/blob/main/pages/src/content/docs/en/architecture.md) — 5段階フィルター、計画のしきい値、レビューラウンド、メモリ圧縮
+- [設定](https://github.com/alibaba/open-code-review/blob/main/pages/src/content/docs/en/configuration.md)と[FAQ](https://github.com/alibaba/open-code-review/blob/main/pages/src/content/docs/en/faq.md) — プロバイダー、フォールバック順序、ローカルモデルのツール呼び出し、アンカリングの失敗
+- [委任モード](https://github.com/alibaba/open-code-review/blob/main/pages/src/content/docs/en/integrations/delegate.md)と[CI/CD](https://github.com/alibaba/open-code-review/blob/main/pages/src/content/docs/en/integrations/ci.md)
+- [コーディングエージェント用プラグイン（Claude Code、Codex、Cursor）](https://github.com/alibaba/open-code-review/blob/main/plugins/open-code-review/README.md)
+- [メンテナーによる2か月の振り返り（2026年7月29日）](https://github.com/alibaba/open-code-review/blob/main/pages/src/content/blog/en/oss-two-month-retrospective.md) — 社内の利用数値と、自分たちのAI生成コードのレビュー方法
+- [Hacker Newsの議論](https://news.ycombinator.com/item?id=48406358) — 独立したテスト結果、精度 vs 再現率の議論
+
+## 次へ
+
+- [コーディングエージェントCLIの比較](/docs/models/coding-agent-clis-compared) — OCRが組み込まれ、比較対象とするエージェント
+- [エージェントの評価](/docs/playbooks/evaluating-agents) — リーダーボードを信じる代わりに、自分のPRでレビュアーをテストする
+- [Claude Codeのフック](/docs/claude-code/hooks) — OCR自身のチームと同じように、コミット前に`ocr review`を自動実行する
