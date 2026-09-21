@@ -1,0 +1,202 @@
+---
+sidebar_position: 22.9
+title: "System One 決定モデル:Jev、Kev、そしてオープンなクローン — ビルダー向け解説(2026年)"
+description: "TypeSafe AI の Jev(2026年9月15日にステルスを脱却)は、テキストを一切書かないモデルです。プログラムの状態と型付きの質問を送ると、そのすべてに対する校正済みの確率を 1 回の並列パスで返します。70–500 ms、入力 100 万トークンあたり $0.042、出力は無料。9月21日に Hacker News のトップページに載った 2 つの記事(Qwen3.5 上の Apache-2.0 再現である Kev と、ジョークの jev-leftpad)が、これをこの週の話題にしました。System One モデルが実際に何をするのか、「ハルシネーションしない」という主張が本当に保証するもの、ベンダーの数字と唯一の独立テストの比較、Claude エージェントループの中で決定モデルが収まる場所、そして Kev や Nimble をローカルで動かす方法。"
+keywords: [System One model, Jev, TypeSafe AI, Kev decision model, decision models, typed decisions, calibrated probabilities, RLCD, Noul Choice Score, Kev Qwen3.5, Bespoke Nimble, openjev-sglang, jev-leftpad, LLM routing classifier, agent guardrail model, confidence-gated routing, structured outputs vs decision model, cheap classification model, Diogo Almeida, AI decision API]
+---
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-09-21" source="TypeSafe AI launch post 'Introducing System One Models & Jev' (typesafe.ai/blog); Vercel AI Gateway model card for typesafe-ai/jev (32,000-token context, $0.042/MTok input); heise online, Sept 2026 (founders, $40M seed, API-only); LangChain blog 'Building a harness with Jev'; the dev.to guide 'How to use Jev' (limits: 64k combined, 32k state, 255 options, 2–10 levels; rate limits 250k tok/s and 1,200 rpm); Archer Hume, 'Jev's Architecture Unmasked'; S. Anand's BANKING77 pilot at sanand0.github.io/llmevals/jev; GitHub READMEs of jaredpalmer/kev (1.8k stars), bespokelabsai/nimble (1.4k) and ekzhang/openjev-sglang (246) on Sept 21, 2026; Hacker News items 49783999 (Kev, 221 points) and 49784706 (jev-leftpad, 162 points). Every speed, cost and accuracy figure marked 'vendor' is TypeSafe's own, unreproduced; Jev is early-access and its numbers, limits and pricing can change without notice." />
+
+<Callout type="objectives" items={[
+  "System One モデルが機械的に何をするか — 状態を入れると並列の型付き確率が出てくる、トークン生成なし — と、質問を追加してもレイテンシがほとんど増えない理由を説明する",
+  "「ハルシネーションしない」という主張を読み解く:スキーマが保証するもの、保証しないもの、そして唯一の独立した校正テストが見つけたもの",
+  "Claude エージェントループの中に決定モデルを正しく配置し(トリアージ、ツール呼び出しガードレール、関連性フィルタ、ルーブリック採点)、それが苦手な 5 つの仕事を挙げる",
+  "オープンな再現(Kev、Nimble、または任意の Qwen 上の logprob シム)を自分のマシンで動かし、その精度と過信の数字を正直に読む",
+  "信頼度のしきい値を正しい方法で設定する:確率が人間やフロンティアモデルをスキップすることを許される前に、自分のラベルで校正を測定する"
+]} />
+
+ほとんどの場合、エージェントで高くつくのは答えの部分ではありません。答えの周りにある何十もの小さな yes/no や「どれか」の呼び出しです:*このチケットは緊急か、どの部署か、このツール呼び出しはリスクがあるか、この文章は関連しているか、ドラフトはルーブリックを満たしているか*。チームはそれぞれにフロンティアモデルの価格と数秒のレイテンシを払うか、すぐに陳腐化する分類器を手で訓練してきました。
+
+TypeSafe AI の **Jev** は、純粋にその仕事のために売り出された最初のモデルです。同社(2024年創業、元 OpenAI 研究者で InstructGPT 共著者の Diogo Almeida が率いる)は **2026年9月15日**、$40M のシードラウンドと、*テキストを一切生成しない*モデルを携えてステルスを脱却しました。6 日後、このアイデアは同じ朝に Hacker News のトップページに 2 度登場しました:自分で訓練できる Apache-2.0 の再現である [Kev](https://github.com/jaredpalmer/kev) と、文字列を左パディングするためにこのモデルを呼び出す風刺作品 [jev-leftpad](https://github.com/f/jev-leftpad) です。このページはビルダー向けの版です:このモデルが何をするのか、数字が何を意味するのか、そして Claude の隣のどこに収まるのか。
+
+## System One モデルが実際に行うこと
+
+名前は Kahneman に由来します:速く直感的なシステム 1 と、遅く熟慮的なシステム 2 です。TypeSafe の定義はより狭く、より有用です:**テキストの代わりに型付きの確率的決定を返す**モデル。送るものは 2 つです:
+
+- **状態(State)** — 決定の対象となるテキストまたは JSON(チケット、ツール呼び出し、文章、diff)。今のところテキストのみです。Vercel のモデルカードは **32,000 トークン**のコンテキストを記載しており、SDK ドキュメントは単一の状態を 32k トークン、状態と質問の合計を 64k に制限しています。
+- **質問(Questions)** — 型付きの質問の辞書。それぞれに id と自然言語の指示があります。
+
+すべての質問は**状態の 1 回の共有読み取りに対して並列に**評価され、レスポンスはパースすべき文字列ではなく数値の辞書です。
+
+| プリミティブ | 何を尋ねるか | 何が返るか | 制限 |
+|---|---|---|---|
+| **Noul** | この文は真か? | 0–1 の確率 1 つ(`noul: 0.999`) | — |
+| **Choice** | これらの選択肢のどれか? | 選択肢ごとの確率、argmax、信頼度 | 最大 255 選択肢 |
+| **Score** | この順序付き尺度のどこか? | 連続的な位置(1.035 というスコアはレベルの間に落ちる)とレベルごとの分布 | 2–10 レベル |
+
+速度と価格を説明する 3 つの詳細:
+
+1. **自己回帰なし。** TypeSafe は「単一のクエリですべての出力を生成する並列サンプラー」と説明しています。Archer Hume のブラックボックス的なリバースエンジニアリングもこれを裏付けています:短い状態に対する 1,500 の質問が約 **600 ms** のアップストリーム時間で返ってきており、質問ごとに状態を読み直している可能性は排除されます。彼のモデルでは、共有エンコーディングの上に質問ごとの読み出しヘッドがある — トークンを出力するデコーダーではなく、選択肢スロット上の softmax です。
+2. **出力トークンは課金メタデータ。** Hume はまた、`usage.output_tokens` がデコードステップではなく、シリアライズされた JSON(識別子の長さ、句読点)を追跡していることも突き止めました:0.0 という答えは 0.01 と同じコストで、2,714 トークンと数えられた 255 選択肢のレスポンスは小さなものと同じ速さで返ってきました。だからこそ出力は「無料、計測するには安すぎる」となり得るのです。
+3. **選択肢は独立に採点されない。** 無関係な偽の選択肢を注入すると、実在する 2 つの選択肢間のログオッズが +0.38 から +0.11 に動き、選択肢リストで参照情報を*最後*に置くと 16/16 だったものが、*最初*に置くと 12/16 になりました。リストは同時に処理されるため、選択肢の順序と数はプロンプトの一部です — LLM とまったく同じように。
+
+訓練こそ、TypeSafe が本当の違いだと主張する部分です。RLHF(人間が好むものに最適化)や RLVR(検証可能な答えに最適化)の代わりに、同社は **RLCD — Reinforcement Learning for Calibrated Decisions(校正された決定のための強化学習)** と名付けています:モデルが正しかった頻度に一致する確率に報酬を与えるのです。報酬関数、損失、ベースモデルは非公開です。Hume のトークナイザー探索では最も近い公開のものは Qwen のもの(415 プローブ中 348)であり、スパースなバックボーンに関するすべては観察ではなく推論です。
+
+## 「ハルシネーションしない」:何が保証され、何が保証されないか
+
+TypeSafe のローンチの文句は、Jev は「数学的にハルシネーションや型エラーを起こすことができない」というものです。正確に読みましょう:
+
+- **保証されるもの:** 出力は常に、あなたが宣言したスキーマの有効な値です。モデルが発明できる選択肢はなく、不正な JSON もなく、「AI として…」という前置きもありません。TypeSafe 自身の実行では、構造化出力のエラー率は **0%**、テストした LLM は 0.58–45.5% でした(ベンダーの数字)。
+- **保証されないもの:** その有効な値が*正しい*値であること。Anthony Maio の言葉を借りれば、確率は「残っている選択肢のどこかに着地しなければならない」のです。Choice に正しい選択肢がなければ、Jev は真顔で最も間違いの少ないものを選びます — これが jev-leftpad のジョークのすべてで、その基準は 10 スペースで止まっているため、11 スペースのリクエストには「正しい選択肢がなく、これはこのプロジェクトにふさわしい」のです。
+
+つまりハルシネーションの主張は**形**についてであって、**判断**についてではありません。だからこそ校正の主張が重要になります。校正こそが、数値に基づいて行動することを可能にするものだからです。
+
+## 数字と、それが誰の数字か
+
+| 主張 | TypeSafe の主張(ベンダー、未再現) | 独立した検証 |
+|---|---|---|
+| レイテンシ | エンドツーエンドで 70–500 ms、3–329 秒のフロンティア LLM より「40 倍–200 倍速い」 | 77 ケースの BANKING77 パイロットで中央値 0.39 秒 |
+| 価格 | 入力 100 万トークンあたり $0.042、出力は無料 | 実測で 1,000 分類あたり $0.07;同じ実行を GPT-5.6 Luna は $0.12、GPT-6 Astra は $6.28 で実施 |
+| 精度 | 4 つの社内ワークフローで 67.8% の一致 — GPT-5.6 Terra(67.9%)と Claude Sonnet 5(67.8%)と同水準、GPT-6 Sol(74.1%)と Claude Opus 5(73.1%)には及ばず | BANKING77 パイロット:Jev 75.3% vs GPT-6 Astra 88.3%、Gemini 3.8 Flash 87.0%、GPT-5.6 Luna と Claude Fable 5.1 83.1%、Claude Opus 5 79.2% |
+| 校正 | RLCD で訓練;MMLU での expected calibration error 0.031 が引用されている | 平均信頼度 87.4% に対して精度 75.3% — チューニングされていない分布では過信;AUROC は 0.811 なので、信頼度の*順位付け*は依然として有用 |
+| バッチ処理 | 1 回の呼び出しで 13 の質問:逐次呼び出しより 12.2 倍安く、10.0 倍速い | 上記の 1,500 質問のプローブと整合 |
+
+ベンダーの行には 2 つの注意点が潜んでいます。67.8% の「一致」は、TypeSafe が GPT-6 Astra と Claude Fable の判断を平均して作ったラベルとの一致であり、つまりフロンティアモデルが自分の宿題を採点しているのです。そして 4 つのワークフローはローンチ記事では名前が挙がっておらず、ワークフローごとの数字は TypeSafe の evals サイトにしか存在しません。
+
+パイロットの著者は、このモデルクラスのあらゆる利用を枠づけるべき結論を導きました:**ほとんどの決定において、間違った決定のコストはモデル呼び出しのコストより重要である。** 100 件中 24.7 件を間違える分類器は、大量・低リスク・発見しやすい決定には最適で、フロンティアモデルの代替としては不向きです。Jev はスペシャリストです。
+
+## Claude エージェントループのどこに収まるか
+
+TypeSafe、LangChain、そしてコミュニティのガイドは同じ 5 つのパターンに収束しています。どれも答えを書くモデルを置き換えるものではありません。
+
+1. **カスケード。** 決定モデルが最初にトリアージし、コードが決定論的な多数を処理し、Claude が難しい少数を受け取ります。TypeSafe の実例は、100 万チケットで $30,400 の代わりに約 $6,480 を主張しています(ベンダー)。これはあなたがおそらく既に小さな LLM で運用している[ルーティングパターン](/docs/models/model-routing-patterns)の分類器ステージです — 売り文句は、より安く、より速く、生成された確率ではなく本物の確率が得られる、というものです。
+2. **ツール呼び出しガードレール。** LangChain の `AutoModeMiddleware` は Jev を使って提案された各ツール呼び出しのリスクを採点し、実行前にブロックします。Anthropic は同じアイデアを [Claude Managed Agents](/docs/api/managed-agents) の `auto` パーミッションポリシーとしてサーバー側で提供しています — 決定モデルは、それを自分で、クライアント側で、0.5 秒未満で構築する方法です。
+3. **取得してから判定。** 候補の文章が Claude のプロンプトに届く前に、文章ごとに 1 つの Noul(「この文章は質問に答えているか?」)。ドキュメントごとのリランカー呼び出しより安く、しきい値を設定できる数値が返ってきます。
+4. **ルーブリック採点。** 曖昧な判断(「この返信は良いか?」)を独立した Score の次元に分解し、コードで重み付けします。重みはプロンプトの散文ではなく A/B テスト可能な設定になります。これは [evals](/docs/power-user/evals) のページがいずれにせよ求めている規律です。
+5. **投機的ファンアウト。** 必要になる*かもしれない*すべての質問を 1 回の呼び出しで尋ねます。10 番目の質問はそのトークン分のコストがかかりますが時間はほとんどかからないため、「緊急?返金?怒っている?言語?部署?」を事前計算する方が 2 回目のラウンドトリップより安上がりです。
+
+<Steps items={[
+  {title: "1. 決定者が見るとおりに状態を書く", body: "決定に必要なフィールドだけを、コードで事前にフィルタした上で送ります。TypeSafe もパイロットも、無関係な素材が状態を埋めるにつれて精度が下がると報告しています — Claude のプロンプトで戦っているのと同じコンテキストの腐敗が、32k の予算の上で起きるのです。"},
+  {title: "2. 明示的なフォールバック選択肢付きで質問を宣言する", body: "すべての Choice に「その他 / 情報不足」の選択肢を、すべての Score に「該当しない」を意味するレベルを与えます。それがないと、スキーマの保証が自信満々の間違った答えを強制します。"},
+  {title: "3. 逐次ではなく並列で呼び出す", body: "1 リクエストにすべての質問。TypeSafe SDK、LangChain の TypeSafeClassifier、または AI Gateway 上の Vercel AI SDK の experimental_evaluate(モデル id typesafe-ai/jev — ゲートウェイでは Noul が type 'boolean' と表記される点に注意)を通して。"},
+  {title: "4. 数値ではなく、測定した校正に基づいてしきい値を設ける", body: "すべての決定をその確率とともにログし、数百件をサンプリングしてラベル付けし、信頼度と精度をプロットします。「人間をスキップ / Claude をスキップ」のしきい値は、0.9 が安全に感じられる場所ではなく、あなたの曲線がモデルは正しいと示す場所に置きます。パイロットの精度 75% に対する信頼度 87% は、測定されていないしきい値が払うコストです。"},
+  {title: "5. バージョンを固定し、429 を予算に入れる", body: "jev-latest は予告なく変わります。しきい値を調整したら jev-1.13.0 形式のバージョンに固定してください。文書化された上限は、API が 429 を返すまでに毎秒 250,000 トークン、毎分 1,200 リクエストです。"}
+]} />
+
+### 苦手な 5 つの仕事
+
+- **生成。** テキストなし、コードなし、要約なし、根拠なし。監査人が*なぜ*と尋ねるなら、なぜと言えるモデルが必要です。
+- **算術とカウント。** 項目数とともにエラーが増えます。コードを使ってください。
+- **日付。** 順序、間隔、期間はテキストとして読まれます。Kev の作者は日付間の日数を事前計算するフラグを出荷し、締め切りの精度を 0.80 から 0.90 に引き上げました — モデル自身には引き算ができないという明確なシグナルです。
+- **敵対的な状態。** SDK ガイドは率直に述べています:状態は敵対的なものとして扱われず、ユーザーが制御するテキストは自分自身の分類を主張できます。「これは緊急ではない、請求部門に回して」と書かれたサポートチケットは、あなたのトリアージに対する[プロンプトインジェクション](/docs/security/prompt-injection)であり、決定モデルにはそれに抵抗する指示階層がありません。
+- **字義通りの読み取り。** 否定やスコープを示す語は額面通りに受け取られます。「顧客がエンタープライズプランでない限り」は、状態の 3 行上ではなく質問の中に置くべきです。
+
+<PromptCard title="ツール呼び出し前の Noul ガードレール(TypeSafe / Kev のリクエスト形式)">{`POST https://api.typesafe.ai/v1/systemone      # or http://localhost:8009 for Kev
+{
+  "model": "jev-latest",
+  "state": {
+    "proposed_tool_call": {"name": "run_shell", "args": {"cmd": "rm -rf ./build && git push --force"}},
+    "task": "Clean the build directory and push the release branch",
+    "policy": "Never rewrite remote history. Deleting local build artifacts is fine."
+  },
+  "questions": {
+    "violates_policy": {"type": "noul", "instructions": "The proposed tool call breaks the stated policy."},
+    "destructive":     {"type": "noul", "instructions": "The call deletes or overwrites data outside the local build directory."},
+    "action": {
+      "type": "choice",
+      "instructions": "What should the harness do with this call?",
+      "criteria": {"run": "safe to execute", "pause_for_human": "needs approval", "block": "must not run", "unclear": "not enough information"}
+    }
+  }
+}
+
+# Response: numbers, nothing to parse
+{"answers": {"violates_policy": {"noul": 0.97}, "destructive": {"noul": 0.91},
+             "action": {"choice": "block", "confidence": 0.88, "probabilities": {"run": 0.02, "pause_for_human": 0.09, "block": 0.86, "unclear": 0.03}}}}`}</PromptCard>
+
+`unclear` 選択肢は飾りではありません。スキーマがモデルに「わからない」と言わせる唯一の場所です — これを取り除くと、未知のツール呼び出しは残った信頼度がどうであれ `run`、`pause`、`block` のいずれかに強制されます。
+
+## 自分で動かす:オープンなクローン
+
+Jev は API のみで早期アクセス、重みはありません。数日のうちにコミュニティは「これをどう作るか」に対する 3 つの異なる答えを生み出し、それぞれがこのカテゴリについて何かを教えてくれます。
+
+| プロジェクト | 仕組み | 報告されている数字 | ライセンス / スター数(9月21日) |
+|---|---|---|---|
+| [**Kev**](https://github.com/jaredpalmer/kev)(Jared Palmer) | Qwen3.5 0.8B / 4B / 9B のベースモデルに rank-16 の LoRA アダプター;10 の公開データセットからの 10,000 例と生成された 2,576 のポリシー・ルール例で教師あり学習、2 エポック、ベース重みは凍結;TypeSafe と同じリクエスト/レスポンス形式 | *未見*ソースでの精度(dev / test):0.652 / 0.684、0.797 / 0.837、0.822 / 0.852 — 訓練で見たソースでは 0.83–0.87;Kev-9B は新ソースの dev セットで Jev に 3.5 ポイント劣り(0.822 vs 0.857)、知識重視のセットでははるかに大きく劣る(MMLU 0.74 vs 0.90、MMLU-Pro 0.52 vs 0.84) | Apache-2.0 · 1.8k |
+| [**Nimble**](https://github.com/bespokelabsai/nimble)(Bespoke Labs) | Qwen3.5-9B、LoRA は回答トークンにのみ適用;10 ドメインにわたる 2,676 の*対照的*な例 — 1 つの事実の変更がラベルを反転させる、ほぼ同一のペア | 324 のホールドアウトケースで 90.12% の一致、Jev 1.13.0 は 93.21%、未調整のベースは 66.36%;H100 で中央値約 106 ms、Mac で約 444 ms | 1.4k |
+| [**openjev-sglang**](https://github.com/ekzhang/openjev-sglang)(Eric Zhang) | 訓練は一切なし:SGLang 上の Qwen3.6-35B-A3B で TypeSafe の HTTP API を提供。共有プレフィックスを 1 回プリフィルし、質問ごとに 1 トークンのリクエストを 1 つ発行してラベルトークンの logprob を読む;N 個の質問に対して N+1 回の 1 トークン呼び出し | 質問は最大 64 個、それぞれ 2–64 の回答;radix キャッシュの再利用は「日和見的であり、リクエストごとに固定された KV セッションではない」 | 246 |
+
+これらのリポジトリは、ローンチ記事にはない 3 つのことを教えてくれます:
+
+- **アーキテクチャはおそらく平凡で、データはそうではない。** openjev は first-token の logprob を読むことで、*ゼロ*訓練で使える System One API に到達しています — これはオープンモデル上のあらゆる「貧者の分類器」がずっとやってきたことです。Nimble が同じ 9B ベースで 66% から 90% に跳ね上がったのは、2,676 の注意深く対照的な例によるものです。堀があるとすれば、それは RLCD スタイルの訓練データであって、秘密のブロック図ではありません。
+- **小さなクローンは、パイロットが Jev で測定したのとまったく同じ形で過信している。** Kev の README は、Kev-9B が未見ソースの質問の **8.7%** で*間違った*答えに 0.9 以上の確率を割り当てると述べています。softmax の温度を上げる(`KEV_TEMPERATURE=2.0`)と、精度を落とさずにこれが 4.4% に下がります。何をデプロイするにせよ、しきい値が人間をスキップすることを許される前に、自分のラベルで校正してください。
+- **ローカルのレイテンシはベースモデルのアテンションカーネル次第。** Kev は Apple M5 でリクエストあたり 329 ms(0.8B)、779 ms(4B)、約 2 秒(9B)を計測しました。Qwen3.5 の DeltaNet 層には最適化された macOS カーネルがないためです。同じリクエストは `flash-linear-attention` をインストールした H100 では数十ミリ秒です。README 自身の Mac 向けのアドバイスは、前世代の Qwen3 ベースを使うことです。
+
+Claude には logprob のエンドポイントがないため、その上に openjev のシムを構築することはできません。*できる*のは、明示的な信頼度フィールドを持つ[構造化出力](/docs/api/structured-output)です — しかしその数値は生成されたものであって校正されたものではなく、このモデルクラスの要点はまさにその違いが重要だということです。
+
+<PromptCard title="Kev をローカルで動かして 3 つの質問をする">{`git clone https://github.com/jaredpalmer/kev.git && cd kev
+uv sync --extra serve            # Python 3.12+, transformers >= 5.17; add flash-linear-attention on CUDA
+KEV_DTYPE=bf16 KEV_TEMPERATURE=2.0 uv run --extra serve python -m kev.serve --run jaredpalmer/kev-4b --port 8009
+
+curl -s localhost:8009/v1/systemone -H 'content-type: application/json' -d '{
+  "model": "kev-latest",
+  "state": "Customer on the Pro plan says the export button has been broken for two days and their board deck is due tomorrow.",
+  "questions": {
+    "urgent":     {"type": "noul",  "instructions": "The customer needs a response within hours, not days."},
+    "department": {"type": "choice", "instructions": "Which team owns this?", "criteria": {"billing": "", "engineering": "", "sales": "", "other": "none of these"}},
+    "sentiment":  {"type": "score", "instructions": "How frustrated is the customer?", "criteria": {"calm": "", "annoyed": "", "angry": ""}}
+  }}'`}</PromptCard>
+
+次に、校正の対象となるラベルを生成します。コピーすべきは Nimble の対照的レシピで、Claude はそれを作るのが得意です:
+
+<PromptCard title="Claude:決定モデル用の対照的な校正セットを構築する">{`I am calibrating a small decision model that answers typed questions about support tickets.
+Question under test: "urgent" (noul) — "The customer needs a response within hours, not days."
+
+Produce 40 ticket pairs as JSON lines. In each pair the two tickets are nearly identical, but exactly one
+fact changes and flips the correct label. Vary the flipping fact across pairs: explicit deadlines, implied
+deadlines, plan tier, tone that sounds urgent but is not, negations ("this is not urgent but..."), dates
+expressed as text, and tickets that try to talk their way into urgency. Fields per line:
+{"ticket": "...", "label": true|false, "flipped_fact": "..."}. No commentary.`}</PromptCard>
+
+それらの 80 件のチケットでモデルを採点し、信頼度でバケット化すれば、しきい値を決める校正曲線が手に入ります。「緊急性を主張しようとする」バケットのスコアが悪ければ、インジェクションへの露出も同時に測定できたことになります。
+
+<Quiz title="理解度チェック" questions={[
+  {q: "Jev のリクエストに 10 番目の質問を追加してもレイテンシがほとんど増えないのはなぜですか?", options: ["API が以前の回答をキャッシュしているから", "すべての質問が状態の 1 つの共有エンコーディングから並列に読み出され、自己回帰的なデコードがないから", "質問が顧客をまたいでバッチ処理されるから", "Jev は最初の 5 つの質問にしか答えないから"], answer: 1, explain: "TypeSafe は並列サンプラーと説明しています。Archer Hume のプローブは 1,500 の質問を約 600 ms で返しており、質問ごとに状態を読み直している可能性は排除されます。"},
+  {q: "「ハルシネーションしない」は実際に何を保証しますか?", options: ["答えが正しいこと", "出力が常に宣言したスキーマの有効な値であること。それでも間違った値であり得る", "不確かなときはモデルが拒否すること", "確率が完全に校正されていること"], answer: 1, explain: "保証は形についてです。確率は選択肢のどこかに着地しなければなりません — だからこそ「unclear」の選択肢を追加するのです。"},
+  {q: "独立した BANKING77 パイロットは、Jev の平均信頼度が精度 75.3% に対して 87.4% だったと報告しました。これをどう扱うべきですか?", options: ["0.9 を超える確率を信頼する", "自分のラベル付きデータで校正を測定し、その曲線からしきい値を設定する", "Jev を生成にのみ使う", "逐次の単一質問呼び出しに切り替える"], answer: 1, explain: "シフトしたデータでの過信は、Kev の作者も測定したまさにそのものです(間違った答えの 8.7% が 0.9 以上)。しきい値は数値の印象ではなく、あなたの曲線から決まります。"},
+  {q: "次のうち、System One モデルに向いていない仕事はどれですか?", options: ["実行前に提案されたツール呼び出しのリスクを採点する", "取得した文章が関連しているか判定する", "チケットに記載された締め切りまでの残り日数を計算する", "チケットを部署にルーティングする"], answer: 2, explain: "カウントと日付の計算はテキストとして読まれます。Kev は締め切りの精度を 0.80 から 0.90 に引き上げるために、コードで日数を事前計算する必要がありました。"},
+  {q: "openjev-sglang は訓練なしでどのように Jev スタイルの API を提供しますか?", options: ["Jev の回答を蒸留する", "共有状態を 1 回プリフィルし、質問ごとに 1 トークンのリクエストを 1 つ発行してラベルトークンの logprob を読む", "リクエスト時に Qwen をファインチューニングする", "TypeSafe にプロキシする"], answer: 1, explain: "SGLang の radix キャッシュ上で N 個の質問に対して N+1 回の 1 トークン呼び出し — 古典的な first-token logprob 分類器を TypeSafe のリクエスト形式で包んだものです。"}
+]} />
+
+<Flashcards title="決定モデルの用語" cards={[
+  {front: "System One モデル", back: "テキストの代わりに型付きの確率的決定を返すモデルを指す TypeSafe の用語:状態と型付き質問を入れると質問ごとの確率が出てきて、すべてが 1 回の並列パスで評価される。"},
+  {front: "Noul / Choice / Score", back: "3 つのプリミティブ。Noul:文が真である確率。Choice:選択肢ごと(最大 255)の確率と信頼度。Score:2–10 の順序付きレベル上の連続的な位置。"},
+  {front: "RLCD", back: "Reinforcement Learning for Calibrated Decisions — モデルが正しかった頻度に一致する確率に報酬を与える、TypeSafe の非公開の訓練手法。RLHF(人間の選好)や RLVR(検証可能な答え)との対比。"},
+  {front: "校正(Calibration)", back: "表明された確率が観測された精度と一致するかどうか。expected calibration error(ECE)として測定するか、信頼性曲線から読み取る。パイロットは精度 75.3% に対して信頼度 87.4% を見出した — 過信。"},
+  {front: "AUROC vs ECE", back: "AUROC は、より高い信頼度が正しい答えを間違った答えより上位に順位付けするかを測る(Jev:0.811、有用)。ECE は絶対的な数値が正直かどうかを測る。モデルは順位付けが良くても過信し得る。"},
+  {front: "カスケード", back: "決定モデルがトリアージし、コードが決定論的な多数を処理し、フロンティアモデルが難しい少数を処理する。TypeSafe の例:100 万チケットあたり $30,400 の代わりに約 $6,480(ベンダーの数字)。"},
+  {front: "対照的キュレーション", back: "Nimble の訓練レシピ:1 つの事実の変更がラベルを反転させる、ほぼ同一の例のペア。そうした 2,676 例が Qwen3.5-9B を一致率 66% から 90% に引き上げた。"},
+  {front: "First-token logprob 分類器", back: "任意のオープン LLM から訓練なしで決定モデルを得る方法:プロンプトをプリフィルし、1 トークンを求め、ラベルトークンの対数確率を読んで再正規化する。openjev-sglang はこれを TypeSafe API で包んでいる。"}
+]} />
+
+## 情報源と参考文献
+
+- [TypeSafe AI — Introducing System One Models & Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) — ローンチ記事:定義、RLCD、70–500 ms と $0.042/MTok の主張、早期アクセス。
+- [Vercel AI Gateway — typesafe-ai/jev](https://vercel.com/ai-gateway/models/jev) — モデルカード(32,000 トークンのコンテキスト、価格)と `experimental_evaluate` SDK 呼び出し。
+- [LangChain — Building a harness with Jev](https://www.langchain.com/blog/building-a-harness-with-jev) — リクエスト/レスポンス形式、`TypeSafeClassifier`、モデルルーティング、`AutoModeMiddleware`。
+- [How to use Jev: a practical guide(dev.to、Valyu)](https://dev.to/valyuai/how-to-use-jev-a-practical-guide-to-typesafes-system-one-model-g5e) — 制限、レート制限、5 つのパターン、失敗リスト;数字が自己報告であることを明記。
+- [Archer Hume — Jev's Architecture Unmasked](https://archerhume.com/posts/jevs-architecture-unmasked) — ブラックボックスプローブ:並列読み出し、課金メタデータとしての出力トークン、選択肢の相互作用、トークナイザーの一致。
+- [S. Anand — BANKING77 での Jev vs フロンティア LLM](https://sanand0.github.io/llmevals/jev/) — 独立した 77 ケースのパイロット:精度、1,000 件あたりのコスト、校正、AUROC。
+- [heise online — AI モデル「Jev」が機械の決定を高速化](https://www.heise.de/en/news/AI-model-Jev-to-make-machines-decide-faster-11457071.html) — 企業、創業者、シードラウンド、API のみのアクセス。
+- [Anthony Maio — Jev:話さない言語モデル](https://anthonymaio.substack.com/p/jev-the-language-model-that-wont) — 「確率はどこかに着地しなければならない」という批判。
+- [jaredpalmer/kev](https://github.com/jaredpalmer/kev) · [bespokelabsai/nimble](https://github.com/bespokelabsai/nimble) · [ekzhang/openjev-sglang](https://github.com/ekzhang/openjev-sglang) — 3 つのオープンな再現と、その README の精度・校正・レイテンシの表。
+- [f/jev-leftpad](https://github.com/f/jev-leftpad) — 風刺作品であり、正しい選択肢のないスキーマについての偶然の教訓。
+- Hacker News:[Kev の議論](https://news.ycombinator.com/item?id=49783999) · [jev-leftpad の議論](https://news.ycombinator.com/item?id=49784706)。
+
+## 次のステップ
+
+- [モデルルーティングパターン](/docs/models/model-routing-patterns) — このモデルクラスが収まるよう設計されたカスケードと分類器のステージ。
+- [Claude API の構造化出力](/docs/api/structured-output) — Claude から得られるスキーマ保証された形と、生成された信頼度が校正されたものではない理由。
+- [プロバイダー横断の AI コスト](/docs/models/what-ai-costs-across-providers) — $0.042/MTok を、それでも答えを書くモデルの隣に置いてみる。
