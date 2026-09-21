@@ -1,0 +1,243 @@
+---
+sidebar_position: 22.8
+title: "AX (Agent Executor): il runtime open per agenti di Google, spiegato per chi costruisce (set 2026)"
+description: "google/ax è arrivato in prima pagina su Hacker News il 20–21 settembre 2026 (507 punti). Non è un modello, non è un harness e non è un'API hosted: è un orchestratore in stile kubectl che esegue Task di agenti in sandbox sopra Agent Substrate, con Workspace (git + MCP + skill), Gateway (allowlist di egress) e Model (provider + secret) come risorse dichiarative. Cosa fanno le quattro primitive, cosa sopravvive a un suspend/resume e cosa no, il contratto del runner che la tua immagine deve rispettare, i requisiti GKE, e perché la documentazione di giugno non corrisponde più alla CLI."
+keywords: [AX, Agent Executor, google/ax, Agent Substrate, agent runtime, Kubernetes agents, GKE Agent Sandbox, gVisor agents, suspend resume agents, snapshot agents, ax apply, ax ssh, ax-task-runner, agent orchestrator, Claude Code on Kubernetes, ADK runtime, self-hosted agent runtime, Managed Agents alternative, OpenAI Agents API alternative]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-09-21" source="github.com/google/ax (README, docs/concepts.md, docs/manifests.md, docs/runner.md, docs/sandbox.md; release tags v0.1.0 of May 20, 2026 through v0.3.0 of Sep 20, 2026; 4.3k stars on Sep 21, 2026); agentexecutor.io; Google Cloud blog posts of May 21, 2026 (Agent Executor; Agent Sandbox GA + Agent Substrate); github.com/agent-substrate/substrate README (2.4k stars); Google Cloud docs 'About GKE Agent Substrate'; Hacker News item 49780797. AX is v1alpha1 and its README promises major breaking changes: re-check field names and commands against the repo before you build on them." />
+
+<Callout type="objectives" items={[
+  "Collocare AX correttamente nello stack di Google: Kubernetes, Agent Sandbox, Agent Substrate, AX, poi il tuo harness",
+  "Leggere le quattro risorse AX (Task, Workspace, Gateway, Model) e sapere cosa ti dà ciascuna",
+  "Spiegare cosa sopravvive davvero a un suspend/resume di AX, cosa no, e cosa deve fare la tua immagine runner al riguardo",
+  "Eseguire un primo Task end to end con ax apply, ax watch e ax ssh, e conoscere le tre trappole di debugging",
+  "Decidere quando un runtime self-hosted come AX batte Claude Managed Agents o la OpenAI Agents API, e quando no"
+]} />
+
+La notte del 20 settembre 2026, **[AX: l'orchestratore agentico open di Google](https://agentexecutor.io)** è salito in cima a Hacker News con 507 punti e 222 commenti. La maggior parte di quei commenti erano persone che chiedevano a cosa serve. È una domanda legittima, perché il progetto è pubblico dal 20 maggio 2026 (v0.1.0) e da allora ha cambiato forma due volte, quindi la maggior parte dei blog post che troverai descrive una CLI che non esiste più.
+
+Ecco la versione breve. **AX non è un modello, non è un framework per agenti e non è un servizio hosted.** È un control plane in stile Kubernetes, con una CLI a forma di `kubectl`, che prende un *Task* di agente dichiarato, gli assegna una sandbox, clona i suoi repo, collega i suoi server MCP e le sue skill, recinta la sua rete, e può congelarlo in uno snapshot per scongelarlo più tardi su qualsiasi worker libero. Sta *sotto* qualunque harness tu usi già, che sia Claude Code, l'ADK di Google, LangChain o un loop Python scritto da te.
+
+## Lo stack, dal basso verso l'alto
+
+Gli annunci di Google usano quattro nomi facili da confondere. Sono quattro layer, e AX è quello in cima.
+
+| Layer | Cos'è | Stato (set 2026) | Numeri pubblicati da Google |
+|---|---|---|---|
+| **Kubernetes / GKE** | Il cluster | — | — |
+| **Agent Sandbox** ([kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)) | Una CRD Sandbox: pod isolati con gVisor (Kata pluggable), warm pool, snapshot dei pod | GA su GKE dal 21 maggio 2026 | 300 allocazioni di sandbox/s per cluster; avvio sotto il secondo, 90% entro 200 ms |
+| **Agent Substrate** ([agent-substrate/substrate](https://github.com/agent-substrate/substrate)) | Un control plane minimale che multiplexa molti *actor* inattivi su pochi *worker* caldi facendo snapshot di RAM + file verso l'object storage | Open source, embrionale, "non un prodotto Google ufficialmente supportato"; versione managed su GKE in valutazione | ~250 actor stateful su 8 pod; "densità 10x" rispetto ai container semplici; attivazione sotto il secondo |
+| **AX** ([google/ax](https://github.com/google/ax)) | Task/Workspace/Gateway/Model dichiarativi + CLI sopra Substrate | v0.3.0, `ax.io/v1alpha1`, Apache-2.0, 4,3k stelle | "miliardi di task per cluster" (claim di marketing, non un benchmark) |
+| **Il tuo harness** | Claude Code, ADK, LangChain, agenti A2A, il tuo loop | — | — |
+
+Due cose che la tabella nasconde. Primo, Substrate è dove vive l'ingegneria interessante (la macchina di snapshot e teleport); AX è il layer ergonomico. Secondo, Substrate vive in una org GitHub tutta sua, non sotto `google/`, cosa che diversi commentatori su HN hanno segnalato come un indizio su quanto tutto questo sia ufficiale. Tratta l'insieme come un progetto open source serio ma pre-1.0 di un team Google, non come un prodotto con uno SLA.
+
+## Le quattro primitive
+
+Tutto in AX è una risorsa YAML dentro un *atespace* (l'unità di tenancy di Substrate; `default` se non specifichi altro). Le applichi con `ax apply -f` esattamente come faresti con `kubectl`.
+
+### Task: l'unità di esecuzione isolata
+
+```yaml
+apiVersion: ax.io/v1alpha1
+kind: Task
+metadata:
+  name: fix-flaky-test
+spec:
+  image: "ghcr.io/my-org/my-agent-image"
+  command: ["my-agent", "--goal", "fix the flaky test"]
+  env:
+    - name: ENVIRONMENT
+      value: "staging"
+  resources:
+    requests: { cpu: "500m", memory: "1Gi" }
+    limits:   { cpu: "2",    memory: "4Gi" }
+  workspaces:
+    - name: golang
+      path: "/workspace"
+      goal: "Ensure the Go toolchain is available and built from source"
+  gateway:
+    name: default-gateway
+  debug: true
+```
+
+Un Task è deliberatamente piccolo. Il documento sui concetti descrive agenti che creano *molti* Task nel corso della loro vita, invece di vivere dentro un unico processo lungo. Tre campi contano più di quanto sembri:
+
+- **`workspaces[].goal`** è una descrizione in linguaggio naturale dell'ambiente di cui il Task ha bisogno. Il setup "generativo" di AX prova a completare il workspace partendo da quella frase (installare una toolchain, scaricare le dipendenze). È l'unico punto in cui un modello è nel loop *prima* che il tuo agente parta.
+- **`debug: true`** è l'unico modo per entrare nella sandbox con `ax ssh`. Senza, i guest service non vengono esposti e la CLI rifiuta di connettersi.
+- **`gateway`** è opzionale nello schema, ma se lo ometti ti stai affidando a qualunque sia la policy di egress di default del substrate. Dichiarane uno.
+
+### Workspace: git + MCP + skill, materializzati prima che l'agente parta
+
+```yaml
+apiVersion: ax.io/v1alpha1
+kind: Workspace
+metadata:
+  name: golang
+spec:
+  git:
+    - name: origin
+      repo: "https://github.com/golang/go.git"
+      branch: "my-fix"
+  mcp:
+    registries:
+      - provider: google
+        query: "mcp.tags:build"
+    servers:
+      - name: git-tools
+        endpoint: "http://git-mcp.default.svc.cluster.local:8080"
+  skills:
+    registries:
+      - provider: google
+        query: "skills.tags:nodejs"
+    path: "/.agents/skills"
+```
+
+Questa è la risorsa che rende AX qualcosa di più di "Job Kubernetes con una sandbox". Un Workspace pre-clona i repository, risolve i server MCP (per endpoint esplicito *o* per query a un registry) e deposita i pacchetti di skill in un path. Nota il path di default delle skill: `/.agents/skills` è la stessa convenzione di directory che lo [standard SKILL.md](/docs/models/skill-md-open-standard) cross-agent usa per Codex, Cursor e Gemini CLI, quindi un Workspace può passare le stesse skill a qualunque harness giri dentro il Task.
+
+### Gateway: listener in ingresso, allowlist in uscita
+
+```yaml
+apiVersion: ax.io/v1alpha1
+kind: Gateway
+metadata:
+  name: default-gateway
+spec:
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+  egress:
+    allowlist:
+      hosts:
+        - host: "api.anthropic.com"
+          port: 443
+```
+
+Il manifest di riferimento arriva con `host: "*"` sulla 443, che è una policy allow-everything. Cambiala. Le allowlist di egress sono il singolo controllo più efficace contro i pattern di esfiltrazione descritti nelle nostre pagine su [prompt injection](/docs/security/prompt-injection) e [cosa carica il tuo agente](/docs/security/what-your-agent-uploads), e AX ti dà un posto dichiarativo dove metterle. I listener sono il modo in cui un Task espone una porta (per un endpoint A2A, un dev server, una UI di debug); `ax tunnel` li inoltra sul tuo laptop.
+
+### Model: provider + ID del modello + un Secret Kubernetes
+
+```yaml
+apiVersion: ax.io/v1alpha1
+kind: Model
+metadata:
+  name: claude-model
+spec:
+  provider: anthropic
+  model: claude-opus-5
+  secretKey:
+    name: anthropic-api-secret
+    key: ANTHROPIC_API_KEY
+  parameters:
+    maxTokens: 16000
+    temperature: 0.9
+```
+
+La documentazione di riferimento mostra i provider `google` e `anthropic`. La credenziale è un riferimento a un Secret Kubernetes, quindi il manifest non contiene mai la chiave e la chiave viene ruotata dove già ruoti i secret. AX *non* è solo-Gemini; la documentazione del runner però segnala che `GEMINI_API_KEY` viene iniettata automaticamente quando l'atespace ha credenziali Gemini, che è l'unico punto in cui il modello di casa Google ha una scorciatoia.
+
+## Cosa succede davvero dentro un Task
+
+Questa è la parte che nessun post di lancio copre, ed è dove perderai un pomeriggio se la salti. Da `docs/runner.md`:
+
+1. **L'entrypoint è fisso.** Qualunque `spec.image` tu fornisca, il controller avvia il container con `/usr/local/bin/ax-task-runner` come PID 1. La tua immagine deve contenere un eseguibile a quel path (un symlink va bene). L'immagine base pubblicata è `gcr.io/ax-substrate/ate-images/ax-task-runner`, ed estenderla è la strada normale.
+2. **Il tuo comando arriva via environment, non via argv.** Il runner riceve `AX_TASK_YAML` (l'intero Task, status incluso) e `AX_WORKSPACES_YAML` (ogni Workspace collegato, come YAML multi-documento), estrae `spec.command` dal Task e lo avvia come processo figlio con il *primo* workspace come working directory. Espone anche `AX_METADATA_URL`, un piccolo server HTTP locale di metadati.
+3. **Il bootstrap ha un orologio da 10 minuti.** La materializzazione del Workspace (clone, risoluzione MCP, installazione delle skill, lo step generativo del `goal`) deve completarsi entro `AX_BOOTSTRAP_TIMEOUT`, default 10 minuti. I monorepo grandi su un worker freddo possono sforarlo.
+4. **Il control plane non legge il tuo exit code.** Il runner logga lo stato di uscita del comando ma resta su come PID 1, che il tuo agente sia ancora in esecuzione o no. Quindi un Task in fase `Running` non significa che il tuo agente sia vivo. Scrivi un tuo segnale di completamento (un file nel workspace, un messaggio sulla tua coda, una cancellazione del Task dall'interno) e osserva quello.
+5. **Lo shutdown è SIGTERM, 10 secondi, SIGKILL.** Il runner inoltra SIGTERM al process group del comando e attende un periodo di grazia limitato. Scrivi lo stato su disco per tempo.
+
+## Suspend e resume: cosa sopravvive
+
+Suspend/resume è la funzionalità che giustifica l'intero stack. Gli agenti passano la maggior parte del loro tempo reale ad aspettare un modello, un tool o un umano, e la scommessa di Substrate è che un agente inattivo dovrebbe costare storage, non un pod caldo.
+
+```bash
+ax suspend task fix-flaky-test   # Ready=False, snapshot taken
+ax resume  task fix-flaky-test   # restored on any free worker
+```
+
+Cosa dicono i doc che sopravvive, e cosa no:
+
+| Sopravvive a un suspend/resume | Non sopravvive |
+|---|---|
+| Il volume `/workspace` (file, clone, artefatti di build) | L'albero dei processi: il tuo agente riparte dal suo entrypoint |
+| Lo snapshot di memoria dell'actor a livello Substrate (RAM + file, nel layer Substrate) | Le connessioni di rete aperte (doc GKE: gli agenti devono gestire la riconnessione) |
+| Spec e status del Task | Qualsiasi cosa scritta fuori dal volume del workspace |
+
+Il doc del runner è esplicito sulla conseguenza: dopo il resume, il runner vede gli stessi file ma un albero di processi *nuovo*, quindi deve tenere traccia del fatto che il setup del workspace sia già stato eseguito (i marker file sono il meccanismo suggerito), altrimenti ri-clonerà ogni repo. Se il tuo agente tiene il suo piano o la sua conversazione solo in memoria di processo, un resume li perde; tieni la trascrizione su disco nel workspace. È la stessa lezione della nostra pagina sugli [harness per agenti long-running](/docs/frontiers/long-running-agent-harnesses), imposta dall'infrastruttura.
+
+<Steps items={[
+  { title: "Installa la CLI e puntala a un cluster", body: "go install github.com/google/ax/cmd/ax@latest. AX segue il contesto kubeconfig attivo (kubectx funziona) e usa come default il namespace ax-system e l'atespace default. Per un laptop, gli script hack/ del repo Agent Substrate tirano su un cluster kind con il substrate installato; il control plane di AX si deploya poi con make deploy AX_IMAGE_REPO=<your registry>, che richiede ko e un registry su cui puoi fare push." },
+  { title: "Costruisci un'immagine runner", body: "FROM l'immagine ax-task-runner pubblicata, apt-get o npm install del tuo agente, mantieni /usr/local/bin/ax-task-runner come entrypoint. Non sovrascrivere ENTRYPOINT; metti invece l'agente in spec.command." },
+  { title: "Scrivi i quattro manifest", body: "Un Model con una secretKey che punta a un Secret Kubernetes esistente, un Gateway con una vera allowlist di egress (il tuo provider di modelli, il tuo git host, nient'altro), un Workspace con il repo ed eventuali server MCP, un Task con debug: true per la prima esecuzione." },
+  { title: "Applica e osserva", body: "ax apply -f manifests/ poi ax watch task <name>. Aspetta le condizioni WorkspaceReady e GatewayReady prima di Ready. Se Ready non arriva mai e la fase passa a Failed, il timeout di bootstrap di 10 minuti è il primo sospettato." },
+  { title: "Entra dentro", body: "ax ssh <name> -- ls -al /workspace mostra cosa ha materializzato davvero il Workspace; ax ssh <name> -- env | grep AX_ mostra il contratto del runner. Entrambi funzionano solo perché hai impostato debug: true." },
+  { title: "Sospendi, riprendi e controlla il tuo segnale di completamento", body: "ax suspend task <name>, aspetta, ax resume task <name>, poi verifica che il tuo agente sia ripartito da disco invece di ricominciare il job da capo. Infine ax delete task <name>: la fase passa a Terminating mentre la sandbox viene smontata." }
+]} />
+
+<PromptCard title="Fai preparare a Claude i manifest per un agente che già esegui">{`I run an agent as a container image ghcr.io/acme/triage-agent:1.4. Its entrypoint is "triage --repo REPO_PATH --model MODEL_ID". It needs: the repo github.com/acme/backend on branch main, an MCP server for Linear reachable at http://linear-mcp.tools.svc.cluster.local:8080, outbound access only to api.anthropic.com:443 and github.com:443, and the Anthropic key from the Kubernetes Secret "anthropic-api-secret" (key ANTHROPIC_API_KEY).
+
+Write the four google/ax v1alpha1 manifests (Model, Gateway, Workspace, Task) for this, following docs/manifests.md in the repo. Then write a Dockerfile that extends the published ax-task-runner base image and installs my agent WITHOUT changing the entrypoint. Finally, list what I must change in the agent so that (a) it treats the first workspace as its working directory, (b) it survives a suspend/resume by keeping its plan and transcript on disk under /workspace and using a marker file to skip re-setup, and (c) it signals completion in a way the AX control plane can't (it ignores exit codes).`}</PromptCard>
+
+## Dove si colloca AX rispetto ai loop di agenti hosted
+
+La domanda più votata nel thread HN era "qual è il vantaggio rispetto alla OpenAI Agents API?". La risposta onesta è che sono layer diversi.
+
+| | AX + Agent Substrate | [Claude Managed Agents](/docs/api/managed-agents) | [OpenAI Agents API](/docs/models/openai-agents-api-vs-managed-agents) | [Il runtime a isolate di Cloudflare](/docs/frontiers/agent-runtimes-isolates-vs-containers) |
+|---|---|---|---|---|
+| Chi esegue il loop | **Tu** (qualsiasi harness nel container) | Anthropic (l'harness è il loro) | OpenAI (l'harness Codex) | Tu, su Workers/Durable Objects |
+| Dove gira | Il tuo cluster Kubernetes, qualsiasi cloud o on-prem | L'infrastruttura di Anthropic | Quella di OpenAI, o una sandbox self-hosted | L'edge di Cloudflare |
+| Isolamento | Sandbox gVisor / Cloud Hypervisor per Task | Ambiente gestito da Anthropic | Sandbox hosted o self-hosted | Isolate V8, container on demand |
+| Scelta del modello | Qualsiasi provider tu metta in una risorsa Model | Claude | Modelli OpenAI | Qualsiasi (via API) |
+| Modello di costo a riposo | Snapshot su storage, resume on demand | Fatturazione per sessione | Fatturazione per sessione | Gli isolate vanno in ibernazione |
+| Cosa possiedi | Cluster, upgrade, secret, policy di egress | Una chiave API | Una chiave API | Un account Workers |
+
+Scegli AX quando hai bisogno di sovranità dei dati, vuoi eseguire i modelli di più di un vendor dietro un'unica policy, gestisci già Kubernetes, o vuoi agenti che possano dormire per giorni senza pagare compute. Scegli un loop hosted quando vuoi un harness funzionante oggi e non vuoi possedere un cluster. Molti team faranno entrambe le cose: un loop hosted per le sessioni interattive, infrastruttura in stile AX per flotte di Task in background.
+
+## Trappole e le critiche che vale la pena ascoltare
+
+- **La documentazione di giugno descrive un tool diverso.** La preview di maggio esponeva una CLI centrata sulle conversazioni (`ax exec --conversation … --resume`, `ax fork` per il branching delle traiettorie, un protocollo AgentService con bridge ADK e A2A). Il riferimento dei comandi nel README di settembre è centrato sulle risorse: `apply`, `get`, `describe`, `watch`, `suspend`, `resume`, `delete`, `ssh`, `tunnel`, `ctx`. Se un tutorial mostra `ax fork`, è di prima del redesign. Le cinque capacità di punta del blog di maggio (esecuzione durevole, isolamento, consistenza di sessione single-writer, recupero delle connessioni, branching delle traiettorie) restano gli obiettivi dichiarati; quanto della storia del branching sopravviva nel modello a risorse non è documentato al momento in cui scriviamo.
+- **`v1alpha1` fa sul serio.** Il README avverte di breaking change importanti prima di una release stabile. Fissa la versione della CLI e il digest dell'immagine runner, e rileggi `docs/manifests.md` a ogni upgrade.
+- **Kubernetes non è opzionale.** La lamentela più ripetuta nel thread. Il quickstart di Substrate gira su kind, quindi puoi provarlo su un laptop, ma produzione significa un cluster vero. Se non gestisci già Kubernetes, AX non è il motivo per iniziare.
+- **Il GKE Agent Substrate managed ha requisiti stringenti.** GKE 1.37+ (1.36 con flag beta), Workload Identity, API beta abilitate alla creazione del cluster, tipi di macchina uniformi per ActorTemplate (niente E2), un bucket Cloud Storage per gli snapshot, isolamento gVisor o Cloud Hypervisor, e **nessun passthrough GPU**. L'uso in produzione è dietro un programma GA privato su allowlist.
+- **I default di egress negli esempi sono permissivi.** `host: "*"` sulla 443 permette a un agente di raggiungere qualsiasi endpoint HTTPS. È l'opposto di ciò che vuoi per un Task che legge repo non fidati. Segui le stesse regole di [mettere in sicurezza agenti locali e ibridi](/docs/models/securing-local-and-hybrid-agents).
+- **Due progetti, due org, un disclaimer.** AX è sotto `google/`; Substrate è sotto `agent-substrate/` e dichiara di non essere un prodotto Google ufficialmente supportato. Nessuno dei due è ammesso al programma di vulnerability reward OSS di Google. Metti in conto di leggere il sorgente quando qualcosa si rompe.
+
+<Flashcards title="Vocabolario AX" cards={[
+  {front: "Task", back: "La più piccola unità di esecuzione isolata in AX: un'immagine, un comando, risorse, Workspace collegati e un Gateway. Gli agenti creano molti Task; un Task non è un processo agente a lunga vita."},
+  {front: "Workspace", back: "Ambiente dichiarativo: repo git, server MCP (per endpoint o query a un registry), pacchetti di skill. Materializzato nella sandbox prima che spec.command parta. Un binding può portare un goal in linguaggio naturale."},
+  {front: "Gateway", back: "Risorsa di policy di rete: i listener che il Task espone, più un'allowlist di egress con le coppie host:porta che la sandbox può raggiungere."},
+  {front: "Model", back: "Provider + ID del modello + parametri di generazione + un riferimento al Secret Kubernetes che contiene la chiave API. Provider visti: google, anthropic."},
+  {front: "atespace", back: "L'ambito di tenancy di Agent Substrate. Ogni risorsa AX vive in uno; la CLI usa 'default' come default (flag -a)."},
+  {front: "Actor / Worker / WorkerPool / ActorTemplate", back: "Il modello di Substrate: un Actor è un'istanza di agente in esecuzione; un Worker è una sandbox calda presa da un WorkerPool; un ActorTemplate è il blueprint. Gli Actor inattivi esistono solo come snapshot."},
+  {front: "ax-task-runner", back: "Il PID 1 fisso di ogni container Task. Legge AX_TASK_YAML e AX_WORKSPACES_YAML, avvia spec.command nel primo workspace, serve AX_METADATA_URL, inoltra SIGTERM, non riporta mai l'exit code a monte."},
+  {front: "Cosa sopravvive a suspend/resume", back: "Il volume /workspace e lo snapshot Substrate. Non l'albero dei processi, non le connessioni di rete aperte. Traccia il setup con marker file; tieni lo stato su disco."}
+]} />
+
+<Quiz title="Mettiti alla prova" questions={[
+  {q: "Fornisci spec.image con il tuo ENTRYPOINT. Cosa esegue AX come PID 1?", options: ["Il tuo ENTRYPOINT", "/usr/local/bin/ax-task-runner, sempre", "spec.command direttamente", "Una shell che carica spec.env"], answer: 1, explain: "Il controller ignora l'entrypoint dell'immagine e avvia ax-task-runner a un path fisso; la tua immagine deve contenerlo. spec.command raggiunge il runner solo tramite la variabile d'ambiente AX_TASK_YAML."},
+  {q: "Il tuo agente esce con status 1. Cosa mostra ax get task?", options: ["Failed", "Succeeded", "Ancora Running: il control plane non legge lo stato di uscita del comando", "Terminating"], answer: 2, explain: "Il runner logga lo stato di uscita e resta su come PID 1. Ti serve un tuo segnale di completamento."},
+  {q: "Dopo ax resume, il tuo agente ri-clona ogni repository. Perché?", options: ["Il volume del workspace è andato perso", "Il Gateway ha bloccato la cache", "L'albero dei processi è nuovo, quindi il runner ha rieseguito il setup; avrebbe dovuto controllare un marker file", "Il resume ri-materializza sempre i Workspace"], answer: 2, explain: "Il volume /workspace sopravvive; l'albero dei processi no. Il doc del runner ti dice di tracciare il setup precedente, tipicamente con marker file."},
+  {q: "ax ssh rifiuta di connettersi al tuo Task. Causa più probabile?", options: ["Contesto kube sbagliato", "spec.debug non è true, quindi i guest service non sono esposti", "Il Gateway non ha listener", "Hai dimenticato -a default"], answer: 1, explain: "La modalità debug è opt-in per Task ed è l'unico modo in cui i guest service gRPC (accesso a processi e filesystem) vengono esposti."},
+  {q: "Quale layer implementa davvero lo snapshot degli agenti inattivi su storage e il loro ripristino su un worker caldo?", options: ["AX stesso", "Agent Substrate", "kubectl", "La risorsa Model"], answer: 1, explain: "AX è il layer dichiarativo e la CLI; Substrate è il control plane che multiplexa gli actor sui worker tramite snapshot. Agent Sandbox fornisce, sotto di esso, il pod gVisor e le primitive di snapshot dei pod."},
+  {q: "Un tutorial di giugno 2026 ti dice di eseguire ax fork per fare branching di una traiettoria. Cosa devi aspettarti?", options: ["Funziona senza modifiche", "È deprecato ma ha un alias", "Il riferimento dei comandi nel README attuale non lo elenca; la CLI è stata riprogettata attorno a apply/get/suspend/resume", "Funziona solo su GKE"], answer: 2, explain: "La preview di maggio era centrata sulle conversazioni (exec/fork/--last-seq). Il README di settembre è centrato sulle risorse. Verifica su docs/manifests.md e sul --help della CLI prima di fidarti dei post più vecchi."}
+]} />
+
+## Fonti e approfondimenti
+
+- [google/ax su GitHub](https://github.com/google/ax) — README (primitive, riferimento CLI, deploy), `docs/concepts.md`, `docs/manifests.md`, `docs/runner.md`, `docs/sandbox.md`, `docs/networking.md`; release da v0.1.0 (20 maggio 2026) a v0.3.0 (20 settembre 2026); Apache-2.0
+- [agentexecutor.io](https://agentexecutor.io) — il sito del progetto arrivato su Hacker News
+- [Agent Executor, Google's distributed Agent Runtime](https://cloud.google.com/blog/products/ai-machine-learning/agent-executor-googles-distributed-agent-runtime) — blog Google Cloud, 21 maggio 2026 (Jaana Dogan, Ethan Bao): le cinque capacità e l'argomento della "nuova classe di workload"
+- [Bringing you Agent Sandbox on GKE and Agent Substrate](https://cloud.google.com/blog/products/containers-kubernetes/bringing-you-agent-sandbox-on-gke-and-agent-substrate) — blog Google Cloud, 21 maggio 2026: Agent Sandbox GA, le cifre di 300 sandbox/s e 200 ms, come Substrate e AX si impilano
+- [agent-substrate/substrate su GitHub](https://github.com/agent-substrate/substrate) — modello actor/worker, la demo dei 250 actor su 8 pod, quickstart su kind, il disclaimer "non un prodotto Google ufficialmente supportato"
+- [About GKE Agent Substrate](https://docs.cloud.google.com/kubernetes-engine/ai-ml/about-agent-substrate) — requisiti, niente passthrough GPU, le connessioni non sopravvivono alla sospensione, GA privata per la produzione
+- [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) — la CRD Sandbox sottostante
+- [Discussione su Hacker News (item 49780797)](https://news.ycombinator.com/item?id=49780797) — le critiche a Kubernetes e YAML, la spiegazione di gVisor/GKE Sandbox, il thread su "quale org possiede Substrate"
+
+## Prossimi passi
+
+- [OpenAI Agents API vs Claude Managed Agents](/docs/models/openai-agents-api-vs-managed-agents) — i loop hosted di cui AX è l'alternativa self-hosted
+- [Runtime per agenti: isolate vs container](/docs/frontiers/agent-runtimes-isolates-vs-containers) — la risposta di Cloudflare alla stessa tesi "gli agenti sono un nuovo workload"
+- [Harness per agenti long-running](/docs/frontiers/long-running-agent-harnesses) — cosa deve fare il tuo agente perché un suspend/resume sia una pausa, non un restart
