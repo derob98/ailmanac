@@ -1,0 +1,243 @@
+---
+sidebar_position: 22.8
+title: "AX(Agent Executor):ビルダー向けに解説する Google のオープンなエージェントランタイム(2026年)"
+description: "google/ax は2026年9月20〜21日に Hacker News のトップページに上がりました(507ポイント)。これはモデルでもハーネスでもホスト型 API でもありません:Agent Substrate の上でエージェントの Task をサンドボックス内で実行する kubectl 風のオーケストレーターで、Workspace(git + MCP + スキル)、Gateway(egress 許可リスト)、Model(プロバイダー + シークレット)を宣言的なリソースとして扱います。4つのプリミティブが何をするか、suspend/resume で何が残り何が失われるか、あなたのイメージが守るべきランナー契約、GKE の要件、そして6月時点のドキュメントが CLI と一致しなくなった理由を解説します。"
+keywords: [AX, Agent Executor, google/ax, Agent Substrate, agent runtime, Kubernetes agents, GKE Agent Sandbox, gVisor agents, suspend resume agents, snapshot agents, ax apply, ax ssh, ax-task-runner, agent orchestrator, Claude Code on Kubernetes, ADK runtime, self-hosted agent runtime, Managed Agents alternative, OpenAI Agents API alternative]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-09-21" source="github.com/google/ax (README, docs/concepts.md, docs/manifests.md, docs/runner.md, docs/sandbox.md; release tags v0.1.0 of May 20, 2026 through v0.3.0 of Sep 20, 2026; 4.3k stars on Sep 21, 2026); agentexecutor.io; Google Cloud blog posts of May 21, 2026 (Agent Executor; Agent Sandbox GA + Agent Substrate); github.com/agent-substrate/substrate README (2.4k stars); Google Cloud docs 'About GKE Agent Substrate'; Hacker News item 49780797. AX is v1alpha1 and its README promises major breaking changes: re-check field names and commands against the repo before you build on them." />
+
+<Callout type="objectives" items={[
+  "Google のスタックの中で AX を正しく位置づける:Kubernetes、Agent Sandbox、Agent Substrate、AX、そしてあなたのハーネス",
+  "AX の4つのリソース(Task、Workspace、Gateway、Model)を読み解き、それぞれが何をもたらすかを理解する",
+  "AX の suspend/resume で実際に何が残り、何が失われ、ランナーイメージがそれに対して何をすべきかを説明する",
+  "ax apply、ax watch、ax ssh で最初の Task をエンドツーエンドで実行し、3つのデバッグの罠を知る",
+  "AX のようなセルフホスト型ランタイムが Claude Managed Agents や OpenAI Agents API に勝つのはいつで、勝たないのはいつかを判断する"
+]} />
+
+2026年9月20日の夜、**[AX:Google のオープンなエージェント型オーケストレーター](https://agentexecutor.io)** は 507 ポイントと 222 コメントで Hacker News のトップに上がりました。コメントの大半は「これは何のためのものか」という質問でした。それはもっともな疑問です。このプロジェクトは 2026年5月20日(v0.1.0)から公開されており、それ以降に2度形を変えているため、見つかるブログ記事のほとんどは、もう存在しない CLI を説明しているからです。
+
+要点は次のとおりです。**AX はモデルでも、エージェントフレームワークでも、ホスト型サービスでもありません。** これは Kubernetes 風のコントロールプレーンで、`kubectl` 風の CLI を持ち、宣言されたエージェントの *Task* を受け取ってサンドボックスを与え、リポジトリをクローンし、MCP サーバーとスキルを接続し、ネットワークを囲い、スナップショットに凍結して後で任意の空きワーカー上で解凍できます。これは、Claude Code、Google の ADK、LangChain、あるいは自分で書いた Python ループなど、すでに使っているハーネスの*下*に位置します。
+
+## スタック:下から上へ
+
+Google の発表では、混同しやすい4つの名前が使われています。それらは4つのレイヤーであり、AX は最上位のものです。
+
+| レイヤー | 何であるか | ステータス(2026年9月) | Google が公開している数字 |
+|---|---|---|---|
+| **Kubernetes / GKE** | クラスター | — | — |
+| **Agent Sandbox**([kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)) | Sandbox CRD:gVisor で分離された Pod(Kata も差し替え可能)、ウォームプール、Pod スナップショット | 2026年5月21日から GKE で GA | クラスターあたり毎秒 300 サンドボックス割り当て;1秒未満の起動、90% が 200 ms 以内 |
+| **Agent Substrate**([agent-substrate/substrate](https://github.com/agent-substrate/substrate)) | RAM + ファイルをオブジェクトストレージにスナップショットすることで、多数のアイドル状態の*アクター*を少数のウォームな*ワーカー*に多重化する最小限のコントロールプレーン | オープンソース、初期段階、「公式にサポートされた Google 製品ではない」;GKE 上のマネージド版は評価中 | 8 Pod 上に約 250 のステートフルなアクター;プレーンなコンテナに比べ「10 倍の密度」;1秒未満のアクティベーション |
+| **AX**([google/ax](https://github.com/google/ax)) | Substrate の上に載る宣言的な Task/Workspace/Gateway/Model + CLI | v0.3.0、`ax.io/v1alpha1`、Apache-2.0、4.3k スター | 「クラスターあたり数十億の Task」(マーケティング上の主張であり、ベンチマークではない) |
+| **あなたのハーネス** | Claude Code、ADK、LangChain、A2A エージェント、自作のループ | — | — |
+
+この表が隠している点が2つあります。第一に、興味深いエンジニアリング(スナップショットとテレポートの仕組み)があるのは Substrate で、AX は使い勝手のためのレイヤーです。第二に、Substrate は `google/` 配下ではなく独自の GitHub org にあり、複数の HN コメンターがこれを「どこまで公式なのか」を示すシグナルとして指摘しました。全体を、SLA 付きの製品ではなく、Google のあるチームによる真剣ではあるが 1.0 未満のオープンソースプロジェクトとして扱ってください。
+
+## 4つのプリミティブ
+
+AX のすべては *atespace*(Substrate のテナンシー単位;指定しなければ `default`)内の YAML リソースです。`kubectl` とまったく同じように `ax apply -f` で適用します。
+
+### Task:分離実行の単位
+
+```yaml
+apiVersion: ax.io/v1alpha1
+kind: Task
+metadata:
+  name: fix-flaky-test
+spec:
+  image: "ghcr.io/my-org/my-agent-image"
+  command: ["my-agent", "--goal", "fix the flaky test"]
+  env:
+    - name: ENVIRONMENT
+      value: "staging"
+  resources:
+    requests: { cpu: "500m", memory: "1Gi" }
+    limits:   { cpu: "2",    memory: "4Gi" }
+  workspaces:
+    - name: golang
+      path: "/workspace"
+      goal: "Ensure the Go toolchain is available and built from source"
+  gateway:
+    name: default-gateway
+  debug: true
+```
+
+Task は意図的に小さく作られています。concepts ドキュメントは、エージェントが1つの長いプロセスの中に住み続けるのではなく、生涯にわたって*多数の* Task を作成すると説明しています。見た目以上に重要なフィールドが3つあります:
+
+- **`workspaces[].goal`** は Task が必要とする環境を平易な英語で記述したものです。AX の「生成的」セットアップは、その一文から Workspace を完成させようとします(ツールチェーンのインストール、依存関係の取得)。あなたのエージェントが開始する*前に*モデルがループに入る唯一の場所です。
+- **`debug: true`** は `ax ssh` でサンドボックスに入る唯一の方法です。これがないとゲストサービスが公開されず、CLI は接続を拒否します。
+- **`gateway`** はスキーマ上は省略可能ですが、省略すると substrate のデフォルトの egress ポリシーが何であれ、それに依存することになります。必ず宣言してください。
+
+### Workspace:git + MCP + スキル、エージェント開始前にマテリアライズされる
+
+```yaml
+apiVersion: ax.io/v1alpha1
+kind: Workspace
+metadata:
+  name: golang
+spec:
+  git:
+    - name: origin
+      repo: "https://github.com/golang/go.git"
+      branch: "my-fix"
+  mcp:
+    registries:
+      - provider: google
+        query: "mcp.tags:build"
+    servers:
+      - name: git-tools
+        endpoint: "http://git-mcp.default.svc.cluster.local:8080"
+  skills:
+    registries:
+      - provider: google
+        query: "skills.tags:nodejs"
+    path: "/.agents/skills"
+```
+
+これが、AX を「サンドボックス付きの Kubernetes Job」以上のものにしているリソースです。Workspace はリポジトリを事前にクローンし、MCP サーバーを(明示的なエンドポイント*または*レジストリクエリで)解決し、スキルパッケージをパスに配置します。デフォルトのスキルパスに注目してください:`/.agents/skills` は、クロスエージェントの [SKILL.md 標準](/docs/models/skill-md-open-standard)が Codex、Cursor、Gemini CLI 向けに使うのと同じディレクトリ規約なので、Workspace は Task 内で動くどのハーネスにも同じスキルを渡せます。
+
+### Gateway:リスナーは内向き、許可リストは外向き
+
+```yaml
+apiVersion: ax.io/v1alpha1
+kind: Gateway
+metadata:
+  name: default-gateway
+spec:
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+  egress:
+    allowlist:
+      hosts:
+        - host: "api.anthropic.com"
+          port: 443
+```
+
+リファレンスマニフェストは 443 番ポートに `host: "*"` を設定した状態で出荷されており、これはすべてを許可するポリシーです。変更してください。egress 許可リストは、[プロンプトインジェクション](/docs/security/prompt-injection)と[エージェントが何をアップロードするか](/docs/security/what-your-agent-uploads)のページで扱った流出パターンに対する、単一で最も効果的な制御であり、AX はそれを置くための宣言的な場所を提供します。リスナーは Task がポートを公開する方法(A2A エンドポイント、開発サーバー、デバッグ UI 用)で、`ax tunnel` がそれらをあなたのラップトップに転送します。
+
+### Model:プロバイダー + モデル ID + Kubernetes シークレット
+
+```yaml
+apiVersion: ax.io/v1alpha1
+kind: Model
+metadata:
+  name: claude-model
+spec:
+  provider: anthropic
+  model: claude-opus-5
+  secretKey:
+    name: anthropic-api-secret
+    key: ANTHROPIC_API_KEY
+  parameters:
+    maxTokens: 16000
+    temperature: 0.9
+```
+
+リファレンスドキュメントには `google` と `anthropic` のプロバイダーが示されています。認証情報は Kubernetes Secret への参照なので、マニフェストにキーが含まれることはなく、キーはすでにシークレットをローテーションしている場所でローテーションされます。AX は Gemini 専用では*ありません*。ただしランナーのドキュメントには、atespace が Gemini の認証情報を持つ場合に `GEMINI_API_KEY` が自動的に注入されると書かれており、これが Google 自身のモデルが近道を得ている唯一の箇所です。
+
+## Task の内部で実際に何が起きるか
+
+これはどのローンチ記事も扱っていない部分であり、飛ばすと午後を丸ごと失うことになる部分です。`docs/runner.md` より:
+
+1. **エントリーポイントは固定です。** どんな `spec.image` を指定しても、コントローラーは `/usr/local/bin/ax-task-runner` を PID 1 としてコンテナを起動します。あなたのイメージはそのパスに実行ファイルを含んでいなければなりません(シンボリックリンクでも構いません)。公開されているベースイメージは `gcr.io/ax-substrate/ate-images/ax-task-runner` で、これを拡張するのが通常の方法です。
+2. **コマンドは argv ではなく環境変数経由で届きます。** ランナーは `AX_TASK_YAML`(status を含む Task 全体)と `AX_WORKSPACES_YAML`(バインドされたすべての Workspace を複数ドキュメントの YAML にしたもの)を受け取り、Task から `spec.command` を取り出し、*最初の* Workspace を作業ディレクトリとして子プロセスで起動します。また、小さなローカル HTTP メタデータサーバーである `AX_METADATA_URL` も公開します。
+3. **ブートストラップには 10 分の時計があります。** Workspace のマテリアライズ(クローン、MCP の解決、スキルのインストール、生成的な `goal` ステップ)は `AX_BOOTSTRAP_TIMEOUT`(デフォルト 10 分)以内に終わらなければなりません。コールドなワーカー上の大きなモノレポは、これを超えてしまうことがあります。
+4. **コントロールプレーンはあなたの終了コードを読みません。** ランナーはコマンドの終了ステータスをログに記録しますが、あなたのエージェントが動いていようがいまいが PID 1 として立ち上がったままです。つまり、`Running` フェーズの Task は、あなたのエージェントが生きていることを意味しません。独自の完了シグナル(Workspace 内のファイル、自分のキューへのメッセージ、内部からの Task 削除)を書き、それを監視してください。
+5. **シャットダウンは SIGTERM、10 秒、SIGKILL です。** ランナーは SIGTERM をコマンドのプロセスグループに転送し、限られた猶予期間だけ待ちます。状態は早めにフラッシュしてください。
+
+## Suspend と resume:何が残るか
+
+Suspend/resume は、このスタック全体を正当化する機能です。エージェントは実時間の大半を、モデル、ツール、あるいは人間を待つことに費やしており、Substrate の賭けは、アイドル状態のエージェントはウォームな Pod ではなくストレージのコストで済むべきだ、というものです。
+
+```bash
+ax suspend task fix-flaky-test   # Ready=False, snapshot taken
+ax resume  task fix-flaky-test   # restored on any free worker
+```
+
+ドキュメントが残ると述べているもの、残らないもの:
+
+| suspend/resume で残るもの | 残らないもの |
+|---|---|
+| `/workspace` ボリューム(ファイル、クローン、ビルド成果物) | プロセスツリー:エージェントはエントリーポイントから再起動する |
+| Substrate レベルのアクターメモリスナップショット(Substrate 層での RAM + ファイル) | 開いているネットワーク接続(GKE ドキュメント:エージェントは再接続を処理しなければならない) |
+| Task の spec と status | Workspace ボリュームの外に書かれたもの |
+
+ランナーのドキュメントはその帰結について明確です:resume 後、ランナーは同じファイルを見ますが、プロセスツリーは*新しい*ものなので、Workspace のセットアップがすでに実行済みかを追跡しなければ(マーカーファイルが推奨されている仕組みです)、すべてのリポジトリを再クローンしてしまいます。エージェントが計画や会話をプロセスメモリだけに保持しているなら、resume でそれは失われます。トランスクリプトは Workspace 内のディスクに置いてください。これは[長時間実行エージェントのハーネス](/docs/frontiers/long-running-agent-harnesses)ページと同じ教訓を、インフラが強制しているのです。
+
+<Steps items={[
+  { title: "CLI をインストールしてクラスターに向ける", body: "go install github.com/google/ax/cmd/ax@latest を実行します。AX はアクティブな kubeconfig コンテキストに従い(kubectx が使えます)、デフォルトは namespace ax-system、atespace default です。ラップトップの場合、Agent Substrate リポジトリの hack/ スクリプトが substrate をインストールした kind クラスターを立ち上げます。その後、AX のコントロールプレーンは make deploy AX_IMAGE_REPO=<your registry> でデプロイしますが、これには ko と push 可能なレジストリが必要です。" },
+  { title: "ランナーイメージをビルドする", body: "公開されている ax-task-runner イメージを FROM にして、apt-get や npm でエージェントをインストールし、/usr/local/bin/ax-task-runner をエントリーポイントのままにします。ENTRYPOINT を上書きせず、代わりにエージェントを spec.command に置いてください。" },
+  { title: "4つのマニフェストを書く", body: "既存の Kubernetes Secret を指す secretKey を持つ Model を1つ、実際の egress 許可リスト(モデルプロバイダー、git ホスト、それ以外は何もなし)を持つ Gateway を1つ、リポジトリと必要な MCP サーバーを含む Workspace を1つ、初回実行用に debug: true を付けた Task を1つ書きます。" },
+  { title: "適用して監視する", body: "ax apply -f manifests/ を実行してから ax watch task <name> を実行します。Ready の前に WorkspaceReady と GatewayReady の条件を待ちます。Ready が一向に来ず、フェーズが Failed に変わる場合、10 分のブートストラップタイムアウトが最初の容疑者です。" },
+  { title: "中に入る", body: "ax ssh <name> -- ls -al /workspace で Workspace が実際に何をマテリアライズしたかが分かり、ax ssh <name> -- env | grep AX_ でランナー契約が分かります。どちらも debug: true を設定したからこそ動作します。" },
+  { title: "Suspend、resume して、自分の完了シグナルを確認する", body: "ax suspend task <name> を実行し、待ってから ax resume task <name> を実行し、エージェントがジョブを最初からやり直すのではなくディスクから再開したことを確認します。最後に ax delete task <name> を実行します:サンドボックスが解体される間、フェーズは Terminating になります。" }
+]} />
+
+<PromptCard title="すでに運用しているエージェント向けのマニフェストを Claude に下書きさせる">{`I run an agent as a container image ghcr.io/acme/triage-agent:1.4. Its entrypoint is "triage --repo REPO_PATH --model MODEL_ID". It needs: the repo github.com/acme/backend on branch main, an MCP server for Linear reachable at http://linear-mcp.tools.svc.cluster.local:8080, outbound access only to api.anthropic.com:443 and github.com:443, and the Anthropic key from the Kubernetes Secret "anthropic-api-secret" (key ANTHROPIC_API_KEY).
+
+Write the four google/ax v1alpha1 manifests (Model, Gateway, Workspace, Task) for this, following docs/manifests.md in the repo. Then write a Dockerfile that extends the published ax-task-runner base image and installs my agent WITHOUT changing the entrypoint. Finally, list what I must change in the agent so that (a) it treats the first workspace as its working directory, (b) it survives a suspend/resume by keeping its plan and transcript on disk under /workspace and using a marker file to skip re-setup, and (c) it signals completion in a way the AX control plane can't (it ignores exit codes).`}</PromptCard>
+
+## ホスト型エージェントループと比べた AX の位置
+
+HN スレッドで最も賛成票を集めた質問は「OpenAI Agents API に対する利点は何か」でした。正直な答えは、これらは異なるレイヤーだということです。
+
+| | AX + Agent Substrate | [Claude Managed Agents](/docs/api/managed-agents) | [OpenAI Agents API](/docs/models/openai-agents-api-vs-managed-agents) | [Cloudflare の isolate ランタイム](/docs/frontiers/agent-runtimes-isolates-vs-containers) |
+|---|---|---|---|---|
+| ループを動かすのは誰か | **あなた**(コンテナ内の任意のハーネス) | Anthropic(ハーネスは彼らのもの) | OpenAI(Codex ハーネス) | あなた、Workers/Durable Objects 上で |
+| 実行場所 | あなたの Kubernetes クラスター、任意のクラウドまたはオンプレミス | Anthropic のインフラ | OpenAI のインフラ、またはセルフホストのサンドボックス | Cloudflare のエッジ |
+| 分離 | Task ごとの gVisor / Cloud Hypervisor サンドボックス | Anthropic が管理する環境 | ホスト型またはセルフホストのサンドボックス | V8 isolate、オンデマンドのコンテナ |
+| モデルの選択 | Model リソースに置いた任意のプロバイダー | Claude | OpenAI のモデル | 任意(API 経由) |
+| アイドル時のコストモデル | ストレージにスナップショット、オンデマンドで resume | セッションベースの課金 | セッションベースの課金 | isolate がハイバネートする |
+| あなたが所有するもの | クラスター、アップグレード、シークレット、egress ポリシー | API キー | API キー | Workers アカウント |
+
+データ主権が必要な場合、1つのポリシーの背後で複数ベンダーのモデルを動かしたい場合、すでに Kubernetes を運用している場合、あるいはコンピュートに支払うことなく何日も眠れるエージェントが欲しい場合は AX を選んでください。今日動くハーネスが欲しく、クラスターを所有したくない場合はホスト型ループを選んでください。多くのチームは両方を使うでしょう:対話セッションにはホスト型ループ、バックグラウンド Task の大群には AX 風のインフラです。
+
+## 落とし穴と、耳を傾ける価値のある反論
+
+- **6月時点のドキュメントは別のツールを説明しています。** 5月のプレビューは会話中心の CLI(`ax exec --conversation … --resume`、トラジェクトリ分岐用の `ax fork`、ADK と A2A のブリッジを持つ AgentService プロトコル)を公開していました。9月の README のコマンドリファレンスはリソース中心です:`apply`、`get`、`describe`、`watch`、`suspend`、`resume`、`delete`、`ssh`、`tunnel`、`ctx`。チュートリアルに `ax fork` が出てきたら、それは再設計前のものです。5月のブログにあった5つの主要機能(耐久性のある実行、分離、単一ライターのセッション整合性、接続回復、トラジェクトリ分岐)は依然として掲げられた目標ですが、分岐の話がリソースモデルの中でどこまで残っているかは、本稿執筆時点では文書化されていません。
+- **`v1alpha1` は本気です。** README は安定版リリース前に大きな破壊的変更があると警告しています。CLI のバージョンとランナーイメージのダイジェストを固定し、アップグレードのたびに `docs/manifests.md` を読み直してください。
+- **Kubernetes は省略できません。** スレッドで最も繰り返された不満です。Substrate のクイックスタートは kind 上で動くのでラップトップで試せますが、本番は実際のクラスターを意味します。すでに Kubernetes を運用していないなら、AX はそれを始める理由にはなりません。
+- **マネージドの GKE Agent Substrate には厳しい要件があります。** GKE 1.37 以上(1.36 はベータフラグ付き)、Workload Identity、クラスター作成時に有効化されたベータ API、ActorTemplate ごとに統一されたマシンタイプ(E2 は不可)、スナップショット用の Cloud Storage バケット、gVisor または Cloud Hypervisor による分離、そして **GPU パススルーなし**。本番利用は許可リスト制のプライベート GA プログラムの背後にあります。
+- **例の egress デフォルトは寛容です。** 443 番ポートの `host: "*"` は、エージェントが任意の HTTPS エンドポイントに到達することを許します。信頼できないリポジトリを読む Task にとって、これは望むものの正反対です。[ローカルおよびハイブリッドエージェントのセキュリティ確保](/docs/models/securing-local-and-hybrid-agents)と同じルールに従ってください。
+- **2つのプロジェクト、2つの org、1つの免責事項。** AX は `google/` 配下、Substrate は `agent-substrate/` 配下にあり、後者は公式にサポートされた Google 製品ではないと明記しています。どちらも Google の OSS 脆弱性報奨プログラムの対象ではありません。何かが壊れたときにソースを読む時間を予算に入れてください。
+
+<Flashcards title="AX の語彙" cards={[
+  {front: "Task", back: "AX における分離実行の最小単位:イメージ、コマンド、リソース、バインドされた Workspace と Gateway。エージェントは多数の Task を作成します。Task は長命なエージェントプロセスではありません。"},
+  {front: "Workspace", back: "宣言的な環境:git リポジトリ、MCP サーバー(エンドポイントまたはレジストリクエリで指定)、スキルパッケージ。spec.command の開始前にサンドボックスへマテリアライズされます。バインディングには平易な英語の goal を持たせられます。"},
+  {front: "Gateway", back: "ネットワークポリシーのリソース:Task が公開するリスナーと、サンドボックスが到達してよい host:port ペアの egress 許可リスト。"},
+  {front: "Model", back: "プロバイダー + モデル ID + 生成パラメーター + API キーを保持する Kubernetes Secret への参照。確認されているプロバイダー:google、anthropic。"},
+  {front: "atespace", back: "Agent Substrate のテナンシースコープ。すべての AX リソースはいずれかに属します。CLI のデフォルトは 'default'(-a フラグ)。"},
+  {front: "Actor / Worker / WorkerPool / ActorTemplate", back: "Substrate のモデル:Actor は実行中のエージェントインスタンス、Worker は WorkerPool から取り出したウォームなサンドボックス、ActorTemplate はその設計図。アイドル状態の Actor はスナップショットとしてのみ存在します。"},
+  {front: "ax-task-runner", back: "すべての Task コンテナの固定された PID 1。AX_TASK_YAML と AX_WORKSPACES_YAML を読み、最初の Workspace で spec.command を起動し、AX_METADATA_URL を提供し、SIGTERM を転送し、終了コードを上流に報告することは決してありません。"},
+  {front: "suspend/resume で残るもの", back: "/workspace ボリュームと Substrate のスナップショット。プロセスツリーと開いているネットワーク接続は残りません。セットアップはマーカーファイルで追跡し、状態はディスクに保持してください。"}
+]} />
+
+<Quiz title="理解度チェック" questions={[
+  {q: "独自の ENTRYPOINT を持つ spec.image を指定しました。AX は PID 1 として何を実行しますか?", options: ["あなたの ENTRYPOINT", "常に /usr/local/bin/ax-task-runner", "spec.command を直接", "spec.env を読み込むシェル"], answer: 1, explain: "コントローラーはイメージのエントリーポイントを無視し、固定パスの ax-task-runner を起動します。あなたのイメージはそれを含んでいなければなりません。spec.command は AX_TASK_YAML 環境変数を通じてのみランナーに届きます。"},
+  {q: "エージェントがステータス 1 で終了しました。ax get task は何を表示しますか?", options: ["Failed", "Succeeded", "依然として Running:コントロールプレーンはコマンドの終了ステータスを読まない", "Terminating"], answer: 2, explain: "ランナーは終了ステータスをログに記録し、PID 1 として立ち上がったままです。独自の完了シグナルが必要です。"},
+  {q: "ax resume の後、エージェントがすべてのリポジトリを再クローンします。なぜですか?", options: ["Workspace ボリュームが失われた", "Gateway がキャッシュをブロックした", "プロセスツリーが新しいためランナーがセットアップを再実行した。マーカーファイルを確認すべきだった", "resume は常に Workspace を再マテリアライズする"], answer: 2, explain: "/workspace ボリュームは残りますが、プロセスツリーは残りません。ランナーのドキュメントは、通常はマーカーファイルで過去のセットアップを追跡するよう指示しています。"},
+  {q: "ax ssh が Task への接続を拒否します。最も可能性の高い原因は?", options: ["kube コンテキストが間違っている", "spec.debug が true でないため、ゲストサービスが公開されていない", "Gateway にリスナーがない", "-a default を忘れた"], answer: 1, explain: "デバッグモードは Task ごとのオプトインであり、gRPC ゲストサービス(プロセスおよびファイルシステムへのアクセス)が公開される唯一の方法です。"},
+  {q: "アイドル状態のエージェントをストレージにスナップショットし、ウォームなワーカー上で復元することを実際に実装しているのはどのレイヤーですか?", options: ["AX 自体", "Agent Substrate", "kubectl", "Model リソース"], answer: 1, explain: "AX は宣言的なレイヤーと CLI であり、Substrate はスナップショットを介してアクターをワーカーに多重化するコントロールプレーンです。Agent Sandbox はその下で gVisor Pod と Pod スナップショットのプリミティブを提供します。"},
+  {q: "2026年6月のチュートリアルが、トラジェクトリを分岐するために ax fork を実行するよう指示しています。何を予期すべきですか?", options: ["そのまま動作する", "非推奨だがエイリアスされている", "現在の README のコマンドリファレンスには載っていない。CLI は apply/get/suspend/resume を中心に再設計された", "GKE でのみ動作する"], answer: 2, explain: "5月のプレビューは会話中心(exec/fork/--last-seq)でした。9月の README はリソース中心です。古い記事を信頼する前に docs/manifests.md と CLI の --help で確認してください。"}
+]} />
+
+## 出典と参考資料
+
+- [GitHub の google/ax](https://github.com/google/ax) — README(プリミティブ、CLI リファレンス、デプロイ)、`docs/concepts.md`、`docs/manifests.md`、`docs/runner.md`、`docs/sandbox.md`、`docs/networking.md`;リリース v0.1.0(2026年5月20日)から v0.3.0(2026年9月20日)まで;Apache-2.0
+- [agentexecutor.io](https://agentexecutor.io) — Hacker News に上がったプロジェクトサイト
+- [Agent Executor、Google の分散エージェントランタイム](https://cloud.google.com/blog/products/ai-machine-learning/agent-executor-googles-distributed-agent-runtime) — Google Cloud ブログ、2026年5月21日(Jaana Dogan、Ethan Bao):5つの機能と「新しいワークロードクラス」という主張
+- [GKE 上の Agent Sandbox と Agent Substrate をお届けします](https://cloud.google.com/blog/products/containers-kubernetes/bringing-you-agent-sandbox-on-gke-and-agent-substrate) — Google Cloud ブログ、2026年5月21日:Agent Sandbox の GA、毎秒 300 サンドボックスと 200 ms の数字、Substrate と AX の積み重なり方
+- [GitHub の agent-substrate/substrate](https://github.com/agent-substrate/substrate) — actor/worker モデル、8 Pod 上の 250 アクターのデモ、kind クイックスタート、「公式にサポートされた Google 製品ではない」という免責事項
+- [GKE Agent Substrate について](https://docs.cloud.google.com/kubernetes-engine/ai-ml/about-agent-substrate) — 要件、GPU パススルーなし、接続は suspend を生き延びない、本番はプライベート GA
+- [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) — その下にある Sandbox CRD
+- [Hacker News の議論(item 49780797)](https://news.ycombinator.com/item?id=49780797) — Kubernetes と YAML への反発、gVisor/GKE Sandbox の説明、「どの org が Substrate を所有しているか」のスレッド
+
+## 次に読む
+
+- [OpenAI Agents API vs Claude Managed Agents](/docs/models/openai-agents-api-vs-managed-agents) — AX がそのセルフホスト版の代替となるホスト型ループ
+- [エージェントランタイム:isolate 対コンテナ](/docs/frontiers/agent-runtimes-isolates-vs-containers) — 「エージェントは新しいワークロードである」という同じ主張への Cloudflare の答え
+- [長時間実行エージェントのためのハーネス](/docs/frontiers/long-running-agent-harnesses) — suspend/resume が再起動ではなく一時停止になるために、エージェントがしなければならないこと
