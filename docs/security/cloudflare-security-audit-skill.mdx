@@ -1,0 +1,147 @@
+---
+sidebar_position: 11.4
+title: "Cloudflare's security-audit Skill: Adversarial AI Security Audits with Claude Code (2026)"
+description: "cloudflare/security-audit-skill is the most-starred repo on GitHub this week (18.5k stars, +2.4k in a day on September 21, 2026). It is not a scanner: it is a SKILL.md that turns a coding agent into a six-phase audit pipeline where hunters can never verify their own findings, every candidate gets a fresh verifier trying to disprove it, and only sandboxed, source-grounded results land in a schema-validated findings.json. How the phases work, what the three verdicts mean, why prompt injection alone is not a finding, what it costs (HN users burned 150k to 1M tokens), and how to run it without those bills."
+keywords: [security-audit-skill, Cloudflare security audit skill, Claude Code security audit, AI security audit, vulnerability discovery harness, findings.json, coverage ledger, adversarial validation, agent skills security, npx skills add, SKILL.md, hunters and verifiers, needs_validation, prompt injection finding, AI code audit cost, Semgrep vs AI audit, Grant Bourzikas]
+---
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-09-21" source="github.com/cloudflare/security-audit-skill (README; skills/security-audit/SKILL.md, RECONNAISSANCE.md, HUNTING.md, VALIDATION-AND-REPORTING.md, AI-AND-LLM.md, report-schema.json; 18.5k stars and +2,428 on GitHub Trending on Sep 21, 2026; MIT); Cloudflare blog 'Build your own vulnerability harness' (June 18, 2026, Grant Bourzikas); Hacker News item 49736466 (Sep 17, 2026, 211 points); github.com/vercel-labs/skills. Token figures are individual HN reports, not a benchmark. The skill is actively edited (14 commits on main at the time of writing): re-check phase names and file names against SKILL.md." />
+
+<Callout type="objectives" items={[
+  "Explain why 'ask Claude to find vulnerabilities' produces confident garbage, and what separation of powers between hunters and verifiers fixes",
+  "Walk the six phases and name the artefact each one produces, from architecture.md to NEEDS-VALIDATION.md",
+  "Read a findings.json correctly: what confirmed, needs_validation and rejected each require, and why only confirmed records get a severity",
+  "Run the skill in Claude Code inside a sandbox that meets its rules, validate the outputs mechanically, and re-run for coverage",
+  "Budget it: what the token bill looks like, the rule that makes the skill refuse to launch hunters, and the three ways to keep a run affordable"
+]} />
+
+Cloudflare open-sourced a single skill in mid-September 2026 and it became the fastest-growing repo on GitHub: **[cloudflare/security-audit-skill](https://github.com/cloudflare/security-audit-skill)** sat at 18.5k stars on September 21 after adding 2.4k in one day, and had already drawn a 211-point [Hacker News thread](https://news.ycombinator.com/item?id=49736466) on September 17. The reason it matters is not the star count. It is that this skill is the *seed* of the fleet-wide vulnerability harness Cloudflare described in June, the one that ran across 128 repositories and produced 7,245 actionable findings. The public skill is the single-repo version you can run today with Claude Code.
+
+It is worth being precise about what it is. There is no binary, no rules engine, no model of its own. It is a `SKILL.md` plus fourteen hunting guides and two zero-dependency Node validators. Everything it does, it does by making *your* agent spawn isolated sub-agents with narrow briefs and refusing to accept their output until a different agent has tried to break it.
+
+## Why "find the vulnerabilities" fails on its own
+
+Cloudflare's June write-up contains the sentence that explains the whole design: an unconstrained agent "will edit the source code so its own exploit works, then triumphantly report the bug it just created." And the companion rule: "If a Hunter is allowed to grade its own homework, it will confidently validate everything it outputs."
+
+That is the failure mode of every one-shot "audit my repo" prompt. The model that spent 80k tokens forming a theory is the last model you want judging that theory. The skill's answer is structural:
+
+- **Hunters cannot file findings.** They return *candidates* and are forbidden from editing the target source, the architecture notes, the ledger, or the findings file.
+- **Verifiers cannot hunt.** A fresh verifier receives one candidate, the architecture facts and the schema, and nothing else, not even another verifier's conclusion. Its job is to disprove.
+- **Nothing is retained unless deterministic code accepts it.** The parent agent writes the shared files; `validate-findings.cjs` and `validate-coverage-ledger.cjs` reject anything that breaks the schema.
+
+Cloudflare's internal version goes further and uses a *different model* for validation than for discovery, on the theory that separate weights give an unbiased second opinion. The public skill does not enforce that, but nothing stops you from routing the verifier sub-agents to a different model.
+
+## The six phases and what each leaves behind
+
+| Phase | Who runs | Output |
+|---|---|---|
+| 1. Reconnaissance | 4 parallel research agents (stack and build; principals and auth; entry surfaces and sinks; what is offline-testable) that return facts only | `architecture.md` (about 1,000 words) and a seeded `coverage-ledger.json` |
+| 2. Coverage-led hunting | Waves of isolated hunters, one or more ledger *units* each; a coverage critic after every wave | Candidates with `proposed_verdict`, unit dispositions, hardening notes, newly discovered gaps |
+| 3. Candidate validation | One fresh verifier per unique candidate fingerprint | A decision per candidate: confirmed, needs_validation or rejected |
+| 4. Structured output | The parent only | `findings.json`, sorted by fingerprint, schema-validated |
+| 5. Independent record verification | One fresh verifier per confirmed or needs_validation record | `verified` or `replace`; any material replacement gets a *second* fresh verifier |
+| 6. Target-neutral reporting | The parent, after phase 5 passes | `REPORT.md`, `FINDINGS-DETAIL.md` (medium and up only), `NEEDS-VALIDATION.md` |
+
+Everything lands under `~/security-audit-skill/<repo-name>/run-<N>/`, with per-agent `agents/<id>/scratch/` and `agents/<id>/artifacts/` directories. Only the parent writes the shared files.
+
+The **coverage ledger** is the mechanism most people miss. A *unit* is one material combination of entry surface, trust boundary, subsystem and attack class, with starting paths in the repo. Units move through `planned`, `in_progress`, `blocked`, `covered` or `candidate`, and each state has rules about which evidence fields must be filled. A **coverage critic** reads the whole ledger after a wave and looks for unmapped entry points, unchecked parallel paths and unjustified exclusions; it can reopen a unit (archiving the prior attempt) but can never propose a finding. That is what makes re-runs *additive*: a second run picks up the units the first left `blocked` or reopened, instead of re-auditing everything.
+
+## The three verdicts, and why only one carries a severity
+
+The schema is strict about which fields each verdict may use, and the validator enforces it.
+
+| Verdict | Means | Must have | Must not have |
+|---|---|---|---|
+| `confirmed` | Independently reproduced in the sandbox from source, minimum observed effect only | root_cause, intended_behavior, trace (entrypoint to sink), evidence, conditions, execution, remediation, severity, confidence | claimed_root_cause, blockers, validation_plan, reason |
+| `needs_validation` | Source-grounded, but blocked by one exact fact that cannot be resolved locally (a deployment setting, an owner-only config) | claimed_root_cause, trace, evidence, blockers, validation_plan | severity, execution, remediation |
+| `rejected` | The verifier disproved it | claimed_root_cause, trace, evidence, reason | severity, execution, remediation, blockers |
+
+Three consequences follow:
+
+- **A `needs_validation` finding has no severity by design.** It is not a "medium"; it is a question for the code owner with an exact plan to answer it. `NEEDS-VALIDATION.md` exists so that list is not mistaken for a vulnerability list.
+- **Severity requires demonstrated impact, not a checklist miss.** The calibration in `SKILL.md`: critical is unauthenticated code execution, full data access or account takeover; high is a complete defeat of an explicit control (auth bypass, cross-tenant access); medium is limited blast radius or uncommon preconditions; low is non-secret disclosure; informational is a confirmed observation with minimal impact. "Missing best practice" is explicitly not a finding.
+- **A clean run reports zero.** The reporting guide says a proportional report may have no confirmed findings and must say so plainly. If your run "finds" twenty criticals in a small service, suspect the sandbox setup before you suspect the service.
+
+For readers of this section, the AI/LLM hunting guide is the sharpest part. Its opening rule: **"Prompt injection alone is not a finding. Require a code-level boundary failure."** A hunter must show the attacker, the affected principal, the execution identity, and an unauthorised action or disclosure, with a source trace from attacker-controlled input to the side effect. The patterns it sends hunters after are the ones in our [prompt injection](/docs/security/prompt-injection) and [MCP tool poisoning](/docs/security/mcp-tool-poisoning-and-rug-pulls) pages, but framed as *code* defects: tool arguments reaching SQL or a shell without handler-side validation, sub-agents inheriting full credentials instead of least authority, tool descriptions treated as authorisation, model output rendered into HTML or a command without encoding, cross-tenant context bleed from over-broad cache keys. Persuading the model to say something rude does not count.
+
+## The sandbox rule is not advice
+
+`SKILL.md` requires that any target-controlled code (tests, fixtures, the project's own build) run inside an OS-enforced sandbox with no external network, an isolated loopback namespace at most, read-only target source, writes confined to `scratch/`, and strict CPU, memory, process and file-size limits. Verifiers are told that if the sandbox is unavailable, the candidate simply stays unvalidated. Promotion from `scratch/` to retained `artifacts/` refuses symlinks, multiply-linked files, archives and recursive copies, and reopens nothing by path.
+
+This is the same threat model as our [coding agents under attack](/docs/security/coding-agents-under-attack) page, turned inward: the repository you are auditing may be hostile, and its test suite is code you are about to execute. In Claude Code, that means running the audit with the [sandbox and credential masking](/docs/claude-code/sandbox-credential-masking) controls on, not in your daily shell with your real environment variables. One gotcha from Cloudflare's own harness applies if you nest Docker inside a container: it needs `seccomp=unconfined` and `apparmor=unconfined` "or it will silently fail."
+
+<Steps items={[
+  { title: "Install the skill where your agent can see it", body: "npx skills add https://github.com/cloudflare/security-audit-skill --skill security-audit. The skills CLI (vercel-labs/skills) drops it into .claude/skills/ for Claude Code or .agents/skills/ for Codex, Cursor and Gemini CLI; add -g for a global install, -a claude-code to target one agent. Read SKILL.md before you run it: it is the contract you are about to execute." },
+  { title: "Open the repo in a sandboxed session", body: "Start Claude Code in the target repo with sandboxing and credential masking on, no production credentials in the environment, and network egress limited to your model provider. The skill needs an agent that can spawn parallel sub-agents; Claude Code's Agent tool qualifies." },
+  { title: "Trigger full-audit mode deliberately", body: "Say 'security audit this codebase' or 'find security vulnerabilities in ./src'. A narrower question ('is this JWT check safe?') triggers guidance mode instead, which answers without creating a run directory. For a first run, point it at one bounded directory, not the monorepo root." },
+  { title: "Watch the run directory, not the chat", body: "Everything appears under ~/security-audit-skill/<repo>/run-1/. architecture.md should exist within minutes; coverage-ledger.json grows unit by unit; findings.json appears only after phase 4. If nothing has landed after recon, check the agent has a sandbox it can execute in." },
+  { title: "Validate mechanically before you read prose", body: "node <skill-dir>/validate-findings.cjs run-1/findings.json and node <skill-dir>/validate-coverage-ledger.cjs run-1/coverage-ledger.json. The skill runs these itself, but running them yourself is the cheapest way to catch a run that was cut short by a session limit." },
+  { title: "Read NEEDS-VALIDATION.md first, then re-run for coverage", body: "Answer each blocker (it is phrased as a question about your deployment) and either promote or drop the record. Then run again: the ledger's prior_status fields make the second run target blocked and reopened units rather than starting over. Cloudflare's own data says one run finds roughly half of what repeated runs find." }
+]} />
+
+<PromptCard title="Trigger phrases and the validator commands">{`# Full audit (creates ~/security-audit-skill/<repo>/run-N/)
+security audit this codebase
+find security vulnerabilities in ./src
+
+# Guidance mode (no run directory, no sub-agent fleet)
+is the session cookie handling in auth/session.ts safe against fixation?
+
+# After a run: mechanical checks, zero dependencies beyond Node
+node .claude/skills/security-audit/validate-findings.cjs ~/security-audit-skill/<repo>/run-1/findings.json
+node .claude/skills/security-audit/validate-coverage-ledger.cjs ~/security-audit-skill/<repo>/run-1/coverage-ledger.json
+
+# What the schema hard-limits (validator rejects beyond these)
+# findings.json: 5 MiB, 1,000 findings, 64 nesting levels
+# coverage-ledger.json: 5 MiB, 10,000 units, 1,000 entries per collection`}</PromptCard>
+
+## What it costs, and how to keep it affordable
+
+The HN thread is mostly about the bill. One user reported "I threw 1M tokens for nothing in a medium codebase"; another put the practical ceiling at 150k tokens, "where you start hitting the dumb zone" of degraded attention. Those are anecdotes, not measurements, but they match the shape of the design: four recon agents, a wave of hunters, a verifier per candidate, a critic per wave, then a second verifier per surviving record. Cloudflare's fleet numbers give the honest scale: a standard 30k-line repository took **3 to 4 hours** for about 100 raw findings, and across the fleet **58%** of raw candidates survived validation (12,057 of 20,799).
+
+Three things in the skill itself keep it from running away:
+
+1. **The budget-reserve rule.** Before each wave the parent must reserve budget for the hunters, the validation pass, the post-wave critic and a final clean critic. `HUNTING.md` says: if those mandatory reserves do not fit, launch **no** hunter from that wave, and mark the units deferred with the budget reason. A run that ends with deferred units is a run that respected your budget, not a broken run.
+2. **Narrow briefs.** Every sub-agent gets one unit or one candidate. Cloudflare's harness kept each agent under 25% of its context window and credits that, more than any prompt wording, for the quality of findings.
+3. **Guidance mode.** Most security questions do not need the pipeline. Ask them directly and the skill answers without spawning anything.
+
+On your side: scope the first run to one directory; use a model with a large context and cheap cache reads for the hunters and a stronger one for verifiers; put a [task budget](/docs/api/task-budgets) on the session; and treat a run cut short by a session limit as partial, not failed, because the ledger records exactly where it stopped.
+
+## Where it sits next to Semgrep, CodeQL and AI code review
+
+It is not a replacement for static analysis and does not try to be. Cloudflare's post has a telling detail: they wired Semgrep into the harness and the agents "ignored it completely," preferring to read and run the code. Static tools give you deterministic, cheap, repeatable coverage of known patterns; this skill gives you expensive, probabilistic, reasoning-heavy coverage of boundary failures that pattern matchers cannot express, with a validation step that static tools do not have. Run both. And do not confuse it with PR-time review: Alibaba's [open-code-review](/docs/models/open-code-review-hybrid-ai-reviewer) is a diff reviewer that runs in seconds per pull request; this is a multi-hour audit of a codebase at rest.
+
+<Flashcards title="Terms you will meet in the run directory" cards={[
+  {front: "Unit", back: "One row of coverage-ledger.json: an entry surface + trust boundary + subsystem + attack class, with starting paths. Status moves through planned, in_progress, blocked, covered, candidate."},
+  {front: "Fingerprint", back: "A stable identifier derived from the source root cause: no line numbers, wave IDs or severity, so variants of the same bug consolidate across phases and runs."},
+  {front: "Coverage critic", back: "A post-wave agent that reads the whole ledger, finds unmapped entry points and unjustified exclusions, and can reopen units. It never proposes findings."},
+  {front: "confirmed", back: "Reproduced locally from source, minimum observed effect only, with trace, conditions, execution, remediation, severity and confidence."},
+  {front: "needs_validation", back: "Source-grounded but blocked by one exact fact that cannot be resolved locally. Has a validation plan; has no severity."},
+  {front: "rejected", back: "A verifier disproved it. Kept in findings.json with the reason so the next run does not rediscover it."},
+  {front: "Promotion", back: "The parent's move of a file from an agent's scratch/ to retained artifacts/: regular files only, singly linked, size-capped, no symlinks, no archives, never reopened by path."},
+  {front: "Guidance mode", back: "The skill's answer to a targeted question: no run directory, no sub-agents. Full-audit mode only starts on an explicit audit request."}
+]} />
+
+<Quiz title="Check yourself" questions={[
+  {q: "A hunter is confident it found an auth bypass. What is it allowed to do with it?", options: ["Write it to findings.json", "Patch the code to prove it", "Return it as a candidate with a fingerprint; a different agent will try to disprove it", "Mark it confirmed with severity high"], answer: 2, explain: "Hunters return candidates only. They may not edit target source or shared files, and verdicts and severity come from fresh verifiers and the parent."},
+  {q: "A record in findings.json has verdict needs_validation and severity high. What happened?", options: ["It is a valid high finding", "The validator should have rejected it: needs_validation records must not carry severity", "It was promoted by a critic", "Severity is optional everywhere"], answer: 1, explain: "The schema forbids severity, execution and remediation on needs_validation records. Only confirmed records are graded."},
+  {q: "Your test suite makes outbound HTTP calls. The skill tells hunters and verifiers to do what?", options: ["Allow it, tests are trusted", "Run it in the OS-enforced sandbox with no external network; if that sandbox is unavailable, leave the candidate unvalidated", "Stub the network with a mock", "Skip the tests"], answer: 1, explain: "Target-controlled code only runs inside the approved sandbox with networking disabled. Verifiers never contact deployed endpoints or external services."},
+  {q: "A hunter shows that a crafted email makes the assistant say something offensive. Under AI-AND-LLM.md this is:", options: ["Critical", "High", "Not a finding: prompt injection alone needs a code-level boundary failure with an observable unauthorised result", "needs_validation"], answer: 2, explain: "The guide requires a crossed boundary: attacker, affected principal, execution identity, unauthorised action or disclosure, with a source trace. Model output alone does not qualify."},
+  {q: "The run ends with several units marked deferred and a budget reason. What does that mean?", options: ["The skill crashed", "The parent applied the reserve rule: it would not launch hunters it could not also validate and critique", "Those units are safe", "The repo is too big"], answer: 1, explain: "If the mandatory reserves for validation and critics do not fit, no hunter launches from that wave. A second run picks those units up."},
+  {q: "Cloudflare's fleet data says a single run finds roughly what share of what repeated runs find?", options: ["About 95%", "About 50%", "About 10%", "All of it, if the model is large enough"], answer: 1, explain: "Their June post reports roughly half, with simpler bugs surfacing first. The additive ledger is designed for that: re-run and it targets the gaps."}
+]} />
+
+## Sources & further reading
+
+- [cloudflare/security-audit-skill on GitHub](https://github.com/cloudflare/security-audit-skill) — README, `SKILL.md`, the phase guides (`RECONNAISSANCE.md`, `HUNTING.md`, `VALIDATION-AND-REPORTING.md`), the fourteen attack-class guides including `AI-AND-LLM.md`, `report-schema.json`, and the two validators; MIT
+- [Build your own vulnerability harness](https://blog.cloudflare.com/build-your-own-vulnerability-harness/) — Cloudflare blog, June 18, 2026 (Grant Bourzikas): how the skill grew into the fleet harness, the 20,799 to 12,057 to 7,245 funnel, the 3–4 hours per 30k-line repo figure, the "grade its own homework" rule, the nested-Docker and 200-OK-with-error gotchas
+- [Hacker News discussion (item 49736466)](https://news.ycombinator.com/item?id=49736466) — first-hand token reports and the cost pushback
+- [vercel-labs/skills](https://github.com/vercel-labs/skills) — the `npx skills add` CLI and where it installs skills for each agent
+- [Agent Skills open standard](/docs/models/skill-md-open-standard) — why one `SKILL.md` runs in Claude Code, Codex, Cursor and Gemini CLI
+
+## Next
+
+- [Vetting agent skills you install](/docs/security/vetting-agent-skills) — this skill spawns agents that execute your repo's code; read it before you trust any skill, including this one
+- [Hardening autonomous runs](/docs/security/hardening-autonomous-runs) — the sandbox, secret and egress setup a multi-hour unattended audit needs
+- [Open Code Review: Alibaba's hybrid AI reviewer](/docs/models/open-code-review-hybrid-ai-reviewer) — the PR-time counterpart, and the same precision-versus-recall lesson
