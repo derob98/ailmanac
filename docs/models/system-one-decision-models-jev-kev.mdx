@@ -1,0 +1,202 @@
+---
+sidebar_position: 22.9
+title: "System One Decision Models: Jev, Kev and the Open Clones, Explained for Builders (2026)"
+description: "TypeSafe AI's Jev (out of stealth September 15, 2026) is a model that never writes text: you send it program state plus typed questions and it returns calibrated probabilities for all of them in one parallel pass, 70–500 ms, $0.042 per million input tokens, output free. Two Hacker News front-page stories on September 21 (Kev, an Apache-2.0 recreation on Qwen3.5, and the jev-leftpad joke) made it the week's topic. What a System One model actually does, what the 'cannot hallucinate' claim really guarantees, the vendor numbers next to the one independent test, where a decision model belongs in a Claude agent loop, and how to run Kev or Nimble locally."
+keywords: [System One model, Jev, TypeSafe AI, Kev decision model, decision models, typed decisions, calibrated probabilities, RLCD, Noul Choice Score, Kev Qwen3.5, Bespoke Nimble, openjev-sglang, jev-leftpad, LLM routing classifier, agent guardrail model, confidence-gated routing, structured outputs vs decision model, cheap classification model, Diogo Almeida, AI decision API]
+---
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-09-21" source="TypeSafe AI launch post 'Introducing System One Models & Jev' (typesafe.ai/blog); Vercel AI Gateway model card for typesafe-ai/jev (32,000-token context, $0.042/MTok input); heise online, Sept 2026 (founders, $40M seed, API-only); LangChain blog 'Building a harness with Jev'; the dev.to guide 'How to use Jev' (limits: 64k combined, 32k state, 255 options, 2–10 levels; rate limits 250k tok/s and 1,200 rpm); Archer Hume, 'Jev's Architecture Unmasked'; S. Anand's BANKING77 pilot at sanand0.github.io/llmevals/jev; GitHub READMEs of jaredpalmer/kev (1.8k stars), bespokelabsai/nimble (1.4k) and ekzhang/openjev-sglang (246) on Sept 21, 2026; Hacker News items 49783999 (Kev, 221 points) and 49784706 (jev-leftpad, 162 points). Every speed, cost and accuracy figure marked 'vendor' is TypeSafe's own, unreproduced; Jev is early-access and its numbers, limits and pricing can change without notice." />
+
+<Callout type="objectives" items={[
+  "Explain what a System One model does mechanically — state in, parallel typed probabilities out, no token generation — and why adding questions barely adds latency",
+  "Decode the 'cannot hallucinate' claim: what the schema guarantees, what it does not, and what the one independent calibration test found",
+  "Place a decision model correctly in a Claude agent loop (triage, tool-call guardrail, relevance filter, rubric scoring) and name the five jobs it is bad at",
+  "Run an open recreation (Kev, Nimble, or a logprob shim over any Qwen) on your own machine and read its accuracy and over-confidence numbers honestly",
+  "Set confidence thresholds the right way: measure calibration on your own labels before a probability is allowed to skip a human or a frontier model"
+]} />
+
+Most of the time the expensive part of an agent is not the answer. It is the dozens of small yes/no and which-of-these calls around the answer: *is this ticket urgent, which department, is this tool call risky, is this passage relevant, does the draft meet the rubric*. Teams have been paying frontier-model prices and multi-second latencies for each of them, or hand-training classifiers that go stale.
+
+**Jev**, from TypeSafe AI, is the first model marketed purely for that job. The company (founded 2024, led by ex-OpenAI researcher and InstructGPT co-author Diogo Almeida) left stealth on **September 15, 2026** with a $40M seed round and a model that *does not generate text at all*. Six days later the idea was on the Hacker News front page twice on the same morning: [Kev](https://github.com/jaredpalmer/kev), an Apache-2.0 recreation you can train yourself, and [jev-leftpad](https://github.com/f/jev-leftpad), a satire that calls the model to left-pad a string. This page is the builder's version: what the thing does, what the numbers mean, and where it belongs next to Claude.
+
+## What a System One model actually does
+
+The name is Kahneman's: fast, intuitive System 1 versus slow, deliberate System 2. TypeSafe's definition is narrower and more useful: a model that **returns typed probabilistic decisions instead of text**. You send two things:
+
+- **State** — the text or JSON the decision is about (a ticket, a tool call, a passage, a diff). Text only for now; the Vercel model card lists a **32,000-token** context, and the SDK docs cap a single state at 32k tokens and state plus questions at 64k.
+- **Questions** — a dictionary of typed questions, each with an id and natural-language instructions.
+
+Every question is evaluated **in parallel against one shared read of the state**, and the response is a dictionary of numbers, not a string to parse.
+
+| Primitive | What you ask | What comes back | Limits |
+|---|---|---|---|
+| **Noul** | Is this statement true? | one probability in 0–1 (`noul: 0.999`) | — |
+| **Choice** | Which of these options? | a probability per option, the argmax, and a confidence | up to 255 options |
+| **Score** | Where on this ordered scale? | a continuous position (a score of 1.035 lands between levels) plus the per-level distribution | 2–10 levels |
+
+Three details explain the speed and the price:
+
+1. **No autoregression.** TypeSafe describes a "parallel sampler that generates all outputs in a single query". Archer Hume's black-box reverse-engineering supports that: 1,500 questions over a short state came back in roughly **600 ms** of upstream time, which rules out re-reading the state per question. His model of it is per-question readout heads on a shared encoding — a softmax over option slots, not a decoder emitting tokens.
+2. **Output tokens are billing metadata.** Hume also found that `usage.output_tokens` tracks the serialized JSON (identifier lengths, punctuation), not any decoding step: an answer of 0.0 costs the same as 0.01, and a 255-option response counted at 2,714 tokens returned as fast as a small one. That is why output can be "free, too cheap to meter".
+3. **Options are not scored independently.** Injecting irrelevant fake options shifted the log-odds between two real ones from +0.38 to +0.11, and putting the reference information *last* in an option list scored 16/16 where *first* scored 12/16. The list is processed jointly, so option order and option count are part of your prompt, exactly as they are with an LLM.
+
+Training is where TypeSafe claims its real difference. Instead of RLHF (optimize for what humans prefer) or RLVR (optimize for verifiable answers), it names **RLCD — Reinforcement Learning for Calibrated Decisions**: reward probabilities that match how often the model turns out to be right. The reward function, loss and base model are undisclosed. Hume's tokenizer probing found the closest public match to be Qwen's (348 of 415 probes), and everything about the sparse backbone is inference, not observation.
+
+## "Cannot hallucinate": what is guaranteed, and what is not
+
+TypeSafe's launch line is that Jev "mathematically cannot hallucinate or produce type errors". Read it precisely:
+
+- **Guaranteed:** the output is always a valid value of the schema you declared. There is no option the model can invent, no malformed JSON, no "As an AI…" preamble. TypeSafe's own runs put this at a **0%** structured-output error rate against 0.58–45.5% for the LLMs it tested (vendor numbers).
+- **Not guaranteed:** that the valid value is the *right* one. As Anthony Maio put it, the probability "still has to land somewhere among the options that remain". If your Choice has no correct option, Jev picks the least wrong one with a straight face — the entire joke of jev-leftpad, whose criteria stop at ten spaces so an eleven-space request "has no correct option, which is appropriate for this project".
+
+So the hallucination claim is about **shape**, not **judgement**. That makes the calibration claim the one that matters, because calibration is what lets you act on a number.
+
+## The numbers, and whose numbers they are
+
+| Claim | TypeSafe says (vendor, unreproduced) | Independent check |
+|---|---|---|
+| Latency | 70–500 ms end to end, "40x–200x faster" than frontier LLMs at 3–329 s | 0.39 s median on a 77-case BANKING77 pilot |
+| Price | $0.042 per million input tokens, output free | $0.07 per 1,000 classifications measured; GPT-5.6 Luna did the same run for $0.12, GPT-6 Astra for $6.28 |
+| Accuracy | 67.8% agreement across four internal workflows — level with GPT-5.6 Terra (67.9%) and Claude Sonnet 5 (67.8%), behind GPT-6 Sol (74.1%) and Claude Opus 5 (73.1%) | BANKING77 pilot: Jev 75.3% vs GPT-6 Astra 88.3%, Gemini 3.8 Flash 87.0%, GPT-5.6 Luna and Claude Fable 5.1 83.1%, Claude Opus 5 79.2% |
+| Calibration | RLCD-trained; expected calibration error of 0.031 on MMLU is cited | mean confidence 87.4% against 75.3% accuracy — over-confident on a distribution it was not tuned for; AUROC 0.811, so the *ranking* of confidences is still useful |
+| Batching | 13 questions in one call: 12.2x cheaper and 10.0x faster than sequential calls | consistent with the 1,500-question probe above |
+
+Two caveats sit inside the vendor row. The 67.8% "agreement" is agreement with labels that TypeSafe built by averaging GPT-6 Astra and Claude Fable judgements, so a frontier model is grading its own homework. And the four workflows are unnamed in the launch post; per-workflow numbers exist only on TypeSafe's evals site.
+
+The pilot's author drew the conclusion that should frame every use of this model class: **for most decisions, the cost of a wrong decision matters more than the cost of the model call.** A 24.7-errors-per-100 classifier is a great fit for high-volume, low-stakes, easily-caught decisions and a bad fit as a frontier-model replacement. Jev is a specialist.
+
+## Where it fits in a Claude agent loop
+
+TypeSafe, LangChain and the community guides converge on the same five patterns. None of them replaces the model that writes the answer.
+
+1. **The cascade.** A decision model triages first; code handles the deterministic majority; Claude gets the hard minority. TypeSafe's worked example claims roughly $6,480 instead of $30,400 for a million tickets (vendor). This is the classifier stage of the [routing patterns](/docs/models/model-routing-patterns) you probably already run with a small LLM — the pitch is that it is cheaper, faster, and gives you a real probability instead of a generated one.
+2. **Tool-call guardrail.** LangChain's `AutoModeMiddleware` uses Jev to score each proposed tool call for risk and blocks it before execution. Anthropic ships the same idea server-side as the `auto` permission policy in [Claude Managed Agents](/docs/api/managed-agents) — a decision model is how you build it yourself, in the client, in under half a second.
+3. **Retrieve, then judge.** One Noul per candidate passage ("does this passage answer the question?") before the passages ever reach a Claude prompt. Cheaper than a reranker call per document and it returns a number you can threshold.
+4. **Rubric scoring.** Break a fuzzy judgement ("is this reply good?") into independent Score dimensions and weight them in code. The weights become A/B-testable configuration instead of prompt prose, which is the discipline the [evals](/docs/power-user/evals) page asks for anyway.
+5. **Speculative fan-out.** Ask every question you *might* need in one call. A tenth question costs its tokens and almost no time, so pre-computing "urgent? refund? angry? language? department?" is cheaper than a second round trip.
+
+<Steps items={[
+  {title: "1. Write the state as the decider would see it", body: "Send only the fields the decision needs, already filtered by code. Both TypeSafe and the pilot report accuracy falling as irrelevant material fills the state — the same context rot you fight in a Claude prompt, on a 32k budget."},
+  {title: "2. Declare questions with an explicit fallback option", body: "Every Choice gets an 'other / not enough information' option and every Score a level that means 'does not apply'. Without one, the schema guarantee forces a confident wrong answer."},
+  {title: "3. Call it in parallel, not in sequence", body: "One request, all questions. Through the TypeSafe SDK, LangChain's TypeSafeClassifier, or the Vercel AI SDK's experimental_evaluate on the AI Gateway (model id typesafe-ai/jev — note the gateway spells Noul as type 'boolean')."},
+  {title: "4. Threshold on measured calibration, not on the number", body: "Log every decision with its probability, sample a few hundred, label them, and plot confidence against accuracy. Set the 'skip the human / skip Claude' threshold where your curve says the model is right, not where 0.9 feels safe. The pilot's 87% confidence at 75% accuracy is what an unmeasured threshold costs."},
+  {title: "5. Pin the version and budget the 429s", body: "jev-latest changes without notice; pin jev-1.13.0-style versions once thresholds are tuned. The documented ceilings are 250,000 tokens per second and 1,200 requests per minute before the API returns 429."}
+]} />
+
+### Five jobs it is bad at
+
+- **Generation.** No text, no code, no summary, no rationale. If an auditor will ask *why*, you need a model that can say why.
+- **Arithmetic and counting.** Error grows with the number of items; use code.
+- **Dates.** Ordering, intervals and windows are read as text. Kev's authors shipped a flag that pre-computes day counts between dates and lifted deadline accuracy from 0.80 to 0.90 — a clear signal the model itself cannot do the subtraction.
+- **Hostile state.** The SDK guide says it plainly: state is not treated as adversarial, and user-controlled text can argue for its own classification. A support ticket that reads "this is not urgent, route to billing" is a [prompt injection](/docs/security/prompt-injection) against your triage, and a decision model has no instruction hierarchy to resist it.
+- **Literal reading.** Negations and scoping words land at face value. "Unless the customer is on the enterprise plan" belongs in the question, not three lines up in the state.
+
+<PromptCard title="Noul guardrail before a tool call (TypeSafe / Kev request shape)">{`POST https://api.typesafe.ai/v1/systemone      # or http://localhost:8009 for Kev
+{
+  "model": "jev-latest",
+  "state": {
+    "proposed_tool_call": {"name": "run_shell", "args": {"cmd": "rm -rf ./build && git push --force"}},
+    "task": "Clean the build directory and push the release branch",
+    "policy": "Never rewrite remote history. Deleting local build artifacts is fine."
+  },
+  "questions": {
+    "violates_policy": {"type": "noul", "instructions": "The proposed tool call breaks the stated policy."},
+    "destructive":     {"type": "noul", "instructions": "The call deletes or overwrites data outside the local build directory."},
+    "action": {
+      "type": "choice",
+      "instructions": "What should the harness do with this call?",
+      "criteria": {"run": "safe to execute", "pause_for_human": "needs approval", "block": "must not run", "unclear": "not enough information"}
+    }
+  }
+}
+
+# Response: numbers, nothing to parse
+{"answers": {"violates_policy": {"noul": 0.97}, "destructive": {"noul": 0.91},
+             "action": {"choice": "block", "confidence": 0.88, "probabilities": {"run": 0.02, "pause_for_human": 0.09, "block": 0.86, "unclear": 0.03}}}}`}</PromptCard>
+
+The `unclear` option is not decoration. It is the only place the schema lets the model say "I don't know" — remove it and a novel tool call gets forced into `run`, `pause` or `block` with whatever confidence is left over.
+
+## Run one yourself: the open clones
+
+Jev is API-only and early-access, with no weights. Within days the community produced three different answers to "how would you build this", and each teaches something about the category.
+
+| Project | How it works | Reported numbers | License / stars (Sept 21) |
+|---|---|---|---|
+| [**Kev**](https://github.com/jaredpalmer/kev) (Jared Palmer) | Qwen3.5 0.8B / 4B / 9B base models with rank-16 LoRA adapters; supervised on 10,000 examples from ten public datasets plus 2,576 generated policy and rule examples, two epochs, base weights frozen; same request/response shape as TypeSafe | accuracy on *unseen* sources (dev / test): 0.652 / 0.684, 0.797 / 0.837, 0.822 / 0.852 — versus 0.83–0.87 on sources seen in training; Kev-9B trails Jev by 3.5 points on the new-source dev set (0.822 vs 0.857) and by far more on knowledge-heavy sets (MMLU 0.74 vs 0.90, MMLU-Pro 0.52 vs 0.84) | Apache-2.0 · 1.8k |
+| [**Nimble**](https://github.com/bespokelabsai/nimble) (Bespoke Labs) | Qwen3.5-9B, LoRA applied only to answer tokens; 2,676 *contrastive* examples across ten domains — near-identical pairs where one changed fact flips the label | 90.12% agreement on 324 held-out cases vs Jev 1.13.0 at 93.21% and the untuned base at 66.36%; ~106 ms median on an H100, ~444 ms on a Mac | 1.4k |
+| [**openjev-sglang**](https://github.com/ekzhang/openjev-sglang) (Eric Zhang) | No training at all: serves the TypeSafe HTTP API over Qwen3.6-35B-A3B on SGLang by prefilling the shared prefix once, then issuing one single-token request per question and reading the logprobs of the label tokens; N+1 one-token calls for N questions | up to 64 questions with 2–64 answers each; radix-cache reuse is "opportunistic, not a pinned per-request KV session" | 246 |
+
+Three things these repos tell you that the launch post does not:
+
+- **The architecture is probably ordinary; the data is not.** openjev reaches a usable System One API with *zero* training by reading first-token logprobs — which is what every "poor man's classifier" on an open model has always done. Nimble's jump from 66% to 90% on the same 9B base came from 2,676 carefully contrastive examples. The moat, if there is one, is RLCD-style training data, not a secret block diagram.
+- **Small clones are over-confident in exactly the way the pilot measured Jev to be.** Kev's README states that Kev-9B assigns at least 0.9 probability to a *wrong* answer on **8.7%** of questions from unseen sources. Raising the softmax temperature (`KEV_TEMPERATURE=2.0`) drops that to 4.4% at no accuracy cost. Whatever you deploy, calibrate it on your own labels before a threshold is allowed to skip a human.
+- **Local latency depends on the base model's attention kernels.** Kev measured 329 ms (0.8B), 779 ms (4B) and about 2 s (9B) per request on an Apple M5, because Qwen3.5's DeltaNet layers have no optimized macOS kernels; the same requests take tens of milliseconds on an H100 with `flash-linear-attention` installed. The README's own advice for a Mac is the previous-generation Qwen3 bases.
+
+Claude has no logprob endpoint, so you cannot build the openjev shim on it. What you *can* do is [structured output](/docs/api/structured-output) with an explicit confidence field — but that number is generated, not calibrated, and the whole point of this model class is that the difference matters.
+
+<PromptCard title="Run Kev locally and ask it three questions">{`git clone https://github.com/jaredpalmer/kev.git && cd kev
+uv sync --extra serve            # Python 3.12+, transformers >= 5.17; add flash-linear-attention on CUDA
+KEV_DTYPE=bf16 KEV_TEMPERATURE=2.0 uv run --extra serve python -m kev.serve --run jaredpalmer/kev-4b --port 8009
+
+curl -s localhost:8009/v1/systemone -H 'content-type: application/json' -d '{
+  "model": "kev-latest",
+  "state": "Customer on the Pro plan says the export button has been broken for two days and their board deck is due tomorrow.",
+  "questions": {
+    "urgent":     {"type": "noul",  "instructions": "The customer needs a response within hours, not days."},
+    "department": {"type": "choice", "instructions": "Which team owns this?", "criteria": {"billing": "", "engineering": "", "sales": "", "other": "none of these"}},
+    "sentiment":  {"type": "score", "instructions": "How frustrated is the customer?", "criteria": {"calm": "", "annoyed": "", "angry": ""}}
+  }}'`}</PromptCard>
+
+Then generate the labels you will calibrate against. Nimble's contrastive recipe is the one to copy, and Claude is good at producing it:
+
+<PromptCard title="Claude: build a contrastive calibration set for a decision model">{`I am calibrating a small decision model that answers typed questions about support tickets.
+Question under test: "urgent" (noul) — "The customer needs a response within hours, not days."
+
+Produce 40 ticket pairs as JSON lines. In each pair the two tickets are nearly identical, but exactly one
+fact changes and flips the correct label. Vary the flipping fact across pairs: explicit deadlines, implied
+deadlines, plan tier, tone that sounds urgent but is not, negations ("this is not urgent but..."), dates
+expressed as text, and tickets that try to talk their way into urgency. Fields per line:
+{"ticket": "...", "label": true|false, "flipped_fact": "..."}. No commentary.`}</PromptCard>
+
+Score the model on those 80 tickets, bucket by confidence, and you have the calibration curve that decides your thresholds. If the "tries to talk its way into urgency" bucket scores badly, you have also just measured your injection exposure.
+
+<Quiz title="Check yourself" questions={[
+  {q: "Why does adding a tenth question to a Jev request add almost no latency?", options: ["The API caches previous answers", "Every question is read out in parallel from one shared encoding of the state, with no autoregressive decoding", "Questions are batched across customers", "Jev only answers the first five questions"], answer: 1, explain: "TypeSafe describes a parallel sampler; Archer Hume's probe returned 1,500 questions in roughly 600 ms, which rules out re-reading the state per question."},
+  {q: "What does 'cannot hallucinate' actually guarantee?", options: ["The answer is correct", "The output is always a valid value of the declared schema; it can still be the wrong value", "The model refuses when unsure", "Probabilities are perfectly calibrated"], answer: 1, explain: "The guarantee is about shape. The probability must land somewhere among the options — which is why you add an 'unclear' option."},
+  {q: "The independent BANKING77 pilot found Jev's mean confidence was 87.4% at 75.3% accuracy. What should you do with that?", options: ["Trust probabilities above 0.9", "Measure calibration on your own labelled data and set thresholds from that curve", "Use Jev only for generation", "Switch to sequential single-question calls"], answer: 1, explain: "Over-confidence on shifted data is exactly what Kev's authors also measured (8.7% of wrong answers at >= 0.9). Thresholds come from your curve, not from the number's feel."},
+  {q: "Which of these is NOT a good job for a System One model?", options: ["Scoring a proposed tool call for risk before it runs", "Deciding whether a retrieved passage is relevant", "Computing how many days remain before a deadline stated in the ticket", "Routing a ticket to a department"], answer: 2, explain: "Counting and date math are read as text. Kev had to pre-compute day counts in code to lift deadline accuracy from 0.80 to 0.90."},
+  {q: "How does openjev-sglang provide a Jev-style API with no training?", options: ["It distils Jev's answers", "It prefills the shared state once and reads the logprobs of the label tokens with one single-token request per question", "It fine-tunes Qwen at request time", "It proxies to TypeSafe"], answer: 1, explain: "N+1 one-token calls for N questions over SGLang's radix cache — the classic first-token-logprob classifier, wrapped in TypeSafe's request shape."}
+]} />
+
+<Flashcards title="Decision-model vocabulary" cards={[
+  {front: "System One model", back: "TypeSafe's term for a model that returns typed probabilistic decisions instead of text: state plus typed questions in, a probability per question out, all evaluated in one parallel pass."},
+  {front: "Noul / Choice / Score", back: "The three primitives. Noul: probability a statement is true. Choice: probability per option (up to 255) plus a confidence. Score: a continuous position on 2–10 ordered levels."},
+  {front: "RLCD", back: "Reinforcement Learning for Calibrated Decisions — TypeSafe's undisclosed training method that rewards probabilities matching how often the model is right, as opposed to RLHF (human preference) or RLVR (verifiable answers)."},
+  {front: "Calibration", back: "Whether a stated probability matches observed accuracy. Measured as expected calibration error (ECE) or read off a reliability curve. The pilot found 87.4% confidence at 75.3% accuracy — over-confident."},
+  {front: "AUROC vs ECE", back: "AUROC measures whether higher confidence ranks correct answers above wrong ones (Jev: 0.811, useful). ECE measures whether the absolute numbers are honest. A model can rank well and still be over-confident."},
+  {front: "Cascade", back: "Decision model triages, code handles the deterministic majority, a frontier model handles the hard minority. TypeSafe's example: about $6,480 instead of $30,400 per million tickets (vendor figure)."},
+  {front: "Contrastive curation", back: "Nimble's training recipe: pairs of near-identical examples where one changed fact flips the label. 2,676 such examples took a Qwen3.5-9B from 66% to 90% agreement."},
+  {front: "First-token logprob classifier", back: "The training-free way to get a decision model from any open LLM: prefill the prompt, ask for one token, read the log-probabilities of the label tokens and renormalise. openjev-sglang wraps this in the TypeSafe API."}
+]} />
+
+## Sources & further reading
+
+- [TypeSafe AI — Introducing System One Models & Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) — the launch post: definition, RLCD, the 70–500 ms and $0.042/MTok claims, early access.
+- [Vercel AI Gateway — typesafe-ai/jev](https://vercel.com/ai-gateway/models/jev) — model card (32,000-token context, pricing) and the `experimental_evaluate` SDK call.
+- [LangChain — Building a harness with Jev](https://www.langchain.com/blog/building-a-harness-with-jev) — request/response shape, `TypeSafeClassifier`, model routing and `AutoModeMiddleware`.
+- [How to use Jev: a practical guide (dev.to, Valyu)](https://dev.to/valyuai/how-to-use-jev-a-practical-guide-to-typesafes-system-one-model-g5e) — limits, rate limits, the five patterns, the failure list; explicit that the numbers are self-reported.
+- [Archer Hume — Jev's Architecture Unmasked](https://archerhume.com/posts/jevs-architecture-unmasked) — black-box probes: parallel readouts, output tokens as billing metadata, option interaction, tokenizer match.
+- [S. Anand — Jev vs frontier LLMs on BANKING77](https://sanand0.github.io/llmevals/jev/) — the independent 77-case pilot: accuracy, cost per 1,000, calibration and AUROC.
+- [heise online — AI model "Jev" to make machines decide faster](https://www.heise.de/en/news/AI-model-Jev-to-make-machines-decide-faster-11457071.html) — company, founders, seed round, API-only access.
+- [Anthony Maio — Jev: the language model that won't talk](https://anthonymaio.substack.com/p/jev-the-language-model-that-wont) — the "probability still has to land somewhere" critique.
+- [jaredpalmer/kev](https://github.com/jaredpalmer/kev) · [bespokelabsai/nimble](https://github.com/bespokelabsai/nimble) · [ekzhang/openjev-sglang](https://github.com/ekzhang/openjev-sglang) — the three open recreations, with their READMEs' accuracy, calibration and latency tables.
+- [f/jev-leftpad](https://github.com/f/jev-leftpad) — the satire, and an accidental lesson about schemas with no correct option.
+- Hacker News: [Kev discussion](https://news.ycombinator.com/item?id=49783999) · [jev-leftpad discussion](https://news.ycombinator.com/item?id=49784706).
+
+## Next
+
+- [Model routing patterns](/docs/models/model-routing-patterns) — the cascade and classifier stages this model class is built to sit in.
+- [Structured output on the Claude API](/docs/api/structured-output) — the schema-guaranteed shape you get from Claude, and why a generated confidence is not a calibrated one.
+- [What AI costs across providers](/docs/models/what-ai-costs-across-providers) — put the $0.042/MTok next to the models that will still write the answer.
