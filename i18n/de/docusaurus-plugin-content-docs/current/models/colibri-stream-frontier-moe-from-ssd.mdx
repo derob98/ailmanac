@@ -1,0 +1,221 @@
+---
+sidebar_position: 22.5
+title: "Colibrì: Ein 744B-MoE von der SSD ausführen (und was es Sie wirklich kostet)"
+description: "Colibrì ist eine reine C-Engine ohne Abhängigkeiten, die GLM-5.2 (744B), Kimi K3 (2,8T), DeepSeek V4.1 Flash und sechs weitere Frontier-MoE-Modelle auf einer 16–32-GB-Maschine ausführt, indem sie die dichten Schichten im RAM hält und die gerouteten Experten von NVMe streamt. Diese Seite erklärt die Speicherhierarchie, die Zahlen, die entscheiden, ob sie für Sie nutzbar ist (0,05 bis 6,8 tok/s), die Fallstricke bei SSD-Verschleiß und spekulativem Decoding sowie die exakten Befehle bis zum ersten Token."
+keywords: [Colibri, colibri inference, GLM-5.2 lokal ausführen, 744B auf 25GB RAM, Expert Offloading, Expert Streaming, MoE-Inferenz CPU, NVMe Streaming LLM, Kimi K3 lokal, DeepSeek V4.1 Flash lokal, Inkling lokal, reine C-Inferenz-Engine, llama.cpp Alternative, lokales Frontier-Modell, Router Lookahead, MLA KV Cache]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Den Drei-Ebenen-Trick verstehen — dichte Gewichte im RAM, geroutete Experten auf der Platte, optionale VRAM-Ebene — und warum MoE ihn überhaupt erst möglich macht","Die Benchmark-Tabelle ehrlich lesen: welche Hardware 0,1 tok/s erreicht, welche ~2, welche ~6, und warum die NVMe-Bandbreite und nicht die CPU die Obergrenze ist","Die vier Fallstricke kennen, die Leute Tage kosten: int8-MTP-Heads, O_DIRECT auf der falschen Platte, spekulatives Decoding, das verliert, und SSD-Verschleiß","Von git clone bis zum ersten gestreamten Token auf GLM-5.2 oder DeepSeek V4.1 Flash kommen","Entscheiden, wann Colibrì einen GGUF-plus-Ollama-Offload schlägt, wann man stattdessen eine GPU mieten sollte und wann eine gehostete API schlicht die richtige Antwort ist"]} />
+
+Am 1. Juli 2026 stellte ein Entwickler unter dem Namen JustVugg ein Repository mit einem Einzeiler als Versprechen online: *Frontier-MoE-Modelle auf Hardware ausführen, die Sie bereits besitzen — reines C, keine Abhängigkeiten, Experten von der Platte gestreamt*. Der Show-HN-Thread erreichte neun Tage später 453 Punkte. Mitte September steht das Projekt bei 30,8k Sternen, und Version 1.11.0, veröffentlicht am 13. September, fügte eine neunte Modellfamilie hinzu (DeepSeek V4.1 Flash, 552B), die den veröffentlichten Checkpoint nativ ohne Konvertierungsschritt liest. Während diese Seite geschrieben wird, ist es das führende KI-Repository in GitHubs täglicher Trending-Liste.
+
+Der Pitch klingt wie ein Trick, und in gewissem Sinne ist er einer. Diese Seite erklärt den Trick präzise genug, dass Sie vorhersagen können, was er auf *Ihrer* Maschine tun wird, bevor Sie 370 GB herunterladen.
+
+## Die Ein-Satz-Version
+
+Ein Mixture-of-Experts-Modell berührt pro Token nur einen kleinen Ausschnitt seiner Gewichte, also hält Colibrì den immer genutzten Teil (Attention, Embeddings, geteilte Experten) resident im RAM und liest den selten genutzten Teil (die gerouteten Experten) bei Bedarf von NVMe — und tauscht Tokens pro Sekunde gegen die Fähigkeit, ein Modell mit 744 Milliarden Parametern auf einem Laptop auszuführen.
+
+## Warum MoE das möglich macht
+
+Nehmen Sie GLM-5.2 als Referenzfall, da es das Modell ist, um das das Projekt herum gebaut wurde:
+
+| Größe | Wert |
+|---|---|
+| Parameter gesamt | 744B |
+| Aktiv pro Token | ~40B |
+| Dichte (immer aktive) Parameter | ~17B → **~9,9 GB** resident als int4 |
+| Geroutete Experten | rund zwanzigtausend über alle Schichten → **~370 GB** auf der Platte als int4 |
+| Expertengewicht, das sich von Token zu Token ändert (kalt) | **~11 GB** |
+| Minimaler RAM / komfortabler RAM | 16 GB / 24 GB |
+
+Jedes Token braucht die dichten 9,9 GB plus die Handvoll Experten, die der Router in jeder Schicht auswählt. Der dichte Teil passt ins RAM. Die Experten nicht — aber Sie brauchen nur wenige davon gleichzeitig, und das nächste Token nutzt oft viele derselben wieder. Also behandelt die Engine **VRAM, RAM und NVMe als eine einzige Speicherhierarchie**: einen LRU-Cache pro Schicht für kürzlich genutzte Experten im RAM, einen gelernten "Pinned Hot-Store" der am häufigsten genutzten Experten, eine optionale VRAM-Ebene, falls eine GPU vorhanden ist, und die Platte als Backing Store für alles andere.
+
+Die Designentscheidung, die daraus eine einzige C-Datei pro Modell statt eines Frameworks macht: kein BLAS, kein Python zur Laufzeit, keine GPU erforderlich. Die GLM-Engine begann mit etwa 1.300 Zeilen C. Keine Abhängigkeiten bedeutet auch, dass der Page-Cache des Betriebssystems zu einer kostenlosen zweiten Cache-Ebene für Expertenlesezugriffe wird.
+
+## Vier Mechanismen, die man verstehen sollte
+
+### 1. Router-Lookahead: Routing ist eine Schicht voraus zu 71,6 % vorhersagbar
+
+Der teure Teil des Streamings ist das *Warten* auf die Platte. Colibrì betreibt einen Lookahead-Thread (aktiviert mit `PILOT=1`), der vorhersagt, welche Experten die *nächste* Schicht brauchen wird, und die Lesezugriffe früh startet. Die gemessene Zahl aus dem README lautet, dass Routing-Entscheidungen eine Schicht voraus zu 71,6 % vorhersagbar sind, was ausreicht, um einen großen Teil der I/O-Latenz hinter der Berechnung zu verstecken. Deshalb ist "tok/s nach dem Warmup" eine ganz andere Zahl als "kalte tok/s".
+
+### 2. Dual-SSD-Streaming: zwei Platten, ein Modell, summierte Bandbreite
+
+Legen Sie eine vollständige Kopie des Modells auf eine zweite NVMe, und die Engine streamt von beiden gleichzeitig. Jeder Experte wird deterministisch einer Platte zugeordnet, gewichtet nach der *gemessenen* Bandbreite jeder Platte, sodass es kein doppeltes Caching gibt und die effektive Lesebandbreite ungefähr die Summe der beiden ist. Der DeepSeek-V4-Flash-Benchmark unten (RTX 5080 plus zwei NVMe-Platten, ~1,6 tok/s) ist eine Dual-Drive-Konfiguration.
+
+### 3. Komprimierter KV-Zustand, der einen Neustart überlebt
+
+Modelle mit Multi-Head Latent Attention (MLA) erlauben Colibrì, einen komprimierten KV-Zustand zu speichern — **576 Floats pro Token statt 32.768, eine 57-fache Reduktion**. Die Engine persistiert diesen Zustand in einer `.coli_kv`-Datei, sodass das Wiederöffnen einer Unterhaltung nach einem Neustart kein erneutes Prefill erfordert und byte-identisch mit einer Sitzung ist, die nie unterbrochen wurde. Auf einer Maschine, auf der das Prefill mit Streaming-Geschwindigkeit läuft, ist das Vermeiden eines erneuten Prefills eines langen Kontexts der Unterschied zwischen nutzbar und nicht nutzbar.
+
+### 4. Die Semantik ist garantiert, die Geschwindigkeit nicht
+
+Der erklärte Vertrag des Projekts: Zu wenig schneller Speicher macht es nur langsamer; Präzision und Router-Verhalten ändern sich nie stillschweigend. Der Forward-Pass wird token-exakt gegen ein `transformers`-Orakel validiert. Das ist der gegenteilige Tausch zu den meisten "passt auf einen Laptop"-Quantisierungsgeschichten, bei denen man Geschwindigkeit bekommt, indem man ein anderes Modell akzeptiert.
+
+## Die Benchmark-Tabelle, ehrlich gelesen
+
+Zahlen aus dem README des Projekts (GLM-5.2, sofern nicht anders angegeben), warmer Cache wo vermerkt:
+
+| Hardware | Tok/s | Was es bedeutet |
+|---|---|---|
+| 6× RTX 5090, alle Experten resident im VRAM | 5,8–6,8 (TTFT ~13 s) | Die Obergrenze: überhaupt kein Platten-I/O. Das ist ein GPU-Rig, nicht "Hardware, die Sie bereits besitzen". |
+| Desktop mit 128 GB RAM, nur CPU, warmer Cache | ~1,8 | Der realistische Bestfall für eine fette Workstation ohne GPUs. |
+| Einzelne RTX 5070 Ti (~24 GB VRAM-Ebene) | 1,07 | Eine GPU der Laptop-Klasse verdoppelt ungefähr den Kaltplatten-Boden. |
+| RTX 5080 + 32 GB RAM + 2 NVMe, DeepSeek V4 Flash | ~1,6 bei 3k Kontext, nach Warmup | Der Dual-SSD-Pfad auf einem kleineren Modell. |
+| Laptop mit 25 GB RAM, langsame NVMe, kalt | 0,05–0,1 | Die Schlagzeilen-Konfiguration "744B auf 25 GB". Etwa ein Token alle 10–20 Sekunden. |
+
+Die Variable, die Ihre Zahl bestimmt, ist die **Random-Read-Bandbreite der Platte**, nicht die CPU. Ein kaltes Token braucht Expertenlesezugriffe in der Größenordnung von 11 GB; eine PCIe-5.0-NVMe mit 13–15 GB/s begrenzt ein kaltes Setup ohne Prefetch daher auf knapp 1 tok/s, und Lookahead plus Cache-Treffer sind das, was Sie darüber bringt. Kommentatoren im Launch-Thread berichteten von Cache-Trefferquoten um 23 % auf einem Apple M5 Max mit 128 GB und 0,091 tok/s auf einem alten Dual-Xeon mit 192 GB DDR3 — "brauchbar für Nachtjobs".
+
+Die ehrlichen Anwendungsfälle sind also: nächtliche oder asynchrone Batches, private Offline-Experimente mit einem Modell der Frontier-Klasse, Forschung dazu, wie sich MoE-Inferenz tatsächlich verhält, und warmer Multi-Turn-Chat auf einer Maschine mit 100 GB+ RAM. Interaktives Pair-Programming auf einem 32-GB-Laptop steht nicht auf der Liste.
+
+## Neun Modellfamilien, und was jede an Platte kostet
+
+| Modell | Gesamt / aktiv | Platte | RAM min | Hinweise |
+|---|---|---|---|---|
+| OLMoE | 7B / 1B | ~7 GB | 8 GB | Das "Funktioniert mein Build"-Modell |
+| Qwen3.6 | 35B / 3B | ~20 GB | 24 GB (vollständig im RAM resident) | Optionale GPU; 7× Beschleunigung gemessen auf zwei 8-GB-Karten |
+| Qwen3.8-Flash-Next | 125B + 51B n-gram / 6B | ~185,5 GB | 16 GB | Nur CPU |
+| DeepSeek V4 Flash | 284B / 13B | ~167 GB | 16 GB | Native fp4-Experten; GPU optional (Pascal oder neuer) |
+| GLM-5.3-Flash | 321B / 40B | ~195 GB | 25 GB | Vision-fähig |
+| DeepSeek V4.1 Flash | 552B / 16B | ~203 GB | 16 GB | Neu in 1.11.0; liest den veröffentlichten Checkpoint ohne Konvertierung |
+| GLM-5.2 / 5.3 | 744B / 40B | ~372 GB | 16 GB | Das Referenzmodell; MIT-lizenzierte Gewichte |
+| Inkling | 975B / 41B | ~469 GB | 25 GB | bf16-dicht sind standardmäßig 49,4 GB resident; ein int4-Tool bringt es auf 25-GB-Hosts |
+| Kimi K3 | 2,8T / 104B | ~1,6 TB | 32 GB+ | Natives MXFP4; erfordert den rohen Checkpoint, keine Konvertierung verfügbar |
+
+Die Quantisierung ist pro Familie, nicht eine globale Einstellung: int4 mit Gruppenskalierung für GLM und Inkling, int8 oder Block-FP8 für OLMoE und Qwen3.8, natives MXFP4 für Kimi K3, native fp4-Experten mit fp8-e4m3-dicht für die DeepSeek-V4-Linie. Wenn Sie bereits Kimi-K3- oder DeepSeek-V4.1-Flash-Gewichte aus einem [vLLM-Deployment](/docs/models/kimi-k3-deploy-locally-vllm-dspark) haben, liest Colibrì genau diese Dateien.
+
+## Vier Fallstricke, die Leute Tage kosten
+
+1. **MTP-Heads müssen int8 sein.** Multi-Token-Prediction-Draft-Heads, die auf int4 quantisiert sind, liefern 0–4 % Draft-Akzeptanz — spekulatives Decoding tut stillschweigend nichts (Issue #8). Der vorkonvertierte GLM-5.2-Container auf Hugging Face ist genau aus diesem Grund int4 für das Modell und int8 für MTP.
+2. **`O_DIRECT` hilft auf manchen Platten und schadet auf anderen.** Das Umgehen des Page-Caches brachte gemessene +34 % auf NVMe-Platten mit DRAM-Cache und Bandbreitenreserve und war neutral bis negativ auf QLC-, DRAM-losen und virtualisierten Platten. Benchmarken Sie beides auf Ihrer Platte; kopieren Sie nicht das Flag von jemand anderem.
+3. **Spekulatives Decoding ist bei echtem Chat oft ein Nettoverlust.** In Multi-Turn-Unterhaltungen akzeptierten die MTP- und Grammatik-Drafter etwa 1–10 von je 24 Tokens, und das Wiederabspielen des rekurrenten Attention-Zustands der Engine für abgelehnte Suffixe kostete mehr, als die akzeptierten Drafts einsparten. Für DeepSeek V4 maß das Projekt 495 Sekunden Wiederabspielen abgelehnter Suffixe und liefert standardmäßig beide Drafter abgeschaltet aus (`V4_DRAFT=0`, `V4_MTP=0`). Schalten Sie sie nur ein, wenn Sie einen Gewinn messen.
+4. **SSD-Verschleiß ist real.** Intensive Expertenlesezugriffe treiben den Page-Cache-Umschlag; das README warnt vor Verschleiß auf Consumer-Platten, und der Rat aus dem Launch-Thread war, Swap zu deaktivieren und ein Read-only-Mount für das Modellverzeichnis in Betracht zu ziehen. Ein 370-GB-Modell, das stundenlang pro Tag gestreamt wird, ist eine Arbeitslast, für die Consumer-NVMe nicht verkauft wurde.
+
+Noch einer, weniger ein Fallstrick als eine Einschränkung: Das gelernte Experten-Pinning kann an Ihre Routing-Historie überangepasst sein. Es hilft bei wiederholten Arbeitslasten; die Maintainer sagen, es brauche noch Held-out-A/B-Tests über Sitzungen hinweg, bevor man den Gewinnen bei neuen Prompts trauen sollte.
+
+## Vom Clone zum ersten Token
+
+<Steps items={[
+  {
+    title: "Bauen (prüft gcc und OpenMP, kompiliert, führt Selbsttests aus)",
+    body: "git clone https://github.com/JustVugg/colibri && cd colibri/c && ./setup.sh — dann make -C c glm für GLM-5.2 oder make -C c inkling / make -C c kimi_k3 für die anderen. Beginnen Sie mit OLMoE (7 GB), um den Build zu bestätigen, bevor Sie sich auf Hunderte Gigabyte Downloads einlassen."
+  },
+  {
+    title: "Die Gewichte in Colibrìs Container-Format bringen",
+    body: "./coli convert --model /nvme/glm52_i4 lädt herunter und konvertiert Shard für Shard, einmalig. Für GLM-5.2 existiert auf Hugging Face ein vorkonvertierter int4-Container mit int8-MTP-Heads (mastouri/GLM-5.2-colibri-int4-g64-with-int8-mtp). DeepSeek V4.1 Flash und Kimi K3 brauchen keine Konvertierung: Richten Sie die Engine auf den veröffentlichten Checkpoint."
+  },
+  {
+    title: "Die Platzierung prüfen, bevor Sie warten",
+    body: "COLI_MODEL=/nvme/glm52_i4 ./coli plan zeigt, welche Tensoren auf Ihrer Maschine in VRAM, RAM und auf der Platte landen; ./coli doctor führt eine Bereitschaftsprüfung durch. Wenn plan sagt, dass die meisten Experten auf einer langsamen Platte kalt sein werden, kennen Sie jetzt Ihre tok/s, bevor Sie einen Abend darauf verwenden."
+  },
+  {
+    title: "Ausführen: TUI oder API mit Dashboard",
+    body: "COLI_MODEL=/nvme/glm52_i4 ./coli chat für einen Terminal-Chat. ./coli web --model /nvme/glm52_i4 startet einen API-Server plus ein Dashboard, das Ebenenplatzierung, Cache-Trefferquote und Platten-I/O live anzeigt; ./coli serve ist die Headless-Variante. Aktivieren Sie PILOT=1 für Router-Lookahead auf jedem Setup, das von der Platte streamt."
+  },
+  {
+    title: "Die zwei Stellschrauben abstimmen, die zählen, und messen",
+    body: "Probieren Sie O_DIRECT ein- und ausgeschaltet auf Ihrer konkreten Platte. Lassen Sie spekulatives Decoding aus, bis ein Benchmark auf Ihren eigenen Prompts zeigt, dass es gewinnt. Wenn Sie eine zweite NVMe haben, spiegeln Sie das Modell darauf für Dual-Drive-Streaming."
+  }
+]} />
+
+<PromptCard title="Ein minimaler erster Lauf auf GLM-5.2 (Linux, eine NVMe)">{`git clone https://github.com/JustVugg/colibri && cd colibri/c
+./setup.sh
+make -C c glm
+./coli convert --model /nvme/glm52_i4        # one-time download + convert
+COLI_MODEL=/nvme/glm52_i4 ./coli plan          # see what lands where
+COLI_MODEL=/nvme/glm52_i4 PILOT=1 ./coli chat  # first streamed tokens`}</PromptCard>
+
+## Colibrì vs. die Alternativen, die Sie bereits kennen
+
+| Pfad | Worin er gut ist | Wo sich Colibrì unterscheidet |
+|---|---|---|
+| **llama.cpp / Ollama mit GGUF-Offload** ([unser Ollama-Leitfaden](/docs/models/run-models-locally-ollama)) | Riesiger Modellkatalog, GPU-Offload, ausgereiftes Tooling; die [GLM-5.2-Seite](/docs/models/glm-5-2-open-weight-frontier) behandelt die 239-GB-Route mit dynamischem 2-Bit-GGUF | GGUF-Offload braucht das *gesamte* quantisierte Modell in RAM plus VRAM (256 GB für GLM-5.2 bei 2 Bit). Colibrì braucht 16–24 GB RAM und eine große Platte, bei derselben Präzision, die das Labor veröffentlicht hat, nicht 2 Bit. |
+| **vLLM / SGLang auf gemieteten GPUs** ([Kimi-K3-Deploy-Leitfaden](/docs/models/kimi-k3-deploy-locally-vllm-dspark)) | Dutzende Tokens pro Sekunde, Batching, mehrere Nutzer | Schnell, weil alles im HBM resident ist. Colibrì existiert für den Fall, dass diese Hardware nicht verfügbar oder nicht erlaubt ist. |
+| **Gehostete API** (DeepSeek, Z.ai, Moonshot) | Mit Abstand am günstigsten pro Token, keine Hardware | Der einzige Grund, Colibrì vorzuziehen, ist, dass die Gewichte und die Prompts die Maschine niemals verlassen dürfen oder dass Sie MoE-Inferenz selbst studieren wollen. |
+
+Die richtige Art, über Colibrì zu denken, ist nicht "ein schnelleres llama.cpp". Es ist das Werkzeug, das ein offenes Modell in *Frontier-Größe* auf einer Maschine verfügbar macht, die es sonst nicht laden könnte, bei einer Geschwindigkeit, um die man herum plant, statt auf sie zu warten. Für einen Privacy-first-Stack, der ein kleines schnelles lokales Modell für interaktive Arbeit mit einem großen langsamen für Batch-Jobs kombiniert, siehe [Ein privater lokaler KI-Stack](/docs/models/private-local-ai-stack).
+
+<Flashcards cards={[
+  { front: "Expert Streaming", back: "Dichte Gewichte (Attention, Embeddings, geteilte Experten) resident halten; geroutete Experten bei Bedarf über einen LRU-Cache pro Schicht und einen gelernten Pinned Hot-Store von NVMe lesen. GLM-5.2: ~9,9 GB resident, ~370 GB auf der Platte." },
+  { front: "Router-Lookahead (PILOT=1)", back: "Ein Thread, der die Experten der nächsten Schicht vorab lädt. Routing ist gemessen eine Schicht voraus zu 71,6 % vorhersagbar, was einen Großteil der Plattenlatenz verbirgt." },
+  { front: "Dual-SSD-Streaming", back: "Vollständige Modellkopie auf jeder von zwei Platten; jeder Experte wird einer Platte zugeordnet, gewichtet nach gemessener Bandbreite. Aggregierte Lesebandbreite ohne doppeltes Caching." },
+  { front: "Komprimierter KV (.coli_kv)", back: "MLA-Modelle speichern 576 Floats pro Token statt 32.768 (57× kleiner); auf der Platte persistiert, sodass eine wiedergeöffnete Unterhaltung kein erneutes Prefill braucht." },
+  { front: "Kalte tok/s vs. warme tok/s", back: "Kalt: ~11 GB Expertenlesezugriffe pro Token, sodass die NVMe-Bandbreite Sie selbst bei PCIe 5.0 auf knapp 1 tok/s begrenzt. Warm: Cache-Treffer und Lookahead bringen eine 128-GB-CPU-Kiste auf ~1,8 tok/s und ein 6×-5090-Rig auf ~6." },
+  { front: "int8-MTP-Regel", back: "Multi-Token-Prediction-Heads in int4 liefern 0–4 % Draft-Akzeptanz; halten Sie sie int8, sonst ist spekulatives Decoding wirkungslos." },
+  { front: "O_DIRECT", back: "+34 % auf NVMe mit DRAM-Cache und Reserve; neutral oder schlechter auf QLC-, DRAM-losen oder virtualisierten Platten. Auf der eigenen Hardware messen." }
+]} />
+
+<Quiz questions={[
+  {
+    q: "Warum kann ein 744B-Modell mit Colibrì überhaupt auf einer 16–25-GB-Maschine laufen?",
+    options: [
+      "Weil das Modell auf 1 Bit quantisiert ist",
+      "Weil nur ~40B Parameter pro Token aktiv sind, der ~17B dichte Teil als int4 ins RAM passt und die gerouteten Experten von NVMe gelesen werden, wenn der Router sie auswählt",
+      "Weil das Modell über das Internet verteilt ist",
+      "Weil die CPU 744 GB Cache hat"
+    ],
+    answer: 1,
+    explain: "MoE-Sparsity ist der ganze Trick: Attention, Embeddings und geteilte Experten bleiben resident (~9,9 GB), während die ~370 GB gerouteter Experten auf der Platte liegen und nur die vom Router ausgewählten hereingestreamt und pro Schicht gecacht werden."
+  },
+  {
+    q: "Was ist die bindende Beschränkung für Tokens pro Sekunde, wenn Experten kalt gestreamt werden?",
+    options: [
+      "Die Anzahl der CPU-Kerne",
+      "Die Größe des Kontextfensters",
+      "Die Random-Read-Bandbreite der NVMe-Platte — etwa 11 GB Expertenlesezugriffe pro kaltem Token",
+      "Die Version von gcc"
+    ],
+    answer: 2,
+    explain: "Ein kaltes Token braucht Expertengewichte in der Größenordnung von 11 GB. Bei 13–15 GB/s (PCIe 5.0) ist das etwa ein Token pro Sekunde, bevor Lookahead und Cache-Treffer helfen; auf einer langsamen Platte sind es 0,05–0,1 tok/s."
+  },
+  {
+    q: "Warum liefert das Projekt spekulatives Decoding für DeepSeek V4 standardmäßig abgeschaltet aus?",
+    options: [
+      "Es ist nicht implementiert",
+      "Die Draft-Akzeptanz bei echtem Multi-Turn-Chat war niedrig (~1–10 von 24 Tokens), und das Wiederabspielen des rekurrenten Attention-Zustands für abgelehnte Suffixe kostete mehr, als die akzeptierten Drafts einsparten — 495 s gemessen",
+      "Es erfordert eine GPU",
+      "DeepSeek verbietet es in der Lizenz"
+    ],
+    answer: 1,
+    explain: "Spekulation zahlt sich nur aus, wenn die Akzeptanz hoch und die Ablehnung billig ist. Hier bedeutet Ablehnung das Wiederabspielen des rekurrenten Zustands, was gemessen mehr kostete, als es einsparte, also sind V4_DRAFT=0 und V4_MTP=0 die Standardwerte."
+  },
+  {
+    q: "Sie haben GLM-5.2 selbst quantisiert, alle Tensoren auf int4, und spekulatives Decoding zeigt ~2 % Draft-Akzeptanz. Was ist passiert?",
+    options: [
+      "Das Modell ist kaputt",
+      "Die MTP-Heads müssen int8 sein; int4-MTP-Heads liefern 0–4 % Akzeptanz (Issue #8)",
+      "Sie brauchen eine zweite SSD",
+      "PILOT=1 fehlt"
+    ],
+    answer: 1,
+    explain: "Die Draft-Heads sind präzisionsempfindlich. Der vorkonvertierte Container auf Hugging Face ist genau aus diesem Grund int4 für das Modell und int8 für die MTP-Heads."
+  },
+  {
+    q: "Für welche Arbeitslast passt Colibrì gut auf einem 32-GB-Laptop mit einer NVMe?",
+    options: [
+      "Interaktives Pair-Programming mit einem 744B-Modell",
+      "Mehrere Nutzer gleichzeitig bedienen",
+      "Nächtliche, asynchrone Batch-Jobs, die vollständig privat und offline bleiben müssen",
+      "Eine gehostete API aus Kostengründen ersetzen"
+    ],
+    answer: 2,
+    explain: "Bei 0,05–0,1 tok/s kalt auf dieser Hardware sind die ehrlichen Anwendungsfälle Batch und Forschung. Interaktive Arbeit will ein kleineres residentes Modell oder gemietete GPUs; bei den reinen Kosten pro Token gewinnt eine gehostete API."
+  }
+]} />
+
+<VerifyNote lastVerified="2026-09-14" source="JustVugg/colibri README and release notes v1.11.0 (Sept 13 2026), GitHub API (30,848 stars), Show HN thread (July 2026). Benchmarks are the project's own measurements; model list and minimums change with each release." />
+
+## Quellen und weiterführende Lektüre
+
+- JustVugg/colibri — Repository, README mit Architektur, Benchmark- und Pro-Modell-Tabellen: https://github.com/JustVugg/colibri
+- Colibrì-Releases (v1.11.0 fügt DeepSeek V4.1 Flash hinzu; v1.10.x-Fixes): https://github.com/JustVugg/colibri/releases
+- Show HN: Colibrì — GLM-5.2 auf 25 GB RAM (Diskussion Juli 2026, Threads zu SSD-Verschleiß und mmap vs. O_DIRECT): https://news.ycombinator.com/item?id=48842459
+- Vorkonvertierter GLM-5.2-Container (int4 g64, int8 MTP): https://huggingface.co/mastouri/GLM-5.2-colibri-int4-g64-with-int8-mtp
+- Issue #8 — int4-MTP-Heads und Draft-Akzeptanz: https://github.com/JustVugg/colibri/issues/8
+- Developers-Digest-Bericht über GLM-5.2 auf einem 32-GB-Laptop: https://www.developersdigest.tech/blog/colibri-glm-52-slow-computer-local-inference
+
+## Weiter
+
+- [GLM-5.2: Offenes Frontier-Coding-Modell](/docs/models/glm-5-2-open-weight-frontier) — das Modell, um das Colibrì gebaut wurde, und seine anderen Serving-Pfade
+- [Kimi K3 lokal ausführen: vLLM, DSpark und die echte Hardware-Rechnung](/docs/models/kimi-k3-deploy-locally-vllm-dspark) — die GPU-residente Alternative für dieselben Gewichte
+- [Ein privater lokaler KI-Stack](/docs/models/private-local-ai-stack) — wo ein langsames Frontier-Modell neben einem schnellen kleinen hinpasst

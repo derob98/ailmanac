@@ -1,0 +1,179 @@
+---
+sidebar_position: 22.7
+title: "OpenAI Agents API vs. Claude Managed Agents: Die gehostete Agentenschleife im Vergleich"
+description: "Am 10. September 2026 hat OpenAI den Codex-Harness hinter einen einzigen API-Aufruf gestellt: die öffentliche Beta der Agents API — dauerhafte Sessions, gehostete oder selbst gehostete Sandboxes, automatische Kompaktierung, Tool-Suche, Subagenten. Anthropic betreibt dieselbe Form seit April als Managed Agents. Beide nutzen dieselben vier Primitive; sie unterscheiden sich bei Berechtigungen, Secrets, Budgets, Netzwerkrichtlinie und den Sandbox-Kosten. Der Vergleich Seite an Seite, die Request-Formen, die sechs Fallstricke und wann man welches wählt."
+keywords: [OpenAI Agents API, Codex-Harness, gehostete Sandboxes, selbst gehostete Sandbox, codex exec-server, Claude Managed Agents, Anthropic Managed Agents, Agent-Sessions, Environments, Kompaktierung, Tool-Suche, programmatisches Tool-Calling, Subagenten, max_concurrent_subagents, Permission Policy, Vaults, Session-Budgets, Vergleich Agent-Laufzeiten, Blaxel, Cloudflare, Daytona, DigitalOcean, E2B, Modal, Runloop, Vercel]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Die beiden Stacks auf dieselben vier Primitive abbilden — Agent, Environment, Session, Events — und wissen, wo jeder Anbieter die Regler platziert hat", "Den minimalen Create-Session-Aufruf auf beiden Seiten schreiben und wissen, welche Felder auf den Agenten und welche auf die Session gehören", "Die Dinge vergleichen, die sich in der Praxis unterscheiden: Berechtigungsmodi, wo Secrets liegen, harte Budgets, Netzwerkrichtlinie, Datenresidenz, die Sandbox-Rechnung", "Verstehen, was 'automatische Kompaktierung' und 'Tool-Suche' tatsächlich mit deinem Kontext und deinem Cache machen, und warum der SSE-Stream auf beiden Seiten eine Reconnect-Strategie braucht", "Eine Laufzeit pro Workload wählen: Agents API, Managed Agents, deine eigene Schleife auf der Responses-/Messages-API oder das Agents SDK / Claude Agent SDK"]} />
+
+Zwei Jahre lang war die „Agentenschleife“ — Modell aufrufen, Tool ausführen, Ergebnis anhängen, wiederholen, kompaktieren, wenn voll — etwas, das jedes Team neu baute. Anthropic hat sie am **8. April 2026** mit **Managed Agents** serverseitig verlagert. Am **10. September 2026** tat OpenAI dasselbe mit der öffentlichen Beta der **Agents API**, die nach eigenen Worten der Codex-Harness hinter einem API-Aufruf ist. Wenn du die [Responses-Multi-Agent-Beta](/docs/models/native-multi-agent-apis) vom Juli genutzt hast, ist das die nächste Ebene darüber: nicht „das Modell fächert Subagenten innerhalb einer Anfrage auf“, sondern „OpenAI hält den gesamten Agenten stundenlang am Leben, mit einem Dateisystem“.
+
+Die beiden Produkte sehen sich inzwischen verblüffend ähnlich. Diese Seite stellt sie nebeneinander, mit den echten Request-Formen, und verbringt den Großteil ihrer Länge an den Stellen, wo sie sich unterscheiden — denn das sind die Stellen, die entscheiden, ob man deinem Agenten Produktions-Zugangsdaten anvertrauen kann.
+
+<VerifyNote lastVerified="2026-09-14" source="OpenAI Agents API docs (overview, quickstart, hosted and self-hosted environments, multi-agent) as of Sept 14, 2026; Anthropic Managed Agents docs and the managed-agents-overview reference in anthropics/skills; Sept 10 Anthropic release notes for the auto permission mode. Both APIs are in beta — field names, defaults and limits move. Sandbox prices are from OpenAI's container rates as reported by third parties on launch day." />
+
+## Dieselben vier Primitive, zwei Vokabulare
+
+| Konzept | OpenAI Agents API | Claude Managed Agents |
+|---|---|---|
+| Die Definition | `agent` (model, instructions, tools, MCP-Server, `multi_agent`) — inline auf jeder Session | **Agent-Objekt**, persistiert und versioniert über `POST /v1/agents`; Sessions referenzieren es per id |
+| Wo Tools laufen | `environment` — `openai_hosted` oder `self_hosted` | **Environment-Objekt** — `cloud` oder `self_hosted` |
+| Das laufende Ding | `session` — dauerhaft, fortsetzbar, Stunden oder Tage | **Session** — dauerhaft, streamt Events, an eine Agent-Version gepinnt |
+| Die Leitung | Events + Items; Stream oder Webhooks | Events; SSE-Stream unter `/v1/sessions/{id}/events/stream` |
+| Beta-Gate | Header `OpenAI-Beta: agents=v1` | Header `managed-agents-2026-04-01` |
+| Selbst gehosteter Worker | `codex exec-server` wählt sich per WebSocket mit einem eingeschränkten Executor-Key nach außen ein | `EnvironmentWorker.run()` oder `ant beta:worker poll` mit einem Environment-Key |
+
+★ Der eine strukturelle Unterschied, der alles andere prägt: **OpenAI legt die Agentendefinition inline auf die Session; Anthropic macht sie zu einem erstklassigen, versionierten Objekt.** Wenn du dich auf der Anthropic-Seite dabei ertappst, `model`, `system` oder `tools` an `sessions.create()` zu übergeben, hast du es verkehrt herum — die gehören auf `agents.create()`, und laufende Sessions bleiben an die Version gepinnt, mit der sie gestartet sind. Auf der OpenAI-Seite gibt es keine Agenten-Registry, die man aufgeräumt halten muss, aber auch nichts, das dir sagt, welche deiner 400 laufenden Sessions auf den Anweisungen von letzter Woche laufen.
+
+## Der minimale Aufruf auf jeder Seite
+
+OpenAI, Python, gehostete Sandbox, Streaming:
+
+```python
+from openai import OpenAI
+
+with OpenAI() as client:
+    with client.beta.agents.sessions.create(
+        agent={
+            "model": "gpt-6-astra",
+            "instructions": "Write clean code, run it, and report the actual output.",
+            "tools": [{"type": "web_search"}],
+            "multi_agent": {"enabled": True, "max_concurrent_subagents": 3},
+        },
+        environment={
+            "type": "openai_hosted",
+            "packages": {"python": ["pandas==2.2.3"]},
+            "network_policy": {"access": "restricted", "allowed_domains": ["pypi.org", "files.pythonhosted.org"]},
+        },
+        input="Create tree.py that prints a readable tree of /workspace, run it, paste the output.",
+        stream=True,
+    ) as events:
+        for event in events:
+            print(event.to_json(indent=None), flush=True)
+```
+
+Anthropic, zwei Aufrufe, weil der Agent ein eigenes Objekt ist:
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()
+
+agent = client.beta.agents.create(
+    model="claude-fable-5-1",
+    system="Write clean code, run it, and report the actual output.",
+    tools=[{
+        "type": "agent_toolset_20260401",
+        "configs": [{"name": "web_fetch", "allowed_domains": ["pypi.org"]}],
+    }],
+    permission_policy={"mode": "auto"},
+)
+
+session = client.beta.sessions.create(
+    agent=agent.id,
+    environment_id="env_...",
+    budget={"type": "limit", "max_list_cost": {"amount": "500", "currency": "USD"}},
+)
+# then stream GET /v1/sessions/{id}/events/stream and send user events
+```
+
+Beide ersparen dir die Schleife, die Kompaktierung, die Retry-Logik und die Sandbox-Bereitstellung. Beide berechnen dir Tokens plus die Kosten der Sandbox. Nun die Unterschiede.
+
+## Wo sie sich unterscheiden
+
+### 1. Berechtigungen: OpenAI hat auf API-Ebene (noch) keine; Anthropic hat drei Modi
+
+Managed Agents liefert eine **Permission Policy** pro Agent und pro MCP-Toolset mit drei Modi: `always_allow` (Standard für die eigenen Tools des Agenten), `always_ask` (Standard für MCP-Toolsets — die Session pausiert bei jedem Aufruf, bis ein Client eine `user.tool_confirmation` sendet) und seit dem **10. September 2026** `auto`. In `auto` klassifiziert der Server **jeden einzelnen Aufruf** — das Tool, die Eingabe dieses Aufrufs und die bisherige Session — als ausführen, ablehnen oder `pending_approval`. Zwei Aufrufe desselben Tools können unterschiedlich beurteilt werden, jedes Event trägt ein Feld `evaluated_permission`, und ein Client kann eine Ablehnung nicht überstimmen (eine Bestätigung für einen abgelehnten Aufruf liefert 400).
+
+Die Agents API hat noch kein Äquivalent. Deine Hebel sind die Tool-Liste, die Netzwerkrichtlinie und die Authentifizierung der MCP-Server. Wenn ein Aufruf von einem Menschen freigegeben werden muss, baust du das in deine eigene Event-Schleife — oder nutzt stattdessen das Agents SDK, wohin OpenAIs Docs für „Approvals“ verweisen.
+
+### 2. Secrets: Vaults vs. Umgebungsvariablen
+
+Anthropics Antwort auf „wie ruft der Agent einen authentifizierten MCP-Server auf“ sind **Vaults**: Die `mcp_servers`-Einträge des Agenten deklarieren nur `{type, name, url}`; Zugangsdaten (`mcp_oauth` mit Auto-Refresh, `static_bearer` oder `environment_variable`) liegen in einem Vault, der bei der Session-Erstellung angehängt wird, und werden **beim Egress** eingesetzt, sodass das Modell sie nie sieht.
+
+OpenAIs gehostete Sandbox nimmt eine `env`-Map aus String-Variablen entgegen und lehnt ein paar reservierte Namen ab (`PATH`, `CODEX_*`, `OPENAI_API_KEY`). Alles andere, was du dort ablegst, ist für den Code lesbar, den der Agent ausführt. Das ist in Ordnung für ein Build-Token, das du stündlich rotierst; für den OAuth-Refresh-Token eines Kunden ist es der falsche Ort. Bei selbst gehosteten Environments kann der **eingeschränkte Key** des Executors nur Environments verbinden — er kann selbst bei einem Leak nicht den Rest der API aufrufen —, was das richtige Design ist und es wert, kopiert zu werden.
+
+### 3. Harte Budgets vs. dein eigener Zähler
+
+Managed Agents akzeptiert ein **Dollar-Budget auf der Session**; wird es erreicht, pausiert die Session mit `budget_reached` und akzeptiert nur noch Settle-Events, bis du die Obergrenze erhöhst oder entfernst. Deployments (geplante Sessions) nehmen ebenfalls Budgets entgegen. Siehe [Session-Budgets](/docs/api/managed-agents-session-budgets).
+
+Die Agents API hat in den Launch-Docs keine Ausgabenobergrenze pro Session. Du bekommst Streaming-Events mit Usage, du bekommst Container-Zeit, und die Obergrenze setzt du selbst. Bei einer außer Kontrolle geratenen Schleife ist der Unterschied der zwischen „bei 5 $ pausiert“ und „auf der Rechnung bemerkt“.
+
+### 4. Netzwerkrichtlinie: beide haben sie, auf verschiedenen Ebenen
+
+OpenAIs gehostete Sandbox hat eine **`network_policy`** mit drei Zuständen — `enabled` (Standard, sofern du kein Template erbst), `disabled` und `restricted` mit einer `allowed_domains`-Liste von **1–100 exakten Hostnamen**: keine Wildcards, keine Ports, keine Pfade, und Redirect-Ziele wie Subdomains brauchen jeweils einen eigenen Eintrag. Zwei Fallstricke aus den Docs: stdio-MCP-Server erfordern derzeit `enabled`, und eine gespeicherte `environment_template_id` kippt den Standard auf kein Netzwerk.
+
+Anthropic beschränkt stattdessen auf **Tool**-Ebene — `allowed_domains` / `blocked_domains` / `max_content_tokens` in den Tool-Konfigurationen von `web_search` und `web_fetch`, nicht im Environment — und der Egress des Bash-Tools folgt dem Networking des Environments. Siehe [Domain-Einschränkungen](/docs/api/managed-agents-domain-restrictions) für die vollständige Matrix. Wenn die Lehre aus [GemStuffer](/docs/security/rubygems-gemstuffer-rogue-agents) lautet „Egress im Netzwerk durchsetzen, nicht im Prompt“, ist OpenAIs `restricted`-Richtlinie die wörtlichere Umsetzung; Anthropics ist pro Tool leichter nachzuvollziehen.
+
+### 5. Datenresidenz und Aufbewahrung
+
+Die Agents-API-Beta ist bei der Datenresidenz **nur USA** und **unterstützt keine Zero Data Retention** — und, ausdrücklich, eine selbst gehostete Sandbox macht eine Session nicht ZDR-fähig. Managed Agents lässt dich über `model.inference_geo` auf dem Agenten oder pro Session festlegen, **wo die Inferenz läuft**. Für einen regulierten Workload ist das heute entscheidend, keine Nuance.
+
+### 6. Was die Sandbox kostet
+
+OpenAIs gehostete Sandbox wird zu **Standard-Container-Tarifen abgerechnet, getrennt von den Tokens** — minutengenau mit fünf Minuten Minimum, von etwa **0,03 $ pro 20 Minuten für einen 1-GB-Container bis 1,92 $ für 64 GB** (grob 0,09 $ bis 5,76 $ pro Stunde), laut Berichten vom Launch-Tag. Inaktive Sandboxes werden nach **einer Stunde ohne Aktivität oder Keep-Alives gelöscht; dieses Timeout ist nicht konfigurierbar.** Dateien unter `/workspace/outputs` werden beim Abschluss einer Runde als unveränderliche Artefakte veröffentlicht und überleben die Sandbox. Anthropics Cloud-Environment ist ein Container pro Session, als Compute zusätzlich zu den Tokens abgerechnet; prüfe die aktuelle Preisseite statt diesem Absatz.
+
+Das Erste, was ein Entwickler unter OpenAIs Ankündigungs-Thread schrieb, war eine Warnung, die Container-Kosten zu berechnen, bevor man Sandboxes in einer Schleife hochfährt. Nimm das wörtlich: Ein Subagenten-Fan-out von sechs auf einem 16-GB-Image sind sechs Container.
+
+## Die zwei Features, nach denen alle fragen
+
+**Automatische Kompaktierung.** Beide Laufzeiten fassen früheren Kontext zusammen, wenn sich die Session ihrem Limit nähert, sodass eine Session stundenlang laufen kann, ohne dass du den Zusammenfasser schreibst. Was keine der beiden für dich tut, ist, die *richtigen* Dinge zu behalten: Wenn ein Fakt über die Kompaktierung hinweg zählt, schreibe ihn in eine Datei im Workspace (OpenAI) oder in einen Memory-Store (Anthropic), statt der Zusammenfassung zu vertrauen. Die Harness-Muster in [Harnesses für langlaufende Agenten](/docs/frontiers/long-running-agent-harnesses) gelten unverändert.
+
+**Tool-Suche und programmatisches Tool-Calling** (OpenAI). Die Tool-Suche lädt Tool-Definitionen bei Bedarf, statt jedes Schema in den Prompt zu stopfen — was das gecachte Präfix stabil hält, wenn du Dutzende MCP-Tools hast. Programmatisches Tool-Calling, aktiviert mit `{"type": "programmatic_tool_calling"}`, lässt das Modell Code schreiben, der mehrere Tools aufruft, Schleifen dreht und Ergebnisse filtert, bevor irgendetwas zurück in den Kontext kommt. Anthropics Äquivalent ist das Bash-plus-Dateien-Toolset: Das Modell schreibt einfach das Skript. Gleicher Effekt, weniger Zeremonie, weniger Struktur.
+
+**Subagenten.** OpenAI: `multi_agent.enabled` mit `max_concurrent_subagents`, **Standard 6**, ohne den Koordinator; Subagenten bekommen einen eigenen Kontext, erben MCP-Tools, Zugangsdaten und Dateien, können aber **keine Function-Tools verwenden**, und Koordinations-Events können Nachrichteninhalte auslassen — du wirst im Stream keine vollständigen Subagenten-Transkripte sehen. Anthropic: Managed Agents stellt keinen symmetrischen Regler bereit; du komponierst Sessions oder nutzt die Subagenten des Claude Agent SDK clientseitig. Die [Seite zu nativen Multi-Agent-APIs](/docs/models/native-multi-agent-apis) hat die Kostenrechnung, die weiterhin gilt.
+
+## Sechs Fallstricke aus den Docs, beide Seiten
+
+<Steps items={[
+  {title: "Der Stream ist nicht die Quelle der Wahrheit", body: "OpenAI: Wenn der Stream abbricht, rufe die Session und ihre gespeicherten Items ab, bevor du es erneut versuchst — eine abgeschlossene Runde bedeutet nicht, dass jedes Tool erfolgreich war; achte auf agent.session.turn.completed. Anthropic: Der SSE-Stream hat kein Replay; bei einem Abbruch GET /v1/sessions/{id}/events, per Event-ID deduplizieren, dann neu verbinden."},
+  {title: "Lege keine Agentenfelder auf die Session (Anthropic)", body: "model, system, tools, mcp_servers und skills gehören auf agents.create(). Erstelle den Agenten einmal, speichere seine id und Version und referenziere ihn. Ein Agent pro Lauf hinterlässt verwaiste Konfigurationen und erhöht die Latenz."},
+  {title: "Ein fehlgeschlagener Setup-Befehl bedeutet keinen Agenten (OpenAI)", body: "setup_commands laufen der Reihe nach, bevor der Agent startet; ein Exit-Code ungleich null blockiert die Session. Pinne Paketversionen in den Listen python / npm / system, damit ein transitives Upgrade nicht alle Sessions auf einmal lahmlegt."},
+  {title: "Restricted Network ist nur Exact-Match (OpenAI)", body: "1–100 Hostnamen, keine Wildcards. api.github.com und github.com sind zwei Einträge; ein Redirect zu objects.githubusercontent.com ist ein dritter. Teste die Allowlist mit einer Trockenlauf-Session, bevor du dich darauf verlässt."},
+  {title: "Archivieren ist für immer (Anthropic)", body: "Das Archivieren eines Agenten, Environments, einer Session, eines Vaults oder Memory-Stores macht ihn schreibgeschützt, ohne Unarchive. Laufende Sessions laufen weiter, neue können ihn nicht referenzieren. Bestätige, bevor du irgendetwas aus der Produktion archivierst."},
+  {title: "Timeouts gelten pro Chunk, nicht pro Session", body: "Auf beiden Seiten setzt sich ein HTTP-Client-Timeout bei jedem gestreamten Chunk zurück, es ist also keine Wanduhr-Obergrenze. Nutze das Plattform-Budget (Anthropic) oder deine eigene Deadline plus Session-Delete (OpenAI) für den harten Stopp."}
+]} />
+
+## Welche Laufzeit für welche Aufgabe
+
+OpenAIs eigene Docs teilen die Wahl jetzt dreifach — Agents API, wenn OpenAI den Agenten verwalten und seinen Fortschritt speichern soll, Agents SDK, wenn du Kontrolle über Deployment, Speicherung und Freigaben in deiner App brauchst, Responses API für direkte Modellinteraktion — und Anthropics Aufteilung ist Managed Agents vs. Claude Agent SDK vs. die rohe Messages API. Auf Workloads abgebildet:
+
+| Workload | Wahl | Warum |
+|---|---|---|
+| Lange Coding-/Datenaufgabe in einer Wegwerf-Sandbox, Minuten bis Stunden, keine Kunden-Secrets | Eine der beiden gehosteten Laufzeiten | Dafür wurden beide gebaut; wähle nach Modell und danach, in welchem Ökosystem deine MCP-Server bereits leben |
+| Agent greift auf den authentifizierten MCP-Server eines Kunden zu | Managed Agents | Vaults halten die Zugangsdaten aus der Sandbox heraus; `auto`-Berechtigungen gaten riskante Aufrufe, ohne alles zu pausieren |
+| Muss in deiner VPC mit deinem Compute laufen | Einer der beiden Self-Hosted-Modi | Gleiche Form: ein ausgehender Worker mit eingeschränktem Key. OpenAI hat neun Partner-Sandboxes angebunden (Blaxel, Cloudflare, Daytona, DigitalOcean, E2B, Modal, Oracle, Runloop, Vercel) |
+| Regulierte Daten, EU-Residenz oder ZDR erforderlich | Managed Agents oder deine eigene Schleife | Die Agents-API-Beta ist nur USA und nicht ZDR-fähig |
+| Breites Recherche-Fan-out, viele unabhängige Lesezugriffe | Agents API mit `multi_agent` | Native Subagenten mit Parallelitätsobergrenze; günstiger zu schreiben als clientseitige Orchestrierung |
+| Menschliche Freigabe für bestimmte Aktionen | Managed Agents `auto` / `always_ask` oder das Agents SDK | Die Agents API hat heute kein Freigabe-Primitiv auf API-Ebene |
+| Du musst alles sehen und wiedergeben können, was der Agent getan hat | Deine eigene Schleife auf Responses / Messages | Beide gehosteten Laufzeiten fassen Teile des Transkripts zusammen oder lassen sie weg |
+
+## Teste dich selbst
+
+<Quiz questions={[
+  {q: "Auf welcher Seite ist die Agentendefinition ein persistiertes, versioniertes Objekt, das Sessions per id referenzieren?", options: ["OpenAI Agents API", "Claude Managed Agents", "Beide", "Keine — beide nehmen die Definition inline"], answer: 1, explain: "Managed Agents erstellt den Agenten einmal über POST /v1/agents; Sessions referenzieren ihn und bleiben an ihre Erstellungsversion gepinnt. Die Agents API nimmt das Agent-Objekt inline bei jedem sessions.create-Aufruf."},
+  {q: "Was macht der 'auto'-Berechtigungsmodus von Managed Agents?", options: ["Erlaubt jeden Tool-Aufruf", "Fragt vor jedem Tool-Aufruf einen Menschen", "Bewertet serverseitig jeden einzelnen Aufruf als ausführen, ablehnen oder pending_approval, basierend auf dem Tool, seiner Eingabe und der bisherigen Session", "Deaktiviert MCP-Tools"], answer: 2, explain: "Hinzugefügt am 10. September 2026. Jeder Aufruf wird separat klassifiziert, Events tragen evaluated_permission, und ein Client kann eine Ablehnung nicht überstimmen."},
+  {q: "Du setzt network_policy.access auf 'restricted' in einer von OpenAI gehosteten Sandbox mit allowed_domains: ['github.com']. Was passiert, wenn der Agent api.github.com abruft?", options: ["Es funktioniert — Subdomains sind eingeschlossen", "Es wird blockiert — Einträge sind exakte Hostnamen, Subdomains und Redirects brauchen eigene", "Es funktioniert nur über HTTPS", "Die Session startet nicht"], answer: 1, explain: "Der Restricted-Modus akzeptiert 1–100 exakte Hostnamen ohne Wildcards; Subdomains und Redirect-Ziele müssen separat aufgeführt werden."},
+  {q: "Welche dieser Aussagen trifft auf die Agents-API-Beta zum Launch zu?", options: ["Sie unterstützt Zero Data Retention bei Self-Hosting", "Sie bietet EU-Datenresidenz", "Datenresidenz ist nur USA und ZDR wird nicht unterstützt, auch nicht mit einer selbst gehosteten Sandbox", "Sie begrenzt die Session-Ausgaben in Dollar"], answer: 2, explain: "Die Übersichts-Docs nennen Residenz nur in den USA und keine ZDR-Fähigkeit, unabhängig vom Environment-Typ. Dollar-Budgets pro Session sind ein Anthropic-Feature."},
+  {q: "Was ist der Standard für max_concurrent_subagents in der Agents API, und was können Subagenten nicht?", options: ["3; sie können keine MCP-Tools nutzen", "6 (ohne den Koordinator); sie können keine Function-Tools nutzen", "10; sie können nicht auf Dateien zugreifen", "Unbegrenzt; sie können keine weiteren Subagenten starten"], answer: 1, explain: "Die Multi-Agent-Docs nennen einen Standard von 6 ohne den Koordinator und merken an, dass Subagenten MCP-Tools, Zugangsdaten und Dateien erben, aber keine Function-Tools nutzen können."},
+  {q: "Wo sollte der OAuth-Refresh-Token eines Kunden liegen, damit das Modell ihn nie sieht?", options: ["In der env-Map der von OpenAI gehosteten Sandbox", "In den Agentenanweisungen", "In einem Managed-Agents-Vault als mcp_oauth-Zugangsdaten, beim Egress eingesetzt", "In einer Datei unter /workspace"], answer: 2, explain: "Vault-Zugangsdaten werden am Netzwerkrand injiziert; die Sandbox und das Modell halten sie nie. Die env-Map von OpenAI ist für jeden Code lesbar, den der Agent ausführt."}
+]} />
+
+## Quellen & weiterführende Literatur
+
+- OpenAI — *Introducing the Agents API* (10. Sept. 2026): https://openai.com/index/introducing-the-agents-api/ — Ankündigung im Entwicklerforum: https://community.openai.com/t/introducing-the-agents-api-and-hosted-sandboxes/1396481
+- OpenAI-Docs — Agents-API-Übersicht: https://developers.openai.com/api/docs/guides/agents-api/overview — Quickstart: https://developers.openai.com/api/docs/guides/agents-api/quickstart — gehostete Sandboxes: https://developers.openai.com/api/docs/guides/agents-api/environments/openai-hosted — selbst gehostete Sandboxes: https://developers.openai.com/api/docs/guides/agents-api/environments/self-hosted — Multi-Agent: https://developers.openai.com/api/docs/guides/agents-api/multi-agent — Laufzeitvergleich: https://developers.openai.com/api/docs/guides/agents
+- MarkTechPost — *OpenAI Launches the Agents API in Public Beta* (10. Sept. 2026): https://www.marktechpost.com/2026/09/10/openai-launches-the-agents-api-in-public-beta-putting-the-codex-harness-behind-one-api-call/
+- Anthropic-Docs — Managed-Agents-Übersicht: https://platform.claude.com/docs/en/managed-agents/overview — Permission Policies: https://platform.claude.com/docs/en/managed-agents/permission-policies — API-Release-Notes: https://platform.claude.com/docs/en/release-notes/api
+- anthropics/skills — `managed-agents-overview.md`-Referenz (Primitive, Header, Anti-Patterns): https://github.com/anthropics/skills/blob/main/skills/claude-api/shared/managed-agents-overview.md
+- AI/TLDR — *Claude Managed Agents add 'auto' mode* (10. Sept. 2026): https://ai-tldr.dev/releases/anthropic-managed-agents-auto-permissions/
+- OpenAI Codex CLI (der `codex exec-server`-Executor): https://github.com/openai/codex
+
+## Weiter
+
+- [Managed Agents](/docs/api/managed-agents) — die Anthropic-Seite in der Tiefe: Agenten vs. Sessions, Vaults, geplante Deployments
+- [Native Multi-Agent-APIs](/docs/models/native-multi-agent-apis) — die Responses-Multi-Agent-Beta vom Juli, auf der das aufbaut, mit der Subagenten-Kostenrechnung
+- [Agent-Laufzeiten: Isolates vs. Container](/docs/frontiers/agent-runtimes-isolates-vs-containers) — was die Sandbox darunter tatsächlich ist und warum das für den Egress zählt

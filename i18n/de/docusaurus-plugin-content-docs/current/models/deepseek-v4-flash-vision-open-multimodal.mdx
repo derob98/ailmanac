@@ -1,0 +1,282 @@
+---
+sidebar_position: 8.3
+title: "DeepSeek V4-Flash-Vision: Das erste Frontier-Open-Weight mit nativer Vision"
+description: "Am 31. August 2026 hat DeepSeek V4-Flash-Vision-Exp als Open Source veröffentlicht — ein 305B-MoE, das V4-Flash native Vision hinzufügt, ohne die Text-Agent-Scores zu verschlechtern, Claude Opus 4.8 auf ApexBench / Agents' Last Exam / ZeroBench zu einem Bruchteil des Preises erreicht oder schlägt und unter MIT erscheint. Die konkreten Zahlen, das harte 384-Token-pro-Bild-Limit, das die meisten Guides ignorieren, und der konkrete Weg, es zu betreiben."
+keywords: [DeepSeek V4, DeepSeek V4-Flash-Vision, V4-Flash-Vision-Exp, DeepSeek Vision-Modell, Open Weight multimodal, MoE Vision, DSpark, natives Vision-Modell, DeepSeek MIT-Lizenz, ApexBench, Agents Last Exam, ZeroBench, DeepSeek vs Claude Opus, DeepSeek V4 lokal ausführen, DeepSeek 305B, hybride Attention CSA HCA]
+---
+
+<LevelBadge level="intermediate" />
+
+Um 00:00 UTC am 31. August 2026 hat DeepSeek still und leise ein neues Repository auf Hugging Face gepusht: `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`. Zehn Tage nachdem dasselbe Modell auf ihrer API live ging (21. August), sind die Gewichte jetzt MIT-lizenziert und öffentlich. Es ist das erste Modell der V4-Familie mit **nativer Vision** — kein Textmodell mit angeflanschtem Adapter, sondern ein gemeinsam trainiertes multimodales MoE — und seine Agent-Scores auf der Vision-Seite sprangen auf ApexBench von 26,2 auf 36,5, ohne die reinen Text-Agent-Scores überhaupt zu bewegen. Auf mehreren Agent-Benchmarks erreicht oder überholt es jetzt knapp **Claude Opus 4.8**, während die API 0,22 $ pro Million Input-Tokens kostet.
+
+Diese Seite ist der praktische Field Guide, den der Launch nicht mitgeliefert hat: was sich architektonisch geändert hat, die Zahlen, die zählen, das eine harte Limit, vor dem dich niemand warnt, wie du es betreibst und wann Claude trotzdem die richtige Wahl bleibt.
+
+<Callout type="objectives" items={[
+  "Verstehen, was 'native Vision' hier bedeutet — das V4-Flash-Backbone plus ein gemeinsam trainierter Vision-Encoder + Aligner, nicht nachträglich drangeheftet",
+  "Die Benchmark-Tabelle so lesen, wie der Release es meint: Text-Agents erhalten, Vision-Agents deutlich hoch, beide in Schlagdistanz zu Claude Opus 4.8",
+  "Das harte architektonische Limit von 384 Tokens pro Bild kennen und wissen, warum es dein Prompting verändert",
+  "Die ehrliche Kostenrechnung machen: 0,22 $ / 0,66 $ / 0,007 $ (gecacht) pro Million Tokens vs. Claude Opus 4.8 mit 15 $ / 75 $",
+  "Den richtigen Serving-Pfad wählen — gehostete API für fast alle, vLLM + DSpark für einen echten Self-Hosted-Betrieb"
+]} />
+
+## Die Ein-Satz-Version
+
+**DeepSeek V4-Flash-Vision-Exp** ist ein multimodales Sparse-MoE-Modell mit 305 Milliarden Parametern — 13B aktiv pro Token, 1,048M Tokens Kontext —, das dem V4-Flash-Text-Backbone gemeinsam trainierte Vision hinzufügt, am 31. August 2026 offen unter MIT auf Hugging Face erschienen ist und multimodale Leistung auf Agent-Niveau zu etwa einem Vierzigstel des Preises pro Token von Claude Opus 4.8 liefert.
+
+## Vier Dinge über V4-Flash-Vision, die nicht in den Release Notes stehen
+
+### 1. Vision wurde hinzugefügt, ohne die Text-Agents zu brechen — das ist der ganze Punkt
+
+Jedes offene Lab, das Vision an ein starkes Textmodell angeflanscht hat, hat dafür auf den Text-Benchmarks bezahlt. DeepSeeks Release-Tabelle ist die Machtdemonstration: auf **Terminal Bench 2.1** erreicht das Vision-Modell **83,9** (vs. 82,7 für das reine Textmodell V4-Flash-0731); auf **DeepSWE** klettert es auf **59,3** (von 54,4); auf **Toolathlon-Verified** auf **75,9** (von 70,3). Keiner davon ist ein Vision-Task — es sind reine Code- und Tool-Use-Agent-Evals. Die Vision-Variante ist bei Text-Agent-Arbeit *besser* als der reine Text-Checkpoint, nicht schlechter.
+
+Das ist wichtig, weil es der "Beweis" ist, auf den das Feld seit Chameleon wartet: Man kann ein riesiges MoE gemeinsam für Text und Vision trainieren, ohne dass der multimodale Zusatz eine Text-Regression verursacht — solange der Vision-Head spät genug landet und der Router weiter Text-Experten spezialisieren darf.
+
+### 2. Der Vision-Encoder hat ein hartes Budget von 384 Tokens pro Bild
+
+Das ist die wichtigste Sache, die du lernen musst, bevor du deinen ersten Prompt schreibst. Der Vision-Encoder in V4-Flash-Vision-Exp vergibt **höchstens 384 Tokens pro Bild** — und diese Obergrenze ist architektonisch, keine kommerzielle Policy. Es gibt keinen "High-Detail"-Modus, der mehr freischaltet. Praktische Konsequenzen:
+
+- **Große Screenshots verlieren feinen Text.** Ein 2560×1440-Dashboard, eine dichte CSV als Bild oder eine lange PDF-Seite werden in der Auflösung kodiert, die 384 Tokens visueller Features ausdrücken können — heißt: kleiner Text überlebt den Round-Trip nicht.
+- **Zuschneiden, nicht skalieren.** Wenn du Zahlen von einem Chart ablesen musst, schick das Chart auf die relevante Region zugeschnitten, nicht die ganze Seite.
+- **Mehrere Bilder schlagen ein riesiges Bild.** Teile große Dokumente in Kacheln pro Region; jede Kachel bekommt ihr eigenes 384-Token-Budget.
+
+Deshalb landet Chartography bei 64,3 (konkurrenzfähig mit den 65,0 von Claude Opus 4.8), aber deshalb übersieht das Modell trotzdem eine Fußnote in 12-Punkt-Schrift auf einem Ganzseiten-Screenshot. Jeder Vision-Agent-Workflow, den du baust, sollte diese Obergrenze voraussetzen.
+
+<VerifyNote lastVerified="2026-09-01" source="https://rits.shanghai.nyu.edu/ai/deepseek-v4-flash-vision-exp-open-weights" />
+
+### 3. Das MoE-Routing ist ungewöhnlich sparse — 6 von 256 Experten feuern pro Token
+
+Die meisten veröffentlichten MoE-Rezepte aktivieren 8 Experten von 32 oder 64. V4-Flash-Vision-Exp nutzt eine viel breitere Expertenbank: **256 geroutete Experten + 1 geteilter Experte**, wobei nur **6 geroutete Experten pro Token feuern** — eine Aktivierungsrate von 2,3 %. Das Modell hat **43 Layer, Hidden Size 4.096**, und der hybride Attention-Stack kombiniert zwei Mechanismen:
+
+- **Compressed Sparse Attention (CSA)** — sparse Muster für Reads über lange Distanzen.
+- **Heavily Compressed Attention (HCA)** — eine aggressiv komprimierte Form für den tiefen Kontext-Schwanz.
+
+Darüber gelegt ersetzen **Manifold-Constrained Hyper-Connections (mHC)** das Standard-Residual durch eine Projektion auf eine beschränkte Mannigfaltigkeit, was laut Paper die Signalausbreitung durch den 43-Layer-Stack stabilisiert. Zusammen sind sie der Grund, warum das Modell ein **Kontextfenster von 1.048.576 Tokens** anpreisen kann, ohne die quadratische Attention-Rechnung.
+
+### 4. Der Preis ist die eigentliche Story
+
+Listenpreise, alle pro Million Tokens:
+
+| Modell | Input | Output | Cache-Read |
+|---|---|---|---|
+| **DeepSeek V4-Flash-Vision-Exp** (API) | **0,22 $** | **0,66 $** | **0,007 $** |
+| Claude Opus 4.8 | 15,00 $ | 75,00 $ | 1,50 $ |
+| Kimi K3 (Cache-Miss / Cache-Hit) | 3,00 $ / 0,30 $ | 15,00 $ | 0,30 $ |
+
+Cache-Read zu **0,007 $/M** ist kein Tippfehler — das ist grob ein Zweihundertstel Cent pro tausend Tokens. Für jeden Workload, bei dem ein wiederholter System-Prompt oder ein langer Kontext erneut gesendet wird (Agent-Loops, RAG über ein statisches Korpus, Chat mit fester Persona), bricht der effektive Input-Preis zusammen. Das ist der Grund, warum V4-Flash-Vision-Exp in Agent-Kostentabellen zu einem Bruchteil dessen auftaucht, was Claude Opus 4.8 pro Task kostet, selbst wenn die rohe Qualität nur wenige Punkte auseinanderliegt.
+
+<VerifyNote lastVerified="2026-09-01" source="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp">
+Preise, Kontextfenster und MoE-Routing stammen aus der offiziellen Model Card zum Release. Siehe [Freshness-Halbwertszeit](/docs/frontiers/freshness-half-life) dazu, wie schnell sich diese Zahlen bewegen.
+</VerifyNote>
+
+## Benchmarks — lies die Tabelle, nicht die Schlagzeile
+
+| Benchmark | V4-Flash-Vision-Exp | V4-Flash-0731 | Claude Opus 4.8 |
+|---|---|---|---|
+| **Text-Agents** | | | |
+| Terminal Bench 2.1 | **83,9** | 82,7 | 85,0 |
+| NL2Repo | 57,7 | 54,2 | **69,7** |
+| DeepSWE | **59,3** | 54,4 | 58,0 |
+| Toolathlon-Verified | 75,9 | 70,3 | **76,2** |
+| **Multimodale Agents** | | | |
+| ApexBench (Pass@1) | 36,5 | 26,2† | **39,4** |
+| Agents' Last Exam | **27,3** | 25,2† | 25,7 |
+| Chartography | 64,3 | — | **65,0** |
+| ZeroBench (Pass@5) | **35,0** | — | 34,0 |
+
+*† Der frühere reine Text-Checkpoint wurde auf Bildern bewertet, die er nicht nativ lesen konnte — eine Untergrenze, kein fairer Kampf.*
+
+Die Tabelle geradeheraus gelesen:
+
+- Bei **Text-Agent-Arbeit** liegt V4-Flash-Vision-Exp durchgehend nur wenige Punkte hinter Claude Opus 4.8 und **schlägt V4-Flash-0731** aktiv auf jedem Eval. Vision wurde ohne Regression hinzugefügt.
+- Bei **multimodalen Agents** schlägt es Claude Opus 4.8 auf **Agents' Last Exam** und **ZeroBench Pass@5**, liegt knapp zurück auf **ApexBench** und **Chartography**. Das ist der erste Open-Weight-Release, bei dem "erreicht Opus bei multimodalen Agents" kein Marketing-Satz ist.
+- Der eine Benchmark, der nicht knapp ist, ist **NL2Repo** (57,7 vs. 69,7). Code-Übersetzung ganzer Repositories ist weiterhin ein Ort, an dem die geschlossene Frontier einen echten Vorsprung hält.
+
+<VerifyNote lastVerified="2026-09-01" source="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp" />
+
+## Das Release-Muster — API zuerst, Gewichte zehn Tage später
+
+V4-Flash-Vision-Exp startete am **21. August 2026** auf der DeepSeek-API und landete erst am **31. August** als Open Weights auf Hugging Face. Diese zehntägige Lücke ist DeepSeeks neuer Standard. Vergleiche Z.ai (GLM), die API + Gewichte gleichzeitig ausliefern; DeepSeek sequenziert absichtlich.
+
+Die Lesart der Branche: Die Labs sind sich jetzt einig, dass große offene MoEs ausgeliefert werden. Die verbleibende Frage ist, *wann* im Release-Zyklus die Gewichte ankommen. Für die Produktionsplanung heißt das:
+
+- Wenn du On-Prem ab Tag null brauchst, achte auf Releases der GLM-Familie.
+- Wenn du auf der API starten und ein bis zwei Wochen später auf Self-Hosted umschwenken kannst, ist DeepSeek das Muster.
+
+## V4-Flash-Vision-Exp betreiben
+
+Es gibt drei realistische Pfade. Wähle nach den zwei Constraints, die tatsächlich zählen: ob die Gewichte auf deiner Infrastruktur liegen müssen, und wie viel VRAM (oder RAM) du bezahlen kannst.
+
+<Steps items={[
+  {
+    title: "Pfad A — DeepSeeks gehostete API (Standard für fast alle)",
+    body: "OpenAI-kompatibler Endpoint unter api.deepseek.com. Die Modell-ID ist deepseek-v4-flash-vision-exp. Preis: 0,22 $ / 0,66 $ / 0,007 $ pro Million Tokens. Das ist die richtige Antwort, solange du keinen Data-Residency- oder Air-Gap-Constraint hast."
+  },
+  {
+    title: "Pfad B — vLLM auf 4× GB300 (Single-Node-Self-Host)",
+    body: "Der vLLM-Container liefert Day-0-Support und den deepseek_v4-Tool-Call-Parser. Du brauchst einen Node mit 4× GB300 (oder eine äquivalente B300-Konfiguration). DSpark Speculative Decoding wird über --speculative-config aktiviert. FP8-KV-Cache und Block-Size 256 sind beide nötig für die Throughput-Zahlen, die DeepSeek veröffentlicht hat."
+  },
+  {
+    title: "Pfad C — Community-GGUF via llama.cpp / Ollama (Workstation-Klasse)",
+    body: "unsloth/DeepSeek-V4-Flash-Vision-Exp-GGUF liefert zwei dynamische Quants: UD-Q4_K_XL mit 155 GB und UD-Q8_K_XL mit 162 GB. Keine davon passt auf eine einzelne 24/48/80-GB-GPU. Was funktioniert, ist eine fette Workstation mit 192 GB+ System-RAM und Offload, oder ein kleines Multi-GPU-Rig mit CPU-Spillover."
+  }
+]} />
+
+<PromptCard title="Gehostete API — Python (OpenAI-kompatibel)">
+{`import openai
+
+client = openai.OpenAI(
+    api_key="YOUR_DEEPSEEK_KEY",
+    base_url="https://api.deepseek.com/v1",
+)
+
+response = client.chat.completions.create(
+    model="deepseek-v4-flash-vision-exp",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What does this chart claim, and what's the one thing it hides?"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/chart.png"}},
+            ],
+        }
+    ],
+)
+print(response.choices[0].message.content)`}
+</PromptCard>
+
+<PromptCard title="Self-Host — vLLM auf 4× GB300 mit DSpark">
+{`docker run --gpus all -p 8000:8000 \\
+  vllm/vllm-openai:deepseekv4-flash-vision \\
+  deepseek-ai/DeepSeek-V4-Flash-Vision-Exp \\
+  --kv-cache-dtype fp8 \\
+  --block-size 256 \\
+  --tensor-parallel-size 4 \\
+  --tool-call-parser deepseek_v4 \\
+  --speculative-config '{"method":"dspark","model":"deepseek-ai/DeepSeek-V4-Flash-Vision-Exp","num_speculative_tokens":3}'`}
+</PromptCard>
+
+<PromptCard title="Lokal — Ollama mit dem Community-GGUF">
+{`ollama run hf.co/unsloth/DeepSeek-V4-Flash-Vision-Exp-GGUF:UD-Q4_K_XL
+
+# Compact image syntax the model was trained to accept:
+# <image>path/to/screenshot.png</image>  followed by your prompt`}
+</PromptCard>
+
+## Wann du zu V4-Flash-Vision greifst — und wann du bei Claude bleibst
+
+**Greif zu V4-Flash-Vision, wenn:**
+
+- Du multimodale Agent-Qualität etwa auf Opus-4.8-Niveau brauchst und die Kosten eine Rolle spielen. Der Cache-Read-Preis zermalmt alles auf der geschlossenen Frontier.
+- Der Workload von einem 1M-Token-Kontext profitiert (Long-Document-VQA, Analyse ganzer Video-Frames, Review großer Repos mit Screenshots).
+- Du Open Weights für Compliance, Air-Gapped-Arbeit oder Fine-Tuning brauchst und Frontier-Hardware hast (oder mietest).
+- Du eine Chart-lastige oder Dashboard-parsende Pipeline baust, in der du das Bild-Tiling kontrollieren kannst.
+
+**Bleib bei Claude Opus 4.8 (oder Sonnet 5), wenn:**
+
+- Der Job Code-Übersetzung oder -Synthese ganzer Repositories ist — NL2Repo ist der Ausreißer, bei dem der Abstand real ist (57,7 vs. 69,7).
+- Du Claude-spezifische Features brauchst: Extended Thinking mit Budget, [Skills](/docs/claude-code/skills), Sub-Agent-Orchestrierung in [Claude Code](/docs/claude-code/what-is-claude-code) oder die [Session-Budget-Kontrollen von Managed Agents](/docs/api/managed-agents-session-budgets).
+- Deine Prompts Bilder mit winzigem, kritischem Text enthalten und du nicht kacheln kannst — du triffst das 384-Token-Limit und verlierst Genauigkeit.
+- Du einen einzelnen Anbieter / SLA / Support-Kontakt willst und bereits in Anthropic-Tooling investiert bist.
+
+Für ein breiteres Framework zur Modellwahl siehe [Wie man ein Modell wählt](/docs/models/choosing-a-model). Für einen Seite-an-Seite-Vergleich der ganzen Open-Weight-Welle ist [DeepSeek, Qwen & die Open-Weight-Welle](/docs/models/deepseek-qwen-open-models) der dauerhafte Überblick.
+
+## Die Fallstricke, die dich zuerst beißen
+
+1. **Du wirst das 384-Token-Limit vergessen.** Die ersten drei Vision-Agents, die du baust, werden die Auflösung überschießen und still Genauigkeit auf kleinem Text verlieren. Instrumentiere dafür: logge die Dimensionen pro Bild und skaliere + kachle bewusst herunter.
+2. **DSpark fällt still weg, wenn du `--speculative-config` weglässt.** Ohne das Flag serviert vLLM das Modell fröhlich mit 1/3 des Throughputs, den der Release angekündigt hat. Übergib die Speculative-Config in Produktion immer.
+3. **Das GGUF ist kein Laptop-Modell.** UD-Q4_K_XL ist 155 GB groß. Community-Threads, die es auf kleineren Kisten "laufen" zeigen, betreiben es mit Bruchteilen von Tokens/s über SSD-Swap — technisch funktionierend, nicht nutzbar.
+4. **Versionsparität zwischen API und Gewichten ist nicht garantiert.** Das API-Modell kann still aktualisiert werden; die Hugging-Face-Gewichte sind auf `Vision-Exp` gepinnt. Wenn ein Benchmark auf der API von Monat zu Monat um ein paar Punkte wandert, liegt es daran.
+5. **`Exp` heißt experimentell.** Die Vision-Variante wird nicht garantiert in produktive V4-Releases übernommen. Bau keine kritische Pipeline auf der Annahme, dass genau dieser Checkpoint in einem Jahr noch da ist.
+
+## Quiz
+
+<Quiz questions={[
+  {
+    q: "Wie viele Parameter werden in DeepSeek V4-Flash-Vision-Exp pro Token aktiviert?",
+    options: [
+      "Alle 305 Milliarden — dichter Forward-Pass",
+      "Etwa 13 Milliarden — das MoE routet 6 von 256 gerouteten Experten plus 1 geteilten Experten",
+      "Genau die Hälfte — 152,5 Milliarden",
+      "Nur der Vision-Encoder feuert für Bild-Tokens; Text wird übersprungen"
+    ],
+    answer: 1,
+    explain: "V4-Flash-Vision-Exp ist ein Sparse-Mixture-of-Experts-Modell. Nur 6 von 256 gerouteten Experten feuern pro Token, plus 1 geteilter Experte — der aktive Footprint liegt bei ~13B von insgesamt 305B. Deshalb kann ein so großes Modell zu vernünftigen Kosten pro Token laufen."
+  },
+  {
+    q: "Was ist das harte architektonische Limit dafür, wie viele Tokens der Vision-Encoder einem einzelnen Bild zuweist?",
+    options: [
+      "1.024 Tokens — dasselbe wie bei den meisten geschlossenen Frontier-Modellen",
+      "384 Tokens — ein architektonisches Budget, keine kommerzielle Policy",
+      "Es gibt kein Limit; der Encoder skaliert mit der Bildauflösung",
+      "Nur durch das 1M-Token-Kontextfenster begrenzt"
+    ],
+    answer: 1,
+    explain: "Jedes Bild wird in höchstens 384 Tokens visueller Features kodiert. Das ist architektonisch. Große Screenshots mit kleinem Text verlieren Details; die funktionierende Technik ist, auf relevante Regionen zuzuschneiden oder große Bilder zu kacheln, sodass jede Kachel ihr eigenes 384-Token-Budget bekommt."
+  },
+  {
+    q: "Auf welchen Benchmarks in der Release-Tabelle schlägt V4-Flash-Vision-Exp Claude Opus 4.8 tatsächlich?",
+    options: [
+      "Es schlägt Opus auf jedem gelisteten Benchmark",
+      "Auf keinem — es liegt überall hinter Opus",
+      "Agents' Last Exam und ZeroBench Pass@5",
+      "NL2Repo und Terminal Bench 2.1"
+    ],
+    answer: 2,
+    explain: "V4-Flash-Vision-Exp erreicht 27,3 vs. 25,7 auf Agents' Last Exam und 35,0 vs. 34,0 auf ZeroBench Pass@5 und liegt damit auf beiden knapp vor Opus 4.8. Es liegt knapp zurück auf ApexBench (36,5 vs. 39,4) und Chartography (64,3 vs. 65,0), und der echte Abstand bleibt bei NL2Repo (57,7 vs. 69,7)."
+  },
+  {
+    q: "Was ist der Cache-Read-Input-Preis auf der DeepSeek-API für dieses Modell?",
+    options: [
+      "0,22 $ pro Million Tokens — der Standard-Input-Preis",
+      "0,007 $ pro Million Tokens — grob ein Zweihundertstel Cent pro tausend Tokens",
+      "1,50 $ pro Million Tokens — entspricht der Cache-Hit-Rate von Claude Opus",
+      "Cache-Reads sind unter 100.000 Tokens kostenlos"
+    ],
+    answer: 1,
+    explain: "Cache-Reads werden mit 0,007 $/M abgerechnet — etwa ein Zweihundertstel Cent pro tausend Tokens. Für Agent-Loops, die einen System-Prompt wiederholen oder einen statischen Kontext halten, bricht das die effektiven Input-Kosten zusammen und ist ein großer Teil davon, warum V4-Flash-Vision-Exp in unabhängigen Evaluationen bei einem Bruchteil der Kosten pro Task von Opus landet."
+  },
+  {
+    q: "Welches Single-Node-Hardware-Profil ist der von vLLM empfohlene Pfad, um V4-Flash-Vision-Exp in Produktion selbst zu hosten?",
+    options: [
+      "Eine 24-GB-Consumer-GPU",
+      "Ein einzelner Mac Studio mit 192 GB Unified Memory",
+      "Ein Node mit 4× GB300 (tensor-parallel-size 4, FP8-KV-Cache, DSpark aktiviert)",
+      "Jeder 8× H100-Node — der Standard für Open-Weight-Modelle"
+    ],
+    answer: 2,
+    explain: "Der veröffentlichte Serve-Befehl nutzt --tensor-parallel-size 4 mit fp8-KV-Cache und Block-Size 256 auf einem 4× GB300-Node, plus DSpark Speculative Decoding für ~3× mehr Throughput. Kleinere Kisten funktionieren nur mit Community-GGUFs und schwerem CPU/SSD-Offload — nicht produktionstauglich."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Was ist DeepSeek V4-Flash-Vision-Exp?", back: "Das erste Modell mit nativer Vision in DeepSeeks V4-Familie — ein 305B-Sparse-MoE (13B aktiv/Token), das dem V4-Flash-Text-Backbone gemeinsam trainierte Vision hinzufügt. Am 31. August 2026 unter MIT auf Hugging Face veröffentlicht." },
+  { front: "Wie viele Experten feuern pro Token?", back: "6 von 256 gerouteten Experten plus 1 geteilter Experte (2,3 % Aktivierungsrate) — viel sparser als das typische 8/32- oder 8/64-MoE-Rezept." },
+  { front: "Was ist das Token-Budget pro Bild?", back: "384 Tokens pro Bild — architektonisch, keine Policy. Große Screenshots mit feinem Text verlieren Details; die Lösung ist Zuschneiden oder Kacheln." },
+  { front: "Was ist CSA + HCA?", back: "Der hybride Attention-Stack in V4-Flash: Compressed Sparse Attention für Reads über lange Distanzen, Heavily Compressed Attention für den tiefen Kontext-Schwanz. Zusammen ermöglichen sie den 1,048M-Token-Kontext ohne quadratische Kosten." },
+  { front: "Was ist mHC (Manifold-Constrained Hyper-Connections)?", back: "Ein Ersatz für die Standard-Residual-Verbindung, der auf eine beschränkte Mannigfaltigkeit projiziert. DeepSeek berichtet, dass es die Signalausbreitung durch den 43-Layer-Stack stabilisiert." },
+  { front: "Was ist DSpark?", back: "Ein Speculative-Decoding-Schema, das mit der V4-Familie ausgeliefert wird und nativ in vLLM unterstützt ist. Aktivieren mit --speculative-config; das Flag zu vergessen senkt den Throughput auf ~1/3 dessen, was der Release verspricht." },
+  { front: "Wie ist der API-Preis von V4-Flash-Vision-Exp?", back: "0,22 $ pro Million Input-Tokens, 0,66 $ pro Million Output-Tokens, 0,007 $ pro Million Cache-Read-Tokens. Grob 1/40 der Listenpreise von Claude Opus 4.8." },
+  { front: "Wo schlägt V4-Flash-Vision-Exp Claude Opus 4.8?", back: "Agents' Last Exam (27,3 vs. 25,7) und ZeroBench Pass@5 (35,0 vs. 34,0). Auf Chartography hält es außerdem mit Opus mit (64,3 vs. 65,0)." },
+  { front: "Wo hält Claude Opus 4.8 noch einen echten Vorsprung?", back: "NL2Repo (69,7 vs. 57,7) — Code-Übersetzung ganzer Repositories ist der Bereich, in dem die geschlossene Frontier noch klar führt." },
+  { front: "Was sind die zwei Unsloth-GGUF-Quants?", back: "UD-Q4_K_XL mit 155 GB und UD-Q8_K_XL mit 162 GB. Keine passt auf eine einzelne Consumer-GPU; Multi-GPU in Workstation-Klasse oder Offload mit viel RAM ist nötig." },
+  { front: "Warum hat DeepSeek zehn Tage zwischen API und Gewichten gewartet?", back: "Es ist DeepSeeks aufkommendes Release-Muster — API zuerst, Gewichte zehn Tage später. Vergleiche Z.ai (GLM), die beides gleichzeitig ausliefern. Die Branche hat sich auf 'große offene MoEs werden ausgeliefert' geeinigt; die verbleibende Variable ist die Release-Sequenzierung." }
+]} />
+
+## Quellen & weiterführende Lektüre
+
+- [DeepSeek-V4-Flash-Vision-Exp Model Card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp) — offizielle Architektur, Benchmarks, Tokenizer und Inferenz-Beispiele
+- [Unsloth DeepSeek-V4-Flash-Vision-Exp GGUF-Quants](https://huggingface.co/unsloth/DeepSeek-V4-Flash-Vision-Exp-GGUF) — die zwei dynamischen Quantisierungen für llama.cpp / Ollama und ihre Größen
+- [Analyse: DeepSeek veröffentlicht V4-Flash-Vision-Exp zehn Tage nach API-Launch als Open Source](https://rits.shanghai.nyu.edu/ai/deepseek-v4-flash-vision-exp-open-weights) — das Release-Muster, das 384-Token-Bildlimit und die Community-4-Bit-Größen
+- [DeepSeek-V4-Flash Basis-Model-Card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) — das Text-Backbone, das V4-Flash-Vision erweitert
+- Verwandt: [DeepSeek, Qwen & die Open-Weight-Welle](/docs/models/deepseek-qwen-open-models) — der dauerhafte Landschaftsüberblick
+- Verwandt: [Kimi K3: Das größte Open-Weight-Modell der Welt](/docs/models/kimi-k3-open-weight-frontier) — das andere Open-MoE-Flaggschiff von 2026
+- Verwandt: [Kimi K3 lokal betreiben: vLLM, DSpark & die echte Hardware-Rechnung](/docs/models/kimi-k3-deploy-locally-vllm-dspark) — Deep Dive zu DSpark und dem exakten vLLM-Setup
+- Verwandt: [Wie man ein Modell wählt](/docs/models/choosing-a-model) — das dauerhafte Framework
+- Verwandt: [Was KI bei den Anbietern kostet](/docs/models/what-ai-costs-across-providers) — wo diese Preise im breiteren Markt stehen
+
+## Weiter
+
+- [DeepSeek, Qwen & die Open-Weight-Welle](/docs/models/deepseek-qwen-open-models) — die breitere Open-Weight-Landschaft, in die dieses Modell passt
+- [Kimi K3: Das größte Open-Weight-Modell der Welt](/docs/models/kimi-k3-open-weight-frontier) — das andere Frontier-Open-MoE zum Vergleich
+- [Wie man ein Modell wählt](/docs/models/choosing-a-model) — wann V4-Flash-Vision passt vs. wann du bei Claude bleibst
+- [DeepSeek-V4.1-Flash](/docs/models/deepseek-v4-1-flash-open-weight-1m) — der Nachfolger, auf den der gehostete `deepseek-v4-flash-vision-exp`-Endpoint seit dem 10. September 2026 routet
