@@ -32,6 +32,10 @@ const clamp = (n: number, max: number): number =>
 export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
   const [index, setIndex] = useState(0);
   const [flipped, setFlipped] = useState(false);
+  // Which way the reader last moved. `null` until the first Prev/Next so the
+  // initial card renders with NO entrance animation (static content must not
+  // animate on load), and identical on server + client (no hydration diff).
+  const [dir, setDir] = useState<'next' | 'prev' | null>(null);
   const baseId = useId();
 
   const total = Array.isArray(cards) ? cards.length : 0;
@@ -58,8 +62,12 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
   const instrId = `${baseId}-instr`;
 
   const go = (next: number) => {
+    const target = clamp(next, total - 1);
     setFlipped(false); // always land on the term side after navigating
-    setIndex(clamp(next, total - 1));
+    if (target !== current) {
+      setDir(target > current ? 'next' : 'prev');
+      setIndex(target);
+    }
   };
   const flip = () => setFlipped((f) => !f);
 
@@ -123,7 +131,16 @@ export default function Flashcards({cards, title}: FlashcardsProps): ReactNode {
           </span>
           {hintText}
         </span>
-        <span className={styles.inner} id={cardId}>
+        {/* Keyed by card index: navigating mounts a FRESH body, so the next card
+            lands on its term side instantly instead of un-flipping over the
+            already-swapped content (which used to flash the new card's
+            definition mid-spin). The remount is also what lets CSS run the
+            direction-aware deal-in via [data-dir]. */}
+        <span
+          key={current}
+          className={styles.inner}
+          id={cardId}
+          data-dir={dir ?? undefined}>
           {/* Both faces are always in the DOM so screen-reader users and the
               :live region get the full content; aria-hidden mirrors what's
               visually facing the reader. */}
