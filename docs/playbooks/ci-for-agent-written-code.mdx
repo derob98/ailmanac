@@ -1,0 +1,287 @@
+---
+sidebar_position: 10
+title: "CI/CD for Agent-Written Code"
+description: "Coding agents multiply PR volume. Merge queues, flaky tests and runner caps break in that order — here is the arithmetic, the levers ranked by leverage, and the gate that stops an agent grading its own homework."
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-09-23" source="https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue">
+Runner concurrency caps, queue timeouts and merge-queue settings are platform limits that GitHub changes without much noise. The mechanisms below are stable; re-check the exact numbers against the limits page before you size a pipeline on them.
+</VerifyNote>
+
+<Callout type="objectives" items={["Know why the merge queue — not the runner budget — is the first thing that breaks under agent PR volume", "Do the batching arithmetic: how a few points of failure rate collapse speculative merging", "Rank the four levers correctly, because 'add more runners' is the weakest one", "Ship a gate that proves an agent's test actually fails without the agent's fix", "Quarantine flakes on evidence instead of vibes, and know the caching gotcha that silently poisons CI"]} />
+
+Your coding agents work. That is the problem.
+
+A team that merged 5 pull requests a day and now merges 40 has not changed its test suite, its runner budget, or its branch protection rules. It has changed the *arrival rate* into a queueing system that was tuned for the old one. Everything downstream — merge queue, flaky-test noise, runner concurrency, review attention — was sized for human throughput, and queueing systems do not degrade gracefully. They hold, hold, hold, then fall over inside a week.
+
+This page is the pipeline side of [the verification bottleneck](/docs/frontiers/the-verification-bottleneck). That page asks *who checks the code*. This one asks whether your CI can physically absorb the volume, and what to do when it can't.
+
+## Three numbers that frame the whole problem
+
+**−7.2%.** DORA's 2024 *Accelerate State of DevOps* report modelled a 25% increase in AI adoption and estimated a **7.2% decrease in delivery stability** alongside a 1.5% decrease in throughput. Individual productivity and job satisfaction went *up*. Delivery-level outcomes went down — the report ties this to larger changesets and weaker batching discipline. The 2025 follow-up reframes it: AI is an **amplifier**, magnifying whatever your delivery system already is. A pipeline that was fragile at 5 PRs/day becomes unusable at 40.
+
+**19%.** METR's randomised trial (July 2025) took 16 experienced open-source maintainers and 246 real issues from their own repositories, randomising whether AI tools were allowed. With AI, tasks took **19% longer**. The gap that matters for CI planning is the perceptual one: developers predicted a 24% speed-up, and *after* the slowdown still believed they had been sped up by 20%. Nobody on your team will tell you the pipeline is the constraint, because nobody experiences it as one — they experience it as "waiting", which feels like weather.
+
+**1.5% / 16% / 84%.** Google's published flakiness data: roughly **1.5% of test runs** report a flaky result; about **16% of their 4.2M tests** have shown flakiness at some point; and around **84% of observed pass→fail transitions** involve a flaky test rather than a real regression. Hold onto that 1.5% — it is small enough to ignore at 5 PRs/day and load-bearing at 40.
+
+## Why the merge queue breaks first
+
+Most teams assume the ceiling is compute. It isn't. It's the merge queue, and the reason is a mechanism most people have never read the docs for.
+
+GitHub's merge queue does **speculative checking**. Queue PRs #1, #2, #3 and it builds temporary branches: `main` + #1, `main` + #1 + #2, `main` + #1 + #2 + #3 — and tests all of them *in parallel*. If every check passes, all three land in one round. That is the whole value proposition: batching turns N serial validations into one.
+
+Now read the failure path. When a check fails for the group containing PR #1, GitHub removes **#1** from the queue — and every group behind it contained #1's changes, so those groups are invalid and get **rebuilt without it**. One bad PR does not cost you one slot. It costs you the rest of the batch's CI round.
+
+That makes queue throughput a function of your *pass rate*, and it's steeper than intuition suggests. Model it: batch size N, each PR independently failing with probability p, and you merge the run of PRs up to the first failure. Expected merges per round is a geometric expectation:
+
+```text
+E[merges] = (1 − p) · (1 − (1 − p)^N) / p
+```
+
+With N = 10:
+
+| Per-PR failure rate `p` | Expected merges per round | Rounds to clear 10 PRs |
+| --- | --- | --- |
+| 2%  | 8.9 | ~1.1 |
+| 5%  | 7.6 | ~1.3 |
+| 10% | 5.9 | ~1.7 |
+| 20% | 3.6 | ~2.8 |
+| 30% | 2.3 | ~4.4 |
+
+Two consequences most teams get backwards:
+
+1. **A flaky suite is a *throughput* tax, not a nuisance tax.** Flakiness adds directly to `p`. Going from 5% real failures to 5% real + 5% flake takes you from 7.6 merges per round to 5.9 — roughly **23% of your merge capacity**, lost to tests that were never testing anything.
+2. **Raising the batch size is the wrong lever when `p` is high.** Bigger N only helps when `(1 − p)^N` stays near 1. At p = 0.2, a batch of 10 delivers 3.6 merges; the fix is lowering `p`, not queueing more optimism.
+
+And agent volume pushes `p` the wrong way — DORA's stability finding is exactly a statement about `p` rising.
+
+## The capacity arithmetic nobody does
+
+Do this on a napkin before you buy runners. Assumptions stated, because they're what make it wrong for your team:
+
+<Steps items={[
+  {title: "Count job-minutes, not wall-clock", body: "A 45-minute suite fanned out into 15 parallel jobs still costs ~45 job-minutes. Parallelism buys latency, never cost. Take your suite's total job-minutes from a recent run, not from the slowest job."},
+  {title: "Multiply by validations per PR, not by PRs", body: "With a merge queue every PR is validated at least twice: once on the PR branch, once inside a merge group. Reruns and rebuilds from the p-math above add more. Budget 2.5x as a floor, not 1x."},
+  {title: "Divide by the burst window, not the day", body: "40 PRs x 2.5 validations x 45 job-min = 4,500 job-minutes. Spread over 24 hours that is trivial. It does not arrive over 24 hours — it arrives in two or three hours around review time. 4,500 job-min into a 2-hour window needs ~37 sustained concurrent jobs."},
+  {title: "Compare against your plan's hard ceiling", body: "GitHub-hosted standard runners cap total concurrent jobs at 20 (Free), 40 (Pro), 60 (Team) and 500 (Enterprise). The napkin above quietly exceeds Free and sits on top of Pro — during the burst, which is the only window that matters."},
+  {title: "Find the silent failure", body: "A queued job is cancelled after 24 hours. On a saturated queue this shows up as jobs that never ran rather than jobs that failed, which is far harder to notice and does not page anyone."}
+]} />
+
+The takeaway is not "buy Enterprise". It's that the constraint is **burst concurrency**, and the daily-average number that makes your pipeline look fine is the number hiding the problem.
+
+## Four levers, ranked by leverage
+
+Teams reach for these in almost exactly the reverse of the useful order.
+
+**1. Lower `p` (highest leverage, lowest cost).** Every point of failure rate removed pays off nonlinearly in the batching math. Concretely: make agents run the fast suite locally before opening a PR, require a green pre-merge check before a PR is *allowed* into the queue, and quarantine flakes aggressively (below). This costs no compute.
+
+**2. Cut the work per validation — test selection.** This is the only lever that changes the exponent rather than the constant. Instead of running everything, run what the change can plausibly break:
+
+- **Develocity Predictive Test Selection** builds a model from your own Build Scan history plus cross-project patterns, and ships a **simulator** so you can measure the savings and the missed-failure rate *before* enabling it. Two safety details worth stealing even if you never buy it: you can pin **must-run tests** by class pattern or annotation, and it **always selects recently flaky tests**, because a flaky test is by definition unpredictable from the change. Pair it with a "remaining tests" run post-merge or nightly so nothing is skipped forever.
+- **Bazel / Buck2** get this structurally: the build graph knows which targets depend on the changed files, so `bazel test` on affected targets is target determination for free.
+- **No build graph?** Python has `pytest-testmon`, which records which tests cover which code and re-runs only the affected ones. Jest ships `--changedSince` out of the box.
+
+<PromptCard title="Test selection, three ecosystems">
+{`# Bazel — test only what the diff can reach
+bazel test $(bazel query "rdeps(//..., set($(git diff --name-only origin/main)))" --output=label 2>/dev/null)
+
+# Python — coverage-based impact analysis
+pip install pytest-testmon
+pytest --testmon          # first run builds the DB, later runs select
+
+# Jest — built in, no plugin
+npx jest --changedSince=origin/main`}
+</PromptCard>
+
+**3. Cache aggressively — and know the gotcha.** Remote caching stores action results keyed by a hash of inputs, command line and whitelisted environment. Bazel's own docs flag the trap: **tools outside the workspace are not tracked**, so two machines with different compiler versions can get a cache *hit* on work that would have produced different outputs. Whitelist what matters with `--action_env`, and keep write access to CI only — developer machines should read:
+
+<PromptCard title="Remote cache, CI-writes-only">
+{`# CI: read and write
+bazel test //... --remote_cache=grpcs://cache.internal:443
+
+# Developer machines: read only, never poison the shared cache
+bazel test //... --remote_cache=grpcs://cache.internal:443 \\
+  --remote_upload_local_results=false`}
+</PromptCard>
+
+**4. Add runners (last).** Linear cost, linear benefit, and it does nothing about `p`. Do it after the first three, when you actually know your burst concurrency number.
+
+## The AI-specific failure mode: the agent grades its own homework
+
+Everything above applies to any high-volume pipeline. This one is specific to agent-written code, and it is the gap most CI setups have.
+
+When the same agent writes the fix *and* the test for the fix, "tests pass" carries much less information than you think. Two failure shapes show up constantly:
+
+- The test asserts the behaviour of the implementation rather than the requirement — it passes because it was written by reading the code it is testing.
+- The agent, when a pre-existing test fails, edits the *test* to match the new behaviour instead of fixing the code. The diff is green and the regression shipped. That behaviour has a name and a literature — see [reward hacking in coding agents](/docs/frontiers/reward-hacking-in-coding-agents) for why models do it and which defenses have measured effect sizes. What follows is the pipeline-side control, not the model-side one.
+
+The cheap structural gate: **a new test must fail against the pre-change code.** That's the red-green discipline of TDD turned into a machine check, and it's what mutation testing formalises at scale. You do not need a mutation-testing framework to get most of the value — you need one CI job:
+
+<PromptCard title="CI gate: new tests must fail without the change">
+{`#!/usr/bin/env bash
+# must-fail-first.sh — run in CI on PRs that add tests
+set -euo pipefail
+
+NEW_TESTS=$(git diff --name-only origin/main...HEAD -- 'tests/**' 'test/**')
+[ -z "$NEW_TESTS" ] && { echo "no new tests, skipping"; exit 0; }
+
+# Keep the new tests, revert everything else to the base commit
+git stash push --keep-index -- $NEW_TESTS
+git checkout origin/main -- src/
+git stash pop
+
+# The new tests MUST fail now. If they pass, they prove nothing.
+if pytest $NEW_TESTS -q; then
+  echo "FAIL: new tests pass against unmodified source — they do not test the change."
+  exit 1
+fi
+echo "OK: new tests fail without the fix."`}
+</PromptCard>
+
+Two honest caveats. It only works when source and tests live in separate trees, and a test that fails for the wrong reason (import error, missing fixture) passes this gate. It is a floor, not a proof — but it catches the single most common way an agent-authored PR is green and worthless.
+
+The complementary review-side control is a reviewer that doesn't share the author's context: see [the hybrid AI code reviewer](/docs/models/open-code-review-hybrid-ai-reviewer) and [the PR-review GitHub Action](/docs/walkthroughs/pr-review-action).
+
+## Flake quarantine that survives contact with agents
+
+Given 84% of pass→fail transitions are flakes, "rerun it" is the default human response and it is the most expensive one available — it burns a full validation on a test that was never going to tell you anything.
+
+<Steps items={[
+  {title: "Measure before you judge", body: "A flaky test is one that produces different results on the same commit. Run the suite N times on an unchanged main and record per-test failure counts. That is your evidence; developer memory is not."},
+  {title: "Quarantine on a threshold, not an argument", body: "Anything above your threshold moves to a non-blocking job that still runs and still reports. It stops gating merges immediately — that is the throughput win — and it stays visible so it does not become dead code."},
+  {title: "Cap the quarantine and give it an owner", body: "An uncapped quarantine is a graveyard. Fixed budget (say 1% of tests), a name attached, an expiry date. Over budget means the next flake evicts the oldest one back into blocking."},
+  {title: "Never let test selection skip a flake", body: "This is the counter-intuitive rule Develocity encodes: recently-flaky tests are always selected, because the model cannot predict them from the diff. Selecting away your flakes hides the signal you need to fix them."},
+  {title: "Re-derive p after each round", body: "Recompute your per-PR failure rate monthly and put it on the dashboard next to merge-queue throughput. It is the one number that tells you whether the pipeline is getting better or the agents are just getting louder."}
+]} />
+
+## Gotchas that cost a day each
+
+- **`merge_group` is not automatic.** GitHub's docs are explicit: you **must** add the `merge_group` event to your workflow triggers, or your checks never fire inside the queue and merges fail on missing required checks. This is the single most common merge-queue misconfiguration.
+- **The 24-hour queue cancellation is silent.** Saturated queue → jobs vanish rather than fail. Alert on queue depth, not just on red builds.
+- **Matrix jobs cap at 256 per workflow run.** Generated matrices (a common agent-scaffolding pattern) hit this without a useful error.
+- **Cross-machine cache hits can be wrong.** Untracked external toolchains produce false hits. Pin toolchains, whitelist environment with `--action_env`.
+- **Branch protection with wildcard patterns is incompatible with merge queues.** If your protection rules use wildcards, the queue will not engage.
+- **Agent PRs touching CI are a security boundary, not a style question.** A PR that can edit workflow files can exfiltrate CI secrets — see [GitHub issue → CI secrets](/docs/security/github-issue-to-ci-secrets-blackhat-2026) and [hardening autonomous runs](/docs/security/hardening-autonomous-runs).
+
+## The honest framing
+
+There is no configuration that makes a pipeline absorb unbounded agent output. What the levers above buy you is a system whose cost grows with the *size of the change* rather than the *number of pull requests* — test selection and caching are sublinear, runners are linear, and merge-queue batching is only sublinear while your pass rate stays high.
+
+Which puts the real constraint back where DORA's 2025 framing puts it: AI amplifies the delivery system you already have. If small batches, fast suites and low flakiness were already your practice, agents make you much faster. If they weren't, agents find out.
+
+<Quiz questions={[
+  {
+    q: "Your merge queue has batch size 10 and your per-PR failure rate rises from 5% to 20%. Roughly what happens to expected merges per round?",
+    options: [
+      "It drops slightly, from about 9 to about 8",
+      "It roughly halves, from about 7.6 to about 3.6",
+      "It is unchanged — batching absorbs failures",
+      "It doubles, because failures free up queue slots"
+    ],
+    answer: 1,
+    explain: "Expected merges follow (1 − p)(1 − (1 − p)^N)/p. At p = 0.05 that is ~7.6; at p = 0.20 it is ~3.6. Speculative batching is a bet on the pass rate, which is why lowering p beats raising batch size."
+  },
+  {
+    q: "A merge group fails because of PR #1. What does GitHub do to the groups queued behind it?",
+    options: [
+      "Nothing — they were tested independently and merge as-is",
+      "It merges them anyway and opens a revert PR for #1",
+      "It removes #1 and rebuilds the groups behind it without #1's changes",
+      "It clears the entire queue and every author must re-queue"
+    ],
+    answer: 2,
+    explain: "Every speculative group behind #1 contained #1's changes, so they are invalid. GitHub removes #1 and rebuilds. One bad PR costs the rest of the batch a full CI round — that is the mechanism behind the throughput math."
+  },
+  {
+    q: "Which lever changes how CI cost scales, rather than just shifting the constant?",
+    options: [
+      "Adding more concurrent runners",
+      "Increasing the merge-queue batch size",
+      "Test selection driven by what the diff can reach",
+      "Retrying failed jobs automatically"
+    ],
+    answer: 2,
+    explain: "Runners are linear cost for linear benefit. Bigger batches help only while the pass rate is high. Test selection ties work to the size of the change instead of the number of PRs — the only structurally sublinear lever here."
+  },
+  {
+    q: "Why does Develocity's Predictive Test Selection always run recently flaky tests, even when the diff does not touch them?",
+    options: [
+      "Flaky tests are usually the slowest, so they parallelise well",
+      "A flaky test's outcome is not predictable from the change, so the model cannot safely skip it",
+      "Contractual compliance requirements demand full suites",
+      "Flaky tests have the highest historical code coverage"
+    ],
+    answer: 1,
+    explain: "The model predicts outcomes from code changes. A flaky test fails independently of the change, so no model can select it correctly — skipping it would also hide the data you need to fix it."
+  },
+  {
+    q: "An agent's PR adds a fix and a test, and CI is green. What does the 'must fail first' gate check?",
+    options: [
+      "That the new test achieves at least 80% line coverage",
+      "That the new test fails when run against the pre-change source",
+      "That the agent did not modify any existing test files",
+      "That the test runs in under one second"
+    ],
+    answer: 1,
+    explain: "If the new test passes against unmodified source, it proves nothing about the fix — the classic shape of a test written by reading the implementation. It is a floor, not a proof: a test failing on an import error also 'passes' the gate."
+  },
+  {
+    q: "Two machines get a Bazel remote cache hit on the same action but would produce different outputs. What is the most likely cause?",
+    options: [
+      "The content-addressable store dropped an output file",
+      "One machine used --disk_cache and the other did not",
+      "A toolchain outside the workspace differs and is not part of the action hash",
+      "The action cache stores only stdout, never metadata"
+    ],
+    answer: 2,
+    explain: "Bazel does not track tools outside the workspace. Different compiler versions can share a cache key. Whitelist what matters with --action_env and pin toolchains inside the workspace."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Speculative checking (merge queue)", back: "GitHub builds temporary branches for base+PR1, base+PR1+PR2, … and tests them in parallel. All green means the whole batch lands in one round. A failure removes that PR and forces every group behind it to be rebuilt." },
+  { front: "Merge-queue throughput formula", back: "E[merges per round] = (1 − p)(1 − (1 − p)^N)/p, for batch size N and per-PR failure probability p. N=10: p=5% → 7.6; p=10% → 5.9; p=20% → 3.6; p=30% → 2.3." },
+  { front: "Why flakiness is a throughput tax", back: "Flake failures add directly to p. Adding 5 points of flake at N=10 takes expected merges from 7.6 to 5.9 — roughly 23% of merge capacity lost to tests that tested nothing." },
+  { front: "DORA 2024 AI finding", back: "A modelled 25% increase in AI adoption → estimated 7.2% decrease in delivery stability and 1.5% decrease in throughput, despite individual productivity rising. DORA 2025 reframes AI as an amplifier of the existing delivery system." },
+  { front: "METR 2025 RCT", back: "16 experienced OSS maintainers, 246 real issues, randomised AI allowed/disallowed. Tasks took 19% longer with AI. Developers predicted +24% speed-up and still believed +20% afterwards." },
+  { front: "Google flakiness numbers", back: "~1.5% of test runs report a flaky result; ~16% of 4.2M tests have shown flakiness; ~84% of pass→fail transitions involve a flaky test rather than a real regression." },
+  { front: "Burst concurrency, not daily average", back: "40 PRs x ~2.5 validations x 45 job-min ≈ 4,500 job-minutes. Trivial over 24h; needs ~37 sustained concurrent jobs if it lands in a 2-hour review window. GitHub standard-runner caps: 20 Free / 40 Pro / 60 Team / 500 Enterprise." },
+  { front: "The four levers, ranked", back: "1) Lower p (free, nonlinear payoff). 2) Test selection (sublinear — ties cost to change size). 3) Remote caching. 4) More runners (linear, last resort)." },
+  { front: "Must-fail-first gate", back: "A new test must fail against the pre-change source. Catches agent-written tests that assert the implementation rather than the requirement. Caveats: needs separate source/test trees, and a test failing on an import error passes the gate." },
+  { front: "merge_group trigger", back: "Workflows must explicitly include the merge_group event or their checks never fire inside the queue, and merges fail on missing required checks. The most common merge-queue misconfiguration." },
+  { front: "Remote cache false-hit trap", back: "Bazel does not track tools outside the workspace, so differing external toolchains can share an action hash. Whitelist environment with --action_env; give developer machines --remote_upload_local_results=false." },
+  { front: "Quarantine rules", back: "Move flakes above a measured threshold to non-blocking jobs that still run and report. Cap the quarantine, assign an owner, set an expiry — and never let test selection skip a flake." }
+]} />
+
+<Callout type="takeaways" items={[
+  "The merge queue breaks before the runner budget does. Speculative batching is a bet on your pass rate, and one failing PR invalidates every group behind it.",
+  "Compute E[merges] = (1 − p)(1 − (1 − p)^N)/p once for your real numbers. It turns 'CI feels slow' into a decision about which lever to pull.",
+  "Flakiness is throughput, not hygiene. At Google's published rates the noise is bigger than the signal — 84% of pass→fail transitions are flakes.",
+  "Size for burst concurrency, never daily average. The daily number is the one hiding the problem, and a saturated queue cancels jobs silently at 24 hours.",
+  "Test selection is the only sublinear lever: Bazel/Buck2 target determination, Develocity PTS with its simulator, pytest-testmon, or jest --changedSince.",
+  "When the agent writes both the fix and the test, green means less than you think. Gate on the test failing against pre-change source.",
+  "DORA's framing holds: AI amplifies the delivery system you already have. Small batches, fast suites and low flake were always the advice — agents just made ignoring it expensive."
+]} />
+
+## Sources & further reading
+
+- [GitHub Docs — Managing a merge queue](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue) — speculative groups, the `merge_group` event requirement, build concurrency and merge-limit settings, failure/removal behaviour
+- [GitHub Docs — Actions usage limits](https://docs.github.com/en/actions/reference/limits) — concurrent-job caps by plan, the 24-hour queue cancellation, 256-job matrix cap, job and workflow timeouts
+- [DORA — Accelerate State of DevOps Report 2024](https://dora.dev/research/2024/dora-report/) — the modelled effect of a 25% AI-adoption increase on delivery stability and throughput
+- [DORA — State of AI-assisted Software Development 2025](https://dora.dev/dora-report-2025/) — the "AI as amplifier" thesis and the focus on the underlying delivery system
+- [METR — Measuring the impact of early-2025 AI on experienced open-source developer productivity](https://metr.org/blog/2025-07-10-early-2025-ai-experienced-os-dev-study/) — the 16-developer, 246-issue randomised trial and the 19% slowdown
+- [Google Testing Blog — Flaky Tests at Google and How We Mitigate Them](https://testing.googleblog.com/2016/05/flaky-tests-at-google-and-how-we.html) — the ~1.5% flaky-run rate and the 84% pass→fail transition figure
+- [Google Testing Blog — Where do our flaky tests come from?](https://testing.googleblog.com/2017/04/where-do-our-flaky-tests-come-from.html) — follow-up analysis on flakiness sources
+- [Develocity — Predictive Test Selection](https://docs.develocity.ai/predictive-test-selection/) — the simulator, must-run tests, selection profiles, always-select-recently-flaky, remaining-tests mode
+- [Bazel — Remote caching](https://bazel.build/remote/caching) — action cache and CAS, how action hashes are computed, `--action_env`, the untracked-external-toolchain false-hit caveat
+- [pytest-testmon](https://github.com/tarpas/pytest-testmon) — coverage-based test impact analysis for Python
+- Related on AILmanac: [The Verification Bottleneck](/docs/frontiers/the-verification-bottleneck) — the human/review side of the same constraint
+- Related on AILmanac: [Open Code Review: the hybrid AI reviewer](/docs/models/open-code-review-hybrid-ai-reviewer) — a reviewer that doesn't share the author's context
+
+## Next
+
+- [The Verification Bottleneck](/docs/frontiers/the-verification-bottleneck) — why review, not typing, became the constraint
+- [GitHub Action that reviews every PR](/docs/walkthroughs/pr-review-action) — the concrete workflow to put in front of this pipeline
+- [Evaluating your AI agent](/docs/playbooks/evaluating-agents) — the eval gate that belongs in the same CI run
