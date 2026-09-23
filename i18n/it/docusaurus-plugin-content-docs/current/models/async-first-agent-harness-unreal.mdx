@@ -1,0 +1,349 @@
+---
+sidebar_position: 22.96
+title: "Harness agentici async-first: cosa cambia Unreal Agent"
+description: "Unreal Labs ha rilasciato un harness in Go con licenza MIT che eguaglia il pass rate di Codex su Terminal-Bench 4.0 spendendo il 39% in meno — non facendo mai aspettare il modello per uno strumento. Il meccanismo dell'event log, perché il numero di turni è la vera unità di costo, e le tre cose che hanno deliberatamente rifiutato di costruire."
+keywords: [Unreal Agent, Unreal Labs, agent harness, async tool calling, Terminal-Bench 4.0, SWE-Atlas, DeepSWE, agent cost optimization, Go agent framework, MIT license, Codex, agent loop, session store, agent sandbox security, SKILL.md]
+---
+
+<LevelBadge level="advanced" />
+
+Il **22 settembre 2026** Unreal Labs ha rilasciato **Unreal Agent** — un harness
+agentico con licenza MIT scritto in Go — e ha pubblicato run di benchmark che lo
+mostrano eguagliare il pass rate di Codex su Terminal-Bench 4.0 spendendo
+**$1,428 contro $2,350**. Stesso modello, stessi task, stesso punteggio, 39% in
+meno di soldi.
+
+La parte interessante non è il numero. È *dove* sono finiti i soldi. La tesi
+centrale di Unreal Agent è che una fetta consistente di quello che paghi a un
+agente di coding non è ragionamento affatto — è il modello seduto nel loop a
+gestire la propria attesa. Questa pagina parla di quel meccanismo, perché si
+trasferisce a qualunque harness tu costruisca o compri, comprese cose che non
+hanno nulla a che fare con Unreal Labs.
+
+<Callout type="objectives" items={[
+  "Capire il flusso di eventi delle chiamate a strumenti asincrone: cosa viene aggiunto al log di sessione, quando, e cosa vede davvero il modello",
+  "Imparare perché il numero di turni — non la lunghezza dell'output — è l'unità che guida il costo di un agente, e come misurarla nel tuo loop",
+  "Leggere onestamente la tabella dei costi pubblicata: cosa coprono le cifre in dollari e cosa no",
+  "Conoscere i tre design che Unreal Labs ha deliberatamente rifiutato di costruire (sub-agent, workflow, hook di sicurezza a livello di harness) e l'argomento dietro a ciascuno",
+  "Applicare le regole trasferibili al tuo agente, qualunque harness tu stia già usando"
+]} />
+
+<VerifyNote lastVerified="2026-09-23" source="https://github.com/unreallabsai/unreal-agent">
+Le cifre dei benchmark, l'architettura e le motivazioni di design vengono dal post
+di lancio e dal repository di Unreal Labs, pubblicati il 22 settembre 2026. Tutte
+le run di benchmark sono del fornitore stesso, eseguite con GPT-6 Astra a
+reasoning xhigh; al momento della scrittura non esisteva alcuna replica
+indipendente. Il repository mostrava circa 1.4k stelle il giorno dopo il lancio.
+</VerifyNote>
+
+## La versione in una frase
+
+Unreal Agent è un **harness in Go con licenza MIT** che aggiunge ogni chiamata a
+uno strumento a un log di sessione append-only come evento *in corso* e lascia che
+l'esecuzione prosegua in background, così il modello non si blocca mai e non fa
+mai polling — il che taglia i turni, e i turni sono ciò che paghi davvero.
+
+## Il meccanismo, con precisione
+
+Ecco un normale turno agentico sincrono:
+
+1. Il modello emette una chiamata a uno strumento.
+2. L'harness esegue lo strumento. Il loop è sospeso.
+3. Lo strumento restituisce. L'harness aggiunge il risultato.
+4. L'harness richiama il modello con l'intera trascrizione.
+
+Ora lo stesso turno in Unreal Agent:
+
+1. Il modello emette una chiamata a uno strumento.
+2. L'harness **immediatamente** aggiunge al log di sessione un evento che dice che
+   la chiamata è *in corso*, e avvia l'esecuzione in background.
+3. L'esecuzione prosegue. Il modello è libero di emettere altre chiamate.
+4. Quando lo strumento termina, il suo risultato viene aggiunto al log — e *quella*
+   aggiunta è ciò che innesca la chiamata successiva al modello.
+
+Il modello vede lo stato in esecuzione e poi il risultato finale, in ordine, nella
+propria trascrizione. Non deve mai codificare "aspetta questo", non emette mai un
+polling, non si porta dietro contabilità di heartbeat nel ragionamento. Come lo
+mette Unreal Labs: l'harness permette al modello di "emettere più chiamate pesanti
+a strumenti per turno di modello senza sprecare token in polling o attese".
+
+È tutta qui l'idea. È piccola. Ed è anche la parte che la maggior parte degli
+harness sbaglia, perché un loop sincrono è la cosa ovvia da scrivere.
+
+### Perché si vede sui soldi
+
+Ogni turno di modello rimanda l'intera trascrizione accumulata. Una run agentica da
+30 turni non costa 30× una singola chiamata — costa all'incirca la *somma di un
+contesto che cresce* lungo 30 chiamate. Il numero di turni è quindi più vicino a un
+driver di costo quadratico che lineare, e domina qualunque risparmio ottenuto
+sfrondando il system prompt.
+
+Guarda cosa riportano le run pubblicate accanto ai dollari:
+
+| Benchmark | Pass rate | Unreal Agent | Turni | Codex | Pi | Turni Pi |
+|---|---|---|---|---|---|---|
+| Terminal-Bench 4.0 | 57.9% | **$1,428** | 28 | $2,350 | $1,827 | 44 |
+| SWE-Atlas Codebase QnA | 65.8% | **$936** | 16 | $1,303 | $1,033 | — |
+| DeepSWE 1.1 | 72.4% | **$1,367** | 26 | $1,633 | $1,584 | — |
+| ALE-CLI | 30.0% pass completo | **$217** | — | — | — | — |
+
+Su Terminal-Bench 4.0 il confronto è 28 turni contro i 44 di Pi — una riduzione del
+36% nei turni per una riduzione del 22% nel costo rispetto a Pi, e del 39% rispetto
+a Codex. La colonna dei turni è quella causale; la colonna dei dollari è la
+conseguenza.
+
+È la stessa lezione che AILmanac affronta dall'altra direzione in
+[perché gli agenti bruciano token](/docs/models/why-agents-burn-tokens): la cosa
+costosa in un agente non è la risposta, è la rilettura.
+
+<Callout type="tip" items={[
+  "Strumenta il numero di turni prima di qualunque altra cosa. Se registri solo i token, ottimizzerai i prompt e ti perderai il loop.",
+  "Una diagnostica utile: conta quanti turni del tuo agente non hanno prodotto nessuna chiamata a strumenti e nessun output visibile all'utente. Quelli sono puro overhead di loop — attesa, controllo, ri-pianificazione — ed è esattamente ciò che un harness asincrono rimuove.",
+  "Gli strumenti che possono girare in parallelo amplificano l'effetto. Se i tuoi tre strumenti più lenti possono girare in concorrenza, un loop sincrono li paga tutti e tre in serie, sia in tempo reale SIA in turni."
+]} />
+
+## Tre cose che deliberatamente non hanno costruito
+
+Le motivazioni contano più del codice, perché sono argomenti che puoi applicare a
+qualunque harness tu stia già usando.
+
+### 1. Niente sub-agent, niente workflow
+
+Unreal Labs ha scelto "un modello di chiamata a strumenti asincrona lineare"
+invece della delega a sub-agent e dei workflow predefiniti. Il ragionamento è che,
+una volta che le chiamate a strumenti sono davvero asincrone, gran parte di ciò a
+cui servivano i sub-agent — far girare cose in parallelo senza bloccare il genitore
+— è già gestito dal loop. I sub-agent aggiungono allora frammentazione del
+contesto, fusione dei risultati e overhead di turni propri, per un problema che non
+hai più.
+
+È una posizione reale, non l'unica. I design multi-agente vincono ancora dove vuoi
+davvero un *contesto isolato*, non solo parallelismo. Ma "ci servono i sub-agent per
+fare due cose alla volta" è un'affermazione che vale la pena ritestare prima contro
+un loop asincrono.
+
+### 2. Niente hook di sicurezza a livello di harness
+
+Questo è l'argomento più tagliente del post di lancio, e vale la pena citarne la
+forma: sicurezza e approvazioni che si appoggiano a hook dell'harness "tendono a
+richiedere più manutenzione e a essere meno robuste di vincoli deterministici di
+ambiente o sandbox, fuori dall'harness".
+
+Cosa raccomandano al suo posto: host consentiti e vietati, token di accesso
+granulari e proxy con gate di approvazione. In altre parole, mettere il controllo
+dove l'agente fisicamente non può arrivare.
+
+La logica è lineare una volta enunciata. Un hook dell'harness è codice che gira
+nello stesso processo del loop dell'agente, a filtrare uno strumento che l'agente
+può già invocare. Un confine di sandbox è imposto dal kernel o dalla rete, sotto
+l'agente del tutto. Se il tuo agente ha uno strumento `bash` — e quello di Unreal
+Agent ce l'ha — una allowlist in-process è un dosso, non un muro. La pagina di
+AILmanac su
+[mettere in sicurezza agenti locali e ibridi](/docs/models/securing-local-and-hybrid-agents)
+spiega come costruire il confine esterno.
+
+### 3. Nessun SDK agentico di fornitore
+
+Unreal Labs si è allontanata dagli SDK dei fornitori (l'Agent SDK di Anthropic è
+nominato) perché quelli presuppongono "sessioni locali, sottoprocessi e limiti di
+risorse che non si traducono in modo pulito nell'uso in produzione".
+
+È un argomento sulla forma del deployment, non sulla qualità. Un SDK modellato su
+una sessione CLI locale presuppone un processo, una macchina, una durata. Una
+flotta di agenti in produzione vuole sessioni che sopravvivano a un processo e
+possano essere riprese su un'altra macchina — che è esattamente ciò che fornisce il
+**session store append-only e versionato** di Unreal Agent, incluso il fork di una
+sessione per biforcare una run.
+
+Se stai costruendo un prodotto sopra un loop agentico, questa è la domanda da fare
+a qualunque SDK: *una sessione può sopravvivere al processo che l'ha creata?*
+
+## L'architettura, in breve
+
+L'harness è deliberatamente piccolo ed esplicitamente componibile — otto componenti
+sostituibili dietro interfacce documentate:
+
+- **Session inbox** — deduplica gli input. Ogni input porta un ID chiamante
+  globalmente unico e stabile, così i retry non applicano due volte.
+- **Coordinator** — possiede i turni dell'LLM e smista le operazioni.
+- **Session store** — storia persistita append-only, supporta il fork, versionata.
+- **Context builder** — assembla l'input del modello. Non esegue **nessun I/O**.
+- **LLM adapter** — parla con il fornitore.
+- **Tool registry e translator** — validano le chiamate in modo sincrono e devono
+  "non eseguire alcun I/O né sospendere il loop".
+- **Operation manager** — esegue il lavoro in background durevole.
+
+Due vincoli in quell'elenco fanno il lavoro pesante ed è facile perderli: il
+**context builder e i tool translator hanno il divieto di fare I/O**. È questo che
+mantiene deterministico e non bloccante il percorso caldo del coordinator — tutta
+la latenza viene spinta nelle operazioni, che sono le cose progettate per essere
+asincrone. Se costruisci il tuo harness, questa è la regola da rubare.
+
+I formati di storage e le operazioni sono versionati, e una versione di sessione
+non supportata **dà errore esplicito alla ripresa** invece di caricarsi a metà. È
+la modalità di fallimento corretta per lo stato durevole, ed è più rara di quanto
+dovrebbe essere.
+
+La superficie di strumenti integrata è di tre strumenti: **Bash**, **ViewImage** e
+**Skill-use** — l'ultimo dei quali si aggancia al formato portabile di skill che
+AILmanac copre in [SKILL.md come standard aperto](/docs/models/skill-md-open-standard).
+Tre strumenti sono il punto: una superficie di strumenti piccola e a basso costo in
+token è parte della storia del costo.
+
+## Farlo girare
+
+<Steps items={[
+  { title: "Installa", body: "Toolchain Go 1.27+, poi go install del runner dal percorso cmd/, oppure clona e usa il Makefile incluso (make build, make test)." },
+  { title: "Scegli un fornitore", body: "Si seleziona tramite variabile d'ambiente. Sono supportati OpenAI, OpenAI Codex, OpenRouter, Fireworks e Ollama, così puoi puntare lo stesso harness su un modello di frontiera ospitato o su uno locale." },
+  { title: "Esegui un singolo prompt", body: "Il runner accetta -p per un prompt e -workspace per la directory in cui l'agente lavora, nella stessa forma di claude -p. L'output è una trascrizione JSONL che puoi redirigere su file." },
+  { title: "Leggi la trascrizione, non il riassunto", body: "Il log di run JSONL è dove il flusso di eventi asincrono è visibile: eventi in corso, poi risultati. Contare gli eventi di chiamata al modello lì dentro ti dà il numero di turni che guida la tua bolletta." },
+  { title: "Metti il confine fuori", body: "Prima di puntarlo su qualcosa di reale, imposta la sandbox: filesystem ristretto, host in allowlist, token con ambito. L'harness deliberatamente non lo fa per te." }
+]} />
+
+<PromptCard title="Installa ed esegui (dall'uso documentato da Unreal Labs)">
+{`go install github.com/unreallabsai/unreal-agent/cmd/unreal-agent-runner@latest
+
+export OPENAI_API_KEY="..."
+unreal-agent-runner -p 'Inspect this project and explain how to run its tests.'`}
+</PromptCard>
+
+<PromptCard title="Puntalo su un fornitore diverso e conserva la trascrizione">
+{`export UNREAL_HARNESS_LLM_PROVIDER=openrouter
+export UNREAL_HARNESS_LLM_MODEL=<model-id>
+
+unreal-agent-runner \\
+  -workspace ./my-project \\
+  -p 'Summarize this project.' > run.jsonl`}
+</PromptCard>
+
+## Leggere onestamente la tabella dei benchmark
+
+Quattro avvertenze, perché i numeri sono abbastanza buoni da meritare scrutinio:
+
+- **Ogni run è del fornitore stesso.** Nessuna terza parte le aveva replicate al
+  momento della scrittura.
+- **Un solo modello.** Tutte le run pubblicate hanno usato GPT-6 Astra a reasoning
+  xhigh. Il vantaggio asincrono dovrebbe generalizzare — è una proprietà del loop,
+  non del modello — ma "dovrebbe" non è "è stato misurato".
+- **I dollari sono totali di suite intera**, non costi per task. Sono confrontabili
+  tra loro e non con il tuo carico di lavoro.
+- **I pass rate sono eguagliati, non migliorati.** La tesi è esplicitamente *stesso
+  punteggio, meno soldi*. Su DeepSWE 1.1 Unreal Agent riporta 72.4% a $1,367
+  contro i $1,633 di Codex — un risparmio del 19%, notevolmente più piccolo del
+  39% su Terminal-Bench. Il vantaggio scala con quanto i tuoi task sono pesanti di
+  strumenti e a lunga durata. Su task brevi con poche chiamate a strumenti,
+  aspettati quasi nulla.
+
+Quest'ultimo punto è quello pratico. Se il tuo agente fa tre chiamate a strumenti e
+finisce, l'asincrono ti compra quasi niente. Se ne fa sessanta in mezz'ora, ti
+compra la differenza tra le due colonne.
+
+## Cosa si trasferisce al tuo agente
+
+Non devi adottare Unreal Agent per usare niente di tutto questo:
+
+- **Misura i turni.** È la variabile di costo che la maggior parte dei team non
+  registra.
+- **Rendi non bloccanti gli strumenti lenti**, anche se il tuo harness è per il
+  resto sincrono. Restituire subito un handle e consegnare il risultato come evento
+  successivo è un cambiamento che puoi fare dentro la maggior parte dei loop.
+- **Tieni il percorso caldo libero da I/O.** L'assemblaggio del contesto e la
+  validazione delle chiamate a strumenti non dovrebbero mai aspettare la rete.
+- **Sposta le approvazioni fuori dal processo.** Policy di rete, credenziali con
+  ambito e un proxy che fa da gate battono una allowlist in-process che vive
+  accanto a uno strumento `bash`.
+- **Riduci la superficie di strumenti.** Tre buoni strumenti costano meno token per
+  turno di quindici mediocri, a ogni singolo turno.
+
+<Quiz questions={[
+  {
+    q: "In Unreal Agent, cosa succede nell'istante in cui il modello emette una chiamata a uno strumento?",
+    options: [
+      "Il loop si sospende finché lo strumento non restituisce",
+      "Un evento 'in corso' viene aggiunto al log di sessione e l'esecuzione prosegue in background",
+      "La chiamata viene accodata fino alla fine del turno",
+      "Viene generato un sub-agent che prende in carico la chiamata"
+    ],
+    answer: 1,
+    explain: "L'harness aggiunge immediatamente un evento 'in corso' e manda l'esecuzione in background. Quando lo strumento finisce, il suo risultato viene aggiunto, e quell'aggiunta è ciò che innesca la chiamata successiva al modello. Il modello non fa mai polling e non si blocca mai."
+  },
+  {
+    q: "Perché tagliare il numero di turni fa risparmiare più soldi che tagliare la lunghezza dell'output in un loop agentico?",
+    options: [
+      "I token di output costano meno di quelli di input",
+      "Ogni turno rimanda la trascrizione accumulata, quindi il costo cresce più che linearmente con i turni",
+      "I fornitori applicano una tariffa fissa per turno",
+      "I turni sono fatturati alla tariffa dei token di reasoning"
+    ],
+    answer: 1,
+    explain: "Ogni chiamata al modello si porta dietro l'intera trascrizione che cresce. Una run da 30 turni paga 30 volte un contesto in crescita. È per questo che la run Terminal-Bench da 28 turni di Unreal Agent batte sul costo quella da 44 turni di Pi a parità di pass rate."
+  },
+  {
+    q: "Perché Unreal Labs sostiene che le approvazioni non vadano implementate come hook dell'harness?",
+    options: [
+      "Gli hook sono più lenti delle chiamate native",
+      "Gli hook girano nello stesso processo di un agente che ha già uno strumento bash, quindi una sandbox o un confine di rete è il controllo più robusto",
+      "Gli hook non sono supportati in Go",
+      "Gli hook rompono il fork delle sessioni"
+    ],
+    answer: 1,
+    explain: "La loro posizione è che vincoli deterministici di ambiente e sandbox fuori dall'harness — host consentiti, token granulari, proxy di approvazione — siano più robusti e a minore manutenzione dei gate in-process piazzati accanto a uno strumento che può eseguire comandi arbitrari."
+  },
+  {
+    q: "Al context builder e ai tool translator è vietato eseguire I/O. Cosa compra questo vincolo?",
+    options: [
+      "Un binario più piccolo",
+      "Compatibilità con più fornitori",
+      "Un percorso caldo deterministico e non bloccante — tutta la latenza viene spinta nelle operazioni, che sono i componenti progettati per essere asincroni",
+      "Meno token per chiamata"
+    ],
+    answer: 2,
+    explain: "Tenere assemblaggio e validazione liberi da I/O è ciò che permette al coordinator di restare non bloccante. Tutto ciò che può aspettare appartiene a un'operazione. È la regola di design più portabile di tutto l'harness."
+  },
+  {
+    q: "Su che tipo di carico di lavoro dovresti aspettarti che il vantaggio asincrono sia minimo?",
+    options: [
+      "Sessioni autonome lunghe con molte chiamate lente a strumenti",
+      "Task brevi che finiscono in una manciata di chiamate a strumenti",
+      "Task che leggono codebase grandi",
+      "Task che eseguono strumenti in parallelo"
+    ],
+    answer: 1,
+    explain: "Il risparmio viene dal rimuovere turni di attesa e polling. Con poche chiamate a strumenti c'è poca attesa da rimuovere — il che è coerente con lo spread pubblicato: 39% più economico su Terminal-Bench 4.0 ma 19% su DeepSWE 1.1."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Unreal Agent — cosa e quando", back: "22 settembre 2026. Unreal Labs. Harness agentico async-first con licenza MIT in Go (modulo github.com/unreallabsai/unreal-agent, Go 1.27+). Arriva come libreria, eseguibile runner e runner di benchmark compatibile con Harbor. ~1.4k stelle il giorno dopo il lancio." },
+  { front: "Il flusso di eventi asincrono", back: "Chiamata a strumento -> evento 'in corso' aggiunto subito al log di sessione, esecuzione in background -> al completamento il risultato viene aggiunto, e quell'aggiunta innesca la chiamata successiva al modello. Nessun blocco, nessun turno di polling." },
+  { front: "Benchmark di punta", back: "Terminal-Bench 4.0: 57.9% di pass, $1,428, 28 turni. Codex: stesso pass rate, $2,350 (39% in più). Pi: $1,827 su 44 turni (28% in più). Tutte le run eseguite dal fornitore con GPT-6 Astra a reasoning xhigh." },
+  { front: "Dove il vantaggio si restringe", back: "DeepSWE 1.1: 72.4% a $1,367 contro i $1,633 di Codex — 19%, non 39%. Il risparmio scala con quanto il task è pesante di strumenti e a lunga durata. I task brevi guadagnano poco." },
+  { front: "Deliberatamente non costruito", back: "Niente sub-agent, niente workflow (le chiamate asincrone a strumenti danno già il parallelismo). Nessun hook di sicurezza a livello di harness (usa sandbox, host consentiti, token con ambito, proxy di approvazione). Nessun SDK agentico di fornitore (presuppongono sessioni locali e sottoprocessi)." },
+  { front: "Gli otto componenti", back: "Session inbox (dedup tramite ID chiamante stabile), coordinator, session store (append-only, forkabile, versionato), context builder, LLM adapter, tool registry, tool translator, operation manager." },
+  { front: "La regola che vale la pena rubare", back: "Context builder e tool translator non devono eseguire alcun I/O né sospendere il loop. Tutta la latenza vive nelle operazioni. È questo che mantiene deterministico il percorso caldo." },
+  { front: "Superficie di strumenti e fornitori", back: "Tre strumenti integrati: Bash, ViewImage, Skill-use. Fornitori selezionati tramite variabile d'ambiente: OpenAI, OpenAI Codex, OpenRouter, Fireworks, Ollama." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Il numero di turni, non quello di token, è la variabile di costo in un loop agentico. Strumentalo per primo.",
+  "Rendere non bloccanti le chiamate a strumenti rimuove i turni di polling e attesa — 28 turni contro 44 a parità di pass rate su Terminal-Bench 4.0 è tutto l'argomento.",
+  "Il vantaggio è proporzionale alla pesantezza di strumenti: 39% su Terminal-Bench, 19% su DeepSWE, ~0 su un task da tre chiamate.",
+  "La sicurezza sta fuori dall'harness. Un hook di approvazione in-process accanto a uno strumento bash è un dosso; una sandbox e un proxy che fa da gate sono un confine.",
+  "Tieni assemblaggio del contesto e validazione degli strumenti liberi da I/O. Spingi ogni attesa dentro un'operazione durevole.",
+  "Tutti i numeri pubblicati sono run del fornitore su un solo modello. Trattali come un'ipotesi ben argomentata sul tuo carico di lavoro, non come una sua misurazione."
+]} />
+
+## Fonti e approfondimenti
+
+- [Unreal Labs — Unreal Agent (post di lancio)](https://unreallabs.ai/blog/unreal-agent/) — la descrizione del flusso di eventi asincrono, le tabelle di benchmark e costo, e le motivazioni di design per ciò che hanno rifiutato di costruire
+- [GitHub — unreallabsai/unreal-agent](https://github.com/unreallabsai/unreal-agent) — licenza MIT, modulo Go, l'architettura a otto componenti, i vincoli di assenza di I/O, il session store versionato
+- [AI/TLDR — pagina dello strumento Unreal Agent](https://ai-tldr.dev/tools/unreal-agent/) — comando di installazione, flag del runner, variabili d'ambiente dei fornitori
+- Correlato su AILmanac: [Perché gli agenti bruciano token](/docs/models/why-agents-burn-tokens) — le meccaniche di costo che questo harness sta attaccando
+- Correlato su AILmanac: [Mettere in sicurezza agenti locali e ibridi](/docs/models/securing-local-and-hybrid-agents) — come costruire il confine di sandbox che Unreal Agent si aspetta tu fornisca
+- Correlato su AILmanac: [SKILL.md come standard aperto](/docs/models/skill-md-open-standard) — il formato dietro lo strumento Skill-use dell'harness
+
+## Avanti
+
+- [Framework agentici open source](/docs/models/open-source-agent-frameworks) — il campo più ampio in cui questo si colloca
+- [CLI di agenti di coding a confronto](/docs/models/coding-agent-clis-compared) — gli strumenti a cui la maggior parte delle persone ricorre invece
+- [Agenti AI locali](/docs/models/local-ai-agents) — puntare lo stesso loop su un modello che ospiti tu
