@@ -1,0 +1,287 @@
+---
+sidebar_position: 10.6
+title: "Optical Context Compression: Sending Text as an Image"
+description: "Render your context into a picture and the vision encoder becomes a compression dial. Measured across Anthropic, OpenAI and Google, an image of code counts 76–87% fewer input tokens than the same code as text — and on Gemini it can cost 6.95x MORE. The mechanism, the accuracy cliff, and how to test it on your own documents."
+keywords: [optical context compression, visual text compression, text as image tokens, DeepSeek-OCR, Glyph, LensVLM, vision tokens, image token cost, long context compression, VLM context window]
+---
+
+<LevelBadge level="advanced" />
+
+Every long-context trick of the last two years tried to make the *tokenizer* cheaper: better chunking, better retrieval, sparser attention. A different line of work asks a stranger question — **what if you stop tokenizing the text at all, render it into a picture, and let the vision encoder do the compressing?**
+
+It sounds like a joke. It isn't. Apple's [LensVLM](https://arxiv.org/abs/2605.07019) hit the Hacker News front page this week doing exactly this, and it sits on top of a year of results — DeepSeek-OCR, Tsinghua/Zhipu's Glyph — showing that a page of text costs **far fewer tokens as pixels than as characters**, right up until it suddenly doesn't.
+
+This page covers the mechanism (it's simpler than you'd guess), the numbers across Claude, GPT and Gemini (they disagree violently), the accuracy cliff that everyone hits, and a 15-minute experiment to find where that cliff is on *your* documents.
+
+<Callout type="objectives" items={[
+  "Explain why rendering resolution is a continuous compression dial while a text tokenizer has no dial at all",
+  "Read the per-provider image-token formulas — Claude's 28x28 patches, OpenAI's 32x32 patches, Gemini's 258-token tiles — and predict which way a given input will go",
+  "Cite the measured cross-provider ratios: 0.135 on Anthropic, 0.194 on OpenAI, 0.242 on Google — and the case where Gemini charges 6.95x more",
+  "Name the cliff: accuracy collapses when glyphs shrink below the vision encoder's effective resolution, and the provider downscales you into it silently",
+  "Decide when optical compression is worth it (long static reference material) and when it is malpractice (anything the model must edit or quote exactly)"
+]} />
+
+<VerifyNote lastVerified="2026-09-24" source="https://platform.claude.com/docs/en/build-with-claude/vision">
+Per-provider image-token formulas, resolution caps and per-request image limits change with every model generation — the Claude high-resolution tier (2576 px / 4784 visual tokens) did not exist before Claude 4.7. Treat every specific number here as perishable and re-check it against each provider's vision docs before you size a pipeline on it. The **mechanism** — resolution as a compression knob, and the legibility cliff underneath it — is durable.
+</VerifyNote>
+
+## The mechanism: resolution is the dial a tokenizer never had
+
+A text tokenizer gives you a roughly fixed exchange rate. English prose lands near four characters per token, source code somewhat worse, and there is **no setting** that changes it. You can delete text or you can pay for it.
+
+A vision encoder works the opposite way. It maps an image of a given size to a **fixed number of visual tokens**, regardless of how much information you crammed into those pixels. Render 40 lines of text into a 1000x1000 image and you pay for a 1000x1000 image. Render 400 lines into the same 1000x1000 image, at a tenth of the font size, and you pay **exactly the same**.
+
+That is the whole idea. Rendering resolution becomes a continuous compression knob — and unlike chunking or summarization, it is *lossy in a visual way*: nothing is removed, everything just gets smaller.
+
+Each provider turns pixels into tokens differently, and the differences matter more than the marketing:
+
+| Provider | How images are counted | Practical consequence |
+| --- | --- | --- |
+| **Claude** | 28x28-pixel patches: an image costs `ceil(width/28) x ceil(height/28)` visual tokens | Cheap per pixel, and hard-capped (see below) |
+| **OpenAI** | 32x32-pixel patches, multiplied by a per-model multiplier; high-detail mode allows up to 2500 patches | A 1024x1024 image is 1024 patches, billed as `ceil(1024 x 1.2)` = 1229 tokens on a 1.2x-multiplier model |
+| **Gemini** | Any image with both dimensions ≤ 384 px costs a flat **258 tokens**; bigger images are cut into 768x768 tiles at **258 tokens each** | There is a hard **floor**. A postage-stamp image of three lines of code still costs 258 tokens |
+
+<Callout type="key" items={[
+  "A text tokenizer has a fixed exchange rate. A vision encoder has a knob: same image size, same price, however much text you pour in.",
+  "Claude bills per 28x28 patch, OpenAI per 32x32 patch times a model multiplier, Gemini per 258-token tile with a 258-token floor.",
+  "Gemini's floor is why short inputs get MORE expensive as images — there is no such thing as a cheap small image."
+]} />
+
+## The measured numbers, and the one that goes the wrong way
+
+In July 2026 a cross-provider study ([arXiv 2607.21672](https://arxiv.org/abs/2607.21672)) did the boring, necessary work: it took real source code — five languages, nine lengths from 20 to 2,000 lines, 15 model aliases, 675 matched text/image pairs — and asked each provider's own API how many input tokens it counted, as text and as a rendered image.
+
+Aggregate image-to-text token ratios:
+
+| Provider | Image / text token ratio | Reduction |
+| --- | --- | --- |
+| Anthropic | **0.135** | 86.5% fewer counted tokens |
+| OpenAI | **0.194** | 80.6% fewer |
+| Google (Vertex AI) | **0.242** | 75.8% fewer |
+
+So far, so uniformly good. The interesting result is the **shape**, not the average. On Anthropic and OpenAI, images counted lower **at every tested size** — even 20 lines. On Gemini, an image of 20 lines of code cost **6.95x as many tokens as the text**, and images only dropped below text at around **200 lines**.
+
+That is the 258-token floor doing its work. Below roughly 200 lines, you are buying a whole tile to hold a handful of glyphs.
+
+<Callout type="warning" items={[
+  "That study measured token ACCOUNTING only. The authors are explicit: it does not measure semantic fidelity, task accuracy, latency, monetary cost, or coding-agent efficiency.",
+  "A 7x smaller token count that answers 40% of your questions wrong is not a 7x saving. Token count is the easy half of this decision.",
+  "Provider ratios are not transferable. The same pipeline that saves 86% on Claude can cost you 7x on Gemini for short inputs."
+]} />
+
+## The non-obvious part: the cap is doing most of the work
+
+Here is what makes those aggregate ratios look so spectacular on long files, and why they are a trap.
+
+Claude does not let you buy an arbitrarily large image. Each model sits in a resolution tier with a **long-edge limit and a visual-token limit**, and anything larger is **downscaled before processing**:
+
+| Tier | Models | Max long edge | Max visual tokens |
+| --- | --- | --- | --- |
+| High-resolution | Claude 4.7 and later | 2576 px | 4784 |
+| Standard | All other models | 1568 px | 1568 |
+
+Read that as a price ceiling. On a standard-tier model, one image costs **at most 1568 visual tokens** — whether it contains 200 lines of code or 2,000. Pour in more text and the bill does not move.
+
+Neither does the pixel budget. The glyphs just get smaller.
+
+This is exactly the failure mode the LensVLM authors name: accuracy *"deteriorates quickly as compression increases: characters shrink below the vision encoder's effective resolution, making them indistinguishable."* The downscaling is silent — no error, no warning, and the token count looks fantastic right up to the point where the model is confidently reading blurred text.
+
+<Callout type="key" items={[
+  "One image on Claude is a fixed-price container: ≤1568 visual tokens standard, ≤4784 on the high-resolution tier (Claude 4.7+).",
+  "Spectacular compression ratios on big files are mostly the provider downscaling you into that cap — not the encoder being clever.",
+  "The token counter cannot see legibility. Your eval has to, which is why the experiment below is not optional."
+]} />
+
+## What the research says the real ceiling is
+
+Three papers bracket the usable range. None of them claims you can compress indefinitely.
+
+**DeepSeek-OCR** ([arXiv 2510.18234](https://arxiv.org/abs/2510.18234), MIT-licensed, ~23.9k stars) framed the whole idea as "contexts optical compression" and put a number on the decay: when text tokens are within **10x** the vision tokens, OCR precision holds around **97%**. Push to **20x** compression and precision falls to roughly **60%**. Its encoder offers fixed modes — 512x512 at 64 vision tokens, 640x640 at 100, 1024x1024 at 256, 1280x1280 at 400 — and at 100 vision tokens per page it beat GOT-OCR2.0 running at 256 tokens per page on OmniDocBench, while under 800 tokens it beat MinerU2.0's 6,000-plus.
+
+**Glyph** ([arXiv 2510.17800](https://arxiv.org/abs/2510.17800), Tsinghua + Zhipu AI) attacked the context window rather than OCR: render long text to images, feed a VLM, and get **3–4x token compression** at accuracy comparable to Qwen3-8B on long-context benchmarks — plus roughly **4x faster prefilling and decoding** and about **2x faster SFT training**. Under aggressive compression, they report a 128K-context VLM reaching 1M-token-level text tasks. Notably, they did not hand-tune the rendering: an **LLM-driven genetic search** looked for the font, layout and resolution that balance accuracy against compression. Rendering configuration is a hyperparameter, not a detail.
+
+**LensVLM** ([arXiv 2605.07019](https://arxiv.org/abs/2605.07019), Apple, May 2026) added the missing piece — a way out of the cliff. Built on Qwen3.5-9B-Base, it ships at 5x, 10x and 15x compression levels and gives the model a `read_page` tool: **scan everything compressed, then expand only the pages you actually need** back to full resolution. It holds accuracy comparable to the full-text upper bound at **4.3x effective compression**, and beats retrieval-based, text-compression and visual-compression baselines out to **10.1x** across seven text-QA benchmarks. Weights are on Hugging Face as `apple/LensVLM-9B` under Apple's research model license; code is at [apple-aiml-research/ml-lensvlm](https://github.com/apple-aiml-research/ml-lensvlm).
+
+<Callout type="key" items={[
+  "Roughly 10x is where the published evidence stops being comfortable: 97% precision under 10x, ~60% at 20x (DeepSeek-OCR).",
+  "Glyph's 3-4x is the conservative, accuracy-preserving setting — and it bought ~4x faster prefill along with it.",
+  "LensVLM's contribution is the escape hatch: selective re-expansion, so one bad page doesn't sink the answer."
+]} />
+
+## Why selective expansion beats retrieval (and when it doesn't)
+
+On paper this looks like RAG with extra steps. It isn't, and the difference is worth understanding.
+
+Retrieval **pre-indexes the entire corpus before any question exists**. You chunk, embed, and store — and every downstream answer inherits whatever your chunk boundaries destroyed: a table split across two chunks, a footnote severed from its claim, a function separated from its imports.
+
+Optical scan-and-expand inverts that. The whole document enters the context **as compressed visual tokens, intact**, layout and all. The model reads the low-resolution version, decides which pages matter for *this* question, and pays full price only for those. No pre-indexing, no chunk boundaries, no embedding model to keep in sync with the corpus.
+
+The LensVLM analysis adds a useful refinement: **text expansion works best for rendered text, while high-resolution image expansion suits native documents where layout carries task-relevant information.** Expanding a rendered page back to characters is cheaper and cleaner; expanding a scanned invoice to full resolution keeps the spatial structure you needed in the first place.
+
+Where retrieval still wins: corpora far larger than any context window, anything that needs exact provenance and character offsets, and any pipeline where you must prove which source produced which sentence.
+
+## Try it on your own documents in 15 minutes
+
+Do not adopt this on the strength of anyone's aggregate ratio — including the ones on this page. The variables that decide it are yours: your font, your line length, your provider, your questions.
+
+<Steps items={[
+  {
+    title: "Render one real document at three resolutions",
+    body: "Take a document you actually feed to a model. Render it to PNG three times — comfortable, half-size, quarter-size — using a monospace font and whatever renderer you have (Pillow, headless Chrome, wkhtmltoimage). Keep the text identical across all three; only the pixel dimensions change. PNG, not JPEG: Anthropic's own vision guidance warns that lossy compression artifacts make small text hard to read, and this is the exact case where that bites."
+  },
+  {
+    title: "Count tokens both ways, with the provider's own counter",
+    body: "Do not estimate. Anthropic exposes /v1/messages/count_tokens, OpenAI publishes an image token calculator, Google exposes countTokens. Send the text version and each image version and record the real counted input tokens. This is where you discover whether your inputs are above or below Gemini's ~200-line crossover."
+  },
+  {
+    title: "Ask the same questions of every version",
+    body: "Write ten questions whose answers live at different depths in the document — one in a table, one in a footnote, one requiring an exact number, one requiring a quoted identifier. Run all ten against the text version and against each image version. The text version is your upper bound, not a competitor."
+  },
+  {
+    title: "Find YOUR cliff, then back off from it",
+    body: "Plot accuracy against effective compression. You are looking for the resolution where exact-value questions start failing first — numbers and identifiers degrade before prose does, because a blurred 3 and a blurred 8 are the same handful of pixels. Published work puts the comfortable zone near 4x and the edge near 10x; your font and line length will move both."
+  },
+  {
+    title: "Decide per document class, not once",
+    body: "The answer is almost never global. A 400-page policy PDF you query all week and a 30-line config file are different decisions on the same provider. Set the rendering resolution per document class and keep the text path for everything the model has to edit."
+  }
+]} />
+
+<PromptCard title="Count the same content both ways on Claude">
+{`# 1. Render text to PNG at a chosen width (Pillow)
+python - <<'PY'
+from PIL import Image, ImageDraw, ImageFont
+text = open("document.txt").read()
+font = ImageFont.truetype("DejaVuSansMono.ttf", 14)   # try 14, 9, 6
+lines = text.splitlines()
+img = Image.new("RGB", (1400, 18 * len(lines) + 20), "white")
+d = ImageDraw.Draw(img)
+for i, line in enumerate(lines):
+    d.text((10, 10 + 18 * i), line, font=font, fill="black")
+img.save("document.png")   # split into page-sized images if it is tall
+PY
+
+# 2. Ask Claude what each version actually costs
+curl https://api.anthropic.com/v1/messages/count_tokens \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "content-type: application/json" \\
+  -d '{
+    "model": "claude-opus-5-5",
+    "messages": [{"role":"user","content":[
+      {"type":"image","source":{"type":"base64","media_type":"image/png","data":"'"$(base64 -i document.png)"'"}},
+      {"type":"text","text":"Answer only from this document."}
+    ]}]
+  }'`}
+</PromptCard>
+
+## When it is worth it — and when it is malpractice
+
+**Reach for optical compression when:**
+
+- The material is **long, static and read-only** — policy manuals, standards, API references, legal corpora you query repeatedly but never edit.
+- The source is **already visual** — scanned PDFs, forms, invoices, slide decks. You were going to pay image tokens anyway; rendering is free.
+- **Layout carries meaning** — tables, multi-column documents, anything where serialising to Markdown destroys the relationships you need.
+- You need **many pages in view at once** and retrieval keeps slicing through the answer.
+
+**Keep the text path when:**
+
+- The model has to **edit, diff or patch** the content. A coding agent needs line numbers, exact whitespace and byte-accurate quoting; none of that survives a round trip through pixels.
+- **A single wrong character is unacceptable** — account numbers, dosages, legal citations, config values. This is where the resolution cliff shows up first.
+- The input is **short**. On Gemini you will pay more, and on any provider you are trading real accuracy for a rounding error in cost.
+- You need **exact citation offsets** back into the source.
+
+<Callout type="warning" items={[
+  "Oversized images are downscaled silently on Claude unless you explicitly ask for an error instead — your legibility can degrade with no signal in the response.",
+  "Sending more than 20 image blocks in one Claude request triggers a stricter per-image dimension limit on EVERY image in that request; keep each under 2000 px per side or keep the request to 20 blocks.",
+  "Per-request image caps are 100 for 200k-context models and 600 otherwise, and a 32 MB request size limit usually bites first — use the Files API and reference images by file_id.",
+  "Prompt caching does apply to image content blocks in user turns, but minimum cacheable prompt lengths still apply; confirm with cache_read_input_tokens in the response rather than assuming."
+]} />
+
+<Flashcards title="Optical compression vocabulary" cards={[
+  {front: "Optical context compression", back: "Rendering text into images and feeding it to a vision-language model, so the vision encoder's fixed tokens-per-image budget acts as a compression dial. Coined in DeepSeek-OCR (Oct 2025)."},
+  {front: "Visual token", back: "The unit a vision encoder bills in. On Claude, one 28x28-pixel patch; an image costs ceil(w/28) x ceil(h/28) of them, capped by the model's resolution tier."},
+  {front: "Effective compression", back: "Text tokens the content would have cost, divided by the visual tokens it actually costs. DeepSeek-OCR holds ~97% precision below 10x and falls to ~60% at 20x."},
+  {front: "Resolution cliff", back: "The point where glyphs shrink below the vision encoder's effective resolution and become indistinguishable. Exact values (digits, IDs) fail before prose does."},
+  {front: "Selective expansion", back: "LensVLM's read_page pattern: scan the whole document at high compression, then re-expand only the pages the model judges relevant. Accuracy comparable to full text at 4.3x."},
+  {front: "Resolution tier (Claude)", back: "Standard: 1568 px long edge / 1568 visual tokens. High-resolution (Claude 4.7+): 2576 px / 4784. Anything larger is downscaled before processing, silently."},
+  {front: "Gemini's 258-token floor", back: "Any image with both dimensions under 384 px costs a flat 258 tokens; larger images are 768x768 tiles at 258 tokens each. Short inputs cost MORE as images."},
+  {front: "Genetic rendering search (Glyph)", back: "Using an LLM-driven search over font, layout and resolution to find the rendering configuration that maximises compression at a target accuracy — rendering config is a hyperparameter."},
+]} />
+
+## Quiz
+
+<Quiz questions={[
+  {
+    q: "A cross-provider study found image-to-text token ratios of 0.135 (Anthropic), 0.194 (OpenAI) and 0.242 (Google). What is the most important caveat before acting on those numbers?",
+    options: [
+      "They only apply to English text",
+      "They measure token accounting only — not semantic fidelity, task accuracy, latency or cost",
+      "They were measured on retired models",
+      "They exclude output tokens"
+    ],
+    answer: 1,
+    explain: "The authors state it explicitly. A smaller token count that produces wrong answers is not a saving, which is why you need your own accuracy eval alongside the counter."
+  },
+  {
+    q: "Why does rendering 20 lines of code as an image cost 6.95x MORE than the text on Gemini, but less on Claude and OpenAI?",
+    options: [
+      "Gemini uses a slower vision encoder",
+      "Gemini charges a flat 258 tokens per tile with no smaller unit, so tiny images hit a floor",
+      "Gemini refuses images under 384 px",
+      "Claude and OpenAI discount code images"
+    ],
+    answer: 1,
+    explain: "Any Gemini image under 384 px on both sides still costs 258 tokens. Below roughly 200 lines you are buying a whole tile to hold a few glyphs; images only drop below text above that."
+  },
+  {
+    q: "On a standard-tier Claude model, you render 200 lines into one image and then 2,000 lines into an image of the same dimensions. What happens to the token count?",
+    options: [
+      "It scales with the amount of text",
+      "It stays the same — the image size sets the price, capped at 1568 visual tokens — while the glyphs get smaller",
+      "The request is rejected",
+      "It doubles"
+    ],
+    answer: 1,
+    explain: "The image is a fixed-price container. That is why huge compression ratios look great on long files: the provider is downscaling you toward the legibility cliff while the counter stays flat."
+  },
+  {
+    q: "What does LensVLM's read_page tool add over plain visual compression?",
+    options: [
+      "It runs OCR before the model sees anything",
+      "It lets the model scan everything compressed, then re-expand only the pages it judges relevant to the question",
+      "It pre-indexes the corpus into embeddings",
+      "It converts images back to Markdown automatically"
+    ],
+    answer: 1,
+    explain: "Selective expansion is the escape hatch from the resolution cliff, and it is why LensVLM matches full-text accuracy at 4.3x compression without pre-indexing anything."
+  },
+  {
+    q: "Which workload is the WORST fit for optical context compression?",
+    options: [
+      "A 400-page policy PDF you query all week",
+      "A coding agent that must patch exact lines and preserve whitespace",
+      "Scanned invoices where column layout matters",
+      "A multi-column standards document"
+    ],
+    answer: 1,
+    explain: "Editing needs line numbers, exact whitespace and byte-accurate quoting — none of which survives a round trip through pixels. Keep the text path for anything the model writes back."
+  }
+]} />
+
+## Sources & further reading
+
+- [LensVLM: Selective Context Expansion for Compressed Visual Representation of Text (arXiv 2605.07019)](https://arxiv.org/abs/2605.07019) — Apple, May 2026: 4.3x at full-text-comparable accuracy, wins to 10.1x, the resolution-cliff explanation, and the text-vs-image expansion finding.
+- [apple-aiml-research/ml-lensvlm](https://github.com/apple-aiml-research/ml-lensvlm) and [apple/LensVLM-9B](https://huggingface.co/apple/LensVLM-9B) — inference framework, the 5x/10x/15x compression levels and the `read_page` tool. Apple research model licence, not open-weight in the MIT sense.
+- [DeepSeek-OCR: Contexts Optical Compression (arXiv 2510.18234)](https://arxiv.org/abs/2510.18234) and [deepseek-ai/DeepSeek-OCR](https://github.com/deepseek-ai/DeepSeek-OCR) — the 97%-under-10x / ~60%-at-20x decay curve, the fixed resolution modes and their vision-token counts. MIT.
+- [Glyph: Scaling Context Windows via Visual-Text Compression (arXiv 2510.17800)](https://arxiv.org/abs/2510.17800) and [thu-coai/Glyph](https://github.com/thu-coai/Glyph) — Tsinghua + Zhipu: 3–4x compression, ~4x faster prefill and decode, and the LLM-driven genetic search over rendering configurations.
+- [Pixels for Programs? A Cross-Provider Case Study of Input-Token Accounting for Source Code as Text and Images (arXiv 2607.21672)](https://arxiv.org/abs/2607.21672) — the 0.135 / 0.194 / 0.242 ratios, the Gemini 6.95x result at 20 lines, and the explicit accounting-only scope.
+- [Claude vision documentation](https://platform.claude.com/docs/en/build-with-claude/vision) — the 28x28 patch formula, both resolution tiers, per-request image limits and the JPEG-artifact warning.
+- [Gemini: understand and count tokens](https://ai.google.dev/gemini-api/docs/tokens) and [OpenAI image token and cost calculator](https://developers.openai.com/api/docs/guides/image-cost-calculator) — the other two accounting models.
+- AILmanac companions: [Why AI agents burn tokens](/docs/models/why-agents-burn-tokens) · [The token economy](/docs/power-user/token-economy) · [What AI costs across providers](/docs/models/what-ai-costs-across-providers)
+
+## Next
+
+- [Why AI agents burn tokens (and how to cap the bill)](/docs/models/why-agents-burn-tokens) — the other half of the input-token problem: the context snowball that optical compression only partly relieves
+- [What AI actually costs across providers](/docs/models/what-ai-costs-across-providers) — turn the token ratios above into a bill
+- [DeepSeek V4-Flash-Vision: the first native-vision frontier open weight](/docs/models/deepseek-v4-flash-vision-open-multimodal) — an open model that reads pixels natively, if you want to run this yourself
