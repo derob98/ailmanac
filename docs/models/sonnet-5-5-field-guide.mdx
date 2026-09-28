@@ -1,0 +1,559 @@
+---
+sidebar_position: 1.5
+title: "Claude Sonnet 5.5: The Field Guide"
+description: "Sonnet 5.5 shipped 28 September 2026 at exactly Sonnet 5's prices — $2/$10 per MTok — and Anthropic still claims up to 30% less per task. The saving is in the token count, not the rate card. Five breaking changes 400-error a Sonnet 5 codebase, a sixth returns 200 and silences your progress UI, thinking can no longer be disabled (only moved between tool calls), and on Terminal-Bench 4.0 the cheap model scores 70.6% against Opus 5.5's 66.4%."
+keywords: [Claude Sonnet 5.5, claude-sonnet-5-5, Sonnet 5.5 migration, Sonnet 5.5 breaking changes, between_tools, thinking disabled 400, forced tool use removed, effort high default, progress update thinking blocks, Terminal-Bench 4.0, GDPval-AA, preserved thinking binding, computer_toolset_20260801, advisor tool, reasoning_extraction refusal, 512 token cache minimum]
+---
+
+<LevelBadge level="intermediate" />
+
+On **28 September 2026** Anthropic released **Claude Sonnet 5.5** (`claude-sonnet-5-5`) — the
+second model in the 5.5 family, after Opus 5.5 six days earlier. The rate card is the interesting
+part precisely because it did *not* move: **$2 in / $10 out per MTok**, byte-for-byte Sonnet 5's
+prices, same tokenizer, same cache and batch rates. Anthropic's claim is nonetheless **output more
+than 30% faster and up to 30% less per task**.
+
+Both can be true at once, and understanding why is the whole point of this page: on Sonnet 5.5 the
+saving lives in the **token count and the turn count**, never in the price per token. That changes
+what you measure, and it changes which knob you reach for first.
+
+The second thing worth knowing on day one: the cheap model is not uniformly behind the expensive
+one. On **Terminal-Bench 4.0** Sonnet 5.5 scores **70.6%** against Opus 5.5's **66.4%** — the one
+published row where the half-price model is ahead. And on knowledge-work Elo the two are a
+statistical tie. The gap that remains is concentrated somewhere specific, and this page says where.
+
+<Callout type="objectives" items={[
+  "Know the real numbers: $2/$10 per MTok unchanged from Sonnet 5, 1M context, 128K max output (300K on Batches), June 2026 cutoff, default effort high",
+  "Fix the five breaking changes that 400-error a Sonnet 5 codebase, and the sixth that returns 200 and makes your progress UI go silent",
+  "Use between_tools correctly — the replacement for thinking disabled, which is rejected at xhigh and max effort and rejects every companion field",
+  "Read the launch table honestly: where Sonnet 5.5 beats Opus 5.5, where it is 8 points behind, and why one row reads 10.3%",
+  "Calibrate effort from scratch instead of carrying a setting over, and recover the ~1/3 of session cost that max effort spends on self-started review",
+  "Handle the quieter failure modes: structured-output requests that think until max_tokens, tool names off by letter case, and real user messages mistaken for prompt injection",
+]} />
+
+<VerifyNote lastVerified="2026-09-28" source="https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5" />
+
+## Specs, and the four numbers that changed
+
+| | Sonnet 5 | **Sonnet 5.5** | Opus 5.5 |
+| --- | --- | --- | --- |
+| Claude API ID | `claude-sonnet-5` | **`claude-sonnet-5-5`** | `claude-opus-5-5` |
+| Input / output per MTok | $2 / $10 | **$2 / $10** | $4 / $20 |
+| Cache read / 5m write | $0.20 / $2.50 | **$0.20 / $2.50** | $0.20 / $5 |
+| Min cacheable prompt | 1,024 tokens | **512 tokens** | — |
+| Context | 1M | **1M** | 1M |
+| Max output (sync) | 128K | **128K** | 128K |
+| Thinking settings accepted | `adaptive`, `disabled` | **`adaptive`, `between_tools`** | `adaptive` only |
+| Default effort | `high` | **`high`** | `medium` |
+| Reliable knowledge cutoff | — | **Jun 2026** | Jun 2026 |
+| Retirement no sooner than | — | **28 Sep 2027** | 22 Sep 2027 |
+
+Four things in that table are genuinely new, and only one of them is a headline anywhere:
+
+1. **The minimum cacheable prompt halved, 1,024 → 512 tokens.** If your system prompt sits in the
+   600–1,000 token range it was silently *uncacheable* on Sonnet 5 and is cacheable now, at 10% of
+   input price on reads. No code change, no beta header. This is the cheapest win on the whole page.
+2. **`thinking: {"type": "disabled"}` is gone**, replaced by `between_tools`. Sonnet 5.5 sits between
+   Sonnet 5 (which accepted `disabled`) and Opus 5.5 (which accepts neither) — it can still skip
+   up-front thinking, just under a new name and with new limits.
+3. **Default effort stayed `high`** — note that this is *higher* than Opus 5.5's `medium` default.
+   The cheaper model thinks more per turn out of the box than the expensive one.
+4. **`temperature`, `top_p` and `top_k` return 400** at any non-default value, as on the rest of the
+   5.x line. Sampling-parameter sweeps are not a tuning surface here; `effort` is.
+
+The tokenizer is unchanged from Sonnet 5, so the same text produces the same token counts. Any
+change you measure in your bill is a change in how many tokens the model *chose* to emit.
+
+## Why the bill drops when the price does not
+
+This is the part most launch coverage compresses into "30% cheaper" and gets subtly wrong. The rate
+card is identical. Anthropic's claim decomposes into three separate effects, and they are not
+equally easy to capture:
+
+<Steps items={[
+  {title: "Fewer output tokens for the same work", body: "Output is the expensive side at $10/MTok against $2 input. Sonnet 5.5 reaches the same result in fewer output tokens than Sonnet 5, which includes thinking tokens — thinking is billed as output even when its text is never returned to you. This effect you get for free, on the same code."},
+  {title: "Fewer tool calls, so fewer round trips", body: "Each avoided tool call removes a whole request: the resent conversation prefix on input, the latency, and a turn of overhead. In an agent loop that is usually a bigger line item than the output tokens themselves. Anthropic's own framing of Terminal-Bench 4.0 is that this is where token efficiency pays."},
+  {title: "More than 30% faster output generation", body: "Latency is not cost, but it is a cost in every interactive product, and it is the effect most likely to survive your own measurement unchanged. Note the ceiling: at medium effort and above the model thinks briefly before nearly every reply, greeting included, which adds to time-to-first-token no matter how fast generation is."}
+]} />
+
+Effects 1 and 2 are exactly what a carried-over `effort` setting can cancel out. Which is why the
+next section is the one to read before you change your model ID.
+
+## Effort: recalibrate, do not carry over
+
+Anthropic is explicit that **effort levels are recalibrated** — a level does not buy the same amount
+of thinking it bought on Sonnet 5. There is no conversion table, by design. Re-run your sweep.
+
+The published starting points are not the default:
+
+| Workload | Start at | Why |
+| --- | --- | --- |
+| General / unsure | `high` | The API default. |
+| Agentic coding, multistep tool use, well-specified | `medium` | Then move to `high` for harder or longer tasks. |
+| Chat, latency-sensitive | `medium` or `low` | Higher effort means a longer wait before the reply starts. |
+| Anything | `xhigh` / `max` | Only where you have **measured** a quality gain. |
+
+Three consequences that bite in production:
+
+- **Changing the top-level `effort` between requests invalidates the prompt cache.** If you want a
+  cheap interactive session that escalates on hard turns, use the **per-message effort** beta
+  (`output_config.effort` on one message), which keeps the cache. This beta is new on 5.5 and was
+  not available on Sonnet 5.
+- **`max_tokens` has to cover thinking plus the reply.** Thinking counts against it even when the
+  thinking text is omitted from the response. A limit sized for a no-thinking request will truncate.
+  For agentic coding Anthropic's guidance is blunt: set `max_tokens` to **128,000** and stream.
+- **Asking the model to think less does not reliably work.** Lowering the effort level does. From
+  `medium` up it thinks before almost every reply; at `low` it skips thinking on most simple requests.
+
+### The max-effort review tax
+
+At `xhigh` and `max`, Sonnet 5.5 does not stop when the task is done. It starts its own rounds of
+review and verification, and if your harness offers subagents it will launch reviewer subagents —
+unasked. Anthropic published the fix and, unusually, the size of it: in their testing on coding
+tasks at `max` effort, the paragraph below **cut session cost by about a third with no change in
+quality**.
+
+<PromptCard title="Stop self-started review rounds at xhigh and max effort">
+{`When the work the user asked for is done and its checks pass, stop and report. Don't start extra
+rounds of review or hardening on your own, and don't launch reviewer sub-agents unless the user
+asked for a review. If you think a deeper review is worth doing, say so at the end.`}
+</PromptCard>
+
+It makes self-started reviews rarer rather than impossible. The mirror-image problem exists at the
+bottom of the range: at `low` and `medium` on long agentic tasks the model is *more* likely to stop
+and check in before finishing, and at `low` it sometimes reports a code change done without running
+a check that exercises it.
+
+## The five breaking changes
+
+Each of these returns HTTP 400 `invalid_request_error` on code that worked on Sonnet 5.
+
+### 1. `disabled` → `between_tools`
+
+`thinking: {"type": "disabled"}` returns 400 with a message that names its replacement:
+
+```text
+"thinking.type.disabled" is not supported for this model. Use "thinking.type.between_tools" for the
+lowest thinking setting, or "thinking.type.adaptive" and "output_config.effort" to control thinking
+behavior.
+```
+
+`between_tools` is the lowest thinking setting on Sonnet 5.5. It needs no beta header and works on
+every platform that offers the model. But it is fussier than `disabled` ever was:
+
+- Accepted at `low`, `medium`, `high`. At **`xhigh` or `max` it returns 400** — those levels require
+  adaptive thinking (omit `thinking`, or send `thinking: {"type": "adaptive"}`; they are equivalent).
+- **Effort cannot change mid-conversation.** A per-message `output_config.effort` that differs from
+  the level in effect returns 400. Per-turn effort needs adaptive thinking.
+- **It takes no companion field.** `display`, `budget_tokens` or `block_binding` sent alongside it
+  returns 400. Manual budgets (`thinking: {"type": "enabled", "budget_tokens": N}`) return 400 too.
+- With **server-side fallback**, a `between_tools` request that falls back to Sonnet 5 runs there
+  with `thinking: {"type": "disabled"}` — the settings map across the fallback for you.
+
+One more trap: with `between_tools`, **remove any instruction telling the model not to think.** Those
+lines make it more likely to write internal XML tags into its visible output.
+
+<PromptCard title="Migrating a thinking-off integration — Sonnet 5 to Sonnet 5.5">
+{`# Before — accepted on Sonnet 5
+client.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=16000,
+    thinking={"type": "disabled"},
+    output_config={"effort": "xhigh"},      # fine with disabled on Sonnet 5
+    messages=[{"role": "user", "content": "..."}],
+)
+
+# After — on Sonnet 5.5: rename the type AND drop effort to high or below
+client.messages.create(
+    model="claude-sonnet-5-5",
+    max_tokens=16000,
+    thinking={"type": "between_tools"},     # xhigh/max with this -> 400
+    output_config={"effort": "high"},
+    messages=[{"role": "user", "content": "..."}],
+)
+
+# If you need xhigh or max, use adaptive thinking instead of between_tools:
+#   thinking={"type": "adaptive"}   (or omit the field entirely)
+
+# SDKs that predate between_tools fail type checking on the literal.
+# Update the SDK, or pass the value as raw JSON.`}
+</PromptCard>
+
+### 2. Forced tool use is rejected
+
+`tool_choice` set to `{"type": "any"}` or `{"type": "tool", "name": "..."}` returns 400:
+
+```text
+tool_choice: type "tool" and "any" are not supported for this model.
+```
+
+`auto` (the default) and `none` still work. The same check applies on the **token-counting
+endpoint**, which is easy to miss in a test suite that only exercises `/v1/messages`.
+
+Forced tool use was doing two jobs; split them:
+
+- **Schema validity** comes from **strict tool use** (`strict: true` on the tool) or from
+  **structured outputs**.
+- **Steering** — making the model call the tool at all — comes from the prompt saying when the tool
+  applies.
+
+### 3. Thinking blocks are bound to the model, the conversation, and the account
+
+Every thinking block records which model produced it, and models only read some other models'
+blocks. The graph is asymmetric and not intuitive:
+
+| Blocks produced by | Can Sonnet 5.5 read them? |
+| --- | --- |
+| Sonnet 5.5 itself | Yes |
+| Sonnet 5, Opus 4.8, Haiku 4.5 and earlier | Yes |
+| Opus 5, Opus 5.5 | **No** |
+| Any Fable or Mythos model | **No** |
+
+And in the other direction: **no other model reads Sonnet 5.5's thinking blocks.** So a conversation
+that migrates *up* from Sonnet 5 to Sonnet 5.5 keeps its reasoning; a conversation that moves *off*
+Sonnet 5.5 to anything else — including Opus 5.5, a tempting escalation path — runs every subsequent
+turn without it. Unreadable blocks are dropped before the model sees them, the request succeeds, and
+dropped blocks are not billed. With the `thinking-binding-controls-2026-08-01` beta header the drops
+are itemised in a top-level `input_transformations` array.
+
+Two further bindings sit on top:
+
+- **Conversation prefix.** The API checks whether the `system` prompt, the `tools` list, or any
+  earlier message changed since a Sonnet 5.5 thinking block was produced. It enforces this **by
+  default for accounts created on or after 31 August 2026, 00:00 UTC** on the Claude API, Bedrock
+  and Google Cloud — replaying a block after such an edit returns 400 there. To drop the affected
+  blocks instead of failing, send `thinking-binding-controls-2026-08-01` and set
+  `thinking.block_binding.prefix_mismatch_behavior` to `"drop_block"`. Note `block_binding` only
+  works with adaptive thinking; under `between_tools` your only options are append-only history or
+  stripping thinking blocks from the edited turn onward.
+- **Account.** Sonnet 5.5's thinking blocks work only in the account that produced them, or a linked
+  one. Another account sending them gets them dropped, with `reason: "organization_binding_mismatch"`
+  under the binding-controls beta. Blocks from earlier models are unaffected.
+
+<Steps items={[
+  {title: "Keep history append-only and none of this can fire", body: "Claude Code, claude.ai, Claude Managed Agents and the Claude Agent SDK already do this. Append-only integrations need no change."},
+  {title: "Change instructions with mid-conversation system messages, not by editing the system prompt", body: "Appending a line to system mid-session edits the prefix and invalidates every earlier thinking block. A mid-conversation system message appends instead — and it is newly supported on Sonnet 5.5, not on Sonnet 5."},
+  {title: "Declare every tool in the first request of the session", body: "Adding an entry to tools later edits the prefix too. If you must add one mid-session, the inline-tools-2026-09-15 beta lets a tool_addition block carry a full tool definition inside a mid-conversation system message, without touching tools and without losing the cache."},
+  {title: "Compact with the API rather than rewriting history yourself", body: "The compact-2026-09-04 beta returns a signed compaction block summarising the conversation, which you send first in place of the messages it replaces. Thinking blocks in the turns you keep can stay valid across the swap — which matters far more here than on Sonnet 5, precisely because these blocks are conversation-bound."},
+  {title: "Do not plan to escalate mid-conversation to Opus 5.5 and keep the reasoning", body: "It cannot read Sonnet 5.5 blocks. If a hard turn needs more depth, raising effort with the per-message beta keeps the reasoning; switching models does not."}
+]} />
+
+### 4. `computer_20251124` is rejected — on two platforms out of three
+
+On the **Claude API and Google Cloud**, Sonnet 5.5 supports computer use only through the
+`computer_toolset_20260801` toolset. Declaring the older `computer_20251124` tool returns 400:
+
+```text
+'claude-sonnet-5-5' does not support tool types: computer_20251124.
+```
+
+**On Amazon Bedrock, Sonnet 5.5 still accepts `computer_20251124`.** That asymmetry is the kind of
+thing that makes a multi-platform deployment pass CI on one cloud and fail on another. Migrating
+means: drop the old beta header, replace the `tools` entry with `{"type": "computer_toolset_20260801"}`,
+and update the agent loop for member `tool_use` blocks, batch actions, and `toolset_name` on results.
+Integrations already on the toolset, and anything using the browser use tool, need no change.
+
+### 5. Advisor pairings narrowed
+
+With the advisor tool (beta), a Sonnet 5.5 *executor* accepts Mythos 5.1, Fable 5.1, Mythos 5,
+Fable 5, Opus 5.5, Opus 5, or Sonnet 5.5 itself as advisor. **Opus 4.8, Opus 4.7 and Sonnet 5 are
+rejected with 400** — all three of which worked as advisors for a Sonnet 5 executor. Every advisor
+Sonnet 5.5 accepts returns its advice **encrypted**, as an `advisor_redacted_result` block, so your
+client cannot read the advice text.
+
+## The sixth change: HTTP 200, and your UI goes quiet
+
+This one fails nothing and is the most likely to reach your users before it reaches your logs.
+
+Between tool calls, Sonnet 5.5 writes user-facing notes about what it just found and what it is
+doing next. **Notes longer than a sentence or two now come back as progress-update `thinking`
+blocks**; shorter remarks stay `text`. At the default `display: "omitted"` a progress-update block's
+text field is **empty**. A client that renders only `text` blocks therefore shows nothing at all
+during a long agentic turn — no error, no warning, just silence where narration used to be.
+
+Three ways out, in order of how little work they are:
+
+1. **Use `between_tools`.** The notes come back with their summary text, no `display` field needed
+   (and none accepted).
+2. **Set `display: "updates"`** with the `thinking-display-updates-2026-08-18` beta header. You get a
+   short summary of each progress update while the reasoning itself stays hidden.
+3. **Give the model a tool for sending the user a message**, for the cases where it needs to show
+   exact text mid-turn — a code snippet, a question it needs answered. Tell it to use that tool only
+   for such content, and declare the tool in the first request so `tools` never changes later.
+
+Then clean up around it: **delete instructions like "hold all findings for the final response"**, and
+if you want updates at predictable points, ask for them explicitly — a line before the first tool
+call, a recap at the end. The model follows that.
+
+If long turns still go quiet, your harness can nudge — carefully. Count consecutive tool-calling
+steps that sent the user no text, and after several (say five) append a one-turn reminder after the
+latest tool results, as a turn-scoped system message:
+
+<PromptCard title="Harness nudge for a silent agentic turn">
+{`The user hasn't heard from you in a while — say in a few words what you're doing, then continue.`}
+</PromptCard>
+
+Stop after the second or third if it does not take. Frequent harness text after tool results makes
+the model suspect a prompt injection — which is the next section. Because the reminder is *appended*
+rather than inserted and later removed, the prompt cache and the preserved thinking both survive.
+Anthropic's measurement: at `high` effort with a message-the-user tool available, this shortens the
+longest silent stretches with no measurable change in task quality.
+
+## Reading the launch table honestly
+
+<VerifyNote lastVerified="2026-09-28" source="https://www.anthropic.com/claude-sonnet-5-5" />
+
+| Benchmark | Sonnet 5 | **Sonnet 5.5** | Opus 5.5 | Sonnet 5.5 as % of Opus 5.5 |
+| --- | --- | --- | --- | --- |
+| Terminal-Bench 4.0 | 10.3% | **70.6%** | 66.4% | **106%** |
+| GDPval-AA v2.1 (Elo) | 1449 | **1844** | 1846 | 99.9% |
+| AA-Briefcase v1.1 (Elo) | 1359 | **1811** | 1822 | 99.4% |
+| OSWorld 2.1 (partial credit) | — | **80.1%** | 81.8% | 98% |
+| CursorBench 4.0 | 34.1% | **55.5%** | 57.8% | 96% |
+| Chartography (no tools) | — | **61.6%** | 64.4% | 96% |
+| Humanity's Last Exam (tools) | 54.9% | **64.5%** | 67.7% | 95% |
+| FrontierCode 1.1 (max effort) | 42.4% | **46.2%** | 54.4% | **85%** |
+
+Four honest readings of that table:
+
+- **The gap is not uniform, and averaging it away hides the useful signal.** On knowledge-work Elo
+  the two models are inside noise of each other. On the hardest coding benchmark, FrontierCode 1.1,
+  Sonnet 5.5 is **8.2 points behind** — 85% of Opus 5.5. That single row is the honest basis for
+  Anthropic's own framing that Opus 5.5 remains clearly stronger on complex, open-ended work
+  requiring sustained judgment.
+- **Terminal-Bench 4.0 is the one row where the half-price model wins**, 70.6% against 66.4%. That
+  benchmark is the closest published proxy for "run an agent in a shell until the job is done,"
+  which is exactly where fewer tool calls and fewer tokens compound.
+- **Treat Sonnet 5's 10.3% on Terminal-Bench 4.0 with suspicion, not awe.** A 60-point generational
+  jump on one benchmark version tells you at least as much about the harness and the scoring version
+  as about the model. Use it to conclude "this version of this benchmark punishes Sonnet 5's agent
+  behaviour," not "Sonnet 5.5 is seven times better at agentic coding."
+- **Sources disagree on FrontierCode at the top of the effort range.** Anthropic's table reports
+  46.2% at `max` effort; at least one aggregator reports a *higher* 52.1% at `xhigh`. We have not
+  been able to confirm the second figure against the primary table, so read it as unverified — but
+  note that "more effort scored lower" is consistent with the docs' own advice to reserve `xhigh` and
+  `max` for cases where you have measured a gain, rather than assuming monotonic improvement.
+
+Independent measurement, as always, lands lower than vendor measurement on agentic benchmarks. Run
+your own evals before you commit a number to a slide.
+
+## The quiet failure modes
+
+None of these throw. All of them cost you accuracy or trust.
+
+### Structured outputs that think until they run out
+
+Ask for a JSON answer to a task that needs a few steps of working out — totalling figures from a
+document, applying a rule, ranking items — and Sonnet 5.5 often answers **without thinking first**,
+especially at `low` and `medium` effort. With structured outputs the response text holds only the
+JSON, so the working has nowhere to go except the thinking; skip the thinking and accuracy drops.
+
+- With adaptive thinking, appending **`Think the problem through before you answer.`** to the system
+  prompt brings `high`-effort accuracy close to `xhigh` for a modest increase in output tokens.
+- `between_tools` is the wrong setting for these requests: with no tools in play, it means no
+  thinking at all, and that line has no effect.
+- At `low` and `medium` with structured outputs, the model occasionally **keeps thinking until it
+  hits `max_tokens`**. Treat any response with `stop_reason: "max_tokens"` as **failed and retry**,
+  even when its text happens to contain valid JSON. This is the single most likely way to ship a
+  confidently wrong number.
+
+If you cannot use structured outputs and ask for JSON in the prompt, the model tends to work the
+problem out in the response text and put the JSON at the end. Do not slice from the first `{` to the
+last `}` — it occasionally writes a draft before the final answer and you would capture both.
+
+<PromptCard title="Extracting the final JSON value from a mixed response">
+{`# Read only text blocks. Treat stop_reason == "max_tokens" as a failure and retry.
+# Starting at each { or [, try to parse a JSON value; continue from the END of a value
+# that parses, so values nested inside it are not counted on their own. Keep the LAST one.
+
+import json
+
+def last_json_value(text):
+    dec, best, i = json.JSONDecoder(), None, 0
+    while i < len(text):
+        if text[i] in "{[":
+            try:
+                value, end = dec.raw_decode(text, i)
+            except ValueError:
+                i += 1
+                continue
+            best, i = value, end          # jump past it: skip nested values
+        else:
+            i += 1
+    return best
+
+# Then check the fields you expect are present, and retry once if they are not.`}
+</PromptCard>
+
+### Real user messages read as prompt injection
+
+Sonnet 5.5 is trained to resist indirect prompt injection — instructions arriving through tool
+results and other content it reads mid-task. Sometimes it misclassifies a **genuine** user message
+that way, tells the user the tool result contained text posing as a message from them, and either
+ignores it or asks for confirmation. The trigger is placement: text arriving immediately after tool
+results, especially on every step.
+
+- **Never put user text inside a `tool_result` block.** This is the placement it misreads most often.
+- Deliver mid-turn user input as a **user turn**: append their words as a text block in the user
+  message that carries the `tool_result` blocks, after the last `tool_result`.
+- Keep harness notices in a **separate** mid-conversation system message, after the user's words.
+  Never put a notice and the user's words in the same block.
+- **Drop your own token/budget countdown after tool results** in interactive sessions where users can
+  type mid-turn. A per-step countdown is the classic cause. The Task budgets beta adds a similar
+  countdown but has not been seen to cause this misread.
+
+### Tool names off by letter case
+
+Sonnet 5.5 occasionally calls a declared tool by a name differing only in case — `bash` for `Bash` —
+or passes a known parameter under a slightly different name. Do not treat that as fatal. Either
+accept the call when the match is unambiguous, or return a `tool_result` with `is_error: true` that
+states the exact expected name; the model usually corrects itself on the next turn.
+
+### Charts: give it tools before you give it effort
+
+For dense charts and technical drawings, give the model a way to crop, zoom, or run code on the
+image. The measured result is worth internalising: **with tools at `high` effort it read charts more
+accurately than without tools at `max` effort, at a fraction of the cost.** On technical drawings the
+tools only help from `high` up, and most at `xhigh` and `max`. Reach for the tool, not the dial.
+
+## Refusals: five categories, and only two get retried
+
+A declined request is **HTTP 200** with `stop_reason: "refusal"` and a `stop_details` object naming
+the category. Sonnet 5.5 is the first Sonnet to ship with cyber safeguards comparable to Anthropic's
+most capable models, and the first with classifiers that block reasoning extraction.
+
+| `stop_details` category | What it covers | Server-side fallback retries it on Sonnet 5? |
+| --- | --- | --- |
+| `cyber` | Could enable cyber harm — malware, exploit development. Finding vulnerabilities in source code is allowed; high-risk dual-use work is not. | **Yes** |
+| `frontier_llm` | Could assist development of competing AI models. | **Yes** |
+| `bio` | Could enable biological harm. Everyday health and educational questions unaffected. | No |
+| `reasoning_extraction` | Asks the model to reproduce its internal reasoning in the response text. | No |
+| `general_harms` | Another usage-policy area. Benign work can also trigger this. | No |
+
+Two practical notes. First, if your prompts ask the model to include its reasoning in the answer,
+**remove those lines** — they invite `reasoning_extraction` declines. Read reasoning from summarized
+thinking blocks (`display: "summarized"`) instead. Second, whether a refusal that arrives before any
+output is billed depends on its category, and it counts against your rate limits either way.
+
+Legitimate life-sciences work blocked by the `bio` classifier can apply to Anthropic's Life Sciences
+Verification Program.
+
+## So which model do you actually run?
+
+<Steps items={[
+  {title: "Sonnet 5.5 is the new default for well-scoped work", body: "Everyday tasks, bug fixes, multistep tool use, polished documents and spreadsheets. Start at medium effort for agentic coding, high for general work, and measure. At $2/$10 with 1M context it is the cheapest model in the lineup that is still frontier-adjacent on knowledge work."},
+  {title: "Opus 5.5 for complex, open-ended, sustained-judgment work", body: "The FrontierCode row is where the 2x price buys something real — 54.4% against 46.2%. Also note it cannot read Sonnet 5.5's thinking blocks, so treat the choice as per-conversation, not per-turn."},
+  {title: "Fable 5.1 only when Opus 5.5 at higher effort still fails your evals", body: "That is Anthropic's own stated criterion, and at $10/$50 it is 5x Sonnet 5.5's list price."},
+  {title: "Stay on Sonnet 5 only for a specific reason", body: "Two exist: code that depends on forced tool_choice, and code that depends on thinking: disabled with xhigh or max effort — a combination between_tools does not allow. Both are migrations, not blockers."},
+  {title: "Haiku 4.5 remains the floor", body: "200K context, $1/$5, no effort parameter. For classification, extraction and routing the 5.5 family is overkill."}
+]} />
+
+The migration itself is a model-ID swap plus six checks, and Anthropic ships an automation for it:
+in Claude Code, `/claude-api migrate this project to claude-sonnet-5-5` applies the ID swap and the
+breaking parameter changes across a codebase and hands you a checklist of what to verify by hand. It
+asks you to confirm scope before editing anything. If you use Claude Managed Agents rather than the
+Messages API directly, the model name is the only change required.
+
+<Flashcards cards={[
+  { front: "between_tools", back: "The lowest thinking setting on Sonnet 5.5 and the replacement for thinking: disabled. Turns off up-front thinking; progress updates between tool calls still return as thinking blocks, with their summary text. No beta header. Accepted at low/medium/high effort only — xhigh or max returns 400. Rejects display, budget_tokens and block_binding." },
+  { front: "Progress-update thinking block", back: "Notes longer than a sentence or two that the model writes between tool calls. Empty text at the default display: \"omitted\", which silences UIs that render only text blocks. Recover them with display: \"updates\" (beta header thinking-display-updates-2026-08-18) or with between_tools." },
+  { front: "Model binding on thinking blocks", back: "Sonnet 5.5 reads its own blocks plus Sonnet 5, Opus 4.8, Haiku 4.5 and earlier. It cannot read Opus 5, Opus 5.5, Fable or Mythos blocks, and no other model reads its blocks. Unreadable blocks are dropped silently and not billed." },
+  { front: "Conversation-prefix binding", back: "The API checks whether system, tools, or an earlier message changed since a thinking block was produced. Enforced by default for accounts created on or after 31 Aug 2026 00:00 UTC on the Claude API, Bedrock and Google Cloud — a replay after an edit returns 400. Opt into drop_block via thinking-binding-controls-2026-08-01, adaptive thinking only." },
+  { front: "Account binding", back: "Sonnet 5.5 thinking blocks work only in the producing account or a linked one. Another account's blocks are dropped before the model sees them; the request still succeeds. Reported as reason: \"organization_binding_mismatch\" under the binding-controls beta." },
+  { front: "512-token cache minimum", back: "Sonnet 5.5's minimum cacheable prompt, down from 1,024 on Sonnet 5. Prompts in the 512–1,023 token band become cacheable with no code change, at 10% of input price on reads." },
+  { front: "Forced tool use is gone", back: "tool_choice types any and tool return 400, including on the token-counting endpoint. Replace schema enforcement with strict tool use or structured outputs, and replace steering with a prompt line naming when the tool applies." },
+  { front: "reasoning_extraction", back: "A refusal category new to the 5.5 family: the request asked the model to reproduce its internal reasoning in the response text. Server-side fallback does NOT retry it. Fix the prompt and read summarized thinking blocks instead." },
+  { front: "computer_toolset_20260801", back: "The only computer-use interface Sonnet 5.5 accepts on the Claude API and Google Cloud; the older computer_20251124 returns 400 there. Bedrock still accepts computer_20251124 — a genuine cross-platform asymmetry." },
+  { front: "The max-effort review tax", back: "At xhigh and max, Sonnet 5.5 starts its own review rounds and launches reviewer subagents unasked. A system-prompt paragraph forbidding that cut session cost by about a third in Anthropic's max-effort coding tests, with no quality change." },
+]} />
+
+<Quiz questions={[
+  {
+    q: "Sonnet 5.5 charges exactly Sonnet 5's prices — $2/$10 per MTok, same cache rates, same tokenizer. Anthropic still claims up to 30% less per task. Where does the saving come from?",
+    options: [
+      "A hidden volume discount that applies automatically above a monthly threshold.",
+      "Fewer output tokens (including thinking, billed as output) and fewer tool calls, so fewer round trips carrying the conversation prefix.",
+      "Cache reads dropped to a 5% tier, as they did on Opus 5.5.",
+      "Thinking tokens stopped being billed when their text is omitted from the response."
+    ],
+    answer: 1,
+    explain: "The rate card is unchanged and the tokenizer is identical, so any saving must be a change in token and turn counts. Thinking tokens are still billed as output even when omitted. Cache reads stayed at $0.20 (a 10% tier) — the 5% tier is Opus 5.5's."
+  },
+  {
+    q: "Your integration runs Sonnet 5 with thinking: {\"type\": \"disabled\"} and output_config effort \"xhigh\". What is the minimum correct change for Sonnet 5.5?",
+    options: [
+      "Swap disabled for between_tools and keep effort at xhigh.",
+      "Swap disabled for between_tools and lower effort to high or below — or keep xhigh and switch to adaptive thinking.",
+      "Keep disabled and add the thinking-display-updates-2026-08-18 beta header.",
+      "Nothing — disabled is still accepted, it just now implies medium effort."
+    ],
+    answer: 1,
+    explain: "disabled returns 400 on Sonnet 5.5. between_tools replaces it but is only accepted at low, medium and high effort; at xhigh or max it returns 400. So either drop the effort level, or keep xhigh and use adaptive thinking (omit the field, or send type adaptive)."
+  },
+  {
+    q: "After migrating a chat product to Sonnet 5.5, users report the assistant looks frozen during long tool-using turns, though the final answer arrives fine and no errors are logged. What happened?",
+    options: [
+      "The model stopped writing narration between tool calls to save tokens.",
+      "Narration longer than a sentence or two now arrives in progress-update thinking blocks, whose text is empty at the default display of \"omitted\" — a client rendering only text blocks shows nothing.",
+      "Streaming broke: thinking blocks are not streamed, so nothing is emitted until the turn ends.",
+      "The 512-token cache minimum causes the first tool call to be served from cache without narration."
+    ],
+    answer: 1,
+    explain: "This is the sixth change — it returns HTTP 200 and fails nothing. The notes are still written, but they come back as progress-update thinking blocks, empty under display: \"omitted\". Fix it with display: \"updates\" (beta), or with between_tools, which returns the summary text without any display field."
+  },
+  {
+    q: "A hard turn arrives in a Sonnet 5.5 conversation and you want more depth. Which option preserves the reasoning accumulated so far?",
+    options: [
+      "Switch that turn to Opus 5.5 — it is the stronger model and reads Sonnet 5.5's thinking blocks.",
+      "Raise the top-level effort to xhigh for the rest of the conversation.",
+      "Raise effort for that message only, with the per-message effort beta and adaptive thinking.",
+      "Switch to Fable 5.1, the only model that reads every other model's thinking blocks."
+    ],
+    answer: 2,
+    explain: "No other model reads Sonnet 5.5's thinking blocks — including Opus 5.5 and Fable — so any model switch runs later turns without that reasoning. Changing the top-level effort would also invalidate the prompt cache. Per-message effort keeps both the cache and the thinking, and requires adaptive thinking (it returns 400 under between_tools)."
+  },
+  {
+    q: "You use structured outputs at medium effort to extract totals from invoices. One response comes back with stop_reason \"max_tokens\" but its text parses as valid JSON with plausible figures. What should your code do?",
+    options: [
+      "Accept it — the JSON is schema-valid, which is exactly what structured outputs guarantee.",
+      "Accept it but log a warning, since truncation only ever affects trailing whitespace.",
+      "Treat it as failed and retry, because at low and medium effort the model can keep thinking until it exhausts max_tokens.",
+      "Re-send the same request with between_tools so no tokens are spent on thinking."
+    ],
+    answer: 2,
+    explain: "Anthropic's guidance is explicit: treat any stop_reason of max_tokens as failed and retry, even when the text holds valid JSON. At low and medium effort with structured outputs the model occasionally thinks until the limit. between_tools is the wrong remedy — with no tools in play it means no thinking at all, and accuracy on this class of task drops."
+  },
+  {
+    q: "Which statement about the launch benchmark table is accurate?",
+    options: [
+      "Sonnet 5.5 trails Opus 5.5 on every published benchmark, by a fairly constant margin.",
+      "Sonnet 5.5 beats Opus 5.5 on Terminal-Bench 4.0 (70.6% vs 66.4%), ties it on knowledge-work Elo, and is ~8 points behind on FrontierCode 1.1.",
+      "Sonnet 5.5 beats Opus 5.5 on knowledge work and loses on everything agentic.",
+      "The scores are identical within noise across all eight benchmarks, so the price difference buys nothing."
+    ],
+    answer: 1,
+    explain: "The gap is highly non-uniform, which is why averaging it into one percentage is misleading. Terminal-Bench 4.0 is the one row where the half-price model is ahead; GDPval-AA (1844 vs 1846) and AA-Briefcase (1811 vs 1822) are ties; FrontierCode 1.1 at max effort is 46.2% vs 54.4%, and that row is the honest basis for keeping Opus 5.5 for complex open-ended work."
+  }
+]} />
+
+## Next
+
+- [Claude Opus 5.5: The Field Guide](/docs/models/opus-5-5-field-guide) — the tier above, six days older: four 400-traps of its own, a default effort of `medium`, and thinking that cannot be turned off at all
+- [Claude Sonnet 5: The Field Guide](/docs/models/sonnet-5-field-guide) — the model you are migrating from
+- [Effort tuning](/docs/api/effort-tuning) — run the sweep this page keeps telling you to run
+
+## Sources & further reading
+
+- [Introducing Claude Sonnet 5.5 — Anthropic (28 September 2026)](https://www.anthropic.com/claude-sonnet-5-5) — launch post and the benchmark table this page reproduces
+- [Claude Sonnet 5.5 model page — Claude Platform docs](https://platform.claude.com/docs/en/models/sonnet-5-5/overview) — specs, per-platform model IDs, full price list, the temperature/top_p/top_k restriction and the 512-token cache minimum
+- [What's new in Claude Sonnet 5.5 — Claude Platform docs](https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5) — the authoritative list of the five breaking changes with exact error strings, the sixth response-shape change, feature support, and availability
+- [Migrating to Claude Sonnet 5.5 — Claude Platform docs](https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide) — before/after code per breaking change, the thinking-settings matrix by model, and the checklist by starting model
+- [Prompting Claude Sonnet 5.5 — Claude Platform docs](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-sonnet-5-5) — effort calibration, initiative and scope, the max-effort review paragraph, the JSON-parsing recipe, tolerant tool-call handling, mid-turn user messages, and the chart-tool measurement
+- [Effort — Claude Platform docs](https://platform.claude.com/docs/en/build-with-claude/effort) — the five levels, per-model defaults, the per-message effort beta and its interaction with caching
+- [Thinking — Claude Platform docs](https://platform.claude.com/docs/en/build-with-claude/thinking) — adaptive thinking, progress updates, display values, and preserving thinking blocks
+- [Preserved thinking — Claude Platform docs](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking) — model binding, conversation-prefix binding and account-bound thinking
+- [Refusals and fallback — Claude Platform docs](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback) — the refusal response shape, server-side fallback coverage, and how refusals are billed
+- [Models overview — Claude Platform docs](https://platform.claude.com/docs/en/models/overview) — the cross-model comparison table, cache-read multipliers and retirement dates
+- [Anthropic launches Claude Sonnet 5.5 with 30% cost reduction per-task — VentureBeat (28 September 2026)](https://venturebeat.com/technology/anthropic-launches-claude-sonnet-5-5-with-30-cost-reduction-per-task-due-to-faster-speeds-and-fewer-tool-calls) — launch framing and the cost-per-task claim
+- [Anthropic debuts Claude Sonnet 5.5 running 30% faster — SiliconANGLE (28 September 2026)](https://siliconangle.com/2026/09/28/anthropic-debuts-claude-sonnet-5-5-running-30-faster-than-the-previous-generation-ai-model/) — independent write-up of the speed and availability claims
+- [Anthropic Releases Claude Sonnet 5.5 at Unchanged Sonnet 5 Pricing — Unite.AI](https://www.unite.ai/anthropic-releases-claude-sonnet-5-5-at-unchanged-sonnet-5-pricing/) — secondary confirmation of the benchmark figures, and the source of the unverified 52.1% FrontierCode-at-xhigh number flagged above
