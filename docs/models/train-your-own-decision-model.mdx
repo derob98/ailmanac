@@ -1,0 +1,292 @@
+---
+sidebar_position: 22.905
+title: "Train Your Own Decision Model: Jeff, Jeeves and the DIY System One Stack (Sep 2026)"
+description: "Two weeks after Jev made decision models a category, the open stack caught up: Jeff fine-tunes a 0.8B Qwen into a Jev-compatible classifier in ~2 hours on one workstation GPU, and PostHog's Jeeves shows that letting a decision model think first beats Jev on its own benchmark. What the training recipe actually is (cross-entropy over option letters, a separately fitted temperature), where tiny models beat the API and where they get destroyed, the 26-option ceiling, the 20x CPU latency cliff, and the boring embeddings baseline that scored 93.0% and that you must beat before any of this is worth doing."
+keywords: [train your own decision model, Jeff decision model, firelex Jeff, Jeeves PostHog, AutoJev, Jev compatible, System One model, fine-tune classifier, calibrated probabilities, temperature calibration, cross-entropy option letters, pointer head, CISPO, Qwen3.5 0.8B, Gemma 4 E2B, local classifier, zero-shot classification, ModernBERT baseline, BANKING77, MLX classifier, decision model latency, agent routing model]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-09-29" source="README of firelex/jeff (created 2026-09-28, 895 stars at time of writing) and PostHog/jeeves (created 2026-09-29, 107 stars); denis-pplx/autojev README; Hacker News items 49883844 (Jeff, 536 points / 204 comments) and 49891290 (Jeeves, 105 points / 44 comments).">
+Every accuracy, latency and training-time figure on this page is **self-reported by the project that published it**, on benchmarks that project chose. Nothing here has been independently replicated. Both repositories are days old and moving fast — star counts, model names, checkpoint ids and CLI flags are the most perishable facts here; read the current README before you copy a command. Neither project is affiliated with or endorsed by TypeSafe, the makers of Jev.
+</VerifyNote>
+
+<Callout type="objectives" items={[
+  "Explain the actual training recipe behind an open decision model — cross-entropy over option letters, one epoch, and a temperature fitted afterwards — and why calibration is a separate step from accuracy",
+  "Read the published benchmark tables honestly: the three rows where a 0.8B model beats the commercial API, and the two rows where it loses by 20–26 points",
+  "Decide between four options — hosted API, zero-shot open weights, your own fine-tune, or a plain embeddings classifier — using the one baseline number that kills most of these projects",
+  "Train and serve a Jev-compatible model yourself in an afternoon on a single GPU, including the checkpoint-selection rule that keeps the result honest",
+  "Know when adding reasoning back to a decision model is worth 11x the latency, and how a confidence threshold buys most of the accuracy for a third of the wait"
+]} />
+
+[System One decision models](/docs/models/system-one-decision-models-jev-kev) explained the category: you send program state plus typed questions, and you get calibrated probabilities back instead of text. That page ended where the open recreations were in mid-September — Kev, Nimble, a logprob shim.
+
+In the last week of September the story changed shape. **The question stopped being "can we clone the API" and became "should you train your own?"** On September 28 a project called **Jeff** shipped 0.8B and 2B fine-tunes that land within four points of Jev's overall benchmark score and run in ~22–28 ms on a laptop-class GPU, trained in about two hours on **one** workstation card. It was the top AI story on Hacker News that day. Twelve hours later PostHog published **Jeeves**, which does the opposite thing — bolts reasoning *onto* a decision model — and reports beating Jev on Jev's own hard tier.
+
+Both are MIT code with Apache-2.0 weights. Both are honest enough in their READMEs to publish the rows where they lose. This page is about what those rows mean for you.
+
+## The 72 hours, in order
+
+| Date (2026) | What shipped | Why it matters |
+| --- | --- | --- |
+| Sep 15 | **Jev** (TypeSafe AI), API-only | Defined the category and the `/v1/systemone` request shape |
+| Sep 21 | **Kev**, **Nimble**, **openjev-sglang** | Proved the *interface* was reproducible on open weights |
+| — | **AutoJev** (denis-pplx) | The recipe: full-weight SFT of Qwen3.8-27B, 73,000 examples, **one H200**, 84.60% vs a 69.83% base |
+| Sep 28 | **Jeff** (firelex) | Shrank it — 0.8B/2B students, ~2 h on one workstation GPU, MLX serving, game evals |
+| Sep 29 | **Jeeves** (PostHog) | Reversed the premise — a *thinking* decision model, LoRA + RL on Qwen3.5-9B |
+
+The through-line: in two weeks a category went from a closed API with undisclosed training to a recipe you can run overnight. AutoJev is the hinge — it published the loss function, and everything after it is a variation on that one idea.
+
+## The recipe, for real
+
+Strip the marketing and a decision model is a startlingly small change to a normal LLM.
+
+### 1. The loss is cross-entropy over option letters
+
+The model is not taught to "make decisions". It is taught to put probability mass on **a single letter token** — `A`, `B`, `C` — at one specific position. You lay the options out as a lettered panel, you train with plain cross-entropy on the correct letter, and at inference you read the logits for the letter tokens and renormalise them over just the options you offered.
+
+That one implementation detail explains the headline limitation. Jeff caps you at **26 options**, and the README is blunt that positions past that are "effectively never selected" — because the alphabet ran out, not because of anything architectural. (Jev itself advertises up to 255 options, which tells you it encodes options differently.)
+
+Jeeves takes the other road: a **pointer head** that scores a projected hidden state against each option's embedding with a scaled dot product. No letters, no alphabet ceiling. It marks the structure with rare tokens borrowed from Qwen's tokenizer that real text essentially never uses — `<|fim_prefix|>` for state, `<|fim_middle|>` for questions, `<|box_start|>`/`<|box_end|>` around options, `<|fim_suffix|>` at the decision point. Reusing dead tokens as delimiters is the cheap trick that avoids growing the vocabulary or colliding with content.
+
+### 2. The calibration is a separate, one-parameter stage
+
+This is the part people skip, and it is the part that makes the output trustworthy.
+
+Accuracy and calibration are different properties. A model can rank the right answer first almost every time and still say "91%" when it is right 75% of the time — the independent BANKING77 pilot on Jev found exactly that shape of over-confidence. So all three projects fit **a single scalar temperature** on a held-out development set *after* training, and ship it alongside the checkpoint. Divide the logits by it, softmax, done.
+
+AutoJev publishes what that buys, and it is the cleanest before/after in the whole stack:
+
+| Metric | Base Qwen3.8-27B | AutoJev-27B |
+| --- | --- | --- |
+| Accuracy | 69.83% | **84.60%** |
+| ECE (expected calibration error — lower is better) | 0.06483 | **0.04282** |
+| Brier score (lower is better) | 0.40834 | **0.22027** |
+
+Note that all three moved, but by different amounts. Accuracy climbed ~15 points while ECE fell ~34% — training made the model *both* righter and more honest, and the honesty is measurable separately. If you train your own and only report accuracy, you have not finished.
+
+### 3. Everything else is small
+
+One epoch. Batch 256. Full-weight (Jeff, AutoJev) or LoRA r=16 (Jeeves). Checkpoint selection **on a development set, never on the benchmark panel** — Jeff states this explicitly, and it is the single line that separates a credible small-model result from a leaked one. Jeff also keeps at least half of each training family in the same panel layout it will see at inference, which matters more than it should; see the wording section below.
+
+<PromptCard title="Train a 0.8B decision model (Jeff's own recipe)">
+{`# 1. Build the training mix from public datasets
+uv run autojev-mix ...
+
+# 2. One epoch, full-weight, lr 5e-6
+scripts/train.sh RUN data/mix/public.jsonl data/mix 5e-6 40 Qwen/Qwen3.5-0.8B <revision> --epochs 1
+
+# 3. Evaluate the SELECTED checkpoint against a held-out panel
+uv run autojev-evaluate --data data/panel.jsonl --local \\
+  --checkpoint checkpoints/RUN/selected --output runs/eval/RUN.json`}
+</PromptCard>
+
+Reported cost of step 2: **~2 hours for 0.8B, ~3.5 hours for 2B, on one RTX PRO 6000.** That is the number that made this a front-page story.
+
+## Read the benchmark table sideways
+
+Here is Jeff's published panel — 4,599 questions across five public datasets plus JevBench's hard tier — with the commercial API in the last column. Read it by *row*, not by the overall line.
+
+| Benchmark | Jeff-0.8B | Jeff-2B | Jeff-Gemma4-E2B | Jev (API) |
+| --- | --- | --- | --- | --- |
+| **Overall** | 79.1% | **83.1%** | 81.6% | 83.0% |
+| Financial PhraseBank | 96.4% | 96.3% | 96.1% | 77.0% |
+| RAGTruth | 86.1% | **88.9%** | 87.4% | 77.3% |
+| WinoGrande | 68.6% | 79.0% | 77.4% | **90.7%** |
+| JudgeBench | 62.6% | 64.6% | 60.6% | **78.6%** |
+| BBH | 64.0% | 68.0% | 66.4% | **94.3%** |
+| JevBench Hard | 47.6% | 53.3% | 48.6% | **73.3%** |
+
+The overall scores are nearly tied. The rows are not close at all:
+
+- **Where the tiny model wins, it wins big.** Financial PhraseBank: 96.4% against 77.0% — a 0.8B model beating a commercial API by 19 points. RAGTruth (does this answer stay faithful to the retrieved passage?): 86.1% against 77.3%. Both are narrow, high-volume, pattern-shaped jobs — sentiment on a fixed vocabulary, groundedness on a supplied passage. If your agent's hot path is that shape, a local 0.8B is not a compromise, it is the better tool.
+- **Where it loses, it is not close.** BBH is 30 points down. JevBench Hard is 26 points down. Those are the rows that need multi-step reasoning, and the README says so plainly: small decision models give you "fast, calibrated choices between the options you describe" and no reasoning chain.
+- **The overall number is the average of those two facts and therefore describes nothing.** This is the most transferable lesson on this page, and it is not specific to decision models: any single headline score is a weighted average over a benchmark mix that is not your mix.
+
+### The games table is the honest one
+
+Jeff also evaluated zero-shot game play — 20 episodes each of Doom, Frogger and Pac-Man — and the result is uncomfortable enough that publishing it earns trust:
+
+| Model | Doom (kills) | Frogger (crossings) | Pac-Man (pellets / 98) |
+| --- | --- | --- | --- |
+| Random | −0.05 | 0 | 11.2 |
+| Hand-coded rule bot | 6.55 | 10.25 | **94.1** |
+| **Jeff-0.8B** | **6.55** | **10.3** | 57.0 |
+| Jeff-2B | −0.9 | 6.0 | 41.2 |
+
+**The 2B is worse at all three games than the 0.8B it outscores on every benchmark row.** The README's read is that the bigger model came out more risk-averse. Whatever the cause, the pairing of those two tables is the point: benchmark rank did not predict behaviour in a loop. And the hand-coded rule bot still wins Pac-Man by 37 points — the reminder that "can a model do it" and "should a model do it" are different questions.
+
+## The latency cliff nobody mentions
+
+Median latency per decision, ~200-token questions:
+
+| Model | RTX PRO 6000 | Apple M4 Max (MLX) | CPU (32 threads) |
+| --- | --- | --- | --- |
+| Jeff-0.8B | 22 ms | 28 ms | **463 ms** |
+| Jeff-2B | 24 ms | 60 ms | 708 ms |
+| Jeff-Gemma4-E2B | 29 ms | — | 1.0 s |
+
+Two things to take from this:
+
+1. **"Tiny model" does not mean "runs anywhere fast."** The same 0.8B checkpoint is 22 ms on a GPU and 463 ms on 32 CPU threads — a **21x** gap. A decision model is only a decision model at GPU latency; on CPU it is a slow API call you happen to host. If your plan was "sprinkle these calls everywhere in the request path", the CPU column is the plan's budget.
+2. **2.5x the parameters cost 2 ms on the big GPU.** 22 → 24 ms. At this size a single forward pass over ~200 tokens is dominated by overhead and memory bandwidth, not by arithmetic, so on a fast card the 2B is nearly free relative to the 0.8B — while on the M4 Max the same step costs you 2.1x (28 → 60 ms). Pick your model per *deployment target*, not from the parameter count.
+
+<Steps items={[
+  {title: "Serve one locally before you train anything", body: "Install with uv, pull a checkpoint from Hugging Face, start the server. You want the zero-shot number on YOUR data before you decide training is necessary — the most common outcome reported by practitioners is that zero-shot is not good enough, and that is much cheaper to discover in twenty minutes than after a training run."},
+  {title: "Build a labelled dev set of a few hundred real examples", body: "Real traffic, real label distribution, including the ambiguous ones you would normally throw out. This set does double duty: it selects your checkpoint and it fits your temperature. It must never overlap the panel you report numbers on."},
+  {title: "Measure the boring baseline first", body: "Embeddings plus a logistic-regression head, on the same dev set. On BANKING77 this approach was reported in the Jeff discussion at 93.0% with a model roughly 15x smaller. If it wins on your data, stop here — you have saved yourself a fine-tune and a GPU."},
+  {title: "Fine-tune only the gap you measured", body: "One epoch, batch 256, cross-entropy over the option letters, lr around 5e-6. Keep at least half your training examples in the exact panel layout you will use at inference. Select the checkpoint on the dev set."},
+  {title: "Fit the temperature, then report both numbers", body: "One scalar on the dev set, stored with the checkpoint. Then publish accuracy AND calibration error to yourself. An uncalibrated decision model is a classifier with a confidence field you are not allowed to trust — which defeats the entire purpose of the category."},
+  {title: "Set the threshold from the reliability curve, not from a round number", body: "Find the confidence at which observed accuracy is actually good enough to skip a human or a frontier model. Everything below it escalates. That number is a property of your data and will not be 0.9 just because 0.9 looks tidy."}
+]} />
+
+<PromptCard title="Serve a Jev-compatible model locally and send it a real request">
+{`# Apple silicon (MLX backend)
+uv sync --no-default-groups --extra mac
+uv run --no-default-groups hf download mstrasser/Jeff-Qwen3.5-0.8B --local-dir checkpoints/jeff-0.8b
+JEFF_BACKEND=mlx JEFF_CHECKPOINT=checkpoints/jeff-0.8b PORT=8765 \\
+  uv run --no-default-groups --extra mac jeff-serve
+
+# Two independent questions, one request, one parallel pass
+curl -s localhost:8765/v1/systemone -H 'content-type: application/json' -d '{
+  "model": "jeff-latest",
+  "state": "Refund request: the customer says the parcel arrived crushed and wants their money back.",
+  "questions": {
+    "route": {"type": "choice", "instructions": "Which team should handle this?",
+              "criteria": {"1": "Refunds and payments", "2": "Damaged or lost parcels", "3": "Account and login problems"}},
+    "angry": {"type": "noul", "instructions": "Is the customer angry?"}
+  }
+}'`}
+</PromptCard>
+
+## The uncomfortable question: do you need a model at all?
+
+The sharpest criticism in the Hacker News thread was not that Jeff performs badly. It was structural: *if you have to fine-tune it on your own labelled data anyway, you have not bought a zero-shot classifier — you have bought a somewhat awkward way to train a classifier*, and the field already has cheaper ones.
+
+The numbers in that thread support taking it seriously. A commenter reported testing the 0.8B zero-shot on job-ad classification and finding it unusable, with the 2B still missing categories. Another reported that plain **embeddings plus a logistic-regression head reached 93.0% on BANKING77 using a model about 15x smaller** than the decision models being compared — against the 87.4%-confidence/75.3%-accuracy shape the independent Jev pilot found on the same dataset.
+
+So the honest decision table:
+
+| Situation | Use |
+| --- | --- |
+| Handful of fixed labels, plenty of examples, latency matters | **Embeddings + logistic regression.** Smallest, fastest, trains in seconds. Beat this before considering anything else. |
+| Labels change often, or questions are written in prose per request | **Zero-shot decision model** — the schema *is* the interface, which is the actual product |
+| One high-volume domain, you have labels, you have a GPU for an afternoon | **Fine-tune.** Jeff's chess run went 15.5% → 55.8%; a voice-navigation fine-tune on ~11,000 examples went 31.7% → 95.8% in under 30 minutes |
+| Genuinely hard, multi-step judgements | **Reasoning** — Jeeves, or a frontier model behind a cascade |
+| You need it working this afternoon and the volume is low | **Hosted API.** Your own GPU is not free either |
+
+The general rule underneath: a decision model earns its place when the *schema* is the valuable part — arbitrary typed questions, in prose, resolved in one pass. When your label set is fixed and known, you are paying model-shaped costs for classifier-shaped work.
+
+## Jeeves: putting the thinking back
+
+Jev's founding pitch was that this class of model does not generate text. PostHog's Jeeves tests that premise directly by letting a decision model think first, then decide, on Qwen3.5-9B with LoRA r=16 and a pointer head.
+
+Training runs in three stages: **SFT** (19,126 questions from 12 public datasets plus synthetic policy data, half carrying reasoning chains, 2 epochs / 596 steps on 8 GPUs), then **CISPO reinforcement learning** (9,992 questions, 8 rollouts each at temperature 1, thinking capped at 2,560 tokens — a 624-step schedule deliberately **stopped at step 402** because calibration was degrading past it), then the same scalar temperature fit.
+
+Reported results:
+
+| Benchmark | Jeeves | Jev | Kev-9B |
+| --- | --- | --- | --- |
+| Test overall | **0.889** | 0.857 | 0.822 |
+| JevBench overall (231 items) | **0.935** | 0.866 | 0.715 |
+| JevBench hard (111 items) | **0.865** | 0.730 | 0.451 |
+
+And the ablation that matters more than any of those rows: **0.804 without reasoning, 0.840 with it.** Thinking is worth about 3.6 points on this model.
+
+Now price it. On one H100, Jeeves answers in **~0.3 s with reasoning off** and **3.3 s median with it on — 17.1 s at p90.** That is roughly 11x the median latency and a tail an order of magnitude worse, for 3.6 points. The README's own mitigation is the interesting engineering: cap thinking at 2,560 tokens *and* add a **0.9 confidence threshold** that stops early when the model is already sure, which brings the median to **2.0 s**. Reasoning becomes something you spend only on the items that need it.
+
+Two caveats Jeeves publishes about itself: it is **worse than Jev on knowledge-heavy tasks** (MMLU 0.793 vs 0.900) — reasoning does not add facts — and its reasoning chains were never rewarded for language consistency, so they are not reliably readable. If you wanted the chain as an audit trail, check that it is legible before you promise anyone it is.
+
+## Gotchas that will cost you a day
+
+- **Wording consistency beats wording quality.** Jeff reports Frogger crossings going from 15 to 23 purely by phrasing every option the same way as its siblings. Options are compared against each other in one pass — asymmetric phrasing is a thumb on the scale. Keep keys short and put the description in the text.
+- **Prompt formats do not port between decision models.** Jev's bearing-number style did not transfer to Jeff; consequence-focused wording was needed instead. Treat a switch of decision model as a re-tuning job, exactly like [porting prompts across models](/docs/models/porting-prompts-across-models).
+- **The 26-option ceiling is silent.** Nothing errors. Options 27+ simply never win. Chunk large label sets into a two-stage decision instead.
+- **English, text-only** for Jeff. AutoJev accepts base64 images; Jeff does not.
+- **Zero-shot quality is workload-shaped and often disappointing.** Multiple practitioners reported the small models being unusable on their own real classification tasks. Measure on your data on day one.
+- **Training-data leak filtering is your job.** Jeff generates synthetic data locally with leak filtering precisely because a decision model trained near its eval panel produces a number that means nothing.
+- **Both repos are days old.** Flags, checkpoint names and defaults are moving. Nothing here substitutes for the current README.
+
+<Flashcards title="DIY decision-model vocabulary" cards={[
+  {front: "Option-letter cross-entropy", back: "The Jeff/AutoJev training objective: lay options out as a lettered panel and train plain cross-entropy on the correct letter token, then read and renormalise the letter logits at inference. Cheap — and the reason the option count stops at 26."},
+  {front: "Pointer head", back: "Jeeves' alternative: score a projected hidden state at the decision point against each option's embedding with a scaled dot product. No letters, so no alphabet ceiling."},
+  {front: "Rare-token markers", back: "Reusing tokenizer tokens that never appear in real text (`<|fim_prefix|>`, `<|box_start|>`, …) as structural delimiters for state, questions and options — no vocabulary growth, no collision with content."},
+  {front: "Temperature calibration", back: "A single scalar fitted on a held-out dev set AFTER training and shipped with the checkpoint. Divides the logits before softmax. Fixes over-confidence without touching accuracy."},
+  {front: "ECE / Brier", back: "The two numbers that say whether a probability is honest. AutoJev: ECE 0.06483 → 0.04282, Brier 0.40834 → 0.22027 against its base model. Report these next to accuracy or you have not measured calibration."},
+  {front: "CISPO", back: "The reinforcement-learning method (from MiniMax) used for Jeeves' second stage. Its 624-step schedule was cut at step 402 because calibration got worse past that point — more RL is not monotonically better."},
+  {front: "Confidence-thresholded thinking", back: "Stop the reasoning chain early once confidence passes a bar (0.9 in Jeeves) instead of always running to the token cap. Cut median latency 3.3 s → 2.0 s while keeping most of the gain."},
+  {front: "The embeddings baseline", back: "Sentence embeddings plus a logistic-regression head — reported at 93.0% on BANKING77 with a ~15x smaller model. The number your fine-tune has to beat before it is worth anything."}
+]} />
+
+<Quiz questions={[
+  {
+    q: "Jeff-0.8B scores 96.4% on Financial PhraseBank against Jev's 77.0%, but 64.0% on BBH against Jev's 94.3%. What is the right conclusion?",
+    options: [
+      "Jeff is better than Jev overall, since it wins the more practical benchmark",
+      "The overall score averages two very different regimes — pick per workload shape: narrow pattern tasks favour the small fine-tune, multi-step reasoning does not",
+      "The benchmarks contradict each other, so neither is usable",
+      "Jev is only better because it is larger, so a larger Jeff would beat it everywhere"
+    ],
+    answer: 1,
+    explain: "The two rows describe different kinds of work. Narrow, high-volume, pattern-shaped jobs (sentiment, groundedness) are where a tiny fine-tune beats the API outright; anything requiring a reasoning chain is where it loses by 26–30 points. The 'overall' line is an average over a benchmark mix that is not your traffic mix."
+  },
+  {
+    q: "Why does Jeff cap you at 26 options per question?",
+    options: [
+      "Attention over more than 26 options becomes numerically unstable",
+      "It is a licensing restriction inherited from Qwen3.5",
+      "Options are encoded as single letter tokens A–Z and trained with cross-entropy on that letter, so the alphabet is the ceiling",
+      "26 is the largest option count present in any public benchmark"
+    ],
+    answer: 2,
+    explain: "The limit falls straight out of the training recipe: the model puts probability mass on one letter token. Positions past Z are never selected — silently, with no error. Chunk large label sets into a two-stage decision."
+  },
+  {
+    q: "Your fine-tuned decision model hits 88% accuracy on your dev set. What still has to be done before you let it skip human review?",
+    options: [
+      "Nothing — 88% accuracy is the relevant number for an automation threshold",
+      "Fit a temperature and check calibration, then set the threshold from the reliability curve rather than from a round number",
+      "Retrain for more epochs until accuracy exceeds 95%",
+      "Switch to the 2B model, since larger models are better calibrated by default"
+    ],
+    answer: 1,
+    explain: "Accuracy and calibration are separate properties: a model can rank correctly and still be badly over-confident, which is exactly the shape the independent Jev pilot found (87.4% stated confidence at 75.3% accuracy). Fit the scalar temperature on held-out data, then read the confidence at which observed accuracy is actually acceptable."
+  },
+  {
+    q: "Jeeves reports 0.804 accuracy with reasoning off and 0.840 with it on, at 0.3 s versus 3.3 s median (17.1 s p90). What is the engineering takeaway?",
+    options: [
+      "Always enable reasoning — 3.6 points is a large gain for a classifier",
+      "Never enable reasoning — an 11x latency cost can never be justified",
+      "Spend reasoning selectively: a confidence threshold that stops early on easy items recovered most of the gain at 2.0 s median",
+      "The 9B model is simply too small, and reasoning would be free on a larger one"
+    ],
+    answer: 2,
+    explain: "Jeeves' own mitigation is a 0.9 confidence threshold alongside the 2,560-token thinking cap, cutting the median to 2.0 s. Treat thinking as a budget spent on the items that need it, not a global switch — and watch the p90, which is where a tail-latency SLO actually breaks."
+  },
+  {
+    q: "Before training your own decision model on a fixed label set, which baseline should you measure first?",
+    options: [
+      "The largest open-weight model you can fit, zero-shot",
+      "Sentence embeddings plus a logistic-regression head — reported at 93.0% on BANKING77 with a roughly 15x smaller model",
+      "A hand-written regular-expression ruleset",
+      "The hosted API at its lowest confidence threshold"
+    ],
+    answer: 1,
+    explain: "When the label set is fixed and you have examples, a classic embeddings-plus-classifier stack is smaller, faster and trains in seconds. A decision model earns its cost when the schema is the product — arbitrary typed questions in prose — not when you already know all your labels."
+  }
+]} />
+
+## Sources & further reading
+
+- [firelex/jeff](https://github.com/firelex/jeff) — the README with the full benchmark, latency and game tables, the training commands, the 26-option limit and the chess/voice fine-tune results.
+- [PostHog/jeeves](https://github.com/PostHog/jeeves) — three-stage training (SFT → CISPO → temperature), pointer head, rare-token markers, the reasoning ablation and the latency/threshold numbers.
+- [denis-pplx/autojev](https://github.com/denis-pplx/autojev) — the origin recipe: full-weight SFT of Qwen3.8-27B on 73,000 examples, one H200, with the accuracy/ECE/Brier before-and-after.
+- [Hacker News — Jeff discussion (item 49883844)](https://news.ycombinator.com/item?id=49883844) — 536 points, 204 comments: the zero-shot failure reports, the ModernBERT critique and the embeddings + logistic-regression BANKING77 number.
+- [Hacker News — Jeeves discussion (item 49891290)](https://news.ycombinator.com/item?id=49891290) — the reasoning-vs-latency argument.
+- [AILmanac — System One decision models: Jev, Kev and the open clones](/docs/models/system-one-decision-models-jev-kev) — the category itself, the independent BANKING77 calibration pilot, and the hosted API's limits and pricing.
+
+## Next
+
+- [System One decision models: Jev, Kev and the open clones](/docs/models/system-one-decision-models-jev-kev) — read this first if the category is new to you; it covers the API, the "cannot hallucinate" claim and the independent test.
+- [Model routing patterns](/docs/models/model-routing-patterns) — where a calibrated probability actually earns its keep: cascades, confidence gates and escalation.
+- [Run models locally with Ollama](/docs/models/run-models-locally-ollama) — the general local-serving ground this page assumes.
