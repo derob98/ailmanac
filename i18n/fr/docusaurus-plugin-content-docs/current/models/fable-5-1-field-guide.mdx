@@ -1,0 +1,297 @@
+---
+sidebar_position: 1.45
+title: "Claude Fable 5.1 : ce qui a changé et comment migrer"
+description: "Anthropic a livré Claude Fable 5.1 et Mythos 5.1 le 1er septembre 2026 : même tarif 10 $/50 $, lectures de cache ramenées à 0,25 $, trois changements cassants de l'API (erreurs sur tool_choice forcé, blocs de réflexion unidirectionnels, historique en append-only) et cinq bêtas additives. Le guide de terrain pour la migration de quiconque épingle claude-fable-5 ou claude-opus-5."
+keywords: [Claude Fable 5.1, claude-fable-5-1, Claude Mythos 5.1, Fable 5.1 migration, tool_choice any not supported, preserved thinking, prefix_mismatch_behavior, turn-scoped system messages, clear_at next_user_message, thinking display updates, per-message effort, cache read pricing, Fable 5.1 vs Opus 5, Fable 5.1 benchmarks]
+---
+
+<LevelBadge level="intermediate" />
+
+Le **1er septembre 2026**, Anthropic a livré **Claude Fable 5.1** (`claude-fable-5-1`) et son jumeau réservé à Glasswing, **Claude Mythos 5.1** (`claude-mythos-5-1`). Si vous survolez le lancement, vous le classerez dans la catégorie « Fable, en mieux » et passerez à autre chose. Ne le faites pas. C'est la première version mineure de Claude où un simple échange d'identifiant de modèle peut **renvoyer des 400 en production** : le `tool_choice` forcé a disparu, les blocs de réflexion sont désormais liés au modèle et à la conversation qui les a produits, et l'édition de l'historique de conversation déclenche une erreur pour les nouveaux comptes. C'est aussi la première version où la ligne la *moins chère* du tableau tarifaire est la plus intéressante : les lectures de cache sont passées de 1 $ à **0,25 $ par MTok**, ce qui explique comment Anthropic peut affirmer que les charges de travail typiques coûtent environ 25 % de moins, et les charges fortement agentiques jusqu'à 45 % de moins, pour un prix catalogue inchangé de 10 $ / 50 $.
+
+Cette page est le guide de terrain de la migration : ce qui a changé, ce qui casse, ce que vous y gagnez, et une checklist que vous pouvez dérouler en un après-midi.
+
+<Callout type="objectives" items={[
+  "Connaître les trois changements cassants qui transforment un passage de claude-fable-5 à claude-fable-5-1 en 400, et le correctif de chacun",
+  "Utiliser les cinq fonctionnalités additives : effort par message, messages système limités au tour, mises à jour de progression, lectures de cache moins chères, provenance du contenu",
+  "Reconnaître les sept changements de comportement qui apparaissent sans aucune modification de code (moins d'appels d'outils parallèles, moins de narration, prose plus dense, réécritures de fichiers entiers)",
+  "Lire les benchmarks de lancement face à Fable 5, Opus 5 et GPT-5.6 Sol sans se laisser vendre quoi que ce soit",
+  "Décider entre Fable 5.1, Opus 5 et Fable 5 pour votre charge de travail, puis dérouler la checklist de migration",
+]} />
+
+<VerifyNote lastVerified="2026-09-14" source="https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1">
+Les identifiants de modèle, les tarifs, les changements cassants, les en-têtes bêta et les notes de comportement proviennent du document officiel d'Anthropic « What's new in Claude Fable 5.1 », de la [présentation du modèle](https://platform.claude.com/docs/en/models/fable-5-1/overview), du [guide de migration](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide) et de la [page tarifaire](https://platform.claude.com/docs/en/about-claude/pricing), tous consultés le 14 septembre 2026. Les chiffres de benchmarks sont ceux d'Anthropic, issus de l'[annonce de lancement](https://www.anthropic.com/claude-fable-and-mythos-5-1). Les trois bêtas citées ici peuvent changer de forme ; revérifiez les en-têtes avant de livrer. Pour le tableau des modèles à jour, voir [Modèles et tarifs actuels](/docs/whats-new/models-and-pricing).
+</VerifyNote>
+
+## La version en un paragraphe
+
+Fable 5.1 succède à [Fable 5](/docs/models/fable-5-mythos-5-flagship) : même palier de classe Mythos au-dessus d'Opus, même contexte de 1M de tokens, même sortie max de 128K, mêmes 10 $ en entrée / 50 $ en sortie, même tokenizer, même réflexion adaptative toujours active, même comportement `stop_reason: "refusal"` en bande, même exigence de rétention de 30 jours (pas de ZDR). La recommandation d'Anthropic reste inchangée dans l'esprit : **commencez par Opus 5** pour l'essentiel du travail, et passez à Fable 5.1 « pour le raisonnement exigeant et le travail agentique de longue haleine, ou quand vos évaluations sur Claude Opus 5 à effort élevé restent insuffisantes ». Ce qui est nouveau : trois changements cassants, cinq fonctionnalités additives, une lecture de cache 75 % moins chère, et une série de dérives comportementales que vous avez intérêt à connaître avant que votre suite d'évals ne vous les apprenne.
+
+## Trois changements cassants
+
+Ce sont les raisons pour lesquelles vous ne pouvez pas vous contenter de changer l'identifiant. Chacun donne un 400, pas une dégradation silencieuse.
+
+### 1. L'usage forcé d'outils renvoie une erreur
+
+`tool_choice: {"type": "any"}` et `{"type": "tool", "name": "..."}` renvoient désormais un 400 `invalid_request_error` :
+
+```text
+tool_choice: type "tool" and "any" are not supported for this model.
+```
+
+La raison est instructive : la réflexion est toujours active, et un appel d'outil forcé la court-circuiterait, si bien que le modèle ferait son raisonnement à l'intérieur des arguments de l'outil et la qualité des arguments chuterait. Le contrôle s'applique à l'API Messages, à l'API Message Batches et au point de terminaison de comptage de tokens. `auto` (la valeur par défaut) et `none` sont inchangés.
+
+**Le correctif** tient en deux lignes : gardez `tool_choice` sur `auto`, mettez `strict: true` sur l'outil avec `additionalProperties: false` dans le schéma, et *dites* dans le prompt quand l'outil s'applique. Anthropic note que Fable 5.1 « suit les instructions d'outils explicites de manière fiable ». Si ce que vous vouliez vraiment, c'était du JSON conforme à un schéma plutôt qu'un appel d'outil, passez plutôt aux [sorties structurées](/docs/api/structured-output).
+
+<PromptCard title="Appel d'outil forcé → outil strict + instruction explicite">
+{`# Before (Fable 5) — now a 400 on Fable 5.1
+"tool_choice": {"type": "tool", "name": "record_summary"}
+
+# After (Fable 5.1)
+"tools": [{
+  "name": "record_summary",
+  "description": "Record the structured summary of the document.",
+  "strict": true,
+  "input_schema": {
+    "type": "object",
+    "properties": {"summary": {"type": "string"}},
+    "required": ["summary"],
+    "additionalProperties": false
+  }
+}],
+"tool_choice": {"type": "auto"},
+"messages": [{"role": "user",
+  "content": "Summarize: The meeting moved to Thursday. Call the record_summary tool with your result."}]`}
+</PromptCard>
+
+### 2. Les blocs de réflexion sont unidirectionnels
+
+Chaque bloc de réflexion enregistre désormais quel modèle l'a produit, et la préservation va dans un seul sens : **Fable 5.1 peut lire les blocs de réflexion d'Opus 5, Fable 5, Mythos 5 et de tous les Claude antérieurs ; aucun d'eux ne peut lire ceux de Fable 5.1.** Une conversation qui migre *vers* Fable 5.1 conserve son raisonnement. Une conversation qui le *quitte* (un routeur, un repli sur Opus 5, une rétrogradation en cours de session pour économiser) perd le raisonnement des tours Fable 5.1.
+
+L'API gère cela en **supprimant** les blocs que le modèle cible ne peut pas lire avant qu'il ne les voie. Les blocs supprimés ne sont pas facturés et ne comptent pas dans `input_tokens`. Sans l'en-tête bêta `thinking-binding-controls-2026-08-01`, la suppression est **silencieuse** ; avec lui, elle est signalée dans un tableau `input_transformations` de premier niveau. Si vous routez entre modèles, envoyez l'en-tête et journalisez ce tableau. La perte silencieuse de raisonnement, c'est exactement le genre de chose qui remonte sous la forme « le modèle est devenu bête après l'étape 12 » dans un rapport de bug.
+
+### 3. Modifier les tours antérieurs invalide les blocs de réflexion
+
+C'est celui qu'il faut lire deux fois. Modifier **quoi que ce soit** avant un bloc de réflexion Fable 5.1, c'est-à-dire le prompt `system`, le tableau `tools` ou n'importe quel message antérieur, invalide tous les blocs de réflexion ultérieurs. Là où le contrôle est appliqué, la requête suivante est rejetée par un 400 dont le message indique `The block is bound to a different conversation`.
+
+Les règles d'application à ce jour :
+
+- **Comptes créés le 31 août 2026 ou après :** contrôle appliqué.
+- **Comptes plus anciens :** l'API enregistre l'incohérence mais n'agit dessus que si vous définissez vous-même `thinking.block_binding.prefix_mismatch_behavior`.
+- **Mythos 5.1** n'exécute pas ce contrôle du tout.
+- Claude Code, claude.ai, Managed Agents et l'Agent SDK préservent le préfixe pour vous. **Seuls les tableaux `messages` construits à la main sont exposés.**
+
+La liste d'Anthropic des éléments qui invalident les blocs, paraphrasée, ressemble à une liste des habitudes courantes des harnais d'agents :
+
+| Invalide tous les blocs de réflexion ultérieurs | Les garde valides |
+| --- | --- |
+| Éditer, réordonner ou supprimer un tour antérieur tout en conservant les suivants | Supprimer une série initiale de blocs de réflexion, du plus ancien au plus récent |
+| Injecter un rappel ou une ligne de statut par requête dans un tour antérieur, puis le retirer à la requête suivante | La compaction côté serveur ou l'[édition de contexte](/docs/api/memory-and-context-editing) qui élague l'historique |
+| Reconstruire les `system` ou `tools` de premier niveau entre deux requêtes d'une même conversation | Déplacer les marqueurs `cache_control` |
+| Une URL d'image ou de document qui sert *des octets différents* plus tard (le contrôle porte sur les octets, donc une URL signée rotative pour le même fichier convient) | Changer l'`effort` entre deux requêtes |
+
+Les correctifs se ramènent tous à une règle : **traitez la conversation comme append-only.** Les rappels par tour deviennent des [messages système limités au tour](#messages-système-limités-au-tour-bêta) (ci-dessous). Les changements d'outils et d'instructions deviennent des [messages système et changements d'outils en cours de conversation](/docs/api/mid-conversation-system-messages). L'élagage devient de la compaction côté serveur. Pour continuer au lieu d'échouer, envoyez l'en-tête `thinking-binding-controls-2026-08-01` avec `prefix_mismatch_behavior: "drop_block"` ; la suppression est alors signalée dans `input_transformations` avec `reason: "prefix_binding_mismatch"`.
+
+Anthropic présente cela en partie comme une mesure **anti-distillation** : le billet de lancement indique que les nouveaux comptes API ne peuvent plus éditer manuellement le contexte antérieur tout en préservant la transcription, ce qui ferme une technique de distillation publiquement documentée. Le bénéfice pratique pour vous, c'est que la même discipline garde aussi le [cache de prompt](/docs/api/prompt-caching) au chaud.
+
+## Cinq fonctionnalités additives
+
+### Effort par message (bêta)
+
+Vous pouvez désormais changer l'`effort` en cours de conversation **sans invalider le cache de prompt**. Montez-le pour l'étape difficile, baissez-le pour les étapes de routine. Envoyez l'en-tête bêta `mid-conversation-output-config-2026-07-01` et insérez un message système ne contenant que l'effort ; le nouveau niveau prend effet à partir du tour utilisateur suivant. Pris en charge sur Fable 5.1, Mythos 5.1 et Opus 5, sur l'API Claude et Google Cloud.
+
+<PromptCard title="Baisser l'effort pour un tour de résumé sans casser le cache">
+{`{
+  "model": "claude-fable-5-1",
+  "max_tokens": 4096,
+  "output_config": {"effort": "high"},
+  "messages": [
+    {"role": "user", "content": "Plan a migration from SQLite to PostgreSQL in three short steps."},
+    {"role": "assistant", "content": "1. Export the SQLite data. 2. Create the PostgreSQL schema. 3. Import the data and verify row counts."},
+    {"role": "system", "content": [], "output_config": {"effort": "low"}},
+    {"role": "user", "content": "Summarize the plan in one sentence."}
+  ]
+}
+# header: anthropic-beta: mid-conversation-output-config-2026-07-01`}
+</PromptCard>
+
+Cela se combine avec les recommandations sur l'effort de [Réflexion et effort](/docs/api/thinking-and-effort) et [Réglage de l'effort](/docs/api/effort-tuning) : la valeur par défaut est `high`, et « un seul niveau pour toute la session » est désormais l'option paresseuse, plus la seule possible.
+
+### Messages système limités au tour (bêta)
+
+Mettez `clear_at: "next_user_message"` sur un message `role: "system"` et il porte l'autorité d'un prompt système pour le tour courant uniquement, puis cesse d'être rendu dès qu'un message `user` ultérieur existe. Vous continuez à le renvoyer tel quel, donc rien d'antérieur ne change, le cache continue de correspondre, les blocs de réflexion ultérieurs restent valides, et un message effacé **ne coûte aucun token d'entrée**. En-tête : `mid-conversation-system-clear-at-2026-08-21`.
+
+```json
+{
+  "role": "system",
+  "clear_at": "next_user_message",
+  "content": "Results have landed in your inbox. Check it before running more code."
+}
+```
+
+C'est le remplacement officiel du schéma « injecter un rappel, le supprimer à la requête suivante » que le changement cassant n° 3 sanctionne désormais.
+
+### Mises à jour de progression entre appels d'outils (bêta)
+
+Fable 5.1, comme Fable 5, écrit de courtes notes de progression entre les appels d'outils, chacune dans son propre bloc `thinking` juste avant l'appel. Avec le `thinking.display: "omitted"` par défaut, elles reviennent **vides**, si bien qu'un long tour agentique paraît silencieux à vos utilisateurs. Nouveauté : `display: "updates"` (en-tête `thinking-display-updates-2026-08-18`) renvoie les notes de progression sous forme de texte pendant que le raisonnement reste masqué. Tout bloc de réflexion au texte non vide est alors une ligne de statut que vous pouvez afficher. `"summarized"` les renvoie aussi, mêlées au raisonnement résumé. La chaîne de pensée brute n'est toujours jamais renvoyée.
+
+### Lectures de cache à 0,25 $ par MTok
+
+| | Entrée de base | Écriture cache 5 min | Écriture cache 1 h | **Lecture de cache** | Sortie |
+| --- | --- | --- | --- | --- | --- |
+| Fable 5 | 10 $ | 12,50 $ | 20 $ | 1,00 $ | 50 $ |
+| **Fable 5.1** | 10 $ | 12,50 $ | 20 $ | **0,25 $** | 50 $ |
+
+Les lectures de cache valent 0,025× l'entrée de base sur Fable 5.1 et Mythos 5.1, contre 0,1× sur tous les autres modèles Claude. Les écritures et le minimum de 512 tokens pour qu'un prompt soit cachable sont inchangés ; le mode batch reste à -50 % (5 $ / 25 $). Pour une longue boucle d'agent qui relit un gros préfixe caché à chaque tour, c'est de là que vient le « jusqu'à 45 % moins cher » du billet de lancement. Note inter-modèles : GPT-6 Astra d'OpenAI, lancé trois jours plus tard au même prix catalogue de 10 $ / 50 $, facture **1,00 $** la lecture de cache, soit quatre fois le tarif de Fable 5.1 ; voir le [guide de terrain Astra](/docs/models/openai-astra-preview).
+
+### Provenance du contenu
+
+Tout le texte produit par Fable 5.1 et Mythos 5.1 porte le filigrane textuel statistique d'Anthropic, sur toutes les plateformes. Les fichiers que Claude produit (via l'exécution de code, par exemple) portent des Content Credentials [C2PA](https://c2pa.org/) signés lorsqu'ils sont récupérés via l'API Files. Anthropic indique que le filigrane n'ajoute ni tokens ni caractères cachés, ne transporte aucune information sur vous ou votre organisation, et ne nécessite aucune modification des requêtes. Contexte : Anthropic a signé le code de bonnes pratiques de l'EU AI Act sur la transparence des contenus générés par IA en juillet 2026, et une API de détection est en préversion privée pour les régulateurs, les fact-checkers, les chercheurs et les entreprises qui ont besoin de vérification.
+
+## Sept changements de comportement que vous verrez sans toucher au code
+
+Anthropic les documente ouvertement, et chacun a un correctif de prompt dans le guide officiel [Prompting Claude Fable 5.1](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-1). Guettez-les dans vos évals avant que vos utilisateurs ne le fassent.
+
+<Flashcards cards={[
+  { front: "L'appel d'outils en parallèle est plus variable", back: "Fable 5.1 peut émettre UN seul appel d'outil par tour là où Fable 5 en groupait plusieurs, en particulier dans les harnais bash-et-éditeur et en computer use, où les lectures suivantes ne sont qu'implicites. La qualité est inchangée ; les tokens, les allers-retours et le temps réel augmentent. Correctif : une instruction d'une ligne « groupe les appels d'outils indépendants » dans le prompt système." },
+  { front: "Moins de mises à jour de progression pendant les longues exécutions d'outils", back: "Moins de texte visible par l'utilisateur entre les appels d'outils, d'autant plus à effort élevé. Correctif : mettez thinking.display sur \"updates\" (bêta), supprimez toute ligne de prompt disant « garde les conclusions pour la réponse finale », et demandez explicitement une phrase d'ouverture, des points d'étape réguliers et une récapitulation finale." },
+  { front: "Répond de mémoire plus souvent à effort faible", back: "À effort: low, le modèle appelle moins souvent les outils de recherche/récupération. Correctif : montez l'effort pour les tours qui exigent des données fraîches (l'effort par message rend cela peu coûteux), ou ajoutez une incitation à vérifier." },
+  { front: "Prose plus dense", back: "Phrases plus longues, moins de sauts de paragraphe dans certaines sorties. Correctif : indiquez explicitement la densité et la longueur de paragraphe visées." },
+  { front: "Moins de mise en forme en conversation", back: "Utilise le gras, les titres et les listes MOINS que les Claude précédents. Les règles anti-formatage écrites pour Opus 4.x peuvent désormais supprimer une structure dont le contenu a besoin. Auditez-les et assouplissez-les." },
+  { front: "Citations non signalées dans les résumés", back: "Plus susceptible de reproduire des passages sources sans les marquer comme citations. Correctif : demandez-lui de baliser les passages textuels, ou vérifiez a posteriori les recoupements pour tout ce que vous publiez." },
+  { front: "Réécritures de fichiers entiers pour de petites modifications", back: "Plus susceptible de réécrire un fichier texte entier que de faire une modification ciblée. Même résultat, plus de tokens de sortie et plus de temps. Correctif : indiquez « privilégie les modifications ciblées ; ne réécris jamais un fichier pour changer une seule ligne »." },
+]} />
+
+## Ce qui reste exactement identique à Fable 5
+
+Si vous aviez déjà câblé Fable 5 correctement, tout ceci se reporte tel quel :
+
+- La réflexion adaptative est toujours active. `thinking: {"type": "enabled"}` avec `budget_tokens`, et `{"type": "disabled"}`, renvoient tous deux un 400. Omettez `thinking` ou envoyez `{"type": "adaptive"}`.
+- `thinking.display` vaut `"omitted"` par défaut ; la chaîne de pensée brute n'est jamais renvoyée.
+- La réflexion entrelacée est automatique, sans en-tête bêta.
+- Le préremplissage renvoie un 400. Des `temperature`, `top_p`, `top_k` non par défaut renvoient un 400.
+- Les refus arrivent en HTTP 200 avec `stop_reason: "refusal"` et une `stop_details.category` ; vous n'êtes pas facturé pour un refus qui survient avant toute sortie. Les cibles de repli autorisées sont **Opus 5 et Opus 4.8**, et le [crédit de repli](/docs/api/server-side-fallbacks) rembourse le coût du cache de prompt lié au changement. Schéma complet dans [Refus et sécurité](/docs/api/refusals-and-safety).
+- La rétention de 30 jours est obligatoire ; une requête émanant d'une organisation ou d'un espace de travail qui ne l'a pas renvoie un 400. Les deux modèles sont des Covered Models.
+- Une divergence à connaître : **ni Fable 5.1 ni Mythos 5.1 ne sont pris en charge sur le Priority Tier.** Fable 5 l'est. Si vous avez acheté de la capacité prioritaire, c'est une raison de rester sur Fable 5 pour l'instant.
+
+## Les benchmarks de lancement, lus honnêtement
+
+Chiffres d'Anthropic, harnais d'Anthropic. Les comparaisons face à GPT-5.6 Sol sont celles qu'OpenAI contesterait en premier, et le GPT-6 Astra d'OpenAI est sorti trois jours plus tard : traitez donc ceci comme l'état des lieux au 1er septembre, pas au 14 septembre.
+
+| Benchmark | Fable 5.1 | Fable 5 | Opus 5 | GPT-5.6 Sol |
+| --- | --- | --- | --- | --- |
+| Terminal-Bench 4.0 | **55,8 %** (Mythos 5.1 : 60,9 %) | 42,0 % | 52,3 % | 37,3 % |
+| Terminal-Bench-Science 0.1 | **52,6 %** | 24,7 % | 29,0 % | 22,4 % |
+| GDPval-AA v2 (Elo) | **1853** | 1723 | 1824 | 1711 |
+| OSWorld 2.0, partiel / strict | **77,9 % / 41,7 %** | 72,9 % / 36,1 % | 75,4 % / 39,6 % | — |
+| Humanity's Last Exam, sans outils / avec outils | **60,9 % / 65,0 %** | 57,8 % / 63,8 % | 56,6 % / 63,6 % | — |
+| AutomationBench | **31,4 %** | 17,1 % | 26,9 % | 19,6 % |
+| CursorBench 3.2.0 | **73,4 %** | 70,5 % | 70,0 % | 67,2 % |
+
+Trois lectures qui comptent plus que n'importe quelle ligne isolée :
+
+1. **Le saut de Fable 5 à 5.1 est le plus marqué sur le travail agentique de longue haleine** (Terminal-Bench-Science a doublé, AutomationBench a presque doublé). C'est cohérent avec le positionnement d'Anthropic, « utilisez-le quand Opus 5 à effort élevé reste insuffisant » : le gain est sur des exécutions de plusieurs heures, pas en conversation.
+2. **Opus 5 est plus proche que ne le laisse croire le titre** sur plusieurs lignes (Terminal-Bench 4.0 : 52,3 contre 55,8 ; GDPval : 1824 contre 1853), pour la moitié du prix catalogue. Ce n'est pas pour rien qu'Anthropic vous répète de commencer par Opus 5.
+3. **Les témoignages clients parlent de tokens, pas seulement de justesse.** Cognition, Rogo, Browserbase et Block citent tous moins de tokens pour un résultat égal ou meilleur. Combiné aux lectures de cache à 0,25 $, « Fable 5.1 est moins cher que Fable 5 à travail égal » est une affirmation plus défendable que « Fable 5.1 est plus intelligent ».
+
+Les exemples scientifiques du billet de lancement (des liants protéiques avec ~50 % de taux de succès sur 12 cibles contre 10-15 % habituellement, une carte d'élévation de Vénus à 2-3 km de résolution à partir de données radar Magellan vieilles de 30 ans, des accélérations de 2,5× sur sept modèles génomiques open source) sont des résultats de recherche rapportés par Anthropic, pas des benchmarks. Signal intéressant pour les charges de travail de recherche, pas un critère d'achat.
+
+## Fable 5.1 vs Opus 5 vs Fable 5 : la décision
+
+| Votre situation | Choix | Pourquoi |
+| --- | --- | --- |
+| L'essentiel du travail en production, sensible au coût | **Opus 5** | La recommandation par défaut d'Anthropic elle-même ; moitié prix ; lit les blocs de réflexion de Fable 5.1 si vous routez un jour vers le haut |
+| Codage autonome de plusieurs heures, recherche, ou production de documents/tableurs/présentations là où Opus 5 à effort `high` échoue encore | **Fable 5.1** | Les plus gros écarts sont exactement ici ; les lectures de cache rendent les longues boucles moins chères que sur Fable 5 |
+| Vous dépendez du Priority Tier | **Fable 5** (pour l'instant) | Fable 5.1 et Mythos 5.1 ne sont pas sur le Priority Tier |
+| Vous forcez `tool_choice` et ne pouvez pas changer le harnais ce sprint-ci | **Fable 5** | Fable 5.1 renvoie un 400 ; migrez le harnais d'abord, le modèle ensuite |
+| Vous routez ou basculez entre modèles en cours de conversation | N'importe lequel, mais **envoyez l'en-tête thinking-binding** | Sinon, rétrograder depuis Fable 5.1 supprime silencieusement son raisonnement |
+| La rétention zéro donnée est contractuelle | **Opus 5** | Fable 5.x et Mythos 5.x exigent une rétention de 30 jours |
+| Cyberdéfense ou recherche en sciences du vivant nécessitant moins d'interventions des classificateurs | **Mythos 5.1** via Glasswing, si approuvé | Même modèle, configuration de garde-fous différente ; organisations américaines, programmes de vérification requis |
+
+## Checklist de migration
+
+Anthropic livre une skill intégrée qui fait l'essentiel de tout ceci dans Claude Code. Lancez-la d'abord, puis vérifiez les points qu'elle ne peut pas voir.
+
+<PromptCard title="Automatiser l'échange d'identifiant et les correctifs de paramètres">
+{`/claude-api migrate this project to claude-fable-5-1`}
+</PromptCard>
+
+<Steps items={[
+  { title: "Changez l'identifiant et cherchez les tool_choice forcés", body: "claude-fable-5 → claude-fable-5-1 (Bedrock : anthropic.claude-fable-5-1). Puis grep sur tool_choice avec type any ou tool. Chaque occurrence devient strict: true + additionalProperties: false + une instruction explicite « appelle l'outil X », ou bascule vers les sorties structurées. N'oubliez pas les appels de comptage de tokens : ils valident aussi." },
+  { title: "Lancez le contrôle d'édition d'historique", body: "Si votre code construit lui-même le tableau messages, exécutez une vraie session avec l'en-tête thinking-binding-controls-2026-08-01 et prefix_mismatch_behavior: \"drop_block\", et journalisez input_transformations. Chaque entrée prefix_binding_mismatch est un endroit où vous éditez l'historique. Corrigez à la source : rappels par tour → messages système limités au tour ; changements de system/tools → messages système en cours de conversation ; élagage → compaction côté serveur. Puis choisissez délibérément votre prefix_mismatch_behavior de production." },
+  { title: "Auditez les chemins de routage et de repli", body: "Partout où une conversation peut passer de Fable 5.1 à Opus 5, Fable 5 ou plus ancien, décidez si perdre le raisonnement de Fable 5.1 est acceptable. Envoyez l'en-tête de binding pour que la suppression soit au moins signalée. Vérifiez que votre cible de repli est Opus 5 ou Opus 4.8 (les seules autorisées)." },
+  { title: "Re-calibrez l'effort, et envisagez l'effort par message", body: "La valeur par défaut est high. Pour les longues boucles, ajoutez la bêta mid-conversation-output-config-2026-07-01 et baissez l'effort sur les tours de routine ; remontez-le sur les tours qui exigent une récupération fraîche, puisqu'à effort faible le modèle répond plus souvent de mémoire." },
+  { title: "Ajoutez les lignes de prompt pour la boucle d'agent", body: "Une ligne demandant de grouper les appels d'outils indépendants ; une ligne demandant une phrase d'ouverture, des points d'étape réguliers et une récapitulation finale (et mettez thinking.display sur updates si votre UI affiche la progression) ; une ligne privilégiant les modifications ciblées aux réécritures de fichiers entiers. Assouplissez toute règle anti-formatage écrite pour Opus 4.x." },
+  { title: "Relancez les évals et revérifiez le coût", body: "Les refus, le repli, le crédit de repli et le tokenizer sont inchangés, donc l'écart que vous observez correspond à du comportement réel. Comparez la dépense en lectures de cache avant et après : si elle n'a pas baissé, votre préfixe n'est pas stable et l'étape 2 n'est pas terminée." },
+]} />
+
+## Mythos 5.1 : même modèle, garde-fous différents
+
+Anthropic indique que Fable 5.1 et Mythos 5.1 sont **le même modèle sous-jacent avec des configurations de garde-fous différentes**, partageant les mêmes caractéristiques et les mêmes tarifs. Mythos 5.1 n'est proposé qu'aux participants approuvés du Project Glasswing, actuellement limité aux organisations américaines, via un Cyber Verification Program pour le travail de sécurité défensive et un Life Sciences Verification Program mené avec le gouvernement américain. Deux choses ont changé pour *tout le monde* côté garde-fous : Fable 5.1 est désormais autorisé à identifier des vulnérabilités logicielles à des fins défensives (Anthropic rapporte environ 60 % d'interventions de cyber-garde-fous en moins par session), tandis que les tâches à double usage comme les tests d'intrusion, la génération d'exploits et l'analyse de vulnérabilités binaires sont toujours redirigées vers les modèles Opus ; et les garde-fous en biologie se déclenchent environ 85 % moins souvent sur les questions bénignes de biologie élémentaire et de médecine. Mythos 5.1 saute également le contrôle de liaison à la conversation sur les blocs de réflexion. Si vous ne pouvez pas obtenir l'accès Glasswing, la consigne d'Anthropic est simple : utilisez Fable 5.1.
+
+Attention au nommage : le [guide de terrain Fable 5](/docs/models/fable-5-mythos-5-flagship) présentait Mythos 5 comme « Fable 5 sans les classificateurs de sécurité ». Pour 5.1, la formulation d'Anthropic est « configurations de garde-fous différentes », et Mythos 5.1 alimente toujours le produit Claude Security d'Anthropic. Considérez-le comme un déploiement configuré différemment, pas comme un modèle non filtré.
+
+## Vérification rapide
+
+<Quiz questions={[
+  {
+    q: "Vous migrez une intégration Fable 5 vers claude-fable-5-1 et chaque requête avec tool_choice de type \"tool\" échoue désormais. Quel est le correctif officiel ?",
+    options: [
+      "Ajouter l'en-tête bêta thinking-binding-controls",
+      "Garder tool_choice sur auto, mettre strict: true sur l'outil avec additionalProperties: false, et dire au modèle dans le prompt quand l'appeler (ou basculer vers les sorties structurées)",
+      "Mettre thinking sur disabled pour que l'appel forcé puisse aboutir",
+      "Rétrograder à effort: low"
+    ],
+    answer: 1,
+    explain: "Fable 5.1 renvoie un 400 pour tool_choice any et tool, parce qu'un appel forcé court-circuiterait la réflexion toujours active et pousserait le raisonnement dans les arguments. Le correctif d'Anthropic est l'usage strict d'outils avec auto plus une instruction explicite, ou les sorties structurées. Désactiver la réflexion est en soi un 400 sur ce modèle."
+  },
+  {
+    q: "Un routeur fait passer une conversation de Fable 5.1 à Opus 5 pour réduire le coût. Qu'advient-il des blocs de réflexion de Fable 5.1 ?",
+    options: [
+      "Opus 5 les lit normalement",
+      "La requête échoue avec un 400",
+      "L'API les supprime avant qu'Opus 5 ne les voie ; la suppression est silencieuse sauf si vous envoyez l'en-tête thinking-binding-controls-2026-08-01, qui la signale dans input_transformations",
+      "Ils sont convertis en blocs de texte"
+    ],
+    answer: 2,
+    explain: "La préservation est unidirectionnelle : Fable 5.1 lit la réflexion des modèles antérieurs ; aucun modèle antérieur ne lit celle de Fable 5.1. Les blocs illisibles sont supprimés sans être facturés, silencieusement par défaut, et signalés dans input_transformations avec l'en-tête bêta."
+  },
+  {
+    q: "Votre boucle d'agent injecte un rappel de statut d'une ligne dans le tour utilisateur précédent à chaque requête et le retire à la suivante. Sur un nouveau compte API, cela provoque désormais une erreur. Qu'est-ce qui le remplace ?",
+    options: [
+      "Un message système limité au tour avec clear_at: \"next_user_message\" (en-tête bêta mid-conversation-system-clear-at-2026-08-21)",
+      "Reconstruire le prompt système à chaque requête",
+      "Mettre le rappel dans tool_choice",
+      "Basculer sur Mythos 5.1"
+    ],
+    answer: 0,
+    explain: "Modifier quoi que ce soit avant un bloc de réflexion Fable 5.1 invalide les blocs ultérieurs. Les messages système limités au tour portent l'autorité système pour un tour, restent dans l'historique tels quels, ne coûtent aucun token d'entrée une fois effacés, et gardent valides à la fois le cache et les blocs de réflexion."
+  },
+  {
+    q: "Fable 5.1 conserve le prix catalogue de 10 $ / 50 $ de Fable 5. D'où vient l'affirmation d'Anthropic « jusqu'à 45 % moins cher sur le travail fortement agentique » ?",
+    options: [
+      "D'une remise batch portée à 75 %",
+      "Des lectures de cache passant de 1,00 $ à 0,25 $ par MTok (0,025× l'entrée de base au lieu de 0,1×), plus moins de tokens par tâche",
+      "D'un tokenizer plus petit",
+      "De tokens de réflexion gratuits"
+    ],
+    answer: 1,
+    explain: "La seule ligne tarifaire qui a changé est celle des lectures de cache, désormais au quart du tarif Fable 5. Ce sont les longues boucles qui relisent un préfixe caché à chaque tour qui en profitent le plus ; les clients d'Anthropic rapportent aussi moins de tokens par tâche."
+  }
+]} />
+
+## À retenir
+
+<Callout type="takeaways" items={[
+  "Fable 5.1 remplace Fable 5 à l'identique UNIQUEMENT si vous ne forcez jamais tool_choice, n'éditez jamais l'historique de conversation et ne routez jamais de blocs de réflexion vers un modèle plus ancien. Cherchez ces trois cas avant de changer l'identifiant.",
+  "Traitez les conversations comme append-only : messages système limités au tour pour les rappels par tour, messages en cours de conversation pour les changements d'instructions et d'outils, compaction côté serveur pour l'élagage. Cela garde les blocs de réflexion valides ET le cache au chaud.",
+  "L'histoire tarifaire, ce sont les lectures de cache à 0,25 $. Les longues boucles d'agent deviennent moins chères ; les conversations courtes, non. Opus 5 à 5 $ / 25 $ reste le « commencez ici » d'Anthropic.",
+  "Attendez-vous à moins d'appels d'outils parallèles, moins de narration, une prose plus dense et des réécritures de fichiers entiers ; chacun a un correctif de prompt d'une ligne, et thinking.display: \"updates\" restaure la progression visible.",
+  "Le Priority Tier et le ZDR sont les deux raisons contractuelles de rester sur Fable 5 ou Opus 5.",
+]} />
+
+## Pour aller plus loin
+
+- [Claude Fable 5 et Mythos 5 : le guide de terrain flagship](/docs/models/fable-5-mythos-5-flagship) — le câblage refus / repli qui se reporte sans changement
+- [Messages système en cours de conversation](/docs/api/mid-conversation-system-messages) — la boîte à outils append-only que cette version présuppose désormais
+- [GPT-6 Astra : le guide de terrain pour les utilisateurs de Claude](/docs/models/openai-astra-preview) — le concurrent sorti trois jours plus tard au même prix catalogue

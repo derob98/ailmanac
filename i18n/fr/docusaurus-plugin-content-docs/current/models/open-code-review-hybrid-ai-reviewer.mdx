@@ -1,0 +1,156 @@
+---
+sidebar_position: 9.05
+title: "Open Code Review : le relecteur IA hybride d'Alibaba face à Claude Code, Codex et n'importe quel modèle (2026)"
+description: "open-code-review (ocr) d'Alibaba est le relecteur de code IA qui fait le buzz sur GitHub : une CLI Go qui entoure un agent LLM de sélection de fichiers, de mise en correspondance de règles et d'ancrage de lignes déterministes. Même modèle Claude, 4,7x la précision d'une revue Claude Code pour 1/15 des tokens sur son propre benchmark — et un rappel maximal de 20 %. Comment ça marche, comment l'exécuter avec Claude, GPT, Qwen ou un modèle local, le mode délégation, la CI et les pièges."
+keywords: [open-code-review, Alibaba open code review, ocr CLI, AI code review, AACR-Bench, Claude Code code review, Codex code review, deterministic engineering, LLM agent hybrid, delegation mode, precision vs recall, pull_request_target, GitHub Actions AI review, Qwen code review, local model code review]
+---
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-09-15" source="github.com/alibaba/open-code-review (README, action.yml, docs under pages/src/content/docs/en, release v1.12.2 of Sept 15, 2026; 27.5k stars on that date); AACR-Bench leaderboard image in the README; Hacker News thread item 48406358; the maintainers' July 29, 2026 retrospective post. Benchmark rows were measured on older versions (OCR v1.3.1/v1.8.7, Claude Code v2.1.169, Codex v0.140.0) and on Alibaba's own dataset. Treat every number as the vendor's, not an independent result." />
+
+<Callout type="objectives" items={[
+  "Expliquer ce qu'open-code-review fait différemment de demander à Claude Code ou Codex de « relire ma PR » : quelles étapes sont du code, lesquelles sont du modèle",
+  "Lire son benchmark honnêtement — le titre des 4,7x de précision, le plafond de 20 % de rappel, et pourquoi un modèle Claude plus récent a obtenu un score plus bas",
+  "Lancer une première revue avec n'importe quel fournisseur (Claude, GPT, Gemini, Qwen, DeepSeek, un modèle Ollama local) et prévisualiser le filtre de fichiers sans dépenser un token",
+  "Choisir entre les revues gérées par OCR et le mode délégation, où c'est votre abonnement Claude Code ou Codex qui fait la réflexion",
+  "Le câbler dans la CI sans tomber dans les pièges de pull_request_target et des faux positifs"
+]} />
+
+Toutes les équipes qui ont activé des agents de codage en 2026 ont heurté le même mur : le code arrive plus vite que quiconque ne peut le lire. « Il n'y a qu'à demander à l'agent de le relire aussi » est la réponse évidente, et elle produit surtout un mur de commentaires auxquels personne ne se fie. **[open-code-review](https://github.com/alibaba/open-code-review)** (la CLI `ocr`) est la réponse d'Alibaba, passée en open source le 18 mai 2026 après environ deux ans d'usage interne, et elle est de retour dans GitHub Trending cette semaine avec 27,5k étoiles et une release le 15 septembre.
+
+Elle mérite une page parce que son idée centrale se transfère à tout ce que vous construisez avec Claude, GPT ou un modèle ouvert : **retirez au modèle les étapes qui ne doivent pas échouer, et ne lui confiez que les jugements de valeur.**
+
+## L'idée : du code pour les rails, un modèle pour le jugement
+
+Les mainteneurs nomment trois modes de défaillance observés quand des agents généralistes relisent du code avec une skill ou un prompt, et ils correspondent presque un pour un à ce dont se plaignent les utilisateurs de Claude Code :
+
+| Défaillance d'une revue purement agentique | Ce qu'OCR fait en code à la place |
+|---|---|
+| **Couverture incomplète** — sur les gros diffs, l'agent relit discrètement certains fichiers et en saute d'autres | Un **filtre de fichiers déterministe à cinq portes** décide exactement quels fichiers sont relus, et chacun est dispatché ; le modèle ne peut pas « oublier » un fichier |
+| **Dérive de position** — le commentaire pointe la mauvaise ligne ou le mauvais fichier | Un **module de positionnement** distinct ancre chaque commentaire en confrontant l'extrait de code cité par le modèle au diff, puis au fichier entier, et seulement ensuite demande au modèle de le repositionner |
+| **Qualité instable** — de petits changements de prompt font basculer le résultat | **Les règles sont associées aux fichiers par motifs glob**, et non choisies par le modèle ; les fichiers liés (par exemple `message_en.properties` et `message_zh.properties`) sont **regroupés** et chaque groupe s'exécute comme un sous-agent isolé |
+
+Le modèle conserve les parties où il est réellement bon : décider quoi examiner ensuite et tirer du contexte. Il reçoit une petite boîte à outils faite sur mesure — lire une plage de fichier, lire le diff d'un autre fichier, grepper le dépôt, trouver un fichier par son nom, émettre un commentaire, terminer — que l'équipe dit avoir distillée à partir de traces d'appels d'outils en production. Une **passe finale de réflexion/filtrage** écarte les commentaires faibles avant que vous ne les voyiez.
+
+<Steps items={[
+  {title: "1. Construire le diff", body: "L'espace de travail (indexé, non indexé et non suivi), une plage de branches calculée depuis la merge-base, un commit unique, ou `ocr scan` pour des fichiers entiers sans diff. Git 2.41+ est requis."},
+  {title: "2. Filtrer les fichiers en code", body: "Cinq portes dans l'ordre : binaire, votre liste d'exclusion (toujours prioritaire), votre liste d'inclusion (court-circuite le reste), liste blanche d'extensions, motifs intégrés de fichiers de test. `vendor/`, `node_modules/` et consorts sont écartés avant les portes et ne peuvent jamais être inclus."},
+  {title: "3. Associer les règles et regrouper", body: "Chaque fichier reçoit sa règle depuis une chaîne de priorité (CLI `--rule`, puis le projet `.opencodereview/rule.json`, puis votre fichier utilisateur, puis les règles intégrées). Les fichiers liés sont regroupés ; les groupes s'exécutent en parallèle, 8 à la fois par défaut."},
+  {title: "4. Planifier, puis relire par tours", body: "Un appel de plan en lecture seule ne s'exécute que pour les gros changements (un fichier avec 50+ lignes modifiées, ou 2+ fichiers totalisant 100+). Ensuite la boucle d'outils principale tourne 1, 2 ou 3 tours selon `--effort` ; les tours suivants voient les découvertes précédentes et sautent le plan, qui selon la doc agit sinon comme un plafond de couverture."},
+  {title: "5. Ancrer, filtrer, produire", body: "Les commentaires sont ancrés à des lignes, les faibles sont filtrés, et les résultats partent en texte, JSON ou SARIF — ou reviennent dans votre PR via une recette CI."}
+]} />
+
+## Le benchmark, lu attentivement
+
+Alibaba publie ses résultats sur **AACR-Bench**, son propre jeu de données sur Hugging Face : 50 dépôts open source, 200 pull requests réelles, 10 langages, et 1 505 problèmes annotés et recoupés par plus de 80 ingénieurs seniors. Extraits du classement dans le README :
+
+| Relecteur | Modèle | F1 | Précision | Rappel | Tokens / revue | Durée |
+|---|---|---|---|---|---|---|
+| OCR v1.3.1 | Claude Opus 4.6 | **25.1%** | 33.9% (301 sur 889) | 20.0% | 385K | 1m23s |
+| OCR v1.8.7 | Qwen3.8-Max | 23.0% | 33.9% | 17.4% | 334K | 5m14s |
+| OCR v1.3.1 | GPT-5.5 | 21.0% | 32.1% | 15.5% | 422K | 2m51s |
+| OCR v1.3.1 | Claude Opus 4.8 | 17.9% | **37.8%** | 11.7% | 352K | 1m06s |
+| Claude Code v2.1.169 | Claude Opus 4.8 | 14.1% | 15.9% | 12.7% | 2,062K | 5m38s |
+| Claude Code v2.1.169 | Claude Opus 4.6 | 11.6% | 7.2% (435 sur 5 980) | **28.9%** | 5,664K | 13m06s |
+| Codex v0.140.0 | GPT-5.5 | 8.4% | 27.8% | 4.9% | 525K | 2m58s |
+
+Trois choses dans ce tableau sont plus intéressantes que le titre.
+
+**1. L'écart de précision est en réalité un écart de volume de commentaires.** Avec Opus 4.6, Claude Code a posté 5 980 commentaires sur 200 PR — environ 30 par PR — et 7 % correspondaient à un vrai problème annoté. OCR en a posté 889 (environ 4,4 par PR) et 34 % correspondaient. Claude Code a en fait *trouvé plus de vrais problèmes* (435 contre 301, d'où le rappel supérieur). La différence, c'est le bruit, et le bruit est ce qui fait désactiver un relecteur IA : un commentateur de Hacker News l'a formulé ainsi : « si 7 éléments signalés sur 8 sont sans problème, les gens vont ignorer les avertissements ».
+
+**2. Le meilleur relecteur du classement trouve un vrai problème sur cinq.** Le meilleur rappel où que ce soit est celui de Claude Code à 28,9 %, et le meilleur d'OCR est 20 %. Même en tenant compte d'une vérité terrain stricte et tranchée (un point soulevé sur HN), aucune configuration ici n'est une barrière de merge. Traitez tout relecteur IA comme un filtre qui attrape quelques bugs à bon compte, pas comme ce qui déclare une PR sûre. Cela rejoint un motif plus large qu'AILmanac couvre dans [le goulot d'étranglement de la vérification](/docs/frontiers/the-verification-bottleneck).
+
+**3. Un modèle plus récent a obtenu un score plus bas, et les ratios du titre rétrécissent avec lui.** Au sein d'OCR, Opus 4.8 avait la meilleure précision du classement (37,8 %) mais un rappel plus faible (11,7 %) qu'Opus 4.6, donc son F1 est tombé de 25,1 % à 17,9 %. Les modèles plus forts se sont montrés plus conservateurs — la même chose qu'a rapportée un testeur HN avec GPT-5.x. Face à Claude Code sur Opus 4.8, l'avantage d'OCR est d'environ 2,4x en précision et d'environ 6x moins de tokens, pas les 4,7x et ~1/15 qu'on obtient des lignes Opus 4.6 (le README arrondit sa revendication globale à « ~1/9 »). Et les lignes Claude Code et Codex ont plusieurs versions de retard.
+
+Gardez aussi en tête qu'il s'agit du benchmark de l'éditeur, bâti par l'équipe qui construit l'outil. Un test indépendant précoce sur HN (10 PR issues d'un autre benchmark) a mesuré environ 12 % de précision ; les mainteneurs l'ont attribué à un appel d'outil cassé et ont dit que c'était corrigé. Exécutez-le sur vos propres PR récentes avant de croire une seule ligne.
+
+## Lancer une première revue avec n'importe quel modèle
+
+`ocr` est un binaire Go distribué via npm. Il parle les protocoles Anthropic, OpenAI Chat Completions, OpenAI Responses et Bedrock, et livre des préréglages pour Anthropic, OpenAI, Gemini, DeepSeek, Kimi, Z.ai, MiniMax, xAI, DashScope (Qwen) et d'autres ; tout le reste est un fournisseur personnalisé avec une URL et un protocole.
+
+<PromptCard title="Installer, configurer et tester le filtre à blanc">{`npm install -g @alibaba-group/open-code-review
+
+# Interactive: pick a provider, paste a key, pick a model; it runs a connectivity test
+ocr config provider
+ocr config model
+ocr llm test
+
+cd your-repo
+# See exactly which files would be reviewed, and why others are excluded — no LLM call
+ocr review --preview
+
+# Review your branch against main, with context the model can't infer
+ocr review --from main --to my-branch --background "Adds rate limiting to the public API"`}</PromptCard>
+
+Ce que la doc précise et qui vous épargne un après-midi :
+
+- **Vous utilisez déjà Claude Code ?** Si aucun fichier de configuration ni variable `OCR_LLM_*` n'est défini, `ocr` se rabat sur `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` et `ANTHROPIC_MODEL`. Il prend le **premier** triplet complet URL-token-modèle qu'il trouve, donc un fichier de configuration périmé l'emporte silencieusement sur vos variables d'environnement.
+- **Les modèles locaux ont besoin d'appels d'outils natifs.** OCR pilote toute la revue par des appels d'outils. Un modèle qui se contente d'*écrire* les appels d'outils sous forme de texte (la FAQ cite `deepseek-r1`) boucle sur « No tool calls parsed » et ne renvoie aucun commentaire. Choisissez un modèle Ollama étiqueté pour les outils, comme `qwen3` ; voir [faire tourner des modèles en local](/docs/models/run-models-locally-ollama).
+- **`--effort` est le cadran qualité/coût.** `low` vaut 1 tour de revue, `medium` (par défaut) 2, `high` 3 ; le délai d'expiration par groupe évolue avec. `--max-tokens-budget` pose un plafond dur sur le total de tokens et publie tout de même des résultats partiels.
+- **`--background` compte.** La référence CLI le qualifie de l'un des drapeaux au plus fort effet de levier : le modèle ne voit que le diff et ce qu'il choisit de lire, pas votre ticket.
+- **Un commentaire à `start_line: 0`** est réel mais n'a pas pu être ancré — le plus souvent le modèle a paraphrasé le code au lieu de le citer, ou le diff comporte des CRLF ou une indentation mixte.
+
+## Règles personnalisées
+
+Les règles sont du JSON simple, associées par glob. Le fichier du projet est `.opencodereview/rule.json` ; chaque entrée a un motif `path`, le texte de `rule`, et `merge_system_rule` pour conserver aussi les règles intégrées pour ce fichier. **Le premier motif correspondant l'emporte**, alors placez les chemins spécifiques avant les généraux, et `ocr rules check <file>` affiche quelle couche et quel motif ont correspondu. Le fichier de règles du dépôt lui-même est un bon modèle : il dit au relecteur d'imposer l'ordre des champs, de garder quatre docs traduites synchronisées avec une table de code, et d'exiger un test nommé pour chaque nouveau fournisseur — des règles maison qu'aucun modèle généraliste ne devinerait.
+
+La couverture intégrée penche vers la stack d'Alibaba (contrôles Java de pointeur nul et de sûreté des threads, XSS en JS/TS, injection SQL dans les fichiers XML de mappers) ; des PR de la communauté ont depuis ajouté Python, Rust, Kotlin, C/C++, Terraform et d'autres.
+
+## Géré par OCR ou mode délégation
+
+Il y a deux façons de l'exécuter depuis un agent de codage, et elles diffèrent sur **qui paie la réflexion**.
+
+| | Géré par OCR (plugin, skill, CLI) | Mode délégation |
+|---|---|---|
+| Qui appelle le modèle | `ocr`, avec sa propre clé API | Votre agent hôte (Claude Code, Codex, Cursor, OpenCode…) |
+| Ce que fait OCR | Tout le pipeline ci-dessus | Uniquement la sélection des fichiers et la résolution des règles |
+| Coût | Tokens API facturés | Le quota de votre abonnement agent |
+| Conserve les garanties du benchmark | Oui — ancrage, tours, filtre de réflexion | En partie — couverture et règles, mais la revue elle-même est ce que fait votre agent |
+
+Dans Claude Code, `/plugin marketplace add alibaba/open-code-review` puis `/plugin install open-code-review@open-code-review` vous donne `/open-code-review:review` (géré par OCR, avec une étape de correction automatique) et `/open-code-review:delegate-review`. Codex installe le même dépôt comme marketplace de plugins.
+
+<PromptCard title="Le mode délégation à la main (ce que la skill automatise)">{`# 1. Which files, in which mode, and why others were excluded
+ocr delegate preview --from main --to my-branch
+
+# 2. The rule checklist for those files, grouped so shared rules appear once
+ocr delegate rule src/api/handler.go src/api/limits.go
+
+# 3. Your agent then reads each diff with git (git diff <merge_base>..<to> -- <path>),
+#    reviews each file against its rule group, and reports
+#    Critical/High always, Medium with context, Low only if clearly valuable.`}</PromptCard>
+
+La délégation est un joli motif même si vous n'installez jamais OCR : un minuscule assistant déterministe qui dit à l'agent *exactement* quels fichiers couvrir et quelle checklist s'applique transforme « relis ça » d'un espoir en une boucle que l'agent ne peut pas écourter.
+
+## CI : deux pièges
+
+Le workflow GitHub livré se déclenche sur `pull_request_target` et sur les commentaires `/open-code-review`, installe `ocr`, relit la plage en JSON (`--format json --audience agent`), et poste des commentaires en ligne, en repliant les découvertes sans ligne dans un résumé. Il existe aussi un `action.yml` composite avec des entrées comme `llm_model` et `llm_reasoning_effort`. Deux choses à trancher avant de le copier :
+
+- **`pull_request_target` donne aux PR issues de forks l'accès à vos secrets.** La doc l'a choisi pour que les revues fonctionnent sur les forks, et elle note qu'OCR ne lit que le diff et n'exécute jamais le code de la PR. Mais le diff est du texte non fiable qui part directement dans un modèle détenant un token de publication. *Inférence, pas un incident documenté :* une PR malveillante peut tenter d'injecter un prompt au relecteur pour qu'il se taise ou poste des commentaires trompeurs. Limitez les permissions du job à ce qu'exige la publication, ne laissez jamais la revue IA être ce qui approuve un merge, et lisez [comment une issue GitHub est devenue une fuite de secrets CI](/docs/security/github-issue-to-ci-secrets-blackhat-2026).
+- **Budgétez le bruit avant de déployer.** Le corps de requête par défaut de l'Action désactive la « réflexion » du modèle pour des raisons de compatibilité, ce qui change le comportement d'un modèle de raisonnement par rapport à vos exécutions locales. Épinglez la version d'`ocr` (l'entrée vaut `latest` par défaut), commencez par un déclencheur sur commentaire seulement sur quelques dépôts, et comptez combien de commentaires votre équipe traite réellement.
+
+<Quiz title="Vérifiez vos acquis" questions={[
+  {q: "Sur AACR-Bench avec Claude Opus 4.6, Claude Code avait 7,2 % de précision et OCR 33,9 %. Quel relecteur a trouvé le plus de vrais problèmes annotés ?", options: ["OCR, parce que sa précision est plus élevée", "Claude Code — 435 vrais problèmes contre 301, mais noyés dans ~5 980 commentaires", "Ils en ont trouvé autant", "Le tableau ne le dit pas"], answer: 1, explain: "La précision est la part des commentaires qui sont réels. Claude Code a commenté bien davantage, donc il a trouvé plus de vrais problèmes (rappel supérieur) tout en étant majoritairement du bruit."},
+  {q: "Quel est le rappel le plus élevé atteint par un relecteur dans le classement publié ?", options: ["Environ 95 %", "Environ 60 %", "Moins de 30 % (28,9 %, Claude Code sur Opus 4.6)", "Exactement 20 %"], answer: 2, explain: "Rien dans le classement n'attrape même un tiers des problèmes annotés. Un relecteur IA est un filtre bon marché, pas une barrière de merge."},
+  {q: "Au sein d'OCR, Claude Opus 4.8 a obtenu un F1 inférieur à Opus 4.6. Pourquoi ?", options: ["Il a planté sur certaines PR", "Il a été plus conservateur : la meilleure précision du classement (37,8 %) mais un rappel tombé à 11,7 %", "Il a consommé dix fois plus de tokens", "OCR ne prend pas en charge Opus 4.8"], answer: 1, explain: "Les modèles plus forts ont posté moins de commentaires, mais plus justes. Le F1 sanctionne la chute du rappel."},
+  {q: "Vous pointez OCR vers un modèle Ollama local et chaque fichier se termine par « Max tool requests reached » et zéro commentaire. Cause la plus probable ?", options: ["Le délai d'expiration est trop court", "Le modèle ne sait pas faire d'appels d'outils natifs — il se contente de les écrire sous forme de texte", "Votre rule.json est invalide", "Les modèles locaux sont bloqués"], answer: 1, explain: "OCR fonctionne entièrement par appels d'outils. Utilisez un modèle avec appel de fonctions natif (par exemple qwen3), et testez-le d'abord avec une requête brute utilisant des outils."},
+  {q: "Que le mode délégation déplace-t-il d'OCR vers votre agent de codage ?", options: ["La sélection des fichiers", "La résolution des règles", "Le raisonnement de la revue lui-même — et donc le coût du modèle", "La publication sur GitHub"], answer: 2, explain: "OCR décide toujours quels fichiers et quelles règles ; votre agent abonné lit les diffs et fait la revue, donc aucune clé API OCR n'est nécessaire."},
+  {q: "Vous définissez OCR_LLM_MODEL dans votre shell mais ocr llm test affiche un autre modèle. Pourquoi ?", options: ["Les variables d'environnement ne sont pas prises en charge", "OCR utilise le premier triplet complet URL-token-modèle, et votre fichier de configuration en contient déjà un", "Il préfère toujours ANTHROPIC_MODEL", "Le nom du modèle est sensible à la casse"], answer: 1, explain: "Un triplet complet dans ~/.opencodereview/config.json l'emporte sur les variables d'environnement. Supprimez ces clés ou changez-les avec ocr config set."}
+]} />
+
+## Sources et lectures complémentaires
+
+- [alibaba/open-code-review sur GitHub](https://github.com/alibaba/open-code-review) — README (justification de conception, tableau de benchmarks), Apache-2.0
+- [Jeu de données AACR-Bench sur Hugging Face](https://huggingface.co/datasets/Alibaba-Aone/aacr-bench) — le benchmark de 200 PR derrière les chiffres
+- [Document d'architecture](https://github.com/alibaba/open-code-review/blob/main/pages/src/content/docs/en/architecture.md) — le filtre à cinq portes, les seuils de plan, les tours de revue, la compression mémoire
+- [Configuration](https://github.com/alibaba/open-code-review/blob/main/pages/src/content/docs/en/configuration.md) et [FAQ](https://github.com/alibaba/open-code-review/blob/main/pages/src/content/docs/en/faq.md) — fournisseurs, ordre de repli, appel d'outils des modèles locaux, échecs d'ancrage
+- [Mode délégation](https://github.com/alibaba/open-code-review/blob/main/pages/src/content/docs/en/integrations/delegate.md) et [CI/CD](https://github.com/alibaba/open-code-review/blob/main/pages/src/content/docs/en/integrations/ci.md)
+- [Plugins pour agents de codage (Claude Code, Codex, Cursor)](https://github.com/alibaba/open-code-review/blob/main/plugins/open-code-review/README.md)
+- [Rétrospective des mainteneurs à deux mois (29 juillet 2026)](https://github.com/alibaba/open-code-review/blob/main/pages/src/content/blog/en/oss-two-month-retrospective.md) — chiffres d'usage interne et comment ils relisent leur propre code écrit par IA
+- [Discussion Hacker News](https://news.ycombinator.com/item?id=48406358) — résultats de tests indépendants, le débat précision contre rappel
+
+## Suite
+
+- [Comparatif des CLI d'agents de codage](/docs/models/coding-agent-clis-compared) — les agents dans lesquels OCR se branche et face auxquels il se mesure
+- [Évaluer les agents](/docs/playbooks/evaluating-agents) — tester un relecteur sur vos propres PR au lieu de faire confiance à un classement
+- [Les hooks dans Claude Code](/docs/claude-code/hooks) — lancer `ocr review` automatiquement avant un commit, comme le fait l'équipe d'OCR elle-même
