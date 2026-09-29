@@ -1,0 +1,252 @@
+---
+sidebar_position: 22.97
+title: "Hindsight: Agentengedächtnis, das lernt"
+description: "Der MIT-lizenzierte Memory-Server, der die GitHub-Trends anführte — retain, recall und reflect, vier parallele Retriever, per RRF fusioniert, Observations, die verfeinert statt überschrieben werden, und das 83,6-%-gegen-39,0-%-Ergebnis, das sagt: Architektur schlägt Modellgröße."
+keywords: [hindsight, vectorize, agent memory, longmemeval, locomo, retain recall reflect, mental models, knowledge pages, memory bank, tempr, reciprocal rank fusion, pgvector, mcp memory server, agent memory benchmark, mem0 alternative, zep alternative, claude agent memory]
+---
+
+<LevelBadge level="advanced" />
+
+# Hindsight: Agentengedächtnis, das lernt
+
+Das meiste "Agentengedächtnis" ist ein Vektorspeicher mit hübschem Wrapper: Du wirfst Gesprächs-Turns hinein, holst sie per Kosinus-Ähnlichkeit wieder heraus, und der Agent rezitiert eine Historie, die er ohnehin nie vergessen hätte. [Hindsight](https://github.com/vectorize-io/hindsight) ist um eine andere Behauptung herum gebaut — dass ein Agent den Monat mit Überzeugungen beenden sollte, die er am Anfang nicht hatte — und ist deswegen derzeit das am schnellsten wachsende Projekt auf GitHub: rund 4.500 Sterne an einem einzigen Tag am 27.09.2026, etwa 37.000 insgesamt, MIT-lizenziert, Python, mit einem peer-review-fähigen [Paper](https://arxiv.org/abs/2512.12818) hinter der Architektur.
+
+Diese Seite ist die praktische Lesart: was tatsächlich in einer Memory-Bank steckt, warum `recall` und `reflect` zwei verschiedene Kostenklassen sind, das Benchmark-Ergebnis, das verändern sollte, wie du deinen Stack budgetierst, und die vier Defaults, die dich in der Produktion beißen werden.
+
+<Callout
+  type="objectives"
+  items={[
+    "Die drei Operationen auseinanderhalten — retain, recall, reflect — und den dritten Pfad, den die meisten übersehen: ein Mental Model lesen, ganz ohne LLM-Call",
+    "Verstehen, warum recall vier parallele Retriever ist, fusioniert per Reciprocal Rank Fusion, und keine Vektorsuche",
+    "Die Benchmark-Zahlen richtig lesen, einschließlich derjenigen, in der ein Konkurrent gewinnt, und der 3,2-Punkte-Lücke zwischen den zwei eigenen Seiten des Anbieters",
+    "Einen Server aufsetzen und ihn in drei Befehlen an Claude, einen OpenAI-SDK-Agenten oder einen Coding-Agenten anschließen",
+    "Die vier Produktions-Defaults erkennen, die für dich falsch sind — angefangen bei der Sicherheitsrichtlinie, die aus ist, bis du sie einschaltest"
+  ]}
+/>
+
+<VerifyNote lastVerified="2026-09-28" source="github.com/vectorize-io/hindsight README and GitHub API (36,993 stars, MIT, Python, pushed 2026-09-26); github.com/vectorize-io/hindsight-benchmarks (LongMemEval-S and LoCoMo tables); vectorize.io/benchmarks (94.6% headline); arXiv:2512.12818 'Hindsight is 20/20'; hindsight.vectorize.io/developer/memory-defense, /developer/mcp-server, /developer/mental-models, /developer/observations, /developer/retrieval; hindsight.vectorize.io/blog/2026/03/23/agent-memory-benchmark; GitHub trending (daily) 2026-09-27. Benchmark leaderboards here are continuously updated and every non-Hindsight score is vendor-self-reported — re-read the live tables before quoting a number in a decision.">
+Hindsight liefert schnell (der letzte Push war am Tag, bevor diese Seite geschrieben wurde) und das Live-Leaderboard verändert sich. Behandle jeden Score, jede Sternzahl und jede Musterzahl unten als datierte Momentaufnahme; die Architektur und die Fallstricke sind der dauerhafte Teil.
+</VerifyNote>
+
+## Die eine Idee: drei Operationen, drei Kostenklassen
+
+Fast jeder Fehler mit Hindsight kommt daher, seine drei Verben als austauschbar zu behandeln. Sie sind es nicht — sie sitzen an wild unterschiedlichen Punkten der Preis-/Latenzkurve, und es gibt einen vierten Pfad, der im Grunde nichts kostet.
+
+| Pfad | Was passiert | LLM-Calls | Nutze es für |
+| --- | --- | --- | --- |
+| `retain` | Ein LLM extrahiert Fakten, Zeitstempel, Entitäten und Beziehungen und normalisiert sie dann zu kanonischen Entitäten, Zeitreihen und Suchindizes | Ja, beim Schreiben | Einen Turn, ein Tool-Ergebnis, ein Dokument aufnehmen |
+| `recall` | Vier Retriever laufen parallel, Ergebnisse werden fusioniert und neu gerankt, dann auf ein Token-Budget getrimmt | Keine Generierung — Retrieval und ein Cross-Encoder | "Was weiß ich über X?" vor einem Turn |
+| `reflect` | Läuft die Hierarchie Mental Models → Observations → Rohfakten ab und schließt darüber, geformt von Mission, Direktiven und Disposition der Bank | Ja, und mehr als einen | "Welche Risiken übersehe ich in diesem Projekt?" |
+| Ein **Mental Model** lesen | Eine gespeicherte Dauerantwort wird aus der Datenbank geholt | **Keine** | Einen Agenten mit gesichertem Wissen hochfahren |
+
+Diese letzte Zeile ist der Mechanismus, den die meisten Leser noch nie gesehen haben. Ein **Mental Model** ist eine Frage, die du einmal registrierst ("Was sind die Präferenzen dieses Nutzers?"); Hindsight schreibt die Antwort, speichert sie und schreibt sie im Hintergrund um, während die Bank lernt. Sie zu lesen ist ein Datenbank-Read — kein Retrieval, keine Inferenz, keine Tokens. So kann die Session eines Agenten bereits wissend starten, statt ihre ersten drei Turns mit Wiederentdecken zu verbringen.
+
+Die praktische Regel: **`reflect` ist zum Denken, `recall` ist zum Nachschlagen, und ein Mental Model ist für das, was du in jeder einzelnen Session nachschlägst.** Wenn du in jedem Turn `reflect` aufrufst, hast du einen teuren Chatbot gebaut.
+
+## Was tatsächlich in einer Bank steckt
+
+Eine **Bank** ist ein isoliertes Gehirn — ein Nutzer, ein Agent oder ein Projekt — mit strikter Isolation und ohne bankübergreifendes Leck. Darin sind Erinnerungen nicht ein flacher Haufen. Hindsight teilt sie entlang einer biomimetischen Achse auf:
+
+- **Weltfakten** — wie die Welt ist. *"Der Herd wird heiß."*
+- **Erfahrungen** — was dieser Agent getan hat und was passiert ist. *"Ich habe den Herd angefasst und es hat wehgetan."*
+- **Observations** — konsolidierte, mit Belegen gestützte Überzeugungen, aus vielen Fakten gebildet.
+- **Mental Models** — erlerntes Verständnis, aus Observations und Fakten synthetisiert.
+- **Knowledge Pages** — Mental Models mit verborgener Mechanik: lebendige wiki-artige Dokumente, die die Bank über sich selbst schreibt, in Ordnern organisiert, durchsuchbar und als einfaches Markdown auf die Festplatte projizierbar.
+
+Die Trennung Welt/Erfahrung leistet echte Arbeit. "Das Deploy-Skript braucht sudo" und "Ich habe das Deploy-Skript ausgeführt und es ist fehlgeschlagen" sind verschiedene Arten von Behauptung mit verschiedenen Lebensdauern, und sie in eine undifferenzierte `memories`-Tabelle zusammenzuklappen ist genau das, was einen naiven Vektorspeicher selbstbewusst über einen Fakt antworten lässt, den er nur einmal, vor zwei Monaten, in einem gescheiterten Versuch beobachtet hat.
+
+**Observations werden verfeinert, nicht überschrieben.** Jede behält ihre stützenden Belege als exakte Zitate plus einen Beleg-Zähler, und wenn neue Evidenz eintrifft, stärkt, schwächt oder erweitert sie die bestehende Überzeugung, statt sie still zu ersetzen. Das ist der Unterschied zwischen einem Gedächtnissystem und einem Cache: Beim Cache gewinnt der letzte Schreibvorgang, und beim Glauben ist der letzte Schreibvorgang *Evidenz*.
+
+Banken tragen außerdem eine **Mission** (eine natürlichsprachige Identität, die lenkt, was priorisiert wird), **Direktiven** (harte Regeln, die niemals verletzt werden dürfen) und **Dispositionsmerkmale** (Skepsis, Wörtlichkeit, Empathie), die formen, wie `reflect` schlussfolgert. Zwei Banken über identischen Fakten können absichtlich zu verschiedenen Schlüssen kommen.
+
+## Recall ist keine Vektorsuche
+
+Das ist der Teil, der sich zu verinnerlichen lohnt, selbst wenn du Hindsight nie betreibst. Ein einzelnes `recall` startet **vier Retrieval-Strategien parallel**:
+
+- **Semantisch** — dichte Vektorähnlichkeit
+- **Keyword** — BM25-Exaktabgleich
+- **Graph** — Entitäts-, temporale und kausale Verknüpfungen
+- **Temporal** — Filterung nach Zeitbereich
+
+Dann werden die vier Ergebnismengen per **Reciprocal Rank Fusion** zusammengeführt, von einem **Cross-Encoder-Reranker** neu geordnet und auf ein Token-Limit getrimmt.
+
+Warum die Mühe? Weil jeder Arm auf eine Weise scheitert, auf die die anderen es nicht tun. Semantische Suche kann "was ist im Juni passiert" nicht beantworten — ein Datum ist zu nichts semantisch ähnlich. BM25 kann keine Paraphrase matchen. Eine Graph-Traversierung ist das Einzige, was "wer hat die Person ersetzt, die den Account besaß, über den sich der Nutzer beschwert hat" beantwortet, und keiner der drei weiß, dass die Antwort in 2.000 Tokens passen muss. Reciprocal Rank Fusion ist der günstige Trick, der das komponierbar macht: Sie bewertet nach **Rangposition**, nicht nach dem eigenen Score jedes Retrievers, sodass du nie eine Kosinusdistanz gegen einen BM25-Score normalisieren musst. Wenn du irgendwo in deinem Stack hybrides Retrieval selbst baust, ist dieses eine Detail die Erkenntnis.
+
+Der Reranker zählt mehr als die Retriever. Die Fusion bringt die richtige Erinnerung in die Top 50; der Cross-Encoder ist das, was sie in die Top 5 bringt, die tatsächlich beim Modell ankommen.
+
+## Die Zahlen, richtig gelesen
+
+Auf **LongMemEval-S** (500 Fragen) berichtet das eigene Harness des Projekts:
+
+| System | Score |
+| --- | --- |
+| Hindsight (Gemini 3) | 91,4 % |
+| Hindsight (OSS-120B) | 89,0 % |
+| Supermemory (Gemini 3) | 85,2 % |
+| Supermemory (GPT-5) | 84,6 % |
+| **Hindsight (OSS-20B)** | **83,6 %** |
+| Full context (GPT-4o) | 60,2 % |
+| **Full context (OSS-20B)** | **39,0 %** |
+
+Sieh dir die zwei fett gedruckten Zeilen an. Dasselbe 20B-Open-Weight-Modell, dieselben Fragen. Mit Hindsight davor: 83,6 %. Mit der gesamten Historie in seinen Kontext gestopft: 39,0 %. Das sind **+44,6 Punkte aus der Architektur allein**, und es setzt ein 20B-Modell *23 Punkte über* Full-Context-GPT-4o. Die Rahmung des Papers — Gedächtnis als "ein strukturiertes, erstklassiges Substrat für Reasoning" statt als Retrieval-Aufsatz — ist genau dieses Ergebnis. Wenn deine Gedächtnisschicht verliert, ist ein größeres Modell zu kaufen der teure Weg, das nicht zu beheben.
+
+Nun die ehrlichen Vorbehalte, denn sie zählen mehr als die Schlagzeile:
+
+1. **Ein Konkurrent gewinnt den anderen Benchmark.** Auf **LoCoMo** erreicht Hindsight (Gemini 3) 89,61 % — und Backboard berichtet 90,00 %. Memobase 75,78 %, Zep 75,14 %. Die Rangfolge kippt je nachdem, welchen Benchmark du nimmst, was der ganze Grund ist, zwei zu lesen.
+2. **Nur eine Zeile ist unabhängig reproduziert.** Laut dem eigenen README des Projekts wurden Hindsights Zahlen von Forschungskollaborateuren am Sanghani Center von Virginia Tech und bei The Washington Post reproduziert; **der Score jedes anderen Systems ist vom jeweiligen Anbieter selbst berichtet.** Eine Tabelle selbstberichteter Zahlen ist eine Tabelle der besten Tage.
+3. **Die zwei Seiten des Anbieters widersprechen sich.** `vectorize.io/benchmarks` titelt mit **94,6 %** auf LongMemEval; die LongMemEval-S-Tabelle im Benchmarks-Repo sagt **91,4 %**. Beide sind Hindsights eigene Publikationen. Das Leaderboard wird kontinuierlich aktualisiert und die Konfigurationen unterscheiden sich, aber eine Spanne von 3,2 Punkten zwischen einer Marketingseite und einem Repo ist ein Grund, das Harness selbst laufen zu lassen, bevor du eines von beiden zitierst.
+
+Und dann die interessanteste Kritik — die vom Hindsight-Team selbst kommt. Ihr [Benchmark-Manifest](https://hindsight.vectorize.io/blog/2026/03/23/agent-memory-benchmark) argumentiert, dass **LoCoMo und LongMemEval für die 32k-Kontext-Ära entworfen wurden**, als Retrieval der schwierige Teil war. Mit Millionen-Token-Fenstern schneidet das Hineinstopfen von allem wettbewerbsfähig ab, sodass diese Benchmarks zunehmend das Leseverständnis eines Modells messen statt eine Gedächtnisarchitektur. Schlimmer: Sie klappen alles auf eine Achse zusammen. Ihr Satz ist der, den man sich klauen sollte:
+
+> Ein System, das 90 % erreicht und 10 $ pro Nutzer pro Tag kostet, ist nicht besser als eines, das 82 % erreicht und 0,10 $ kostet.
+
+Was die richtige Art ist, jede Gedächtnisschicht zu bewerten, einschließlich der, die du schon hast: Genauigkeit pro Dollar pro Nutzer pro Tag, auf deinem eigenen Traffic. Siehe [Agenten evaluieren](/docs/playbooks/evaluating-agents) dazu, wie man dieses Harness baut.
+
+## Aufsetzen
+
+<Steps items={[
+  {title: "1. Server starten", body: "Ein Docker-Befehl, ein LLM-Key. Es liefert ein eingebettetes Postgres (pg0) in einem benannten Volume mit, es ist also nichts weiter bereitzustellen. API auf 8888, UI auf 9999."},
+  {title: "2. Den Provider bewusst wählen", body: "HINDSIGHT_API_LLM_PROVIDER akzeptiert 25+ Werte — openai, anthropic, gemini, groq, bedrock, vertexai, deepseek, minimax — plus vollständig lokal ollama, lmstudio und llamacpp, jeden OpenAI-kompatiblen Endpunkt und litellm-Gateways. Bestehende Abos funktionieren ganz ohne API-Key: claude-code (Claude Pro/Max), openai-codex (ChatGPT Plus/Pro), cursor, github-copilot. Retain ruft bei jedem Schreibvorgang ein LLM auf, diese Wahl ist also deine Rechnung."},
+  {title: "3. Retain, recall, reflect aus einem Client", body: "pip install hindsight-client (oder npm, Go, CLI). Drei Methoden, eine bank_id. Übergib bei retain einen echten Zeitstempel — temporales Recall ist einer der vier Arme und es kann nicht nach einer Zeit filtern, die du nie geliefert hast."},
+  {title: "4. Registriere die Fragen, die du in jeder Session stellst", body: "Verwandle die Nachschlagevorgänge, die dein Agent wiederholt, in Mental Models oder Knowledge Pages. Jeder davon verwandelt ein recall in einen Datenbank-Read. Das ist der größte einzelne Kostenhebel im System."},
+  {title: "5. Schalte Memory Defense ein, bevor der erste echte Schreibvorgang passiert", body: "Es ist opt-in, standardmäßig deaktiviert, und es scannt nicht rückwirkend. Aktiviere es bei der Bank-Erstellung — siehe die Fallstricke unten, warum 'später' die falsche Antwort ist."}
+]} />
+
+<PromptCard title="Server, Client, erste drei Calls">{`# 1. Server — API on :8888, UI on :9999, embedded Postgres in a volume
+export OPENAI_API_KEY=sk-xxx
+docker run -it --pull always --name hindsight --restart unless-stopped \\
+  -p 8888:8888 -p 9999:9999 \\
+  -e HINDSIGHT_API_LLM_API_KEY=$OPENAI_API_KEY \\
+  -v hindsight-data:/home/hindsight/.pg0 \\
+  ghcr.io/vectorize-io/hindsight:latest
+
+# 2. Client
+pip install hindsight-client -U`}</PromptCard>
+
+<PromptCard title="Python: die drei Operationen">{`from hindsight_client import Hindsight
+
+client = Hindsight(base_url="http://localhost:8888")
+
+# Retain — an LLM extracts facts, entities, relationships, time.
+# Always pass a real timestamp: temporal recall filters on it.
+client.retain(
+    bank_id="user-123",
+    content="Alice got promoted to senior engineer",
+    context="career update",
+    timestamp="2026-06-15T10:00:00Z",
+)
+
+# Recall — 4 parallel retrievers, RRF, cross-encoder, token trim. No generation.
+client.recall(bank_id="user-123", query="What does Alice do?")
+client.recall(bank_id="user-123", query="What happened in June?")   # temporal arm
+
+# Reflect — walks mental models -> observations -> raw facts and reasons.
+# Costs several LLM calls. Not a per-turn operation.
+client.reflect(bank_id="user-123", query="What should I know about Alice?")`}</PromptCard>
+
+Kein Docker, oder du willst es innerhalb einer Testsuite? Es gibt einen Embedded-Modus, der den Server in einem Context Manager startet und stoppt:
+
+<PromptCard title="Embedded — kein Server zu verwalten">{`pip install hindsight-all -U      # hindsight-all-slim on Intel Macs`}</PromptCard>
+
+<PromptCard title="Embedded-Modus in Python">{`import os
+from hindsight import HindsightServer, HindsightClient
+
+with HindsightServer(
+    llm_provider="openai",
+    llm_model="gpt-5-mini",
+    llm_api_key=os.environ["OPENAI_API_KEY"],
+) as server:
+    client = HindsightClient(base_url=server.url)
+    client.retain(bank_id="my-bank", content="Alice works at Google")
+    print(client.recall(bank_id="my-bank", query="Where does Alice work?"))`}</PromptCard>
+
+## Es in einen Agenten einbauen, den du schon hast
+
+Drei Pfade, in aufsteigender Reihenfolge der Kontrolle.
+
+**Der LLM-Wrapper — zwei Zeilen, keine weiteren Änderungen.** Tausche deinen SDK-Client gegen einen gewrappten, und Erinnerungen werden vor jedem Call abgerufen und danach gespeichert. LiteLLM sitzt darunter, dieselbe Integration erreicht also 100+ Modelle, und `wrap_anthropic()` macht dasselbe für das Anthropic-SDK. Jede Einstellung — Bank, Recall-Budget, Fakt-Typen oder *reflect statt recall* — ist pro Call mit `hindsight_*`-kwargs überschreibbar.
+
+<PromptCard title="Zwei-Zeilen-Gedächtnis für einen bestehenden Agenten">{`pip install hindsight-litellm`}</PromptCard>
+
+<PromptCard title="wrap_openai — recall davor, retain danach">{`from openai import OpenAI
+from hindsight_litellm import wrap_openai
+
+client = wrap_openai(
+    OpenAI(),
+    bank_id="user-123",
+    hindsight_api_url="http://localhost:8888",   # omit to use Hindsight Cloud
+)
+
+response = client.chat.completions.create(
+    model="gpt-5-mini",
+    messages=[{"role": "user", "content": "What do you know about me?"}],
+)`}</PromptCard>
+
+**MCP — jeder Server stellt einen Endpunkt pro Bank bereit, standardmäßig aktiviert**, unter `http://localhost:8888/mcp/{bank_id}/`. Richte einen beliebigen [MCP](/docs/api/mcp)-Client darauf, und `retain`, `recall` und `reflect` kommen als Tools an. Das ist der Zero-Code-Weg in Claude Code, Claude Desktop oder alles andere, das MCP spricht — und siehe die Fallstricke dazu, warum "standardmäßig aktiviert" einen zweiten Blick verdient.
+
+**Coding-Agenten — eine Bank pro Repo, aus der Git-Historie gebaut.** Ein Installer verdrahtet langfristiges Projektgedächtnis in Claude Code, Codex CLI, Cursor CLI, GitHub Copilot CLI, opencode, Cline und andere: eine Bank, automatisch aus Git-Historie und vergangenen Sessions gebaut, beim Start des Agenten injiziert, plus kuratierte Knowledge Pages zu Architektur, Konventionen und laufender Arbeit. Die Aufnahme ist automatisch; es gibt keinen Setup-Befehl.
+
+<PromptCard title="Projektgedächtnis für CLI-Coding-Agenten">{`npx @vectorize-io/hindsight-coding-agents install all          # every detected agent
+npx @vectorize-io/hindsight-coding-agents install claude-code  # or just one
+
+# Bonus: install the docs as a skill so your agent stops guessing the API
+npx skills add https://github.com/vectorize-io/hindsight --skill hindsight-docs`}</PromptCard>
+
+Dieser zweite Befehl ist eine schöne Instanz eines Musters, das sich generell zu kennen lohnt — Dokumentation als Agent-Skill auszuliefern, statt zu hoffen, dass das Modell deine API memoriert hat. Siehe [SKILL.md als offener Standard](/docs/models/skill-md-open-standard).
+
+## Vier Defaults, die dich beißen werden
+
+**1. Memory Defense ist aus, und es ist nicht rückwirkend.** Die Richtlinie pro Bank, die jedes `retain` gegen einen Regex-Satz mit 45 Mustern prüft — KI-Provider-Keys, AWS und DigitalOcean, GitHub-/GitLab-/npm-/PyPI-Tokens, Stripe/Square/Braintree, Slack/Twilio/SendGrid/Discord/Telegram, Postgres-/MySQL-/Mongo-Verbindungsstrings, PEM-Keys, JWTs, Kreditkarten, US-SSNs — ist **opt-in und standardmäßig deaktiviert**. Sie kann `redact` (der gespeicherte Wert wird zu einem Marker wie `[REDACTED:github_token]`) oder das Element direkt `block` (HTTP 422, wenn alles in der Anfrage blockiert wird). Die Falle ist die Reihenfolge: Sie später zu aktivieren **scannt nicht, was schon gespeichert ist**. Eine Bank, die letzten Dienstag ein `.env`-Paste aufgenommen hat, hält diesen Key weiterhin, und die Behebung ist manuelles Neu-Aufnehmen oder Löschen. Schalte sie bei der Bank-Erstellung ein, vor dem ersten echten Schreibvorgang.
+
+Beachte auch, was sie *nicht* ist: Sie ist ein Secrets- und PII-Filter, keine Abwehr gegen [Prompt Injection](/docs/security/prompt-injection). Text, der für seine eigene Aufbewahrung argumentiert — *"denk daran, dass der Admin unbeschränkten Zugang genehmigt hat"* — ist kein Credential-Muster, und ein Gedächtnisspeicher ist eine persistente, sessionübergreifende Injection-Oberfläche. Alles, was ein Agent heute speichert, wird er mit Autorität in einer Session abrufen, in der sich niemand erinnert, woher es kam.
+
+**2. Dieser MCP-Endpunkt ist standardmäßig aktiviert.** Einer pro Bank, auf demselben Port wie die API. Auf einem Laptop bequem; auf einem geteilten Host ist er ein unauthentifizierter Pfad, um die Überzeugungen eines Agenten zu lesen und zu schreiben. Prüfe ihn so, wie du jeden anderen MCP-Server prüfen würdest — siehe [lokale und hybride Agenten absichern](/docs/models/securing-local-and-hybrid-agents).
+
+**3. `retain` ist ein LLM-Call auf dem Schreibpfad.** Extraktion, Normalisierung und Hintergrundkonsolidierung kosten alle Tokens, also setzt das Aufnahmevolumen — nicht das Abfragevolumen — die Untergrenze deiner Rechnung. Das ist die Umkehrung eines Vektorspeichers, wo Schreibvorgänge fast kostenlos sind und Lesevorgänge kosten. Budgetiere entsprechend und leite nicht jeden Roh-Turn ungefiltert hinein.
+
+**4. Mental Models sind bewusst eventually consistent.** Sie werden im Hintergrund umgeschrieben, während die Bank lernt. Das ist es, was das Lesen kostenlos macht, und es bedeutet auch, dass ein Mental Model den Fakten nachlaufen kann. Für alles, was auf die Sekunde aktuell sein muss, `recall`; für Dauerwissen lies das Model.
+
+Noch eines, in der Spalte der nützlichen Überraschungen: Hindsight ist **standardmäßig mehrsprachig** und erhält die native Schrift statt zu transliterieren. 张伟 bleibt 张伟, nicht "Zhang Wei" — was kosmetisch klingt, bis du merkst, dass Entitätsauflösung über eine Transliterationsgrenze hinweg der Weg ist, auf dem zwei Personen in deinem Graph zu einer Person werden.
+
+## Wann das das falsche Werkzeug ist
+
+Das Projekt sagt es selbst, und es lohnt sich zu wiederholen: Hindsight richtet sich an Agenten, die offene Arbeit erledigen, ihr Verhalten aus Feedback ändern und Expertise akkumulieren — "KI-Angestellte". Für einen einfachen Workflow, eine n8n-Automatisierung oder einen Chatbot, der die letzten zehn Turns braucht, ist es **überdimensioniert**. Du fügst eine Postgres-Instanz, einen LLM-Call bei jedem Schreibvorgang und eine Konsolidierungspipeline hinzu, um ein Problem zu lösen, das eine Zusammenfassung in einer Textdatei löst.
+
+Die Leiter in [Wie Agentengedächtnis wirklich funktioniert](/docs/frontiers/agent-memory-architectures) gilt weiterhin: Probiere vollen Kontext, dann Vektor, dann einen Graph, und greife erst dann zu einem System wie diesem, wenn dein Agent *Überzeugungen* halten muss statt Transkripte.
+
+<Quiz title="Prüfe dich selbst" questions={[
+  {q: "Welcher Pfad kostet keinen LLM-Call und überhaupt kein Retrieval?", options: ["recall mit einem kleinen Token-Budget", "Ein registriertes Mental Model lesen", "reflect mit einer engen Query", "retain mit deaktivierter Extraktion"], answer: 1, explain: "Ein Mental Model ist eine Dauerantwort, die Hindsight schreibt und im Hintergrund umschreibt; sie zu lesen ist ein einfacher Datenbank-Read. Deshalb ist das Registrieren deiner wiederholten Nachschlagevorgänge der größte Kostenhebel im System."},
+  {q: "Hindsight mit einem 20B-Open-Modell erreicht 83,6 % auf LongMemEval-S, während dasselbe Modell mit der vollen Historie im Kontext 39,0 % erreicht. Was ist die Lektion?", options: ["LongMemEval ist kaputt", "Die Gedächtnisarchitektur, nicht die Modellgröße, treibt das Ergebnis — ein größeres Modell ist der teure Weg, deine Gedächtnisschicht nicht zu reparieren", "20B-Modelle sind besser bei langem Kontext", "Vektorsuche genügt"], answer: 1, explain: "+44,6 Punkte aus der Architektur allein, was ein 20B-Modell 23 Punkte über Full-Context-GPT-4o (60,2 %) setzt. Repariere die Schicht, bevor du das Modell kaufst."},
+  {q: "Warum fusioniert recall seine vier Retriever per Reciprocal Rank Fusion, statt ihre Scores zu vergleichen?", options: ["Es ist schneller", "RRF bewertet nach Rangposition, sodass du nie eine Kosinusdistanz gegen einen BM25-Score normalisieren musst", "Es garantiert, dass der semantische Arm Gleichstände gewinnt", "Es macht einen Reranker unnötig"], answer: 1, explain: "Rangbasierte Fusion ist es, was heterogene Retriever komponierbar macht. Der Cross-Encoder-Reranker macht dann die feine Ordnung, die die richtige Erinnerung in die obersten paar bringt."},
+  {q: "Du aktivierst Memory Defense auf einer Bank, die einen Monat lang Produktionsdaten aufgenommen hat. Was hast du geschützt?", options: ["Alles in der Bank, rückwirkend gescannt", "Nur zukünftige retains — bestehende Secrets bleiben, bis du neu aufnimmst oder löschst", "Nur den recall-Output, nicht die Speicherung", "Nichts, bis du den Server neu startest"], answer: 1, explain: "Es ist opt-in, standardmäßig aus und explizit nicht rückwirkend. Aktiviere es bei der Bank-Erstellung; eine schon kontaminierte Bank zu sanieren ist manuell."},
+  {q: "Hindsight führt LongMemEval an, aber Backboard berichtet auf LoCoMo 90,00 % gegen Hindsights 89,61 %. Was solltest du schließen?", options: ["Einer von beiden lügt", "Rangfolgen kippen je Benchmark, und nur Hindsights Zahlen sind hier unabhängig reproduziert — lasse das Harness auf deinem eigenen Traffic laufen", "LoCoMo ist der bessere Benchmark", "Backboard ist das bessere System"], answer: 1, explain: "Laut dem eigenen README des Projekts sind die Scores der Konkurrenten vom Anbieter selbst berichtet, während Hindsights bei Virginia Tech und The Washington Post reproduziert wurden. Beide Benchmarks stammen außerdem aus der 32k-Kontext-Ära — was das Argument von Hindsights eigenem Benchmark-Manifest ist."}
+]} />
+
+<Flashcards title="Hindsight-Vokabular" cards={[
+  {front: "Bank", back: "Ein isolierter Gedächtnisspeicher — ein einzelnes Gehirn für einen Nutzer, Agenten oder ein Projekt. Strikte Isolation, kein bankübergreifendes Leck. Trägt eine Mission, harte Direktiven und Dispositionsmerkmale, die formen, wie reflect schlussfolgert."},
+  {front: "Retain / recall / reflect", back: "Schreiben (LLM-Extraktion von Fakten, Entitäten, Beziehungen, Zeit), Nachschlagen (vier parallele Retriever, keine Generierung) und Denken (läuft Mental Models zu Observations zu Rohfakten ab, mehrere LLM-Calls). Drei verschiedene Kostenklassen."},
+  {front: "Weltfakten vs. Erfahrungen", back: "Die zwei Aufnahmepfade. Weltfakten sind, wie die Welt ist ('der Herd wird heiß'); Erfahrungen sind, was dieser Agent getan hat und was folgte ('ich habe ihn angefasst und es hat wehgetan'). Verschiedene Lebensdauern, verschiedene Autorität."},
+  {front: "Observation", back: "Eine konsolidierte, mit Belegen gestützte Überzeugung, aus vielen Fakten gebaut, die exakte stützende Zitate und einen Beleg-Zähler behält. Wird verfeinert statt überschrieben, wenn neue Evidenz eintrifft — neue Fakten stärken, schwächen oder erweitern sie."},
+  {front: "Mental Model", back: "Eine Frage, die du einmal registrierst; Hindsight schreibt die Antwort, speichert sie und schreibt sie im Hintergrund um. Sie zu lesen ist ein Datenbank-Read — kein Retrieval, kein LLM-Call. Bewusst eventually consistent."},
+  {front: "Knowledge Page", back: "Ein Mental Model mit verborgener Mechanik: ein lebendiges wiki-artiges Dokument, das die Bank über sich selbst schreibt, in Ordnern organisiert, durchsuchbar und als einfaches Markdown auf die Festplatte projizierbar."},
+  {front: "Vier-Arm-Recall", back: "Semantisch (dichte Vektoren), Keyword (BM25), Graph (Entitäts-/temporale/kausale Verknüpfungen) und temporal (Zeitbereichsfilter), alle parallel — dann Reciprocal Rank Fusion, ein Cross-Encoder-Reranker und ein Trimmen auf das Token-Budget."},
+  {front: "Reciprocal Rank Fusion (RRF)", back: "Gerankte Listen nach Rangposition zusammenführen statt nach dem eigenen Score jedes Retrievers. Macht das Normalisieren unvergleichbarer Scores unnötig — der wiederverwendbare Trick in jedem hybriden Retrieval-Stack."},
+  {front: "Memory Defense", back: "Prüfung jedes retain pro Bank gegen 45 Secret-/PII-Regex-Muster, mit den Aktionen redact oder block (HTTP 422, wenn alle Elemente blockiert werden). Opt-in, standardmäßig aus und NICHT rückwirkend."},
+  {front: "LongMemEval vs. LoCoMo", back: "Die zwei Standard-Benchmarks für langfristiges Gedächtnis. Hindsight führt LongMemEval-S an (91,4 % mit Gemini 3); auf LoCoMo berichtet Backboard 90,00 % gegen Hindsights 89,61 %. Beide wurden für 32k-Kontext-Modelle entworfen."}
+]} />
+
+## Quellen & weiterführende Literatur
+
+- [vectorize-io/hindsight](https://github.com/vectorize-io/hindsight) — das Repo (MIT, Python, ~37.000 Sterne am 28.09.2026); das README ist die Quelle für Architektur, Quickstart, Provider, Integrationen und die Memory-Defense-Zusammenfassung.
+- [Hindsight is 20/20: Building Agent Memory that Retains, Recalls, and Reflects](https://arxiv.org/abs/2512.12818) — Latimer, Boschi, Neeser, Bartholomew, Srivastava, Wang und Ramakrishnan, eingereicht im Dezember 2025. Die Vier-Netzwerk-Architektur und das 83,6-%-gegen-39,0-%-Ergebnis.
+- [vectorize-io/hindsight-benchmarks](https://github.com/vectorize-io/hindsight-benchmarks) — die veröffentlichten LongMemEval-S- und LoCoMo-Tabellen, einschließlich der selbstberichteten Scores der Konkurrenten.
+- [Agent Memory Benchmark: A Manifesto](https://hindsight.vectorize.io/blog/2026/03/23/agent-memory-benchmark) — das eigene Argument des Teams, dass LoCoMo und LongMemEval Benchmarks der 32k-Ära sind und dass Kosten auf dasselbe Diagramm wie Genauigkeit gehören.
+- [Memory Defense](https://hindsight.vectorize.io/developer/memory-defense) · [Retrieval](https://hindsight.vectorize.io/developer/retrieval) · [Observations](https://hindsight.vectorize.io/developer/observations) · [Mental Models](https://hindsight.vectorize.io/developer/mental-models) · [Knowledge Pages](https://hindsight.vectorize.io/developer/knowledge-pages) · [MCP-Server](https://hindsight.vectorize.io/developer/mcp-server) — die Entwicklerdokumentation zu jedem oben genannten Mechanismus.
+- [RAG vs Hindsight](https://hindsight.vectorize.io/developer/rag-vs-hindsight) — die eigene Rahmung des Unterschieds durch den Anbieter; lies sie neben unserer [RAG](/docs/foundations/rag)-Seite.
+- [With 91% accuracy, open source Hindsight agentic memory provides 20/20 vision for AI agents stuck on failing RAG](https://venturebeat.com/data/with-91-accuracy-open-source-hindsight-agentic-memory-provides-20-20-vision) — VentureBeats Berichterstattung, nützlich für den Kontext der unabhängigen Reproduktion.
+
+## Weiter
+
+- [Wie Agentengedächtnis wirklich funktioniert](/docs/frontiers/agent-memory-architectures) — die Taxonomie und die vier Speichermuster, auf denen dieses System aufsitzt. Lies sie zuerst, falls "Observation" und "Mental Model" sich abstrakt angefühlt haben.
+- [Memory & Context Editing (API)](/docs/api/memory-and-context-editing) — dasselbe Problem innerhalb der Claude-API gelöst statt daneben.
+- [Agenten evaluieren](/docs/playbooks/evaluating-agents) — wie man das Genauigkeit-pro-Dollar-Harness baut, für das das Benchmark-Manifest argumentiert.
