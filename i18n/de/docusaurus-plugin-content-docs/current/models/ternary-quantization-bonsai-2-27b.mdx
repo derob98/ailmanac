@@ -1,0 +1,437 @@
+---
+sidebar_position: 22.95
+title: "Ternäre Quantisierung in der Praxis: Bonsai 2 27B in 5.95 GB"
+description: "PrismML hat Qwen3.8-27B auf 1.75 Bit pro Gewicht und 5.95 GB komprimiert. Der praktische Leitfaden, den niemand geschrieben hat: warum ein Standard-llama.cpp die Datei lädt und stillschweigend Unsinn produziert, warum die größere 7.21-GB-Datei auf einer H100 schneller, auf einer 4090 aber langsamer ist, warum 5.95 GB Gewichte 12 GB VRAM brauchen, und welche Fähigkeiten die Schlagzeile von 98.2% Erhalt stillschweigend verliert."
+keywords: [ternary quantization, Bonsai 2 27B, PrismML, BitNet b1.58, 1.58-bit LLM, PTQ1_0, PQ2_0, TQ2_0, llama.cpp fork, Hadamard rotation, low-bit inference, run 27B locally, GGUF, Q2_0_g64, local LLM 8GB VRAM]
+---
+
+<LevelBadge level="advanced" />
+
+Am 17. September 2026 veröffentlichte PrismML **Ternary Bonsai 2 27B**: ein Modell mit
+27 Milliarden Parametern, dessen Gewichte ausschließlich `-1`, `0` und `+1` sind, gepackt in
+eine Datei von 5.95 GB, freigegeben unter Apache 2.0. Das GGUF-Repo auf Hugging Face
+überschritt innerhalb von fünf Tagen 2.5 Millionen Downloads. Die Schlagzeile war überall
+dieselbe — *ein 27B-Modell, das auf einen Laptop passt*.
+
+Die Schlagzeile ist wahr. Fast alles, was Leute daraus ableiten, ist es nicht.
+
+Ein Standard-llama.cpp lädt die Datei und produziert flüssigen Unsinn, ohne einen Fehler zu
+melden. Ollama und LM Studio verweigern sie komplett. Die 5.95 GB große Datei braucht bei
+Standardeinstellungen rund 12 GB VRAM. Der *größere* 7.21-GB-Build ist auf einer
+Rechenzentrums-GPU schneller und auf einer 4090 langsamer. Und die vielzitierten „98.2% der
+vollen Präzision" sind ein Durchschnitt über vierzehn Benchmarks, der einen Einbruch von
+6 Punkten beim multimodalen Reasoning verdeckt — und, in einem unabhängigen Test, ein
+komplettes Versagen bei Sprachen mit geringen Ressourcen.
+
+Diese Seite ist die praktische Ebene: was ternäre Quantisierung dir wirklich bringt, wie du
+dieses Modell betreibst, ohne deine Ausgabe stillschweigend zu verfälschen, und wie du eine
+Kompressions-Erhaltungszahl ehrlich liest. Die Technik überlebt das Modell — dieselbe
+Argumentation gilt für jedes Low-Bit-Release, das folgt.
+
+<Callout type="objectives" items={[
+  "Verstehen, warum ternäre Gewichte in der Praxis 1.75 Bit belegen und nicht die 1.58 Bit, die die Theorie versprechen",
+  "Den Fehlermodus 'stiller Unsinn' erkennen: Standard-Loader ignorieren die Hadamard-Rotation und melden nie einen Fehler",
+  "Zwischen PTQ1_0 und PQ2_0 anhand des Umschlagpunkts Bandbreite-vs-Entpacken wählen, nicht anhand der Dateigröße",
+  "Echten Speicher budgetieren: 5.95 GB Gewichte, ~64 KiB Cache pro Token, und warum die Defaults die 12 GB weit überschreiten",
+  "'98.2% Erhalt' korrekt lesen — welche Fähigkeiten die Kompression überleben und welche stillschweigend nicht",
+]} />
+
+## Was ternäre Quantisierung wirklich ist
+
+Ein normales Modell speichert jedes Gewicht als 16-Bit-Float. Ein ternäres Modell speichert
+jedes Gewicht als einen von drei Werten — `-1`, `0`, `+1` — mit einem einzigen gemeinsamen
+FP16-Skalierungsfaktor pro Gewichtsgruppe. Die Rekonstruktion ist `w = scale_g * t`, wobei
+`t` das Trit ist.
+
+Drei Zustände brauchen log₂(3) ≈ **1.58 Bit**. Das ist die Zahl, die die Forschungsliteratur
+verwendet, von Microsofts BitNet b1.58 an. Es ist nicht die Zahl, die du auf der Platte
+bekommst.
+
+Bonsai 2 27B liefert für seinen dichtesten Build **1.75 Bit pro Gewicht**. Die zusätzlichen
+0.17 Bit pro Gewicht sind der Teil, den niemand erklärt:
+
+- **Gruppen-Skalierungsfaktoren.** Ein FP16-Faktor pro Gruppe von 128 Gewichten sind 16 Bit,
+  amortisiert über 128 Gewichte — 0.125 Bit pro Gewicht, noch vor allem anderen.
+- **Packverluste.** Trits lassen sich nicht sauber auf Bytes aufteilen. Dichtes Packen holt
+  das meiste, aber nicht alles der theoretischen Dichte heraus.
+- **Unquantisierte Komponenten.** Embeddings, Ausgabeprojektionen und
+  Normalisierungsschichten bleiben in höherer Präzision. Bei einem 27B-Modell sind das ein
+  kleiner Anteil der Parameter, aber ein merklicher Anteil der Bytes.
+
+Das echte Verhältnis ist also nicht 16/1.58 ≈ 10×. Es ist **53.8 GB → 5.95 GB, also etwa
+9×** — genau das, was die Model Card berichtet.
+
+:::tip Warum ternär schnell ist — und es ist nicht die Mathematik
+Die Intuition, die die meisten haben, lautet: ternäre Multiplikation ist billig; eine
+Multiplikation mit `-1`, `0` oder `+1` ist ein Vorzeichenwechsel, ein Überspringen oder
+nichts. Stimmt, aber daher kommt der Gewinn auf echter Hardware nicht.
+
+Die Token-Generierung ist **durch die Speicherbandbreite begrenzt**, nicht durch die
+Rechenleistung. Jedes generierte Token erfordert, die komplette Gewichtsmatrix aus dem
+Speicher zu streamen. Reduziere die Bytes um 9×, und du reduzierst den dominierenden
+Kostenfaktor um 9×. Die Arithmetik war nie der Engpass.
+
+Das ist praktisch relevant: eine CPU oder GPU ohne native Ternär-Unterstützung muss die
+Gewichte in ein normales Format *dequantisieren*, um ihre vorhandenen
+Multiply-Accumulate-Einheiten zu nutzen — das verschenkt die arithmetische Einsparung und
+behält nur die Bandbreiten-Einsparung. Genau deshalb verändert das gewählte Packformat die
+Performance in eine Richtung, die verkehrt herum aussieht — siehe unten.
+:::
+
+## Die Falle: Standard-llama.cpp lädt das Modell und lügt
+
+Das ist das Wichtigste auf dieser Seite, und es kommt in fast keiner Berichterstattung über
+das Release vor.
+
+Die Gewichte von Bonsai 2 haben eine **blockweise Hadamard-Rotation, die in die Speicherung
+eingefaltet ist**. Zur Laufzeit muss eine passende Umkehrtransformation auf die
+*Aktivierungen* angewandt werden. Die Rotation ist ein Standardtrick für
+Low-Bit-Quantisierung — sie verteilt Ausreißer-Magnituden über einen Block, damit das
+ternäre Raster weniger zu verlieren hat — aber sie bedeutet, dass die gespeicherten Gewichte
+für einen Loader, der nichts davon weiß, nicht direkt nutzbar sind.
+
+Ein Standard-Build von llama.cpp weiß nichts davon. Je nach Version verweigert er entweder
+die Tensortypen oder, schlimmer, er **lädt die Datei erfolgreich und erzeugt flüssige,
+selbstsichere, völlig falsche Ausgaben**. Es gibt keinen Fehler, keine Warnung, kein Flag
+für verminderte Qualität. Die Model Card sagt es unmissverständlich: Standard-llama.cpp
+führt diese Dateien nicht aus, und Standard-Builds produzieren Unsinn, weil die
+Hadamard-Transformation der Aktivierungen fehlt.
+
+Downstream-Werkzeuge erben das Problem auf unterschiedliche Weise:
+
+| Runtime | Verhalten mit Bonsai 2 27B GGUF |
+| --- | --- |
+| PrismMLs `llama.cpp`-Fork (Branch `prism`) | Funktioniert — heute der einzige lokale GGUF-Pfad |
+| Standard-`llama.cpp` | Verweigert die Tensortypen **oder** lädt und liefert Unsinn |
+| Ollama | Import scheitert mit einem `tensor size overflow`-Fehler |
+| LM Studio | Verweigert die ggml-Tensortypen `142` und `143` |
+| MLX (Apple) | Separater `mlx-2bit`-Build erforderlich; größerer Footprint |
+
+Die Fehlschläge bei Ollama und LM Studio sind das *sichere* Ergebnis. Der stille Erfolg von
+Standard-llama.cpp ist das gefährliche, weil ein Benchmark-Skript oder ein Eval-Harness den
+Unsinn bereitwillig als Ergebnis protokolliert.
+
+:::warning Wenn du ein Low-Bit-Modell evaluierst, prüfe zuerst den Loader
+Führe einen Prompt mit bekannter Antwort aus, bevor du irgendetwas anderes laufen lässt. Wenn
+ein Modell, das 95+ in HumanEval erreicht, nicht kohärent auf „was ist 2+2" antworten kann,
+hast du ein Loader-Problem, kein Modellproblem. Das gilt für jedes exotische
+Quantisierungsformat, nicht nur für dieses.
+:::
+
+## So führst du es aus
+
+<Steps items={[
+  {
+    title: "Baue PrismMLs Fork, nicht Mainline",
+    body: "git clone https://github.com/PrismML-Eng/llama.cpp && cd llama.cpp, dann cmake -B build -DGGML_CUDA=ON && cmake --build build -j für NVIDIA. Auf Apple Silicon lässt du das CUDA-Flag weg — Metal ist standardmäßig aktiv. Auf AMD nimm -DGGML_HIP=ON. Der Standard-Branch ist prism; die README warnt ausdrücklich davor, von prism-v6 zu bauen und die Bibliotheken dieses Forks mit einer Standard-Installation von llama.cpp auf derselben Maschine zu mischen."
+  },
+  {
+    title: "Wähle das richtige GGUF, bevor du 7 GB herunterlädst",
+    body: "PTQ1_0 ist 5.95 GB groß bei 1.75 Bit pro Gewicht — dichte Trits. PQ2_0 ist 7.21 GB groß bei 2.13 Bit pro Gewicht — jedes Trit bekommt seinen eigenen 2-Bit-Slot. Gleiche Gewichte, gleiche Qualität, andere Packung. Die Wahl ist eine Durchsatzentscheidung, keine Qualitätsentscheidung. Siehe die Umschlagtabelle weiter unten."
+  },
+  {
+    title: "Herunterladen — und die Byte-Anzahl prüfen",
+    body: "hf download prism-ml/Ternary-Bonsai-2-27B-gguf Ternary-Bonsai-2-27B-PQ2_0.gguf --local-dir . — PTQ1_0 hat 5,946,648,928 Bytes und PQ2_0 hat 7,206,168,928 Bytes. Ein abgebrochener Download ist ein weiterer Weg, plausibel aussehenden Unsinn zu bekommen. Füge die mmproj-Datei (629 MB bei Q8_0, 931 MB bei BF16) nur hinzu, wenn du Vision brauchst."
+  },
+  {
+    title: "Serviere es mit einer expliziten Kontextgröße",
+    body: "./build/bin/llama-server -m Ternary-Bonsai-2-27B-PQ2_0.gguf --alias bonsai-2-27b -ngl 99 -fa on -c 32768 --host 127.0.0.1 --port 8080. Das -c-Flag ist in der Praxis nicht optional: -c 0 setzt standardmäßig das volle 262K-Fenster und versucht, rund 16 GB Attention-Cache zu allozieren, bevor überhaupt ein einziges Token generiert wurde."
+  },
+  {
+    title: "Mit einem Aufruf mit bekannter Antwort verifizieren, dann das Tooling anschließen",
+    body: "Der Server stellt einen OpenAI-förmigen Endpunkt /v1/chat/completions bereit, also kann alles, was Chat-Completions spricht, auf http://127.0.0.1:8080/v1 zeigen. Schicke einen trivialen Prompt und lies die Antwort mit eigenen Augen, bevor du einen Eval-Harness oder eine Agent-Schleife darauf richtest."
+  },
+  {
+    title: "Wenn PQ2_0 auf der CPU abstürzt, deaktiviere das Repacking",
+    body: "PQ2_0 kann während des CPU-Repack-Schritts von llama.cpp abstürzen. Übergib --no-repack oder setze LLAMA_ARG_REPACK=0 in der Umgebung."
+  }
+]} />
+
+<PromptCard title="Minimal von Anfang bis Ende: bauen, holen, servieren, verifizieren">
+{`# 1. Fork only — stock llama.cpp will silently produce garbage
+git clone https://github.com/PrismML-Eng/llama.cpp && cd llama.cpp
+cmake -B build -DGGML_CUDA=ON && cmake --build build -j
+
+# 2. Fetch (PQ2_0 = 7.21 GB, faster on big GPUs; PTQ1_0 = 5.95 GB, fits 8 GB cards)
+hf download prism-ml/Ternary-Bonsai-2-27B-gguf \\
+  Ternary-Bonsai-2-27B-PQ2_0.gguf --local-dir .
+
+# 3. Serve — always set -c explicitly, never leave it at 0
+./build/bin/llama-server -m Ternary-Bonsai-2-27B-PQ2_0.gguf \\
+  --alias bonsai-2-27b -ngl 99 -fa on -c 32768 \\
+  --host 127.0.0.1 --port 8080
+
+# 4. Verify the loader BEFORE trusting any output
+curl -s http://127.0.0.1:8080/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"bonsai-2-27b","messages":[{"role":"user","content":"What is 2+2? Answer with one number."}]}'
+# Coherent "4" => loader is correct. Fluent nonsense => wrong build, stop here.`}
+</PromptCard>
+
+## PTQ1_0 vs. PQ2_0: der Umschlagpunkt, der verkehrt herum aussieht
+
+Zwei Builds derselben Gewichte. PTQ1_0 packt Trits dicht mit 1.75 Bit. PQ2_0 gibt jedem Trit
+seinen eigenen 2-Bit-Slot bei 2.13 Bit — 21% mehr Platz auf der Platte, aber das Entpacken
+ist deutlich billiger, weil die Slots Byte-aligned sind.
+
+Gemessener Generierungsdurchsatz, Token pro Sekunde:
+
+| GPU | PQ2_0 (7.21 GB) | PTQ1_0 (5.95 GB) | Sieger |
+| --- | --- | --- | --- |
+| RTX 5090 | 129.9 | 120.5 | PQ2_0 |
+| RTX 4090 | 81.2 | **91.1** | PTQ1_0 |
+| L4 (24 GB) | 29.8 | **32.1** | PTQ1_0 |
+| M5 Pro (Metal) | 28.1 | — | — |
+
+Das Muster verallgemeinert sich: **PTQ1_0 gewinnt auf GPUs der Ada-Generation und im unteren
+Segment, PQ2_0 gewinnt auf H100, A100 und Blackwell.**
+
+Das ist das Gegenteil der üblichen Quantisierungs-Daumenregel, nach der kleiner immer
+schneller ist. Der Grund ist der Kompromiss zwischen Bandbreite und Entpacken von weiter
+oben. Auf einer bandbreiten-hungrigen Karte dominiert es, 21% weniger Bytes zu bewegen, und
+die dichte Packung gewinnt. Auf einer Karte mit enormer Speicherbandbreite ist Bandbreite
+nicht mehr die Beschränkung, und die Bit-Schiebe-Kosten des dichten Entpackens werden zum
+Engpass — also läuft das dickere, Byte-aligned Format schneller.
+
+Die Prompt-Verarbeitung erzählt dieselbe Geschichte noch deutlicher: auf einer RTX 5090
+verarbeitet PQ2_0 Prompts mit 3,893 Tok/s gegenüber 1,805 bei PTQ1_0 — mehr als das Doppelte,
+weil das Prefill rechengebunden ist, wo die Entpackkosten am härtesten zuschlagen.
+
+**Daumenregel:** unter 12 GB VRAM hast du keine Wahl, nimm PTQ1_0. Darüber nimm PQ2_0 — außer
+du bist auf einer 4090 oder einer L4, wo PTQ1_0 messbar gewinnt.
+
+## Dateigröße ist nicht Speicherbedarf
+
+Für dieses Modell zirkulieren drei verschiedene „Größen"-Zahlen — 5.9 GB, 7.2 GB und 8.6 GB —
+und alle drei sind vertretbar, weil sie Unterschiedliches messen. Hier ist das tatsächliche
+Budget:
+
+- **Gewichte:** 5.95 GB (PTQ1_0) oder 7.21 GB (PQ2_0).
+- **Vision-Projektor:** +629 MB (Q8_0) oder +931 MB (BF16), falls du Bilder brauchst.
+- **Attention-Cache:** rund **64 KiB pro Token**. Das sind ~0.5 GB bei 8K Kontext, ~2 GB bei
+  32K und ~16 GB beim vollen 262K-Fenster.
+- **Parallele Slots:** llama.cpp alloziert Cache *pro Slot*. Die Defaults allozieren mehrere.
+
+Ein unabhängiger Test hat bei Standardeinstellungen knapp über **12 GB VRAM** gemessen,
+fallend auf etwa **8 GB**, als der Server auf einen einzigen parallelen Slot begrenzt wurde.
+Der gemessene Platten-Footprint — rund 7 GB — entspricht dem PQ2_0-Build, und daher kommt ein
+Teil der Zahlenverwirrung.
+
+Praktischer Kontextspielraum pro Karte, mit PQ2_0, sofern nicht anders angegeben:
+
+| VRAM | Build | Nutzbarer Kontext |
+| --- | --- | --- |
+| 8 GB | PTQ1_0 | ~16K Token (~6K mit Vision) |
+| 12 GB | PQ2_0 | ~56K Token |
+| 16 GB | PQ2_0 | ~118K Token |
+| 24 GB | PQ2_0 | ~240K Token |
+| 32 GB+ | PQ2_0 | Volles 262K-Fenster |
+
+Die Behauptung „läuft auf einem Laptop" übersteht all das — aber „läuft auf einem Laptop *mit
+einer 8-GB-GPU und 16K Kontext*" ist die ehrliche Version, und das ist ein materiell anderes
+Produkt.
+
+## Was „98.2% Erhalt" verbirgt
+
+PrismML berichtet über vierzehn Benchmarks einen Aggregatwert von **84.78 gegenüber 86.32 des
+Basismodells in voller Präzision** — daraus entsteht die Zahl 98.2%. Durchschnitte sind der
+Ort, an dem Kompressionsschäden sich verstecken. Die Streuung pro Benchmark:
+
+| Benchmark | Bonsai 2 27B | FP16-Basis | Delta |
+| --- | --- | --- | --- |
+| AIME26 | 95.83 | 94.58 | +1.25 |
+| MATH-500 | 98.80 | 99.80 | −1.00 |
+| LiveCodeBench | 90.07 | 90.05 | +0.02 |
+| HumanEval+ | 95.12 | 93.29 | +1.83 |
+| MMLU-Redux | 89.09 | 91.46 | −2.37 |
+| MMMU-Pro | 75.49 | 81.73 | **−6.24** |
+
+Drei Dinge lassen sich aus dieser Tabelle mitnehmen.
+
+**Erstens: der Schaden ist nicht gleichmäßig — er ist strukturell.** Mathematik und Code
+bleiben im Wesentlichen unberührt. Der Wissensabruf fällt (das zusammengesetzte Maß aus
+Wissen und Reasoning landet bei rund 79.9 gegenüber 85.6 in voller Präzision). Das
+multimodale Reasoning bekommt den echten Treffer: MMMU-Pro fällt um 6.24 Punkte, und OCR
+Bench v2 sinkt von 60.99 auf 56.88. Kompression kostet dich *Breite des gespeicherten
+Wissens*, nicht *prozedurale Fertigkeit* — genau das, was man erwartet, wenn man die für
+Long-Tail-Assoziationen verfügbare Präzision zerdrückt.
+
+**Zweitens: sei misstrauisch gegenüber den positiven Werten.** Dass das komprimierte Modell
+seine eigene Basis in voller Präzision bei HumanEval+ um 1.83 Punkte und bei AIME26 um 1.25
+„schlägt", ist kein Beleg dafür, dass Kompression hilft. Es ist ein Beleg dafür, dass diese
+Benchmarks eine Streuung von ein paar Punkten zwischen Läufen haben. Was dich auch die
+kleinen negativen Werte abwerten lassen sollte.
+
+**Drittens: die Zahlen des Anbieters stimmen untereinander nicht ganz.** Die Benchmark-Tabelle
+der Model Card aggregiert zu 84.78, während PrismMLs Launch-Post einen Aggregatwert von 83.9
+nennt. Beide werden als dieselben 98.2% Erhalt beschrieben. Die Diskrepanz ist klein und
+unerklärt; wir berichten sie, statt eine der beiden auszuwählen.
+
+:::danger Der Fehlermodus, den die Benchmarks nicht erfasst haben
+Ein unabhängiger Praxistest fand Verhalten, das keine Benchmark-Zeile vorhersagt: aufgefordert,
+in Sprachen mit geringen Ressourcen wie Tamil zu übersetzen, **geriet das Modell in eine
+Wiederholungsschleife und schloss die Aufgabe nie ab** — schlechter als die vorige
+Bonsai-Generation. Derselbe Test fand, dass es einen echten Zeitzonen-Bug identifizierte und
+sich dann selbst von der korrekten Schlussfolgerung abbrachte, und dass es über drei
+Korrekturrunden hinweg keinen funktionierenden Reset-Button in einer kleinen HTML-Aufgabe
+hinbekam.
+
+Das ist die charakteristische Signatur aggressiver Quantisierung: die Aggregatwerte halten,
+während der Long Tail — seltene Sprachen, Selbstkorrektur über lange Horizonte — auf eine
+Weise degradiert, die nur im Einsatz auffällt. Community-Berichte beschreiben außerdem
+Verschlechterungen bei Abruf und Kohärenz jenseits von etwa 200K Token des angekündigten
+262K-Fensters.
+:::
+
+## Die Mainline-Geschichte und warum sie für das nächste Release wichtig ist
+
+Es gibt eine parallele Anstrengung, ternäres Bonsai ins Upstream-llama.cpp zu bringen, und
+ihr aktueller Stand ist eine nützliche Lektion darüber, wie Low-Bit-Formate fragmentieren.
+
+PrismML schlug Ternär-Packung mit Gruppengröße 128 für die kleineren Bonsai-Modelle vor. Der
+llama.cpp-Maintainer widersprach und plädierte für **Gruppengröße 64**, mit der Begründung,
+dass sie unter 6% zusätzlichen Speicher kostet, dabei aber mehr Tensorformen unterstützt und
+bessere Qualität liefert. `Q2_0` mit Gruppe 64 wurde das offizielle Format und ist in mehrere
+Backends gemergt, darunter CUDA und Vulkan. PrismML behielt seine Gruppe-128-Varianten im
+Fork.
+
+„Unterstützt llama.cpp ternäre Modelle" hat also zwei korrekte und entgegengesetzte
+Antworten:
+
+- **Ja** — `Q2_0_g64`-Builds laufen auf Mainline über alle Backends, und die README des Forks
+  verweist selbst auf sie als portablen Weg.
+- **Nein, nicht für dieses Modell** — zum Zeitpunkt der Verifikation enthält das
+  veröffentlichte Repo `Ternary-Bonsai-2-27B-gguf` die Dateien `F16`, `PQ2_0`, `PTQ1_0` und
+  die zwei mmproj-Dateien. Es gibt **keinen `Q2_0_g64`-Build des 27B**. Der Fork ist der
+  einzige Weg.
+
+Zwei ältere Ternär-Formate, `TQ1_0` und `TQ2_0`, existieren bereits in ggml, nutzen aber
+Gruppengröße 256, was inkompatibel dazu ist, wie diese Modelle nativ gepackt sind. `TQ2_0`
+ist außerdem das engste getreue ternäre Layout in ggml mit rund 2.06 Bit pro Gewicht — und in
+der aktuellen Mainline implementiert es ein reines CPU-Skalarprodukt ohne CUDA-, Metal- oder
+Vulkan-Pfad. „Ternär unterstützt" in einem Changelog zu lesen sagt dir sehr wenig darüber, ob
+deine GPU es auch nutzen wird.
+
+Für das nächste Low-Bit-Modell, das du evaluierst, ist die Frage nicht *ist es quantisiert*,
+sondern **welche Gruppengröße, welche Packung, welche Backends haben Kernel, und gibt es
+einen portablen Build** — denn das entscheidet, ob du auf Mainline läufst oder den Fork
+von jemand anderem pflegst.
+
+## Wann das das richtige Werkzeug ist
+
+Lohnt sich, wenn:
+
+- Du ein leistungsfähiges Modell für **Mathematik oder Code** auf Hardware brauchst, die ein
+  27B nicht in höherer Präzision halten kann. Dort ist der Erhalt nahezu perfekt und der
+  Nutzen am größten.
+- Du **bandbreitenbeschränkt** bist — eine Laptop-GPU, eine Edge-Box, eine geteilte L4 — und
+  9× weniger Bytes pro Token den Unterschied zwischen nutzbar und nicht nutzbar machen.
+- Energie eine Rolle spielt. PrismML nennt 0.714 mWh pro Token auf einer RTX 4090, was sie
+  als 40% effizienter als ein 8B-Modell in voller Präzision einordnen.
+- Die Apache-2.0-Lizenz und vollständig lokale Ausführung Anforderungen sind, keine
+  Präferenzen.
+
+Lohnt sich nicht, wenn:
+
+- Die Arbeit **wissensintensiv oder multimodal** ist. Genau dort landet die Kompressionsrechnung.
+- Du Abdeckung für **nicht-englische Long-Tail-Sprachen** brauchst. Die unabhängige Evidenz
+  ist hier schlecht, und Benchmarks haben es nicht vorhergesagt.
+- Du keine geforkte Inferenz-Runtime pflegen kannst. Ollama und LM Studio laden es heute
+  nicht, und ein Standard-Build scheitert still statt laut.
+- Du es auf die Stärke der 262K-Spezifikation hin jenseits von ~200K Token Kontext betreiben
+  wolltest.
+
+<Flashcards cards={[
+  { front: "Was ist Bonsai 2 27B genau?", back: "Eine ternär quantisierte Kompression von Qwen3.8-27B (27.36B Parameter), veröffentlicht von PrismML am 17. September 2026 unter Apache 2.0. Die Architektur ist gegenüber dem Basismodell unverändert; nur die Gewichtsrepräsentation unterscheidet sich." },
+  { front: "Warum 1.75 Bit pro Gewicht und nicht die theoretischen 1.58?", back: "log2(3) = 1.58 ist die informationstheoretische Untergrenze für drei Zustände. Echte Dateien addieren einen FP16-Skalierungsfaktor pro Gruppe von 128 Gewichten (~0.125 Bit/Gewicht amortisiert), Packverluste sowie unquantisierte Embeddings und Norm-Schichten. Ergebnis: 53.8 GB auf 5.95 GB, etwa 9x." },
+  { front: "Was ist die Hadamard-Rotation und warum bricht sie Standard-Loader?", back: "Eine blockweise Rotation, die in die gespeicherten Gewichte eingefaltet ist und Ausreißer-Magnituden verteilt, damit das ternäre Raster weniger verliert. Die Umkehrung muss zur Laufzeit auf die Aktivierungen angewandt werden. Ein Loader, der davon nichts weiß, produziert flüssige, selbstsichere, völlig falsche Ausgaben ohne Fehlermeldung." },
+  { front: "PTQ1_0 oder PQ2_0?", back: "Gleiche Gewichte und Qualität, andere Packung. PTQ1_0 = 5.95 GB, 1.75 bpw, dichte Trits — gewinnt auf RTX 4090, L4 und allem unter 12 GB. PQ2_0 = 7.21 GB, 2.13 bpw, Byte-aligned Slots — gewinnt auf RTX 5090, H100, A100, Blackwell und ist bei der Prompt-Verarbeitung viel schneller." },
+  { front: "Warum ist die größere Datei manchmal schneller?", back: "Das Dekodieren ist durch die Speicherbandbreite begrenzt, also gewinnen normalerweise weniger Bytes. Auf GPUs mit sehr hoher Bandbreite ist Bandbreite nicht mehr die Beschränkung, und die Kosten des Entpackens dicht gepackter Trits werden zum Engpass — also läuft das dickere, Byte-aligned Format schneller." },
+  { front: "Wie viel Speicher braucht die 5.95-GB-Datei tatsächlich?", back: "Knapp über 12 GB VRAM bei den llama.cpp-Defaults, etwa 8 GB begrenzt auf einen einzigen parallelen Slot. Der Attention-Cache liegt bei rund 64 KiB pro Token — etwa 2 GB bei 32K Kontext und etwa 16 GB beim vollen 262K-Fenster." },
+  { front: "Was verbirgt die Erhaltungszahl von 98.2%?", back: "Aggregat 84.78 vs. 86.32 über 14 Benchmarks. Mathematik und Code sind gleichauf; MMLU-Redux liegt 2.37 zurück; MMMU-Pro 6.24; OCR Bench v2 fällt von 60.99 auf 56.88. Kompression kostet gespeicherte Wissensbreite, nicht prozedurale Fertigkeit." },
+  { front: "Welche Runtimes können es heute laden?", back: "Nur PrismMLs llama.cpp-Fork (github.com/PrismML-Eng/llama.cpp, Branch prism) für GGUF, plus ein separater MLX-2-Bit-Build für Apple. Ollama scheitert mit tensor size overflow; LM Studio verweigert die ggml-Tensortypen 142 und 143." },
+  { front: "Warum gibt es keinen Mainline-llama.cpp-Build des 27B?", back: "Der llama.cpp-Maintainer hat auf Q2_0 mit Gruppengröße 64 standardisiert, was in CUDA und Vulkan gemergt ist. PrismML behielt Gruppe 128 in seinem Fork. Q2_0_g64-Builds existieren für kleinere Bonsai-Modelle, aber das veröffentlichte 27B-GGUF-Repo liefert nur F16, PQ2_0, PTQ1_0 und mmproj-Dateien." },
+  { front: "Was ist der Verifikations-Reflex für jede exotische Quantisierung?", back: "Schicke einen Prompt mit bekannter Antwort und lies die Antwort selbst, bevor du einen Eval-Harness oder eine Agent-Schleife auf den Server richtest. Sonst werden Fehlschläge mit stillem Unsinn als echte Ergebnisse protokolliert." }
+]} />
+
+## Teste dich selbst
+
+<Quiz questions={[
+  {
+    q: "Du lädst Ternary-Bonsai-2-27B-PTQ1_0.gguf herunter, führst es auf einem aktuellen Standard-Build von llama.cpp aus, und es generiert flüssigen Text, der subtil falsch ist. Was ist die wahrscheinlichste Ursache?",
+    options: [
+      "Der Download war beschädigt",
+      "Standard-llama.cpp wendet die erforderliche Hadamard-Transformation der Aktivierungen nicht an, lädt die Datei also und produziert Unsinn, ohne einen Fehler zu melden",
+      "Die Temperatur ist zu hoch",
+      "Das Modell braucht einen System-Prompt"
+    ],
+    answer: 1,
+    explain: "Die Gewichte haben eine blockweise Hadamard-Rotation, die in die Speicherung eingefaltet ist; die Umkehrung muss zur Laufzeit auf die Aktivierungen angewandt werden. Ein Loader ohne diese Unterstützung meldet keinen Fehler — er produziert einfach Unsinn. Nutze PrismMLs Fork. (Die Prüfung der Byte-Anzahl schließt eine Beschädigung aus: PTQ1_0 hat 5,946,648,928 Bytes.)"
+  },
+  {
+    q: "Du hast eine RTX 4090 mit 24 GB. Welcher GGUF-Build liefert den höheren Generierungsdurchsatz?",
+    options: [
+      "PQ2_0 — es ist größer, also muss es höhere Qualität haben",
+      "PTQ1_0 — 91.1 Tok/s gegenüber 81.2 bei PQ2_0 auf dieser Karte",
+      "Sie sind identisch; die Dateien unterscheiden sich nur in der Größe auf der Platte",
+      "Keiner von beiden läuft auf einer 4090"
+    ],
+    answer: 1,
+    explain: "Gleiche Gewichte, gleiche Qualität — der Unterschied ist die Packung. Auf einer Karte der Ada-Generation ist Bandbreite die Beschränkung, also gewinnt die dichtere Packung: PTQ1_0 misst 91.1 Tok/s gegenüber 81.2 bei PQ2_0. Auf H100/A100/Blackwell kippt die Reihenfolge, weil dort die Entpackkosten dominieren."
+  },
+  {
+    q: "Deine Karte hat 8 GB VRAM. Die Gewichtsdatei ist 5.95 GB groß. Du startest llama-server mit Standardeinstellungen, und der Speicher geht aus. Warum?",
+    options: [
+      "Die Datei ist insgeheim größer als angegeben",
+      "Der Attention-Cache kostet rund 64 KiB pro Token, und llama.cpp alloziert ihn pro parallelem Slot — die Defaults treiben die Gesamtnutzung über 12 GB",
+      "Ternäre Modelle brauchen konstruktionsbedingt doppelt so viel VRAM wie ihre Dateigröße",
+      "Der Vision-Projektor wird immer geladen"
+    ],
+    answer: 1,
+    explain: "Die Gewichte sind nur ein Teil des Budgets. Eine unabhängige Messung sah bei den Defaults knapp über 12 GB, fallend auf etwa 8 GB mit einem einzigen parallelen Slot. Setze auch -c explizit: -c 0 nimmt standardmäßig das volle 262K-Fenster und versucht, rund 16 GB Cache zu allozieren."
+  },
+  {
+    q: "Ein Teammitglied zitiert '98.2% der Leistung in voller Präzision', um zu begründen, dass das komprimierte Modell ein Drop-in-Ersatz für eine Pipeline zum Dokumentenverständnis ist. Was ist der stärkste Einwand?",
+    options: [
+      "98.2% liegt im Benchmark-Rauschen, die Zahl ist also bedeutungslos",
+      "Der Erhalt ist höchst ungleichmäßig — Mathematik und Code sind gleichauf, während MMMU-Pro um 6.24 Punkte fällt und OCR Bench v2 von 60.99 auf 56.88 sinkt, und das ist genau die betreffende Arbeitslast",
+      "Das Modell ist nicht für kommerzielle Nutzung lizenziert",
+      "27B-Modelle sind für Dokumentenverständnis nie geeignet"
+    ],
+    answer: 1,
+    explain: "Das Aggregat ist ein Durchschnitt über 14 Benchmarks. Prozedurale Fertigkeit übersteht die Kompression; die gespeicherte Wissensbreite und das multimodale Reasoning nicht. Für eine Vision-/Dokumenten-Pipeline landest du im schlechtesten Teil der Verteilung. (Die Lizenz ist Apache 2.0, das ist also nicht der Einwand.)"
+  },
+  {
+    q: "Ein Changelog sagt, llama.cpp 'unterstützt ternäre Quantisierung'. Was musst du trotzdem prüfen, bevor du annimmst, dass deine GPU sie nutzt?",
+    options: [
+      "Nichts — Ternär-Unterstützung ist ein einzelnes Feature-Flag",
+      "Gruppengröße, Packformat und welche Backends Kernel haben — TQ2_0 ist in Mainline reines CPU, und das Repo von Bonsai 2 27B liefert keinen Q2_0_g64-Build",
+      "Nur, ob die Datei unter 8 GB liegt",
+      "Ob das Modell unter Apache 2.0 lizenziert ist"
+    ],
+    answer: 1,
+    explain: "Ternär ist eine Familie, kein Format. TQ1_0/TQ2_0 nutzen Gruppengröße 256, und TQ2_0 hat in Mainline ein reines CPU-Skalarprodukt; der offizielle Q2_0-Standard ist Gruppe 64 und in CUDA und Vulkan gemergt; PrismML liefert Gruppe 128 als PTQ1_0/PQ2_0 im eigenen Fork. Für das 27B speziell ist kein portabler g64-Build veröffentlicht."
+  }
+]} />
+
+<VerifyNote lastVerified="2026-09-22" source="PrismML launch post and the prism-ml/Ternary-Bonsai-2-27B-gguf model card and file listing on Hugging Face; PrismML-Eng/llama.cpp README (branch prism, 716 stars at check); ggml-org/llama.cpp discussion #22019; independent hands-on testing and benchmark tables published by MindStudio, DataCamp and Atomic Chat. Throughput, VRAM and retention figures are vendor or third-party measurements on specific hardware and will move as the fork, mainline kernels and published GGUF builds change — re-check the model card's file list before assuming a portable build does or does not exist." />
+
+## Quellen & weiterführende Literatur
+
+- PrismML — Launch-Post zu Bonsai 2 27B (Ternär-Schema, Bit pro Gewicht, Benchmark-Aggregat, Durchsatz- und Energiewerte pro Hardware): https://prismml.com/news/bonsai-2-27b
+- Hugging Face — Model Card und Dateiliste von `prism-ml/Ternary-Bonsai-2-27B-gguf` (Größen von PTQ1_0 / PQ2_0 / F16 / mmproj, Hinweis zur Hadamard-Rotation, Ausführungsbefehle, 262K Kontext, Apache 2.0): https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf
+- Hugging Face — die vollständige Bonsai-2-Kollektion, inklusive MLX-2-Bit-Build und WebGPU-Demo-Space: https://huggingface.co/prism-ml
+- `PrismML-Eng/llama.cpp` — der erforderliche Fork, Branch `prism`, mit den Hinweisen zu PQ2_0 / Q2_0_g64 und der Warnung gegen das Mischen von Builds: https://github.com/PrismML-Eng/llama.cpp
+- `ggml-org/llama.cpp` Diskussion #22019 — Gruppe 128 gegen den Gruppe-64-Standard `Q2_0`, Inkompatibilität von TQ1_0/TQ2_0 mit Gruppe 256, Merge-Status der Backends: https://github.com/ggml-org/llama.cpp/discussions/22019
+- Microsoft — technischer Bericht zu BitNet b1.58 2B4T, der Referenzpunkt für das Training ternärer LLMs: https://arxiv.org/pdf/2504.12285
+- Microsoft — `bitnet.cpp`: effiziente Edge-Inferenz für ternäre LLMs (warum der Gewinn aus der Bandbreite kommt und warum Hardware ohne native Ternär-Unterstützung dequantisieren muss): https://arxiv.org/pdf/2502.11880
+- MindStudio — unabhängiger Praxistest der 98.2%-Behauptung, inklusive des mehrsprachigen Versagens und des gemessenen VRAM: https://www.mindstudio.ai/blog/bonsai-2-27b-real-world-test
+- Atomic Chat — lokale Installationsanleitung mit der Durchsatztabelle pro GPU, der Tabelle zum Kontextspielraum und dem `--no-repack`-Workaround: https://atomic.chat/blog/guides/how-to-run-bonsai-2-locally
+- DataCamp — Vergleich pro Benchmark gegen die Basis in voller Präzision und die Berichte zur Degradation bei langem Kontext: https://www.datacamp.com/blog/bonsai-2-27b
+- SiliconANGLE — Berichterstattung zum Launch und Positionierung: https://siliconangle.com/2026/09/18/prismml-launches-bonsai-2-27b-a-high-intelligence-ai-model-so-small-it-fits-on-consumer-hardware/
+
+## Als Nächstes
+
+- [Colibrì: ein 744B-MoE von der SSD ausführen](/docs/models/colibri-stream-frontier-moe-from-ssd) — der andere Weg, ein übergroßes Modell auf kleine Hardware zu bringen: streamen statt komprimieren
+- [Modelle lokal mit Ollama ausführen](/docs/models/run-models-locally-ollama) — der Weg über unterstützte Runtimes, für alles, was kein Fork-only-Format ist
+- [Ein privater lokaler KI-Stack](/docs/models/private-local-ai-stack) — wo ein schnelles komprimiertes Modell neben dem Rest deines Toolings sitzt
