@@ -1,0 +1,362 @@
+---
+sidebar_position: 22.96
+title: "Harnais d'agents async-first : ce que change Unreal Agent"
+description: "Unreal Labs a publié un harnais Go sous licence MIT qui égale le taux de réussite de Codex sur Terminal-Bench 4.0 pour 39 % moins cher — en ne faisant jamais attendre le modèle sur un outil. Le mécanisme du journal d'événements, pourquoi le nombre de tours est la véritable unité de coût, et les trois choses qu'ils ont délibérément refusé de construire."
+keywords: [Unreal Agent, Unreal Labs, agent harness, async tool calling, Terminal-Bench 4.0, SWE-Atlas, DeepSWE, agent cost optimization, Go agent framework, MIT license, Codex, agent loop, session store, agent sandbox security, SKILL.md]
+---
+
+<LevelBadge level="advanced" />
+
+Le **22 septembre 2026**, Unreal Labs a publié **Unreal Agent** — un harnais
+d'agent sous licence MIT écrit en Go — et diffusé des exécutions de benchmarks
+montrant qu'il égale le taux de réussite de Codex sur Terminal-Bench 4.0 pour
+**1 428 $ contre 2 350 $**. Même modèle, mêmes tâches, même score, 39 % moins cher.
+
+Ce qui est intéressant, ce n'est pas le chiffre. C'est *où* est passé l'argent.
+L'affirmation centrale d'Unreal Agent est qu'une large part de ce que vous payez à
+un agent de codage n'est pas du raisonnement du tout — c'est le modèle assis dans
+la boucle à gérer sa propre attente. Cette page porte sur ce mécanisme, parce
+qu'il se transpose à n'importe quel harnais que vous construisez ou achetez, y
+compris ceux qui n'ont rien à voir avec Unreal Labs.
+
+<Callout type="objectives" items={[
+  "Comprendre le flux d'événements des appels d'outils asynchrones : ce qui est ajouté au journal de session, quand, et ce que le modèle voit réellement",
+  "Comprendre pourquoi le nombre de tours — et non la longueur de sortie — est l'unité qui détermine le coût d'un agent, et comment le mesurer dans votre propre boucle",
+  "Lire honnêtement le tableau de coûts publié : ce que les montants en dollars couvrent et ce qu'ils ne couvrent pas",
+  "Connaître les trois conceptions qu'Unreal Labs a délibérément refusé de construire (sous-agents, workflows, hooks de sécurité au niveau du harnais) et l'argument pour chacune",
+  "Appliquer les règles transposables à votre propre agent, quel que soit le harnais que vous utilisez déjà"
+]} />
+
+<VerifyNote lastVerified="2026-09-23" source="https://github.com/unreallabsai/unreal-agent">
+Les chiffres des benchmarks, l'architecture et la justification de conception
+proviennent du billet de lancement et du dépôt d'Unreal Labs, publiés le
+22 septembre 2026. Toutes les exécutions de benchmarks sont celles de l'éditeur
+lui-même, réalisées avec GPT-6 Astra en raisonnement xhigh ; aucune réplication
+indépendante n'existait au moment de la rédaction. Le dépôt affichait environ
+1,4 k étoiles le lendemain du lancement.
+</VerifyNote>
+
+## La version en une phrase
+
+Unreal Agent est un **harnais Go sous licence MIT** qui ajoute chaque appel
+d'outil à un journal de session en ajout seul sous forme d'événement *en cours*
+et laisse l'exécution se poursuivre en arrière-plan, de sorte que le modèle ne
+bloque jamais et n'interroge jamais — ce qui réduit les tours, et ce sont les
+tours que vous payez réellement.
+
+## Le mécanisme, précisément
+
+Voici un tour d'agent synchrone normal :
+
+1. Le modèle émet un appel d'outil.
+2. Le harnais exécute l'outil. La boucle est suspendue.
+3. L'outil retourne. Le harnais ajoute le résultat.
+4. Le harnais rappelle le modèle avec la transcription complète.
+
+Maintenant le même tour dans Unreal Agent :
+
+1. Le modèle émet un appel d'outil.
+2. Le harnais ajoute **immédiatement** au journal de session un événement
+   indiquant que l'appel est *en cours*, et lance l'exécution en arrière-plan.
+3. L'exécution se poursuit. Le modèle est libre d'émettre d'autres appels.
+4. Lorsque l'outil se termine, son résultat est ajouté au journal — et *cet*
+   ajout est ce qui déclenche l'appel de modèle suivant.
+
+Le modèle voit l'état en cours puis le résultat final, dans l'ordre, dans sa
+propre transcription. Il n'a jamais à encoder « attends ceci », n'émet jamais de
+sondage, ne porte jamais de comptabilité de heartbeat dans son raisonnement. La
+formulation d'Unreal Labs : le harnais permet au modèle « d'émettre davantage
+d'appels d'outils lourds par tour de modèle sans gaspiller de tokens à les
+interroger ou à les attendre ».
+
+C'est toute l'idée. Elle est petite. C'est aussi la partie que la plupart des
+harnais ratent, parce qu'une boucle synchrone est la chose évidente à écrire.
+
+### Pourquoi cela se traduit en argent
+
+Chaque tour de modèle renvoie la transcription accumulée. Une exécution d'agent
+de 30 tours ne coûte pas 30× un appel unique — elle coûte à peu près la *somme
+d'un contexte croissant* sur 30 appels. Le nombre de tours est donc plus proche
+d'un facteur de coût quadratique que linéaire, et il domine tout ce que vous
+économisez en rognant le prompt système.
+
+Regardez ce que les exécutions publiées rapportent à côté des dollars :
+
+| Benchmark | Taux de réussite | Unreal Agent | Tours | Codex | Pi | Tours Pi |
+|---|---|---|---|---|---|---|
+| Terminal-Bench 4.0 | 57,9 % | **1 428 $** | 28 | 2 350 $ | 1 827 $ | 44 |
+| SWE-Atlas Codebase QnA | 65,8 % | **936 $** | 16 | 1 303 $ | 1 033 $ | — |
+| DeepSWE 1.1 | 72,4 % | **1 367 $** | 26 | 1 633 $ | 1 584 $ | — |
+| ALE-CLI | 30,0 % réussite complète | **217 $** | — | — | — | — |
+
+Sur Terminal-Bench 4.0, la comparaison est de 28 tours contre 44 pour Pi — une
+réduction de 36 % des tours pour une réduction de 22 % du coût face à Pi, et de
+39 % face à Codex. La colonne des tours est la colonne causale ; la colonne des
+dollars en est la conséquence.
+
+C'est la même leçon qu'AILmanac aborde dans l'autre sens dans
+[pourquoi les agents brûlent des tokens](/docs/models/why-agents-burn-tokens) :
+ce qui coûte cher dans un agent, ce n'est pas la réponse, c'est la relecture.
+
+<Callout type="tip" items={[
+  "Instrumentez le nombre de tours avant toute autre chose. Si vous ne journalisez que les tokens, vous optimiserez les prompts et manquerez la boucle.",
+  "Un diagnostic utile : comptez combien de tours de votre agent n'ont produit aucun appel d'outil et aucune sortie visible par l'utilisateur. Ce sont de purs frais de boucle — attente, vérification, replanification — et c'est exactement ce qu'un harnais asynchrone supprime.",
+  "Les outils capables de tourner en parallèle amplifient l'effet. Si vos trois outils les plus lents peuvent s'exécuter simultanément, une boucle synchrone paie les trois en série, en temps réel ET en tours."
+]} />
+
+## Trois choses qu'ils n'ont délibérément pas construites
+
+La justification compte plus que le code, parce que ce sont des arguments que
+vous pouvez appliquer à n'importe quel harnais que vous exploitez déjà.
+
+### 1. Pas de sous-agents, pas de workflows
+
+Unreal Labs a choisi « un modèle d'appel d'outils asynchrone simple » plutôt que
+la délégation à des sous-agents et des workflows prédéfinis. Le raisonnement est
+qu'une fois les appels d'outils véritablement asynchrones, la plus grande partie
+de ce à quoi servaient les sous-agents — faire tourner des choses en parallèle
+sans bloquer le parent — est déjà prise en charge par la boucle. Les sous-agents
+ajoutent alors du découpage de contexte, de la fusion de résultats et leurs
+propres frais de tours pour un problème que vous n'avez plus.
+
+C'est une position réelle, pas la seule. Les conceptions multi-agents gagnent
+encore là où vous voulez vraiment un *contexte isolé*, pas seulement du
+parallélisme. Mais « nous avons besoin de sous-agents pour faire deux choses à la
+fois » est une affirmation qu'il vaut la peine de retester d'abord face à une
+boucle asynchrone.
+
+### 2. Pas de hooks de sécurité au niveau du harnais
+
+C'est l'argument le plus tranchant du billet de lancement, et sa forme mérite
+d'être citée : la sécurité et les approbations qui reposent sur des hooks de
+harnais « tendent à exiger plus de maintenance et à être moins robustes que des
+contraintes déterministes d'environnement ou de bac à sable, à l'extérieur du
+harnais ».
+
+Ce qu'ils recommandent à la place : des hôtes autorisés et interdits, des jetons
+d'accès granulaires, et des proxys avec portails d'approbation. Autrement dit,
+placez le contrôle là où l'agent ne peut physiquement pas l'atteindre.
+
+La logique est simple une fois énoncée. Un hook de harnais est du code qui tourne
+dans le même processus que la boucle de l'agent, contrôlant un outil que l'agent
+peut déjà invoquer. Une frontière de bac à sable est appliquée par le noyau ou le
+réseau, en dessous de l'agent dans son intégralité. Si votre agent dispose d'un
+outil `bash` — et c'est le cas d'Unreal Agent — une liste d'autorisation en
+processus est un ralentisseur, pas un mur. La page d'AILmanac
+[sécuriser les agents locaux et hybrides](/docs/models/securing-local-and-hybrid-agents)
+explique comment construire la frontière extérieure.
+
+### 3. Pas de SDK d'agent d'éditeur
+
+Unreal Labs s'est éloigné des SDK d'éditeurs (l'Agent SDK d'Anthropic est
+nommément cité) parce que ceux-ci supposent « des sessions locales, des
+sous-processus et des limites de ressources qui ne se traduisent pas proprement
+en usage de production ».
+
+C'est un argument de forme de déploiement, pas de qualité. Un SDK modelé sur une
+session CLI locale suppose un processus, une machine, une durée de vie. Une flotte
+d'agents en production veut des sessions qui survivent à un processus et peuvent
+être reprises sur une autre machine — c'est exactement ce que fournit le **magasin
+de sessions en ajout seul et versionné** d'Unreal Agent, y compris le fork d'une
+session pour créer une branche d'exécution.
+
+Si vous construisez un produit au-dessus d'une boucle d'agent, voici la question à
+poser à tout SDK : *une session peut-elle survivre au processus qui l'a créée ?*
+
+## L'architecture, brièvement
+
+Le harnais est délibérément petit et explicitement composable — huit composants
+remplaçables derrière des interfaces documentées :
+
+- **Boîte de réception de session** — déduplique les entrées. Chaque entrée porte
+  un identifiant d'appelant globalement unique et stable, de sorte que les
+  nouvelles tentatives ne s'appliquent pas deux fois.
+- **Coordinateur** — possède les tours LLM et répartit les opérations.
+- **Magasin de sessions** — historique persisté en ajout seul, gère le fork,
+  versionné.
+- **Constructeur de contexte** — assemble l'entrée du modèle. N'effectue
+  **aucune E/S**.
+- **Adaptateur LLM** — dialogue avec le fournisseur.
+- **Registre d'outils et traducteurs** — valident les appels de façon synchrone et
+  ne doivent « effectuer aucune E/S ni suspendre la boucle ».
+- **Gestionnaire d'opérations** — exécute le travail durable en arrière-plan.
+
+Deux contraintes de cette liste font le gros du travail et sont faciles à manquer :
+le **constructeur de contexte et les traducteurs d'outils ont interdiction de
+faire des E/S**. C'est ce qui maintient le chemin critique du coordinateur
+déterministe et non bloquant — toute la latence est repoussée dans les
+opérations, qui sont les composants conçus pour être asynchrones. Si vous
+construisez votre propre harnais, c'est la règle à voler.
+
+Les formats de stockage et les opérations sont versionnés, et une version de
+session non prise en charge **échoue explicitement à la reprise** plutôt que de se
+charger à moitié. C'est le bon mode d'échec pour un état durable, et il est plus
+rare qu'il ne devrait l'être.
+
+La surface d'outils intégrée compte trois outils : **Bash**, **ViewImage** et
+**Skill-use** — ce dernier se branchant sur le format de compétence portable
+qu'AILmanac couvre dans
+[SKILL.md comme standard ouvert](/docs/models/skill-md-open-standard).
+Trois outils, c'est tout l'intérêt : une surface d'outils réduite et peu coûteuse
+en tokens fait partie de l'histoire du coût.
+
+## L'exécuter
+
+<Steps items={[
+  { title: "Installer", body: "Chaîne d'outils Go 1.27+, puis go install du runner depuis le chemin cmd/, ou clonez et utilisez le Makefile fourni (make build, make test)." },
+  { title: "Choisir un fournisseur", body: "Sélectionné par variable d'environnement. OpenAI, OpenAI Codex, OpenRouter, Fireworks et Ollama sont pris en charge, vous pouvez donc pointer le même harnais vers un modèle frontière hébergé ou vers un modèle local." },
+  { title: "Lancer un prompt unique", body: "Le runner prend -p pour un prompt et -workspace pour le répertoire dans lequel l'agent travaille, dans la même forme que claude -p. La sortie est une transcription JSONL que vous pouvez rediriger vers un fichier." },
+  { title: "Lire la transcription, pas le résumé", body: "Le journal d'exécution JSONL est l'endroit où le flux d'événements asynchrone est visible : événements en cours, puis résultats. Compter les événements d'appel de modèle qu'il contient vous donne le nombre de tours qui détermine votre facture." },
+  { title: "Placer la frontière à l'extérieur", body: "Avant de le pointer vers quoi que ce soit de réel, configurez le bac à sable : système de fichiers restreint, hôtes sur liste d'autorisation, jetons à portée limitée. Le harnais ne le fait délibérément pas pour vous." }
+]} />
+
+<PromptCard title="Installer et exécuter (d'après l'usage documenté par Unreal Labs)">
+{`go install github.com/unreallabsai/unreal-agent/cmd/unreal-agent-runner@latest
+
+export OPENAI_API_KEY="..."
+unreal-agent-runner -p 'Inspect this project and explain how to run its tests.'`}
+</PromptCard>
+
+<PromptCard title="Le pointer vers un autre fournisseur et conserver la transcription">
+{`export UNREAL_HARNESS_LLM_PROVIDER=openrouter
+export UNREAL_HARNESS_LLM_MODEL=<model-id>
+
+unreal-agent-runner \\
+  -workspace ./my-project \\
+  -p 'Summarize this project.' > run.jsonl`}
+</PromptCard>
+
+## Lire honnêtement le tableau des benchmarks
+
+Quatre réserves, parce que les chiffres sont suffisamment bons pour mériter un
+examen attentif :
+
+- **Chaque exécution est celle de l'éditeur.** Aucun tiers ne les avait répliquées
+  au moment de la rédaction.
+- **Un seul modèle.** Toutes les exécutions publiées ont utilisé GPT-6 Astra en
+  raisonnement xhigh. L'avantage asynchrone devrait se généraliser — c'est une
+  propriété de la boucle, pas du modèle — mais « devrait » n'est pas « a été
+  mesuré ».
+- **Les dollars sont des totaux pour la suite entière**, pas des coûts par tâche.
+  Ils sont comparables entre eux, et non à votre charge de travail.
+- **Les taux de réussite sont égalés, pas améliorés.** L'affirmation est
+  explicitement *même score, moins cher*. Sur DeepSWE 1.1, Unreal Agent rapporte
+  72,4 % à 1 367 $ contre 1 633 $ pour Codex — une économie de 19 %, nettement
+  inférieure aux 39 % de Terminal-Bench. L'avantage croît avec le poids des outils
+  et la durée de vos tâches. Sur des tâches courtes avec peu d'appels d'outils,
+  attendez-vous à quasiment rien.
+
+Ce dernier point est le point pratique. Si votre agent fait trois appels d'outils
+et termine, l'asynchrone ne vous apporte presque rien. S'il en fait soixante en
+une demi-heure, il vous apporte la différence entre les deux colonnes.
+
+## Ce qui se transpose à votre propre agent
+
+Vous n'avez pas besoin d'adopter Unreal Agent pour utiliser tout ceci :
+
+- **Mesurez les tours.** C'est la variable de coût que la plupart des équipes ne
+  journalisent pas.
+- **Rendez les outils lents non bloquants**, même si votre harnais est par
+  ailleurs synchrone. Retourner immédiatement un identifiant et livrer le résultat
+  plus tard sous forme d'événement est un changement que vous pouvez faire à
+  l'intérieur de la plupart des boucles.
+- **Gardez le chemin critique sans E/S.** L'assemblage du contexte et la
+  validation des appels d'outils ne devraient jamais attendre le réseau.
+- **Sortez les approbations du processus.** Politique réseau, identifiants à
+  portée limitée et proxy de contrôle battent une liste d'autorisation en
+  processus qui vit à côté d'un outil `bash`.
+- **Réduisez la surface d'outils.** Trois bons outils coûtent moins de tokens par
+  tour que quinze outils médiocres, à chaque tour.
+
+<Quiz questions={[
+  {
+    q: "Dans Unreal Agent, que se passe-t-il à l'instant où le modèle émet un appel d'outil ?",
+    options: [
+      "La boucle se suspend jusqu'au retour de l'outil",
+      "Un événement en cours est ajouté au journal de session et l'exécution se poursuit en arrière-plan",
+      "L'appel est mis en file d'attente jusqu'à la fin du tour",
+      "Un sous-agent est créé pour prendre en charge l'appel"
+    ],
+    answer: 1,
+    explain: "Le harnais ajoute immédiatement un événement en cours et bascule l'exécution en arrière-plan. Quand l'outil se termine, son résultat est ajouté, et cet ajout est ce qui déclenche l'appel de modèle suivant. Le modèle n'interroge jamais et ne bloque jamais."
+  },
+  {
+    q: "Pourquoi réduire le nombre de tours économise-t-il plus d'argent que réduire la longueur de sortie dans une boucle d'agent ?",
+    options: [
+      "Les tokens de sortie sont moins chers que les tokens d'entrée",
+      "Chaque tour renvoie la transcription accumulée, donc le coût croît plus vite que linéairement avec les tours",
+      "Les fournisseurs facturent un forfait fixe par tour",
+      "Les tours sont facturés au tarif des tokens de raisonnement"
+    ],
+    answer: 1,
+    explain: "Chaque appel de modèle transporte toute la transcription croissante. Une exécution de 30 tours paie un contexte croissant 30 fois. C'est pourquoi l'exécution Terminal-Bench en 28 tours d'Unreal Agent bat celle de Pi en 44 tours sur le coût, à taux de réussite égal."
+  },
+  {
+    q: "Pourquoi Unreal Labs argumente-t-il contre l'implémentation des approbations sous forme de hooks de harnais ?",
+    options: [
+      "Les hooks sont plus lents que les appels natifs",
+      "Les hooks tournent dans le même processus qu'un agent qui dispose déjà d'un outil bash, donc une frontière de bac à sable ou de réseau est le contrôle le plus robuste",
+      "Les hooks ne sont pas pris en charge en Go",
+      "Les hooks cassent le fork de session"
+    ],
+    answer: 1,
+    explain: "Leur position est que des contraintes déterministes d'environnement et de bac à sable à l'extérieur du harnais — hôtes autorisés, jetons granulaires, proxys d'approbation — sont plus robustes et moins coûteuses en maintenance que des portails en processus placés à côté d'un outil capable d'exécuter des commandes arbitraires."
+  },
+  {
+    q: "Le constructeur de contexte et les traducteurs d'outils ont interdiction d'effectuer des E/S. Qu'apporte cette contrainte ?",
+    options: [
+      "Une taille de binaire plus petite",
+      "La compatibilité avec davantage de fournisseurs",
+      "Un chemin critique déterministe et non bloquant — toute la latence est repoussée dans les opérations, qui sont les composants conçus pour être asynchrones",
+      "Une consommation de tokens plus faible par appel"
+    ],
+    answer: 2,
+    explain: "Garder l'assemblage et la validation sans E/S est ce qui permet au coordinateur de rester non bloquant. Tout ce qui peut attendre appartient à une opération. C'est la règle de conception la plus transposable de tout le harnais."
+  },
+  {
+    q: "Sur quel type de charge de travail faut-il s'attendre à ce que l'avantage asynchrone soit le plus faible ?",
+    options: [
+      "De longues sessions autonomes avec de nombreux appels d'outils lents",
+      "Des tâches courtes qui se terminent en une poignée d'appels d'outils",
+      "Des tâches qui lisent de grandes bases de code",
+      "Des tâches qui exécutent des outils en parallèle"
+    ],
+    answer: 1,
+    explain: "L'économie vient de la suppression des tours d'attente et de sondage. Avec peu d'appels d'outils, il y a peu d'attente à supprimer — ce qui est cohérent avec l'écart publié : 39 % moins cher sur Terminal-Bench 4.0 mais 19 % sur DeepSWE 1.1."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Unreal Agent — quoi et quand", back: "22 septembre 2026. Unreal Labs. Harnais d'agent async-first sous licence MIT en Go (module github.com/unreallabsai/unreal-agent, Go 1.27+). Livré comme bibliothèque, exécutable runner et lanceur de benchmarks compatible Harbor. ~1,4 k étoiles le lendemain du lancement." },
+  { front: "Le flux d'événements asynchrone", back: "Appel d'outil -> événement en cours ajouté immédiatement au journal de session, exécution en arrière-plan -> à la fin, le résultat est ajouté, et cet ajout déclenche l'appel de modèle suivant. Aucun blocage, aucun tour de sondage." },
+  { front: "Benchmark phare", back: "Terminal-Bench 4.0 : 57,9 % de réussite, 1 428 $, 28 tours. Codex : même taux de réussite, 2 350 $ (39 % de plus). Pi : 1 827 $ sur 44 tours (28 % de plus). Toutes les exécutions réalisées par l'éditeur avec GPT-6 Astra en raisonnement xhigh." },
+  { front: "Où l'avantage se réduit", back: "DeepSWE 1.1 : 72,4 % à 1 367 $ contre 1 633 $ pour Codex — 19 %, pas 39 %. L'économie croît avec le poids des outils et la durée de la tâche. Les tâches courtes gagnent peu." },
+  { front: "Délibérément non construit", back: "Pas de sous-agents, pas de workflows (les appels d'outils asynchrones donnent déjà le parallélisme). Pas de hooks de sécurité au niveau du harnais (utiliser bac à sable, hôtes autorisés, jetons à portée limitée, proxys d'approbation). Pas de SDK d'agent d'éditeur (ils supposent des sessions locales et des sous-processus)." },
+  { front: "Les huit composants", back: "Boîte de réception de session (déduplication par identifiant d'appelant stable), coordinateur, magasin de sessions (ajout seul, forkable, versionné), constructeur de contexte, adaptateur LLM, registre d'outils, traducteurs d'outils, gestionnaire d'opérations." },
+  { front: "La règle à voler", back: "Le constructeur de contexte et les traducteurs d'outils ne doivent effectuer aucune E/S ni suspendre la boucle. Toute la latence vit dans les opérations. C'est ce qui garde le chemin critique déterministe." },
+  { front: "Surface d'outils et fournisseurs", back: "Trois outils intégrés : Bash, ViewImage, Skill-use. Fournisseurs sélectionnés par variable d'environnement : OpenAI, OpenAI Codex, OpenRouter, Fireworks, Ollama." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Le nombre de tours, et non le nombre de tokens, est la variable de coût d'une boucle d'agent. Instrumentez-le en premier.",
+  "Rendre les appels d'outils non bloquants supprime les tours de sondage et d'attente — 28 tours contre 44 pour le même taux de réussite sur Terminal-Bench 4.0, c'est tout l'argument.",
+  "L'avantage est proportionnel au poids des outils : 39 % sur Terminal-Bench, 19 % sur DeepSWE, ~0 sur une tâche à trois appels.",
+  "La sécurité a sa place à l'extérieur du harnais. Un hook d'approbation en processus à côté d'un outil bash est un ralentisseur ; un bac à sable et un proxy de contrôle sont une frontière.",
+  "Gardez l'assemblage du contexte et la validation des outils sans E/S. Repoussez chaque attente dans une opération durable.",
+  "Tous les chiffres publiés sont des exécutions de l'éditeur sur un seul modèle. Traitez-les comme une hypothèse bien argumentée sur votre charge de travail, pas comme une mesure de celle-ci."
+]} />
+
+## Sources et lectures complémentaires
+
+- [Unreal Labs — Unreal Agent (billet de lancement)](https://unreallabs.ai/blog/unreal-agent/) — la description du flux d'événements asynchrone, les tableaux de benchmarks et de coûts, et la justification de conception de ce qu'ils ont refusé de construire
+- [GitHub — unreallabsai/unreal-agent](https://github.com/unreallabsai/unreal-agent) — licence MIT, module Go, l'architecture à huit composants, les contraintes sans E/S, le magasin de sessions versionné
+- [AI/TLDR — page outil Unreal Agent](https://ai-tldr.dev/tools/unreal-agent/) — commande d'installation, options du runner, variables d'environnement des fournisseurs
+- À lire aussi sur AILmanac : [Pourquoi les agents brûlent des tokens](/docs/models/why-agents-burn-tokens) — la mécanique de coût que ce harnais attaque
+- À lire aussi sur AILmanac : [Sécuriser les agents locaux et hybrides](/docs/models/securing-local-and-hybrid-agents) — comment construire la frontière de bac à sable qu'Unreal Agent attend de vous
+- À lire aussi sur AILmanac : [SKILL.md comme standard ouvert](/docs/models/skill-md-open-standard) — le format derrière l'outil Skill-use du harnais
+
+## Pour continuer
+
+- [Frameworks d'agents open source](/docs/models/open-source-agent-frameworks) — le champ plus large dans lequel cela s'inscrit
+- [Comparatif des CLI d'agents de codage](/docs/models/coding-agent-clis-compared) — les outils vers lesquels la plupart des gens se tournent à la place
+- [Agents IA locaux](/docs/models/local-ai-agents) — pointer la même boucle vers un modèle que vous hébergez

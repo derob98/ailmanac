@@ -1,0 +1,202 @@
+---
+sidebar_position: 6.7
+title: "Paiements d'agents : x402, MPP et AgentCore en GA"
+description: "Comment les agents IA paient réellement les choses aujourd'hui — le protocole x402 fondé sur HTTP 402, les schémas exact/upto/batch-settlement, les facilitateurs, la disponibilité générale d'Amazon Bedrock AgentCore Payments en août 2026 (sessions de paiement, Coinbase Bazar MCP, Stripe Privy, Machine Payment Protocol), et comment ajouter un péage ou un agent dépensier sans inventer un portefeuille."
+keywords: [x402, HTTP 402, agent payments, AgentCore Payments, Machine Payment Protocol, MPP, Coinbase Bazar, Stripe Privy, agentic commerce, upto scheme, x402 facilitator, autonomous agent transactions, agent wallet]
+---
+
+<LevelBadge level="advanced" />
+
+Pendant deux ans, les agents ont été très bons pour *décider* d'acheter quelque chose et très mauvais pour le *payer* réellement. Le contournement était toujours le même — provisionner une clé d'API à l'avance, confier à l'agent une carte de crédit partagée, et espérer qu'il n'accumule pas une facture impossible à annuler. En 2026, cet écart s'est refermé. Une petite pile technique a émergé autour d'une grande idée — **utiliser HTTP 402 comme il a toujours été censé l'être** — et un véritable service AWS, désormais en disponibilité générale, l'enveloppe dans les garde-fous dont une vraie entreprise a besoin. Cette page est un guide de terrain pratique sur cette pile : comment **x402** fonctionne sur le fil, pourquoi le schéma *`upto`* est le plus intéressant, ce que **AgentCore Payments** vous apporte réellement en GA, et où se trouvent les arêtes vives.
+
+<Callout type="objectives" items={[
+  "Lire un défi x402 brut et comprendre les trois en-têtes, les deux appels au facilitateur et les trois schémas de paiement",
+  "Distinguer exact d'upto et savoir lequel votre endpoint devrait annoncer",
+  "Fixer le plafond de dépense et l'expiration d'une session de paiement pour qu'un agent ne puisse pas vider votre portefeuille sur un mauvais prompt",
+  "Choisir entre Coinbase Privy (rails crypto) et Stripe Privy (rails carte) au sein d'AgentCore Payments",
+  "Reconnaître les trois vraies menaces : l'injection de prompt incitant à acheter, le mauvais comportement du facilitateur et la sur-liquidation en « upto »",
+]} />
+
+<VerifyNote lastVerified="2026-08-27" source="https://aws.amazon.com/blogs/machine-learning/amazon-bedrock-agentcore-payments-is-now-generally-available-enabling-agents-to-transact-safely-and-autonomously-at-scale/">
+Les chiffres présentés ici se périment vite — volume de règlement, chaînes prises en charge, noms exacts des paquets SDK et contenu du catalogue Bazar bougent d'une semaine à l'autre. AgentCore Payments est passé en GA le 2026-08-18. Vérifiez les noms des champs de session de paiement et la surface d'intégration Coinbase / Stripe auprès du blog AWS et du dépôt x402-foundation avant de livrer, et considérez toute capitalisation d'en-tête ou nom de schéma comme faisant autorité depuis la spécification, pas depuis cette page.
+</VerifyNote>
+
+## Pourquoi « l'agent paie, tout simplement » est plus dur qu'il n'y paraît
+
+Dès qu'un agent dispose d'un véritable pouvoir de dépense, quatre choses cassent d'un coup :
+
+- **Le modèle de la clé d'API était un contournement.** Toute API « compatible agents » vous demande aujourd'hui de générer une clé, de créditer un solde et de remettre la chaîne à l'agent. C'est l'humain qui fait la comptabilité ; l'agent n'est qu'un client. Tout ce que l'agent achète puise dans la réserve pré-engagée de l'humain.
+- **Les cartes ont été conçues pour un acheteur par session.** Les cartes supposent qu'une personne clique sur « Payer ». Les agents veulent se déployer en éventail — acheter 200 petites choses sur 30 sites en une heure — et chaque achat devrait être atomique, bon marché et réversible.
+- **Il n'y a pas de découverte.** Un acheteur humain peut lire une page de tarifs. Un agent a besoin d'un « voici ce que ça coûte et comment le payer » lisible par machine, *en ligne dans la réponse*.
+- **Les garde-fous doivent être appliqués ailleurs que dans l'agent.** Si la seule limite est un prompt disant « dépense moins de 10 $ », l'agent finira par lui désobéir. La limite doit vivre dans une infrastructure avec laquelle le modèle ne peut pas discuter.
+
+x402 s'attaque au problème de la découverte. AgentCore Payments s'attaque au problème du garde-fou. Ce sont des compléments, pas des concurrents.
+
+## x402 sur le fil — tout le protocole en un flux
+
+**x402** est un protocole ouvert maintenu par l'organisation [`x402-foundation/x402`](https://github.com/x402-foundation/x402) sur GitHub (Apache-2.0, ~6,5 k étoiles au moment de la rédaction). Toute son astuce consiste à donner au code de statut HTTP **`402 Payment Required`** la sémantique que tout le monde a toujours supposée.
+
+Le flux complet tient en exactement six mouvements. Pas de session, pas de connexion, pas de clé.
+
+<Steps items={[
+  {title: "1. Le client demande", body: "L'agent effectue une requête HTTP normale vers un endpoint payant. Pas d'en-tête d'authentification, pas de portefeuille."},
+  {title: "2. Le serveur répond par un défi 402", body: "Le serveur répond `HTTP/1.1 402 Payment Required` et pose un en-tête `PAYMENT-REQUIRED` portant un objet `PaymentRequirements` encodé en base64 : le prix, le ou les jetons acceptés, le réseau, l'adresse du marchand, le schéma et une expiration. C'est l'étiquette de prix lisible par machine."},
+  {title: "3. Le client signe une charge utile de paiement", body: "Le SDK client x402 de l'agent lit le défi, choisit l'une des exigences qu'il peut payer et construit un `PaymentPayload` signé (une signature de type EIP-712, ou l'équivalent sur Solana/Aptos/Stellar). Rien n'est encore on-chain — il s'agit d'une *autorisation*, pas d'un transfert."},
+  {title: "4. Le client réessaie avec la signature", body: "Même requête, cette fois avec un en-tête `PAYMENT-SIGNATURE` contenant la charge utile signée."},
+  {title: "5. Le serveur vérifie (via un facilitateur)", body: "Le serveur transmet la charge utile à un *facilitateur* — un petit service optionnel qui exécute `POST /verify` pour confirmer la signature et le solde on-chain du client, puis, une fois que le serveur a produit la réponse, `POST /settle` pour soumettre réellement le transfert. Le serveur peut aussi faire tourner son propre facilitateur."},
+  {title: "6. Le serveur renvoie 200 + preuve de règlement", body: "Le corps de la réponse porte le contenu payé ; un en-tête `PAYMENT-RESPONSE` porte un reçu de règlement encodé en base64 pour que l'agent puisse auditer que ce qu'il a autorisé correspond à ce qui a effectivement été réglé."},
+]} />
+
+Deux points de conception méritent qu'on s'y arrête. Premièrement, c'est le *serveur* — pas le client — qui décide quand régler. Si la requête échoue après l'étape 4, le serveur n'appelle jamais `/settle`, donc l'agent n'est pas débité ; la signature était une autorisation avec une expiration courte, et elle expire tout simplement. C'est la propriété qui rend x402 utilisable pour des agents : **un téléchargement échoué est un téléchargement gratuit**. Deuxièmement, le facilitateur n'a jamais la garde des fonds du client ; l'invariant déclaré du protocole est « aucun schéma de paiement ne doit permettre aux facilitateurs de déplacer des fonds en dehors des intentions du client ». Un facilitateur malhonnête peut refuser de régler ; il ne peut pas sur-régler.
+
+## Les trois schémas — et pourquoi `upto` est le plus intéressant
+
+x402 définit les schémas comme *la manière dont le montant est convenu*, pas comme la devise utilisée. L'ensemble stable actuel :
+
+- **`exact`** — le serveur annonce un prix fixe et le client signe pour exactement ce montant. Idéal pour du contenu dont le coût par lecture est connu : « 0,02 $ pour cet article ». Simple, ennuyeux, correct.
+- **`upto`** — le serveur annonce un *plafond*. Le client signe en autorisant *jusqu'à* ce plafond ; le serveur choisit le montant réellement facturé au moment du règlement, dans la limite du plafond. C'est celui qui débloque les économies intéressantes.
+- **`batch-settlement` (EVM)** — pour les usages à haute fréquence. Le client dépose une garantie en séquestre une seule fois, puis accumule de nombreux bons hors chaîne qui sont encaissés en un seul règlement on-chain groupé. Même modèle de confiance, gas par requête radicalement plus faible.
+
+`upto` est le schéma qui rend possibles le **paiement à l'inférence** et la **tarification dynamique**. Si vous vendez de l'inférence au jeton, vous ne savez pas au moment de la requête combien de jetons la complétion consommera ; vous ne le savez qu'au moment de la *réponse*. Avec `exact`, soit vous surfacturez (arrondir au plafond puis rembourser — ce qui exige un second mouvement on-chain), soit vous sous-facturez (le client paie pour 4 k jetons et vous en générez 10 k). Avec `upto`, le client signe *« facture-moi au plus l'équivalent de 10 k jetons »*, vous produisez la réponse, puis vous réglez sur l'usage réel. L'annonce de GA d'AWS AgentCore Payments met précisément en avant ce motif comme celui que leur lancement rend possible : « le schéma `upto` au sein de x402 permet à un agent de fixer un plafond de dépense plutôt que de s'engager sur un prix fixe. »
+
+Attention au mode de défaillance : **si le serveur règle au plafond au lieu de l'usage réel, le client n'a aucun recours on-chain pour la différence — la signature le couvrait.** Le paramètre de montant de l'appel `/settle` est de confiance. En pratique, c'est pour cela que vous voulez un facilitateur que vous exploitez vous-même ou en qui vous avez confiance ; plus de détails ci-dessous.
+
+## Les chaînes et les SDK que vous rencontrerez vraiment
+
+Le monorepo x402 actuel publie des paquets SDK pour **EVM, SVM (Solana), AVM, Aptos, Stellar, TVM, Hedera et Keeta**, mais le trafic d'aujourd'hui se concentre fortement sur **Base** (le L2 EVM de Coinbase) et **Solana**, tous deux réglant en **USDC**. En TypeScript, les paquets que vous importerez réellement sont `@x402/core`, l'un des modules de chaîne (`@x402/evm`, `@x402/svm`, …) et un wrapper client — `@x402/fetch` pour un remplacement direct de `fetch()` qui gère de façon transparente la boucle 402→signature→réessai, ou `@x402/express` / `x402-hono` côté serveur. Python a un unique paquet pip `x402` ; Go a `github.com/x402-foundation/x402/go/v2`.
+
+Cloudflare propose un chemin encore plus court : le sous-module **`agents/x402`** à l'intérieur de son paquet Agents vous donne un client MCP avec x402 intégré, et `x402-hono` est le middleware de péage pour un Worker. Ainsi, un Cloudflare Worker qui transforme une route en endpoint payant ressemble à peu près à ceci :
+
+<PromptCard title="Transformer une route Hono en péage x402">
+{`import { Hono } from "hono";
+import { paymentMiddleware } from "x402-hono";
+
+const app = new Hono();
+
+app.use("/premium/*", paymentMiddleware({
+  network: "base",
+  facilitator: "https://facilitator.x402.org",
+  routes: {
+    "/premium/summary": {
+      price: { asset: "USDC", amount: "0.05" },
+      scheme: "exact",
+      recipient: "0xYourMerchantAddress",
+    },
+    "/premium/inference": {
+      price: { asset: "USDC", maxAmount: "0.50" },
+      scheme: "upto",
+      recipient: "0xYourMerchantAddress",
+    },
+  },
+}));
+
+app.get("/premium/summary", c => c.text("The paid content."));
+app.get("/premium/inference", c => c.text("The paid inference result."));
+export default app;`}
+</PromptCard>
+
+Un appelant utilisant `@x402/fetch` n'a besoin de rien savoir de tout cela — le wrapper voit le 402, signe, réessaie et renvoie la réponse 200 finale exactement comme le ferait un `fetch` normal.
+
+## AgentCore Payments en GA — ce qu'AWS a réellement livré le 2026-08-18
+
+x402 seul est un protocole. Il vous donne le *comment* un agent paie. Il ne vous donne pas le *s'il devrait*. C'est le problème que **Amazon Bedrock AgentCore Payments** — en GA le **18 août 2026** après une préversion en mai — résout réellement.
+
+La primitive à comprendre est la **session de paiement**. Chaque paiement effectué par un agent doit s'exécuter à l'intérieur d'une session, et une session a exactement deux plafonds :
+
+- **Un montant de dépense maximum** dans une devise spécifiée.
+- **Une date d'expiration.**
+
+Les deux sont vérifiés *de façon déterministe au niveau de l'infrastructure* — en dehors du modèle, en dehors du framework d'agent, en dehors de tout ce que le modèle peut contourner par le raisonnement. Une requête qui pousserait la dépense cumulée au-delà du plafond est rejetée avant même que la charge utile de paiement ne soit signée. Une requête postérieure à l'expiration est rejetée de la même manière. C'est cela, le garde-fou. Le modèle n'a pas besoin d'être bien aligné pour que cela tienne ; il doit être bien *contraint*, et la contrainte vit dans la session.
+
+Autour de cette primitive, AgentCore est passé en GA avec :
+
+- **L'intégration des portefeuilles Coinbase et Stripe Privy.** Les identifiants vivent dans AgentCore Identity Secrets Manager ; l'agent ne les voit jamais ; c'est un jeton dérivé à courte durée de vie qui autorise réellement les opérations de portefeuille. Les utilisateurs finaux peuvent créditer par carte (Stripe) ou en USDC (Coinbase).
+- **Quick Create pour Coinbase.** Vous provisionnez les identifiants Coinbase depuis la console ou la CLI AgentCore sans quitter la plateforme.
+- **Le Machine Payment Protocol (MPP)** — l'abstraction de paiement au-dessus de x402 qui permet à un agent de payer des services compatibles MPP *et* des endpoints x402 avec la même session et le même plafond de session. MPP est le point de rencontre entre paiements sur rails carte et sur rails stablecoin.
+- **Un annuaire organisé de serveurs MCP compatibles `x402` — « Coinbase Bazar »** — exposé à l'agent via AgentCore Gateway. La découvrabilité des endpoints payants est classée selon « la preuve sociale, la richesse des métadonnées, la qualité de la description et la disponibilité », ce qui est une façon polie de dire qu'ils essaient de ne pas devenir un annuaire d'escroqueries à la shitcoin.
+- **Des plugins de framework.** Un plugin **Strands Agents** et un middleware **LangGraph** sont livrés en GA, de sorte que le contexte de la session de paiement traverse votre boucle d'agent sans que vous ayez à écrire un client HTTP x402 à la main.
+
+Le câblage Strands est volontairement minime — vous construisez un `AgentCorePaymentsPluginConfig` avec l'ARN du gestionnaire de paiement, l'ID utilisateur, l'ID de l'instrument de paiement et l'ID de session, puis vous ajoutez le plugin à l'agent. L'application des règles de session se produit sous le plugin.
+
+<PromptCard title="AgentCore Payments — plugin Strands, forme minimale">
+{`from agentcore_payments import AgentCorePaymentsPlugin, AgentCorePaymentsPluginConfig
+import os
+
+plugin = AgentCorePaymentsPlugin(
+    config=AgentCorePaymentsPluginConfig(
+        payment_manager_arn=os.environ["PAYMENT_MANAGER_ARN"],
+        user_id="test-user-123",
+        payment_instrument_id=os.environ["PAYMENT_INSTRUMENT_ID"],
+        payment_session_id=os.environ["PAYMENT_SESSION_ID"],
+    )
+)
+# Attach plugin to your Strands agent; the payment session caps
+# (max spend + expiry) are set when you mint the payment session,
+# NOT in the plugin config.`}
+</PromptCard>
+
+Chaque tentative de paiement émet une entrée de log CloudWatch et un span AgentCore Observability ; les tableaux de bord intégrés montrent les taux de succès, la valeur moyenne des transactions et la santé de bout en bout par agent. C'est la brique d'observabilité qui rend « l'agent a acheté un truc bizarre » réellement débogable une semaine après les faits.
+
+## Pas seulement de la crypto — où Stripe s'insère
+
+Une erreur de lecture fréquente consiste à croire que x402 et AgentCore Payments sont *« de la crypto pour agents »*. Ils ne le sont pas. x402 a simplement été livré d'abord sur les stablecoins parce que le règlement on-chain est le seul rail offrant un véritable règlement par requête, nativement machine et sans permission. Mais l'abstraction MPP d'AgentCore et l'intégration Stripe Privy signifient que la session d'un agent peut être financée par une **carte**. Ce que Stripe Privy apporte dans ce contexte, c'est un portefeuille adossé à une carte avec délégation — l'utilisateur humain confie à l'agent une autorité de dépense cadrée et révocable sur une carte, et la session AgentCore applique le plafond de dépense par-dessus. Pour les entreprises qui ne veulent aucune garde de stablecoins, c'est la voie à suivre.
+
+Choisir :
+
+- **Coinbase / Privy (USDC sur Base ou Solana).** Le meilleur choix quand il vous faut un vrai règlement par requête, sous le centime ; quand vous ne voulez aucune rétrofacturation ; quand la contrepartie est un autre agent.
+- **Stripe Privy (carte).** Le meilleur choix quand le marchand est une entreprise classique sans rails on-chain, quand le panier moyen est assez élevé pour que les frais stablecoin ne dominent pas, quand vous voulez que l'acheteur dispose des droits de contestation du réseau carte.
+
+## Les trois menaces à prendre au sérieux
+
+Les paiements d'agents autonomes ouvrent une surface d'attaque restreinte et spécifique. Les trois contre lesquelles vous devriez concevoir :
+
+- **L'injection de prompt incitant à acheter.** Une page malveillante dans le contexte d'un agent peut lui ordonner d'acheter des choses. La défense n'est pas « faire refuser le modèle » — c'est le *plafond de session*. Fixez le plus petit plafond de dépense qui permettra d'accomplir la tâche légitime, et l'expiration la plus courte. Si une injection de prompt pousse l'agent à tenter de dépenser 10 000 $ et que le plafond de session est de 5 $, l'injection échoue. C'est exactement la même leçon que [Injection de contexte cryptographique : Grok](/docs/security/cryptographic-context-injection-grok) — les frontières de confiance vivent en dehors du modèle.
+- **Le mauvais comportement du facilitateur.** L'appel `/verify` est honnête par construction (un mauvais `/verify` ne peut que *rejeter*), mais un facilitateur compromis ou byzantin peut refuser de faire `/settle` après que le serveur a livré le contenu, surfacturer silencieusement en mode `upto`, ou retarder le règlement au-delà de l'expiration de la charge utile pour que la signature du client cesse d'être valide. Défense : privilégiez les facilitateurs que vous exploitez vous-même pour l'usage côté marchand ; côté client, utilisez la vérification de reçu intégrée à `@x402/fetch` pour échouer bruyamment si `PAYMENT-RESPONSE` diverge de ce que vous avez signé.
+- **La sur-liquidation en `upto`.** En `upto`, le montant réglé est fourni par le serveur. Un serveur malhonnête peut régler au plafond quel que soit l'usage réel. L'atténuation vit en dehors du protocole : émettez un reçu d'usage signé dans le corps de votre réponse (jetons générés, secondes diffusées, octets servis) et refusez de faire confiance à un montant réglé qui n'est pas cohérent avec lui. Certains wrappers clients refuseront d'accepter un règlement si vous fournissez un callback renvoyant le maximum attendu.
+
+Ce sont aussi les contours de ce que [WriteGuard de Cloudflare](https://blog.cloudflare.com/mcp-portal-writeguard-private-beta/) tente de traiter au niveau MCP — traiter « coûte de l'argent » comme une écriture assortie d'attribution et d'audit — mais le plafond de session d'AgentCore est aujourd'hui le contrôle porteur. Combiner une politique de niveaux d'écriture façon WriteGuard au niveau MCP *et* un plafond de session de paiement au niveau du portefeuille est la posture ceinture-et-bretelles vers laquelle la plupart des déploiements en production convergeront.
+
+## Où cela s'inscrit dans le tableau plus large des agents
+
+x402 donne à un agent un moyen de *transiger*. **[MCP](/docs/api/mcp)** lui donne un moyen d'*atteindre* les endpoints où les transactions ont lieu. **[A2A](/docs/models/a2a-protocol-agent-to-agent)** lui donne un moyen de *déléguer* du travail à un autre agent qui peut lui-même être payé. En pratique, vous verrez les trois composés : un passage de relais A2A invoque un agent pair qui utilise MCP pour atteindre un outil tarifé en x402, et l'appelant paie via sa session AgentCore. Quand on parle de « la couche monétaire pour les agents », c'est de cela qu'il s'agit — non pas d'un produit unique, mais d'une pile où la découverte, la capacité et le règlement ont chacun un protocole et où aucun d'eux n'exige d'humain dans la boucle.
+
+<Quiz questions={[
+  {q: "Dans un échange x402, que met le serveur dans l'en-tête PAYMENT-REQUIRED ?", options: ["Une transaction pré-signée que le client soumet telle quelle","Un objet PaymentRequirements encodé en base64 décrivant le prix, le réseau, l'adresse, le schéma et l'expiration","Le solde du compte du client pour qu'il puisse décider s'il a les moyens d'acheter la ressource","Un défi OAuth 2.0 avec une portée `payment`"], answer: 1, explain: "La réponse 402 porte l'étiquette de prix lisible par machine : PaymentRequirements, encodé en base64, dans un en-tête PAYMENT-REQUIRED. Le client construit et signe ensuite sa propre PaymentPayload."},
+  {q: "Pourquoi le schéma `upto` est-il celui qui rend possible la tarification au paiement à l'inférence ?", options: ["C'est le seul schéma avec règlement on-chain","Il permet au client de signer pour un plafond et au serveur de régler l'usage réel au moment de la réponse","Il évite entièrement le facilitateur, donc le gas est moins cher","Il utilise des rails fiat au lieu de stablecoins"], answer: 1, explain: "Avec `upto`, la signature du client autorise jusqu'à un plafond ; le montant réellement facturé est décidé au règlement, après que la réponse a été produite. C'est ainsi qu'une complétion payée au jeton facture au client l'usage réel, et non le plafond."},
+  {q: "Quel invariant le protocole x402 vous donne-t-il à propos du facilitateur ?", options: ["Le facilitateur peut régler n'importe quel montant qu'il souhaite","Le facilitateur doit être exploité par le marchand","Le facilitateur peut refuser de régler mais ne peut pas déplacer des fonds en dehors de l'intention signée du client","Le facilitateur détient la garde des fonds du client pendant la vérification"], answer: 2, explain: "Par conception, « aucun schéma de paiement ne doit permettre aux facilitateurs de déplacer des fonds en dehors des intentions du client ». Un facilitateur malveillant peut refuser de régler ; il ne peut pas sur-régler au-delà de ce que le client a signé."},
+  {q: "Dans Amazon Bedrock AgentCore Payments, où le plafond de dépense d'une session est-il appliqué ?", options: ["À l'intérieur du prompt système de l'agent","Dans la couche framework LangGraph/Strands","De façon déterministe au niveau de l'infrastructure, avant que la charge utile de paiement ne soit signée","Sur le serveur du marchand, après que la réponse a été générée"], answer: 2, explain: "AgentCore vérifie les deux plafonds de session de paiement (dépense max + expiration) au niveau de l'infrastructure, en dehors de tout ce que le modèle peut influencer. C'est toute la raison pour laquelle un plafond de session est un vrai garde-fou et une limite fondée sur un prompt n'en est pas un."},
+  {q: "Que porte l'en-tête `PAYMENT-RESPONSE` sur une réponse x402 200 réussie ?", options: ["Le défi suivant pour la requête d'après","Le prix révisé du marchand après la production de la réponse","Un reçu de règlement encodé en base64 pour que le client puisse auditer ce qui a réellement été réglé","Le corps complet de la réponse, re-signé par le facilitateur"], answer: 2, explain: "Le serveur renvoie un reçu de règlement encodé en base64 dans PAYMENT-RESPONSE. Le client s'en sert pour vérifier que le montant réglé correspond à ce qu'il a autorisé."},
+  {q: "Vous voulez protéger un agent autonome contre une attaque par injection de prompt incitant à acheter via une page web malveillante dans son contexte. Quel contrôle fait le vrai travail ?", options: ["Une ligne de prompt système « n'effectue pas d'achats sans confirmation »","Un plafond de dépense et une expiration par session de paiement définis dans AgentCore","Bloquer les rails crypto et n'utiliser que des cartes","Masquer l'adresse du portefeuille au modèle"], answer: 1, explain: "Les règles au niveau du prompt sont au mieux des efforts de bonne volonté. La dépense max + l'expiration de la session, appliquées en dehors du modèle, sont ce qui fait réellement échouer un prompt malveillant qui veut vider les fonds."},
+]} />
+
+## Termes à mémoriser
+
+<Flashcards items={[
+  {front: "x402 — en une ligne", back: "Protocole ouvert utilisant HTTP 402 pour rendre les endpoints payants découvrables par machine ; le serveur lance un défi, le client signe, le serveur règle via un facilitateur."},
+  {front: "Les trois en-têtes x402", back: "PAYMENT-REQUIRED (l'étiquette de prix du serveur sur le 402), PAYMENT-SIGNATURE (la charge utile signée du client au réessai), PAYMENT-RESPONSE (le reçu de règlement du serveur sur le 200)."},
+  {front: "exact vs upto", back: "exact : prix fixe, le client signe le montant exact. upto : le serveur annonce un plafond, le client signe le plafond, le serveur règle l'usage réel dans la limite du plafond. upto rend possible le paiement à l'inférence."},
+  {front: "batch-settlement", back: "Schéma x402 réservé à EVM où un client met en séquestre une fois puis accumule de nombreux bons hors chaîne, encaissés en un seul règlement on-chain. Amortit le gas pour les usages à haute fréquence."},
+  {front: "Facilitateur", back: "Service optionnel auquel le serveur marchand s'adresse. POST /verify vérifie la signature et le solde du client ; POST /settle soumet le transfert. Invariant de confiance : il ne peut pas déplacer de fonds en dehors de l'intention signée du client."},
+  {front: "Session de paiement (AgentCore)", back: "Le contexte cadré dans lequel s'exécutent les paiements d'un agent. Deux plafonds : montant de dépense maximum et date d'expiration. Appliqués au niveau de l'infrastructure, pas dans le modèle."},
+  {front: "MPP", back: "Machine Payment Protocol — l'abstraction d'AgentCore au-dessus de x402 pour qu'une seule session d'agent puisse payer à la fois des endpoints x402 et des services compatibles MPP sous le même plafond."},
+  {front: "Coinbase Bazar", back: "Annuaire MCP organisé, côté AgentCore, d'endpoints x402 payants à l'usage, atteint via AgentCore Gateway. Classé sur la qualité des métadonnées, la qualité de la description et la disponibilité."},
+  {front: "Coinbase Privy vs Stripe Privy", back: "Les deux sont des intégrations de portefeuille au sein d'AgentCore. Coinbase Privy finance un portefeuille en stablecoin (USDC sur Base/Solana). Stripe Privy finance un portefeuille adossé à une carte — même plafond de session, aucune garde on-chain."},
+  {front: "Les trois vraies menaces", back: "L'injection de prompt incitant à acheter (atténuer avec plafond de session + expiration). Le mauvais comportement du facilitateur (atténuer : exploitez votre propre facilitateur, vérifiez PAYMENT-RESPONSE). La sur-liquidation en upto (atténuer : reçu d'usage signé dans le corps de la réponse)."},
+]} />
+
+## Sources et lectures complémentaires
+
+- Amazon Bedrock AgentCore Payments — [annonce de GA, 2026-08-18](https://aws.amazon.com/blogs/machine-learning/amazon-bedrock-agentcore-payments-is-now-generally-available-enabling-agents-to-transact-safely-and-autonomously-at-scale/) et [note GA « What's New »](https://aws.amazon.com/about-aws/whats-new/2026/08/bedrock-agentcore-payments-ga/)
+- Protocole x402 — [`x402-foundation/x402`](https://github.com/x402-foundation/x402) sur GitHub (spécification, SDK) et la [documentation du protocole](https://docs.x402.org/faq)
+- Cloudflare — [x402 pour Cloudflare Agents](https://developers.cloudflare.com/agents/tools/payments/x402/) (middleware client et serveur)
+- Coinbase — [Présentation de x402 : les paiements natifs d'internet](https://www.coinbase.com/developer-platform/discover/launches/x402)
+- Cloudflare — [WriteGuard : contrôles à granularité fine pour les serveurs MCP](https://blog.cloudflare.com/mcp-portal-writeguard-private-beta/) — la couche de niveaux d'écriture au-dessus des paiements x402
+- AILmanac — [A2A : le protocole d'agent à agent](/docs/models/a2a-protocol-agent-to-agent) — comment les agents payés délèguent
+- AILmanac — [Injection de contexte cryptographique : Grok](/docs/security/cryptographic-context-injection-grok) — pourquoi les plafonds au niveau de la session comptent plus que les règles au niveau du prompt
+- AILmanac — [Quand les agents dirigent une entreprise](/docs/frontiers/when-agents-run-a-business) — la vue d'ensemble
+
+## Suite
+
+- [A2A : le protocole d'agent à agent](/docs/models/a2a-protocol-agent-to-agent) — la couche de délégation sous laquelle x402 se place
+- [Claude, MCP et les outils locaux](/docs/models/claude-mcp-local-tools) — la couche outils au-dessus de la couche paiement
+- [Quand les agents dirigent une entreprise](/docs/frontiers/when-agents-run-a-business) — vers quoi tout cela mène
