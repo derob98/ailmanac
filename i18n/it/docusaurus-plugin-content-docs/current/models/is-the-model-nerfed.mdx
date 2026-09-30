@@ -1,0 +1,452 @@
+---
+sidebar_position: 22.995
+title: "Il modello è stato nerfato? Come capirlo davvero"
+description: "\"L'hanno nerfato\" è l'affermazione più ripetuta nell'AI e la meno misurata. Sulla Claude API i pesi dietro a un model ID non possono cambiare — ogni ID attuale è uno snapshot fissato. Ma ci sono altre sette cose che possono cambiare sotto di te senza un nuovo modello, da un aggiornamento pubblicato del system prompt a un harness che scambia silenziosamente modello a metà sessione. Ecco cosa può e cosa non può muoversi, perché il risultato più citato sul 'GPT-4 è peggiorato' era un bug di valutazione, e un protocollo di misura che puoi eseguire in un pomeriggio."
+keywords: [model nerfed, is Claude nerfed, Opus 5.5 nerfed, LiveNerf, model degradation, capability degradation, behavior drift, model quantization claim, silent model downgrade, Anthropic postmortem, pinned model snapshot, paired benchmark design, control arm, GPQA Diamond, AI model quality measurement, effort level, adaptive thinking, fallback model]
+---
+
+<LevelBadge level="intermediate" />
+
+Il 29 settembre 2026 la notizia su Claude più votata su Hacker News non era un lancio.
+Era [**LiveNerf**](https://github.com/ninjahawk/livenerf), un repository il cui unico
+scopo è rispondere a una domanda — *Claude Opus 5.5 è già stato nerfato?* — con 745
+punti e 306 commenti. Sette giorni dopo l'uscita di un modello di punta, la
+conversazione più partecipata della community su di esso riguarda se sia già stato
+silenziosamente peggiorato.
+
+Questa domanda è più vecchia di qualunque modello attuale e non si risolve mai, perché
+quasi tutti quelli che ne discutono discutono a memoria. La versione utile della domanda
+è più stretta e ha una risposta: **cosa, esattamente, ha il permesso di cambiare tra il
+modello che hai usato martedì scorso e il modello che stai usando adesso** — e come
+faresti a sapere quale dei due si è mosso?
+
+<Callout type="objectives" items={[
+  "Sapere qual è l'unica cosa che non può cambiare silenziosamente sulla Claude API — e perché su claude.ai la risposta è diversa",
+  "Riconoscere i sette meccanismi che cambiano davvero la qualità dell'output senza alcun nuovo modello",
+  "Capire perché il risultato più citato sul 'modello diventato più stupido' era un bug di progettazione della valutazione, non una perdita di capacità",
+  "Eseguire una misura che possa davvero rilevare un calo di 3 punti, usando un disegno appaiato e un braccio di controllo",
+  "Fare triage di una giornata storta in dieci minuti prima di concludere qualsiasi cosa"
+]} />
+
+<VerifyNote lastVerified="2026-09-30" source="https://platform.claude.com/docs/en/about-claude/models/overview">
+I model ID, la semantica degli snapshot fissati, i default di effort e la policy sul
+system prompt vengono dalla documentazione ufficiale di Anthropic, letta il 30 settembre
+2026. La metodologia e i conteggi di LiveNerf vengono dal README del suo repository,
+letto lo stesso giorno — la serie era a **6 giorni su 30 raccolti** al momento, quindi
+non aveva ancora prodotto un verdetto. Un dato qui è di seconda mano: NerfBench di
+BridgeBench avrebbe collocato Opus 5.5 a circa il 99,2% della potenza al lancio a fine
+settembre 2026, ma `bridgebench.ai` blocca il fetch automatico e quel numero arriva dai
+riassunti dei risultati di ricerca — trattalo come non verificato e controlla tu stesso
+la fonte. Tutto ciò che sta nella sezione "cosa può cambiare" è meccanismo, non cronaca,
+e dovrebbe invecchiare bene; i model ID specifici e i default di effort no.
+</VerifyNote>
+
+## L'unica cosa che non può cambiare
+
+Partiamo dall'affermazione da cui dipende tutta la discussione: *hanno sostituito i pesi
+con una versione quantizzata più economica e non l'hanno detto a nessuno.*
+
+Sulla Claude API, per la lineup attuale, questa è una cosa che non può succedere — e il
+motivo è una decisione di versionamento, non una promessa sulle intenzioni. Dalla
+panoramica dei modelli di Anthropic:
+
+> Ogni model ID di Claude è uno snapshot fissato, inclusi gli ID senza data usati dalla
+> generazione 4.6 in poi.
+
+È una frase facile da saltare a piè pari ed è tutta la partita. Storicamente
+`claude-opus-4-5` era un *alias* che risolveva a uno snapshot datato come
+`claude-opus-4-5-20251101` — gli alias si spostano, gli snapshot no. Dalla generazione
+4.6 in poi l'ID senza data **è esso stesso lo snapshot**. `claude-opus-5-5` non è un
+puntatore a qualunque cosa Anthropic stia servendo questa settimana; è un singolo
+artefatto congelato con una data di ritiro pubblicata (non prima del 22 settembre 2027).
+
+Quindi se stai chiamando l'API con un model ID attuale, "hanno cambiato il modello" è
+l'unica ipotesi che puoi escludere senza misurare nulla. Il che è utile, perché costringe
+alla domanda interessante: **allora cosa è cambiato?**
+
+<Callout type="warning">
+Questa è un'affermazione sui *pesi*, non sul *serving*. Un modello congelato servito
+attraverso uno stack di inferenza rotto produce output peggiore dello stesso modello
+congelato servito correttamente — ed è dimostrabilmente successo. Vedi il meccanismo 4
+più sotto.
+</Callout>
+
+## Sette cose che cambiano senza un nuovo modello
+
+| # | Cosa si muove | Dove si applica | Lo vedi? |
+|---|---|---|---|
+| 1 | Il system prompt di prodotto | claude.ai, app iOS/Android — **non** l'API | Sì, pubblicato |
+| 2 | Profondità del thinking (adaptive thinking + `effort`) | API, Claude Code, app | In parte |
+| 3 | Scambi di modello a livello di harness | Claude Code, qualunque client con fallback | A volte |
+| 4 | Bug dello stack di serving | Tutto | No — finché non esce un postmortem |
+| 5 | Incidenti in corso | Tutto | Sì, pagina di stato |
+| 6 | Lunghezza della conversazione e compaction | Tutto | Raramente |
+| 7 | I tuoi prompt e i tuoi task | Tu | Quasi mai |
+
+### 1. Il system prompt di prodotto viene aggiornato, l'API no
+
+Anthropic pubblica il system prompt che claude.ai e le app mobili antepongono a ogni
+conversazione, con voci datate per modello, e dichiara chiaramente:
+
+> Questo prompt viene aggiornato periodicamente per migliorare le risposte di Claude.
+> Questi aggiornamenti del system prompt non si applicano alla Claude API.
+
+È il fatto più sottovalutato di tutto il discorso sul nerf. Lo *stesso modello congelato*
+può comportarsi in modo misurabilmente diverso su claude.ai questa settimana rispetto
+alla scorsa, perché il blocco di istruzioni da diverse migliaia di token davanti al tuo
+messaggio è cambiato — e niente di tutto ciò arriva a chi chiama l'API. Significa anche
+che le due popolazioni che litigano tra loro su Reddit spesso non stanno usando affatto
+lo stesso sistema: un gruppo sta su una superficie di prodotto dove l'inquadratura si
+muove, l'altro su un endpoint grezzo dove non si muove.
+
+Se vuoi sapere se l'app è cambiata, le note di rilascio sono la fonte primaria, non la
+tua memoria.
+
+### 2. Adaptive thinking significa che lo stesso prompt non riceve lo stesso sforzo
+
+Sulla lineup attuale il thinking è *adattivo*: il modello decide quanto pensare, guidato
+da un parametro `effort`. È una fonte di varianza tra run reale e documentata che nell'era
+dei budget fissi non esisteva.
+
+Anche i default non sono uniformi, e si sono spostati:
+
+| Modello | Effort di default | Thinking |
+|---|---|---|
+| Claude Fable 5.1 | `high` | Adattivo, sempre attivo |
+| Claude Opus 5.5 | `medium` | Adattivo, sempre attivo |
+| Claude Sonnet 5.5 | `high` | Adattivo |
+| Claude Haiku 4.5 | non supportato | Esteso |
+
+La nota di Anthropic stessa è che Opus 5.5 a `medium` è calibrato per corrispondere a
+Opus 5 a `high`. Porta avanti una configurazione da un modello più vecchio senza
+rileggere quella nota e puoi ritrovarti con *meno* thinking di prima, su un modello più
+nuovo e nominalmente migliore, e percepire correttamente che "è diventato più pigro".
+Non è stato nerfato niente. Un enum voleva dire un'altra cosa.
+
+Claude Code aggiunge una scala più ampia — `low`, `medium`, `high`, `xhigh`, `max`,
+`ultracode` — impostabile per sessione, per modello, e sovrascrivibile dal frontmatter di
+skill e subagent. Una skill che hai installato il mese scorso può star limitando in
+silenzio l'effort di ogni run che tocca.
+
+### 3. Il tuo harness ti cambia il modello
+
+È il meccanismo che più spesso produce un genuino "è peggiorato a metà sessione", e non
+ha niente a che vedere con il modello.
+
+Claude Code ha **tre** meccanismi di scambio indipendenti:
+
+- **Fallback da limite d'uso.** Raggiungi il tetto di Opus e la sessione prosegue su
+  Sonnet. Gli utenti hanno [aperto issue](https://github.com/anthropics/claude-code/issues/3434)
+  chiedendo che si fermi invece di fare downgrade, proprio perché il calo si sente prima
+  di leggerlo.
+- **Catene di fallback su errore.** `--fallback-model sonnet,haiku` oppure un array
+  `fallbackModel` nelle impostazioni. Scatta su overload ed errori server non
+  ritentabili — mai su errori di auth, fatturazione, rate limit o dimensione della
+  richiesta — e dura solo per il turno corrente.
+- **Fallback da contenuto segnalato.** Fable, Opus 5.5, Sonnet 5.5 e Opus 5 eseguono
+  classificatori di sicurezza per contenuti cyber e bio. Un messaggio segnalato può
+  essere instradato a un *modello diverso* invece di essere rifiutato: Opus 5.5 ripiega
+  su Opus 5 per il bio e su Opus 4.8 per il cyber; Sonnet 5.5 ripiega su Sonnet 5 per il
+  cyber e rifiuta per il bio. Si controlla con `switchModelsOnFlag`.
+
+Il terzo è quello subdolo. Fai una domanda su un tema di sicurezza e la tua "sessione
+Opus 5.5" può risponderti con Opus 4.8. L'output non è un Opus 5.5 degradato. È un Opus
+4.8 non degradato.
+
+L'alias `opusplan` fa la stessa cosa per progetto: Opus per la pianificazione, Sonnet per
+l'esecuzione. Se la tua percezione è "pianifica benissimo e poi implementa in modo
+sciatto", controlla se non hai chiesto esattamente quello.
+
+### 4. Lo stack di serving si rompe, in silenzio, per settimane
+
+L'argomento più forte contro il "è tutto effetto placebo" è che il controesempio l'ha
+scritto Anthropic stessa. A settembre 2025 ha pubblicato
+[un postmortem](https://www.anthropic.com/engineering/a-postmortem-of-three-recent-issues)
+su tre bug infrastrutturali sovrapposti che hanno degradato la qualità dell'output per
+settimane:
+
+1. **Un errore di routing della context window** (5 ago – 18 set) ha mandato richieste
+   ordinarie a server configurati per un contesto da 1M token in arrivo. Al picco, il
+   **16% delle richieste su Sonnet 4** il 31 agosto era instradato male, e circa il
+   **30% degli utenti di Claude Code** ha incontrato almeno una risposta degradata. Il
+   routing era *sticky*: una volta che una conversazione finiva su un server sbagliato,
+   anche i turni successivi tendevano a finirci — che è esattamente il pattern "è rotto
+   per me e funziona per te" che alla gente viene detto essere immaginario.
+2. **Corruzione dell'output** da una misconfigurazione TPU (25 ago – 2 set) su Opus 4.1,
+   Opus 4 e Sonnet 4 — inclusi caratteri thailandesi che comparivano a metà di frasi in
+   inglese.
+3. **Una miscompilazione XLA:TPU** dell'approximate top-k (25 ago – 12 set), un bug di
+   precisione mista nel compilatore che traduce JAX in istruzioni TPU, innescato da una
+   modifica pensata per *migliorare* la selezione dei token.
+
+Da quel documento vale la pena interiorizzare tre dettagli. Primo, Anthropic afferma
+nettamente: *"Non riduciamo mai la qualità del modello per domanda, ora del giorno o
+carico dei server"* — la teoria del complotto specifica viene smentita, mentre tre bug
+reali e non correlati vengono ammessi. Secondo, il motivo per cui il rilevamento ha
+richiesto settimane è che **le valutazioni interne non se ne sono accorte**: i benchmark
+restavano verdi mentre gli utenti avevano ragione. Terzo, i controlli sulla privacy
+impedivano agli ingegneri di leggere semplicemente le conversazioni andate male.
+
+Questa è la forma onesta del problema. Il degrado è reale, di solito è infrastruttura
+più che intenzione, e i benchmark aggregati sono pessimi nel vederlo.
+
+### 5. C'è un incidente aperto proprio adesso
+
+Prima di teorizzare, controlla [status.claude.com](https://status.claude.com/). Il
+**29 settembre 2026** — lo stesso giorno in cui LiveNerf è arrivato in prima pagina —
+Anthropic ha aperto un incidente alle 14:21 UTC per tassi di errore elevati su claude.ai,
+Claude Code, Claude Cowork e l'API, l'ha esteso alle 14:30 a "prestazioni degradate" e ha
+applicato una mitigazione alle 14:41. Una settimana prima, il 22 settembre, gli errori
+avevano colpito diversi modelli tra cui Opus 5, Mythos 5.1 e Fable 5.1.
+
+Una quota significativa dei post "oggi è peggiorato" viene scritta durante una finestra
+già pubblicamente riconosciuta.
+
+### 6. La conversazione si è allungata
+
+Ogni modello Claude attuale dichiara una context window da 1M token, e la qualità non è
+piatta lungo tutta la finestra. Due effetti che si sommano:
+
+- **Le conversazioni lunghe degradano.** L'attenzione su un prefisso molto lungo non è
+  gratis, e le istruzioni date 200 turni fa competono con tutto quello che è venuto dopo.
+- **La compaction riscrive la tua cronologia.** La compaction lato server riassume il
+  contesto precedente quando ci si avvicina alla soglia di attivazione. Anche Claude Code
+  fa compaction. Dopo una compaction, il modello sta lavorando su un *riassunto* di
+  quello che ricordi di avergli detto. Non se n'è dimenticato. È cambiata la trascrizione.
+
+Vale anche la pena saperlo: il tokenizer introdotto con Opus 4.7 ha cambiato il tasso di
+cambio. 1M token equivalgono a circa **555k parole** con il tokenizer attuale, contro
+circa **750k parole** con quello vecchio. Lo stesso documento occupa una frazione più
+grande della tua finestra rispetto a prima.
+
+### 7. Sei cambiato tu
+
+Il meccanismo meno popolare e il più comune. La prima settimana chiedi cose che già sai
+che il modello fa bene. La quarta settimana fai domande più difficili, su un codebase più
+grande, con un `CLAUDE.md` più lungo, avendo smesso di scrivere i prompt curati che
+scrivevi quando era una novità. La quantità misurata — *la mia soddisfazione per
+sessione* — ha due input variabili e tu ne hai strumentato solo uno.
+
+## La prova più citata è un bug di valutazione
+
+Se hai visto una sola prova che un modello è peggiorato, è probabilmente questa: in
+*How Is ChatGPT's Behavior Changing over Time?*, Chen, Zaharia e Zou riportano che
+l'accuratezza di GPT-4 su "questo numero è primo? ragiona passo per passo" è crollata dal
+**97,6% al 2,4%** tra marzo e giugno 2023. È finita ovunque. Viene citata ancora.
+
+Poi Arvind Narayanan e Sayash Kapoor
+[hanno guardato il test set](https://www.normaltech.ai/p/is-gpt-4-getting-worse-over-time).
+**Tutti e 500 i numeri erano primi.**
+
+Il modello di marzo rispondeva quasi sempre "primo". Quello di giugno rispondeva quasi
+sempre "composto". Su un insieme di soli primi fa 97,6% contro 2,4% — ma misura un
+*ribaltamento del bias*, non il ragionamento. Quando hanno usato 500 numeri composti, i
+punteggi si sono invertiti. Nessuna delle due versioni controllava i fattori; entrambe
+elencavano i divisori da testare e poi tiravano a indovinare. Il comportamento è
+cambiato. La capacità era la stessa, e non è mai stata buona.
+
+<Callout type="tip">
+**La distinzione da tenere.** La *deriva comportamentale* — formattazione diversa,
+prolissità, disponibilità, ipotesi di default — è reale, comune, ed è un effetto
+collaterale documentato del fine-tuning. La *perdita di capacità* è un'affermazione molto
+più forte e richiede prove molto più forti. Quasi ogni affermazione virale sul nerf è la
+prima travestita da seconda.
+</Callout>
+
+Sopra a tutto questo si aggiungono tre trappole statistiche, che valgono anche per le tue
+impressioni personali:
+
+- **Una valutazione in cui la risposta è sempre la stessa misura il bias, non l'abilità.**
+  Se il tuo test set personale è tutto "dovrebbe rifiutare" o tutto "dovrebbe riuscire",
+  uno spostamento nella postura di default del modello sembra un crollo.
+- **Bias di selezione nell'evidenza.** Nessuno posta "anche oggi Opus andava bene". Il
+  feed che stai leggendo è un filtro che lascia passare solo le giornate storte, e si fa
+  più denso man mano che un modello diventa popolare.
+- **Regressione verso la media.** Il tuo baseline è la settimana di lancio in cui sei
+  rimasto più colpito — che, essendo l'estremo del tuo campione, è la cosa che un modello
+  immutato ha meno probabilità di ripetere.
+
+## Come misurarlo — il disegno di LiveNerf
+
+LiveNerf vale la pena studiarlo meno per il suo verdetto che per la sua metodologia,
+perché è il disegno che una risposta credibile richiede. Dal repository (662 stelle al
+momento della scrittura, 6 giorni su 30 raccolti):
+
+<Steps items={[
+  {title: "Rinuncia al determinismo, poi congela tutto il resto", body: "Non puoi rendere deterministici questi modelli — i parametri di sampling non ci sono più sulla lineup attuale e l'adaptive thinking non si può disattivare. La risposta di LiveNerf, nella sua stessa formulazione: rendi deterministico tutto il resto. Prompt congelati, versione della CLI fissata, grader esatti, log grezzi conservati per sempre. Non stai eliminando il rumore; stai facendo in modo che il rumore sia l'unica cosa rimasta che può muoversi."},
+  {title: "Scegli item nella fascia in cui il modello è inaffidabile", body: "2.336 candidati sono stati selezionati da GPQA Diamond, MMLU-Pro, matematica competitiva e AIME 2025-26. Opus 5.5 ne azzecca circa il 93% al primo tentativo — quindi il 93% del bacino è inutile per il rilevamento, perché un soffitto non può mostrare un calo. Il pannello è costituito dalle 78 domande su cui il modello ha ragione solo qualche volta. Una domanda che tutti azzeccano sempre non misura niente."},
+  {title: "Confronta in modo appaiato, non aggregato", body: "Ogni run viene confrontato item per item con gli stessi item nel baseline della settimana di lancio, così la difficoltà delle domande si cancella invece di diventare una variabile confondente. È questo che permette a un pannello da 78 item di rilevare qualcosa."},
+  {title: "Usa un braccio di controllo", body: "Le stesse domande GPQA passano ogni giorno attraverso lo stesso harness su Claude Opus 5 — un modello diverso. Se entrambi i bracci si muovono insieme, il cambiamento è nella piattaforma, nell'harness o nel grader, non in Opus 5.5. Senza un controllo non puoi distinguere 'il modello è cambiato' da 'è cambiata la mia misura'."},
+  {title: "Pre-registra la regola di decisione prima di guardare", body: "LiveNerf dichiara un cambiamento solo quando valgono tre condizioni insieme: un intervallo di confidenza al 99% che esclude lo zero su due finestre consecutive di 10 giorni, un effetto di almeno 3 punti, e nessun movimento corrispondente nel braccio di controllo. Decidere la soglia dopo aver visto i dati è il modo in cui il rumore diventa una scoperta."},
+  {title: "Registra abbastanza da ricostruire un run contestato", body: "Prompt completi, risposte complete, uso di token, latenza, versione della CLI, git SHA dell'harness, hash di task e item, e i contatori d'uso del piano prima e dopo ogni run giornaliero. Trenta giorni: dieci per stabilire un baseline, poi due finestre da 10 giorni."}
+]} />
+
+La versione più corta di tutti e sei: **una singola sessione andata male non è una prova,
+e non lo è nemmeno una singola andata bene.**
+
+### La tua versione, a basso costo
+
+Non ti servono 78 item GPQA. Ti servono i tuoi task, che è meglio — a te interessa il tuo
+carico di lavoro, non MMLU-Pro. Il protocollo scala verso il basso:
+
+<PromptCard title="Protocollo personale di verifica del nerf">
+{`1. Collect 20-30 real prompts from your own work.
+   Keep only the ones you sometimes get a good answer to and sometimes don't.
+   Drop anything that always works (ceiling) or never works (floor).
+
+2. Write a grader you can run without thinking about it.
+   Pass/fail is enough. A human rubric you apply inconsistently is worse than nothing.
+
+3. Pin EVERYTHING that is pinnable:
+   - exact model ID (e.g. claude-opus-5-5, never an alias on an older generation)
+   - effort level, explicitly set - never inherited
+   - one frozen system prompt, byte for byte
+   - no tools, or exactly the same tool list every run
+   - fresh conversation per item; no shared history
+
+4. Baseline: run the whole set 5 times over the first week. Save raw outputs.
+
+5. Re-run the identical set on the same schedule later.
+   Compare item by item against the baseline - not set average to set average.
+
+6. Add a control arm: the same items on a DIFFERENT model, same harness, same day.
+   Both move together => your measurement moved, not the model.
+
+7. Decide in advance what counts: e.g. "a drop of 3+ items, twice in a row,
+   with the control flat." Write it down before you look at the numbers.`}
+</PromptCard>
+
+Due modi di sbagliare da evitare. Non usare un alias dove la generazione ne ha ancora uno
+— misureresti qualunque cosa l'alias stia puntando. E non lasciare che `effort` venga
+ereditato da un'impostazione di sessione, da una skill o dal frontmatter di un subagent,
+altrimenti stai misurando la deriva della tua configurazione.
+
+## Cosa hanno trovato davvero i tracker
+
+Al 30 settembre 2026 i tracker pubblici non supportano un nerf di Opus 5.5. LiveNerf
+aveva raccolto 6 dei suoi 30 giorni previsti senza run mancati e quindi **non era
+arrivato a un verdetto** — per la sua stessa regola pre-registrata non può, prima di due
+finestre complete da 10 giorni. Un secondo tracker, NerfBench di BridgeBench, è stato
+riportato a fine settembre come collocare Opus 5.5 a circa il 99,2% della potenza al
+lancio, comodamente dentro la sua banda di varianza normale — un dato che non siamo
+riusciti a verificare alla fonte (vedi la nota sopra).
+
+Da lì due conclusioni oneste. L'evidenza empirica finora punta a "nessun cambiamento
+rilevabile", e la versione onesta di "nessun cambiamento rilevabile" include la soglia di
+rilevabilità: un pannello appaiato da 78 item con un effetto minimo di 3 punti può
+mancare completamente un calo reale di 1 punto. *Nessuna prova di degrado* non è *prova
+di nessun degrado* — e un tracker rigoroso ti dice quale delle due ha in mano.
+
+## Triage in dieci minuti
+
+Prima di concludere qualsiasi cosa, in quest'ordine:
+
+<Steps items={[
+  {title: "Controlla la pagina di stato", body: "status.claude.com. Un incidente aperto chiude l'indagine. Il 29 settembre 2026 la finestra di prestazioni degradate e il picco della discussione sul nerf sono stati lo stesso pomeriggio."},
+  {title: "Controlla quale modello ha risposto davvero", body: "In Claude Code, /model. Cerca uno switch da limite d'uso, una catena di fallback che è scattata, uno scambio da contenuto segnalato, oppure opusplan che fa esattamente quello che dice. L'API restituisce il modello che ha servito la richiesta nella risposta — leggilo invece di darlo per scontato."},
+  {title: "Controlla il tuo livello di effort", body: "/effort, più qualunque effortLevel o modelSettings per modello nelle impostazioni, più il frontmatter di ogni skill o subagent in gioco. Una configurazione portata avanti è la causa più comune di 'è diventato più pigro' senza nessun altro cambiamento."},
+  {title: "Controlla la lunghezza della conversazione", body: "Se è scattata la compaction, il modello sta leggendo un riassunto dei tuoi turni precedenti. Apri una sessione nuova con il contesto ripetuto e vedi se il problema sopravvive."},
+  {title: "Rilancia lo stesso identico prompt tre volte", body: "L'adaptive thinking rende i giudizi su singolo campione inaffidabili per costruzione. Se due su tre vanno bene, hai pescato un'estrazione sfortunata, non un modello peggiore."},
+  {title: "Solo adesso, confronta con qualcosa che hai salvato", body: "Se non hai conservato nessun artefatto del periodo buono, stai confrontando con il ricordo della settimana in cui sei rimasto più colpito - il campione meno riproducibile che hai. Inizia a salvare gli output da oggi, così la prossima volta che succede potrai rispondere."}
+]} />
+
+<Flashcards cards={[
+  { front: "Snapshot fissato", back: "Un model ID i cui pesi non cambiano mai. Sulla Claude API ogni ID attuale lo è, inclusi gli ID senza data dalla generazione 4.6 in poi — claude-opus-5-5 è esso stesso uno snapshot, non un puntatore. Esclude 'hanno sostituito i pesi' per chi chiama l'API. Le generazioni più vecchie usavano alias che risolvevano a ID datati; gli alias possono spostarsi." },
+  { front: "Deriva comportamentale vs perdita di capacità", back: "Deriva = formattazione, prolissità, disponibilità o ipotesi di default diverse; comune, ed effetto collaterale documentato del fine-tuning. Perdita di capacità = il modello non riesce più a fare qualcosa che sapeva fare. Il risultato di GPT-4 sui numeri primi era deriva misurata su un test set di soli primi e riportata come perdita." },
+  { front: "Confronto appaiato", back: "Valutare gli stessi item rispetto ai propri risultati precedenti invece di confrontare medie di insiemi. Elimina la difficoltà delle domande come variabile confondente, ed è questo che rende un pannello piccolo (LiveNerf: 78 item) capace di rilevare qualcosa." },
+  { front: "Braccio di controllo", back: "Gli stessi item eseguiti attraverso lo stesso harness su un modello diverso, lo stesso giorno. Se entrambi i bracci si muovono insieme il cambiamento è nella piattaforma, nell'harness o nel grader — non nel modello sotto test. Senza uno non puoi separare 'il modello è cambiato' da 'è cambiata la mia misura'." },
+  { front: "Regola di decisione pre-registrata", back: "Mettere per iscritto la soglia per dichiarare un cambiamento prima di vedere i dati. Quella di LiveNerf: un IC al 99% che esclude lo zero su due finestre consecutive di 10 giorni, un effetto minimo di 3 punti, e un controllo piatto. Scegliere la regola dopo trasforma il rumore in scoperte." },
+  { front: "Routing sticky", back: "Quando una richiesta instradata male fa finire anche i turni successivi della stessa conversazione sullo stesso server sbagliato. Nell'incidente Anthropic di agosto 2025 questo ha trasformato un guasto intermittente in un degrado persistente per utenti specifici — il pattern 'rotto per me, funziona per te'." },
+  { front: "Fallback da contenuto segnalato", back: "I classificatori di sicurezza su Fable, Opus 5.5, Sonnet 5.5 e Opus 5 possono instradare un messaggio segnalato a un modello diverso invece di rifiutare: Opus 5.5 → Opus 5 per il bio, → Opus 4.8 per il cyber; Sonnet 5.5 → Sonnet 5 per il cyber. Si disattiva con switchModelsOnFlag. L'output non è un Opus 5.5 degradato — è un modello diverso." },
+  { front: "Soglia di rilevabilità", back: "Il più piccolo effetto reale che una misura avrebbe potuto trovare. Un pannello appaiato da 78 item con un effetto minimo di 3 punti non può vedere un calo di 1 punto. 'Nessuna prova di degrado' vale solo quanto la soglia che ci sta sotto." }
+]} />
+
+## Quiz
+
+<Quiz questions={[
+  {
+    q: "Chiami la Claude API con il model ID claude-opus-5-5 e la qualità dell'output cala vistosamente nell'arco di due settimane. Quale spiegazione puoi escludere per prima, senza misurare nulla?",
+    options: [
+      "Un bug nello stack di serving che degrada le risposte",
+      "Che i pesi dietro claude-opus-5-5 siano stati sostituiti con una versione diversa",
+      "Che il system prompt di prodotto sia stato aggiornato",
+      "Che i tuoi prompt siano diventati più difficili"
+    ],
+    answer: 1,
+    explain: "Ogni model ID attuale di Claude è uno snapshot fissato — gli ID senza data dalla generazione 4.6 in poi sono essi stessi snapshot, non alias. I pesi non possono cambiare sotto un ID fissato. I bug di serving e la deriva dei prompt restano ipotesi vive, e il system prompt di prodotto pubblicato esplicitamente non si applica affatto all'API."
+  },
+  {
+    q: "L'accuratezza di GPT-4 su 'questo numero è primo?' è passata dal 97,6% al 2,4% tra due versioni. Cosa ha scoperto l'analisi successiva?",
+    options: [
+      "Il modello di giugno era stato quantizzato per tagliare i costi di serving",
+      "Tutti e 500 i numeri del test erano primi, quindi il punteggio misurava un ribaltamento dell'ipotesi di default del modello piuttosto che una qualunque capacità di ragionamento",
+      "L'harness di valutazione aveva un bug di scoring che invertiva successo e fallimento",
+      "Il calo era reale e OpenAI lo ha poi confermato"
+    ],
+    answer: 1,
+    explain: "Narayanan e Kapoor hanno mostrato che il test set conteneva solo numeri primi. A marzo il modello tirava a indovinare quasi sempre 'primo', a giugno quasi sempre 'composto' — su un insieme di soli primi questo si legge come un crollo. Eseguilo sui composti e i punteggi si invertono. Nessuna delle due versioni controllava davvero i fattori. Il comportamento è cambiato; la capacità no."
+  },
+  {
+    q: "Stai costruendo una verifica personale del degrado del modello. Oggi tutti i tuoi 30 prompt ricevono risposte corrette. Perché quel pannello è quasi inutile?",
+    options: [
+      "Trenta item sono troppo pochi per qualunque test statistico",
+      "Gli item che il modello azzecca sempre sono al soffitto e non possono mostrare un calo — ti servono item su cui ha ragione solo qualche volta",
+      "I prompt personali non sono confrontabili con i benchmark standard",
+      "Ti serve un insieme corrispondente di prompt che il modello sbaglia sempre"
+    ],
+    answer: 1,
+    explain: "È per questo che LiveNerf ha selezionato 2.336 candidati riducendoli a 78. Opus 5.5 risponde correttamente al primo tentativo a circa il 93% del bacino, il che rende quel 93% cieco a qualunque cambiamento. Il rilevamento vive nella fascia in cui il modello è inaffidabile. Gli item che falliscono sempre sono altrettanto inutili — quello è il pavimento."
+  },
+  {
+    q: "A metà sessione in Claude Code le tue risposte diventano nettamente più deboli subito dopo che hai fatto una domanda di sicurezza. Causa più probabile?",
+    options: [
+      "Il modello è stato nerfato durante la tua sessione",
+      "Un classificatore di sicurezza ha segnalato il contenuto e ha instradato il turno a un modello diverso e più vecchio",
+      "La cache dei prompt è scaduta",
+      "La tua context window si è riempita"
+    ],
+    answer: 1,
+    explain: "Fallback da contenuto segnalato: i classificatori cyber e bio possono instradare a un modello diverso invece di rifiutare. Opus 5.5 ripiega su Opus 4.8 per il cyber, Sonnet 5.5 su Sonnet 5. Non stai vedendo un Opus 5.5 degradato — stai vedendo rispondere un modello completamente diverso. switchModelsOnFlag lo disattiva."
+  },
+  {
+    q: "Un tracker riporta nessun degrado rilevabile usando un pannello appaiato da 78 item con un effetto minimo pre-registrato di 3 punti. Cosa ti autorizza a dire?",
+    options: [
+      "Che il modello dimostrabilmente non è cambiato",
+      "Che non si è verificato nessun cambiamento abbastanza grande da essere visto da questo disegno — un calo reale più piccolo passerebbe inosservato",
+      "Che il modello è migliorato",
+      "Niente, perché 78 item sono troppo pochi per concludere qualcosa"
+    ],
+    answer: 1,
+    explain: "Ogni misura ha una soglia di rilevabilità. Un effetto minimo di 3 punti non può risolvere un calo di 1 punto. 'Nessuna prova di degrado' è un'affermazione limitata, non una prova che non ci sia stato nessun cambiamento — e un tracker rigoroso dichiara la sua soglia così puoi capire quale delle due sta riportando."
+  },
+  {
+    q: "Perché le valutazioni interne di Anthropic non hanno colto i tre bug infrastrutturali dell'agosto 2025 che avevano davvero degradato l'output?",
+    options: [
+      "Le valutazioni non sono state eseguite in quel periodo",
+      "I benchmark restavano verdi — non erano abbastanza sensibili da distinguere un'implementazione funzionante da una rotta, e i controlli sulla privacy limitavano l'accesso alle conversazioni colpite",
+      "I bug colpivano solo piattaforme di terze parti, che non erano valutate",
+      "I modelli colpiti non erano ancora nella suite di valutazione"
+    ],
+    answer: 1,
+    explain: "Il postmortem di Anthropic dice che le valutazioni non catturavano il degrado segnalato dagli utenti, e che i controlli sulla privacy impedivano agli ingegneri di esaminare le interazioni problematiche. Una delle correzioni successive sono state valutazioni più sensibili, capaci di distinguere un'implementazione funzionante da una rotta, eseguite in continuo in produzione. I benchmark aggregati sono pessimi rilevatori di degrado."
+  }
+]} />
+
+## Prossimi passi
+
+- [Claude Opus 5.5: la guida sul campo](/docs/models/opus-5-5-field-guide) — il modello al centro di questa discussione, e cosa è davvero uscito con lui
+- [Claude Sonnet 5.5: la guida sul campo](/docs/models/sonnet-5-5-field-guide) — default di effort, binding dei blocchi di thinking, e le trappole di configurazione che sembrano degrado
+- [Come scegliere un modello](/docs/models/choosing-a-model) — il framework durevole, una volta che hai smesso di rincorrere il dibattito della settimana
+
+## Fonti e approfondimenti
+
+- [ninjahawk/livenerf](https://github.com/ninjahawk/livenerf) — il tracker per Opus 5.5 con disegno appaiato, braccio di controllo e regola pre-registrata; leggi il README per il protocollo completo
+- [A postmortem of three recent issues](https://www.anthropic.com/engineering/a-postmortem-of-three-recent-issues) — il resoconto di Anthropic su un degrado reale: routing, misconfigurazione TPU e un bug del compilatore XLA
+- [Models overview](https://platform.claude.com/docs/en/about-claude/models/overview) — la dichiarazione sugli snapshot fissati, i default di effort, le note su contesto e tokenizer
+- [Model IDs and versioning](https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions) — come alias e snapshot differiscono tra le generazioni
+- [System prompt release notes](https://platform.claude.com/docs/en/release-notes/system-prompts) — i system prompt di prodotto pubblicati e datati, e la nota che non si applicano all'API
+- [Claude Code model configuration](https://code.claude.com/docs/en/model-config) — catene di fallback, fallback da contenuto segnalato, livelli di effort, precedenza del modello nei subagent
+- [Claude status](https://status.claude.com/) — controlla questa pagina prima di teorizzare
+- [How Is ChatGPT's Behavior Changing over Time?](https://arxiv.org/abs/2307.09009) — Chen, Zaharia e Zou; la fonte del dato 97,6%→2,4%
+- [Is GPT-4 getting worse over time?](https://www.normaltech.ai/p/is-gpt-4-getting-worse-over-time) — la correzione di Narayanan e Kapoor: il test set di soli primi, e deriva comportamentale contro perdita di capacità
+- [anthropics/claude-code#3434](https://github.com/anthropics/claude-code/issues/3434) — la issue sul fallback silenzioso Opus→Sonnet, come l'hanno vissuta gli utenti
