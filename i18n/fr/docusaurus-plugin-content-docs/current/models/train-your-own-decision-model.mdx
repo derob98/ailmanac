@@ -1,0 +1,292 @@
+---
+sidebar_position: 22.905
+title: "Entraîner son propre modèle de décision : Jeff, Jeeves et la pile System One DIY (sept. 2026)"
+description: "Deux semaines après que Jev a créé la catégorie des modèles de décision, la pile ouverte a rattrapé son retard : Jeff affine un Qwen de 0,8 Md de paramètres en un classifieur compatible Jev en ~2 heures sur un seul GPU de station de travail, et Jeeves de PostHog montre que laisser un modèle de décision réfléchir d'abord bat Jev sur son propre benchmark. Ce qu'est réellement la recette d'entraînement (entropie croisée sur les lettres d'options, une température ajustée séparément), où les petits modèles battent l'API et où ils se font écraser, le plafond à 26 options, la chute de latence CPU x20, et la baseline par embeddings — ennuyeuse mais efficace — qui a obtenu 93,0 % et qu'il faut battre avant que tout ceci en vaille la peine."
+keywords: [train your own decision model, Jeff decision model, firelex Jeff, Jeeves PostHog, AutoJev, Jev compatible, System One model, fine-tune classifier, calibrated probabilities, temperature calibration, cross-entropy option letters, pointer head, CISPO, Qwen3.5 0.8B, Gemma 4 E2B, local classifier, zero-shot classification, ModernBERT baseline, BANKING77, MLX classifier, decision model latency, agent routing model]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-09-29" source="README of firelex/jeff (created 2026-09-28, 895 stars at time of writing) and PostHog/jeeves (created 2026-09-29, 107 stars); denis-pplx/autojev README; Hacker News items 49883844 (Jeff, 536 points / 204 comments) and 49891290 (Jeeves, 105 points / 44 comments).">
+Chaque chiffre d'exactitude, de latence et de temps d'entraînement de cette page est **auto-déclaré par le projet qui l'a publié**, sur des benchmarks que ce projet a lui-même choisis. Rien ici n'a été répliqué de façon indépendante. Les deux dépôts ont quelques jours et évoluent vite — le nombre d'étoiles, les noms de modèles, les identifiants de checkpoints et les options de CLI sont les faits les plus périssables ici ; lisez le README actuel avant de copier une commande. Aucun des deux projets n'est affilié à ou approuvé par TypeSafe, les créateurs de Jev.
+</VerifyNote>
+
+<Callout type="objectives" items={[
+  "Expliquer la véritable recette d'entraînement derrière un modèle de décision ouvert — entropie croisée sur les lettres d'options, une époque, et une température ajustée après coup — et pourquoi la calibration est une étape distincte de l'exactitude",
+  "Lire honnêtement les tableaux de benchmarks publiés : les trois lignes où un modèle de 0,8 Md bat l'API commerciale, et les deux lignes où il perd de 20 à 26 points",
+  "Choisir entre quatre options — API hébergée, poids ouverts en zero-shot, son propre fine-tune, ou un simple classifieur par embeddings — à l'aide du seul chiffre de baseline qui tue la plupart de ces projets",
+  "Entraîner et servir soi-même un modèle compatible Jev en un après-midi sur un seul GPU, y compris la règle de sélection du checkpoint qui garde le résultat honnête",
+  "Savoir quand redonner de la réflexion à un modèle de décision vaut 11 fois la latence, et comment un seuil de confiance permet de récupérer la majeure partie de l'exactitude pour un tiers de l'attente"
+]} />
+
+[Les modèles de décision System One](/docs/models/system-one-decision-models-jev-kev) expliquaient la catégorie : vous envoyez l'état du programme plus des questions typées, et vous récupérez des probabilités calibrées au lieu de texte. Cette page s'arrêtait là où en étaient les recréations ouvertes à la mi-septembre — Kev, Nimble, un shim de logprob.
+
+Dans la dernière semaine de septembre, l'histoire a changé de forme. **La question n'était plus « peut-on cloner l'API » mais « devrait-on entraîner le sien ? »** Le 28 septembre, un projet appelé **Jeff** a publié des fine-tunes de 0,8 Md et 2 Md de paramètres qui arrivent à quatre points du score global de benchmark de Jev et tournent en ~22–28 ms sur un GPU de classe laptop, entraînés en environ deux heures sur **une seule** carte de station de travail. C'était l'histoire IA la plus populaire sur Hacker News ce jour-là. Douze heures plus tard, PostHog publiait **Jeeves**, qui fait l'inverse — ajouter du raisonnement *sur* un modèle de décision — et affirme battre Jev sur le palier difficile de son propre benchmark.
+
+Les deux sont en code MIT avec des poids Apache-2.0. Les deux sont assez honnêtes dans leurs README pour publier les lignes où ils perdent. Cette page traite de ce que ces lignes signifient pour vous.
+
+## Les 72 heures, dans l'ordre
+
+| Date (2026) | Ce qui a été publié | Pourquoi c'est important |
+| --- | --- | --- |
+| 15 sept. | **Jev** (TypeSafe AI), API uniquement | A défini la catégorie et le format de requête `/v1/systemone` |
+| 21 sept. | **Kev**, **Nimble**, **openjev-sglang** | A prouvé que l'*interface* était reproductible sur des poids ouverts |
+| — | **AutoJev** (denis-pplx) | La recette : SFT pleins poids de Qwen3.8-27B, 73 000 exemples, **un seul H200**, 84,60 % contre 69,83 % pour la base |
+| 28 sept. | **Jeff** (firelex) | L'a réduit — étudiants de 0,8/2 Md, ~2 h sur un GPU de station de travail, service via MLX, évaluations sur jeux |
+| 29 sept. | **Jeeves** (PostHog) | A inversé le postulat — un modèle de décision qui *réfléchit*, LoRA + RL sur Qwen3.5-9B |
+
+Le fil conducteur : en deux semaines, une catégorie est passée d'une API fermée à l'entraînement non divulgué à une recette exécutable en une nuit. AutoJev est le pivot — il a publié la fonction de perte, et tout ce qui suit est une variation de cette idée unique.
+
+## La recette, pour de vrai
+
+Débarrassée du marketing, un modèle de décision est un changement étonnamment petit par rapport à un LLM normal.
+
+### 1. La perte est une entropie croisée sur les lettres d'options
+
+Le modèle n'est pas entraîné à « prendre des décisions ». Il est entraîné à placer de la masse de probabilité sur **une seule lettre-jeton** — `A`, `B`, `C` — à une position précise. Vous présentez les options comme un panneau lettré, vous entraînez avec une entropie croisée classique sur la bonne lettre, et à l'inférence vous lisez les logits des jetons de lettres et les renormalisez uniquement sur les options que vous avez proposées.
+
+Ce seul détail d'implémentation explique la limitation phare. Jeff vous plafonne à **26 options**, et le README est direct : les positions au-delà sont « pratiquement jamais sélectionnées » — parce que l'alphabet est épuisé, pas pour une raison architecturale. (Jev lui-même annonce jusqu'à 255 options, ce qui indique qu'il encode les options différemment.)
+
+Jeeves prend l'autre voie : une **pointer head** qui compare un état caché projeté à l'embedding de chaque option via un produit scalaire mis à l'échelle. Pas de lettres, pas de plafond alphabétique. Elle marque la structure avec des jetons rares empruntés au tokenizer de Qwen que le texte réel n'utilise pratiquement jamais — `<|fim_prefix|>` pour l'état, `<|fim_middle|>` pour les questions, `<|box_start|>`/`<|box_end|>` autour des options, `<|fim_suffix|>` au point de décision. Réutiliser des jetons morts comme délimiteurs est l'astuce peu coûteuse qui évite de faire grossir le vocabulaire ou d'entrer en collision avec le contenu.
+
+### 2. La calibration est une étape séparée, à un seul paramètre
+
+C'est la partie que les gens sautent, et c'est la partie qui rend le résultat digne de confiance.
+
+L'exactitude et la calibration sont des propriétés différentes. Un modèle peut classer la bonne réponse en premier presque à chaque fois et pourtant dire « 91 % » alors qu'il n'a raison que dans 75 % des cas — c'est exactement la forme de surconfiance que le pilote indépendant sur BANKING77 a trouvée chez Jev. Les trois projets ajustent donc **une seule température scalaire** sur un ensemble de développement mis de côté *après* l'entraînement, et la livrent avec le checkpoint. On divise les logits par elle, on passe au softmax, et c'est fait.
+
+AutoJev publie ce que cela apporte, et c'est le comparatif avant/après le plus limpide de toute la pile :
+
+| Métrique | Qwen3.8-27B de base | AutoJev-27B |
+| --- | --- | --- |
+| Exactitude | 69,83 % | **84,60 %** |
+| ECE (erreur de calibration attendue — plus bas est mieux) | 0,06483 | **0,04282** |
+| Score de Brier (plus bas est mieux) | 0,40834 | **0,22027** |
+
+Notez que les trois métriques ont bougé, mais de montants différents. L'exactitude a grimpé d'environ 15 points tandis que l'ECE a chuté d'environ 34 % — l'entraînement a rendu le modèle *à la fois* plus juste et plus honnête, et l'honnêteté se mesure séparément. Si vous entraînez le vôtre et ne rapportez que l'exactitude, vous n'avez pas fini.
+
+### 3. Tout le reste est mineur
+
+Une époque. Batch de 256. Pleins poids (Jeff, AutoJev) ou LoRA r=16 (Jeeves). Sélection du checkpoint **sur un ensemble de développement, jamais sur le panneau de benchmark** — Jeff le déclare explicitement, et c'est la seule ligne qui sépare un résultat crédible de petit modèle d'un résultat qui a fuité. Jeff conserve aussi au moins la moitié de chaque famille d'entraînement dans la même disposition de panneau que celle qu'elle verra à l'inférence, ce qui compte plus qu'il ne devrait ; voir la section sur la formulation plus bas.
+
+<PromptCard title="Entraîner un modèle de décision de 0,8 Md (la propre recette de Jeff)">
+{`# 1. Build the training mix from public datasets
+uv run autojev-mix ...
+
+# 2. One epoch, full-weight, lr 5e-6
+scripts/train.sh RUN data/mix/public.jsonl data/mix 5e-6 40 Qwen/Qwen3.5-0.8B <revision> --epochs 1
+
+# 3. Evaluate the SELECTED checkpoint against a held-out panel
+uv run autojev-evaluate --data data/panel.jsonl --local \\
+  --checkpoint checkpoints/RUN/selected --output runs/eval/RUN.json`}
+</PromptCard>
+
+Coût rapporté de l'étape 2 : **~2 heures pour le 0,8 Md, ~3,5 heures pour le 2 Md, sur une seule RTX PRO 6000.** C'est le chiffre qui a fait de ceci une histoire de une page.
+
+## Lire le tableau de benchmark de travers
+
+Voici le panneau publié par Jeff — 4 599 questions réparties sur cinq jeux de données publics plus le palier difficile de JevBench — avec l'API commerciale dans la dernière colonne. Lisez-le par *ligne*, pas par la ligne globale.
+
+| Benchmark | Jeff-0.8B | Jeff-2B | Jeff-Gemma4-E2B | Jev (API) |
+| --- | --- | --- | --- | --- |
+| **Global** | 79,1 % | **83,1 %** | 81,6 % | 83,0 % |
+| Financial PhraseBank | 96,4 % | 96,3 % | 96,1 % | 77,0 % |
+| RAGTruth | 86,1 % | **88,9 %** | 87,4 % | 77,3 % |
+| WinoGrande | 68,6 % | 79,0 % | 77,4 % | **90,7 %** |
+| JudgeBench | 62,6 % | 64,6 % | 60,6 % | **78,6 %** |
+| BBH | 64,0 % | 68,0 % | 66,4 % | **94,3 %** |
+| JevBench Hard | 47,6 % | 53,3 % | 48,6 % | **73,3 %** |
+
+Les scores globaux sont quasiment à égalité. Les lignes, elles, ne le sont pas du tout :
+
+- **Là où le petit modèle gagne, il gagne largement.** Financial PhraseBank : 96,4 % contre 77,0 % — un modèle de 0,8 Md qui bat une API commerciale de 19 points. RAGTruth (cette réponse reste-t-elle fidèle au passage récupéré ?) : 86,1 % contre 77,3 %. Les deux sont des tâches étroites, à fort volume, de forme reconnaissable — sentiment sur un vocabulaire fixe, ancrage sur un passage fourni. Si le chemin critique de votre agent a cette forme, un modèle local de 0,8 Md n'est pas un compromis, c'est le meilleur outil.
+- **Là où il perd, ce n'est pas serré.** BBH accuse 30 points de retard. JevBench Hard, 26 points. Ce sont les lignes qui exigent un raisonnement en plusieurs étapes, et le README le dit clairement : les petits modèles de décision offrent des « choix rapides et calibrés entre les options que vous décrivez » et pas de chaîne de raisonnement.
+- **Le chiffre global est la moyenne de ces deux faits et ne décrit donc rien.** C'est la leçon la plus transférable de cette page, et elle n'est pas spécifique aux modèles de décision : tout score global unique est une moyenne pondérée sur un mélange de benchmarks qui n'est pas votre mélange.
+
+### Le tableau des jeux est le plus honnête
+
+Jeff a aussi évalué le jeu en zero-shot — 20 épisodes chacun de Doom, Frogger et Pac-Man — et le résultat est suffisamment inconfortable pour que sa publication mérite la confiance :
+
+| Modèle | Doom (kills) | Frogger (traversées) | Pac-Man (pastilles / 98) |
+| --- | --- | --- | --- |
+| Aléatoire | −0,05 | 0 | 11,2 |
+| Bot à règles codées à la main | 6,55 | 10,25 | **94,1** |
+| **Jeff-0.8B** | **6,55** | **10,3** | 57,0 |
+| Jeff-2B | −0,9 | 6,0 | 41,2 |
+
+**Le 2 Md est pire que le 0,8 Md aux trois jeux, alors qu'il le surclasse sur chaque ligne de benchmark.** L'interprétation du README est que le modèle plus grand est devenu plus averse au risque. Quelle qu'en soit la cause, la mise en regard de ces deux tableaux est le point important : le rang au benchmark n'a pas prédit le comportement en boucle. Et le bot à règles codées à la main gagne toujours Pac-Man de 37 points — le rappel que « un modèle peut-il le faire » et « un modèle devrait-il le faire » sont des questions différentes.
+
+## La falaise de latence dont personne ne parle
+
+Latence médiane par décision, questions d'environ 200 jetons :
+
+| Modèle | RTX PRO 6000 | Apple M4 Max (MLX) | CPU (32 threads) |
+| --- | --- | --- | --- |
+| Jeff-0.8B | 22 ms | 28 ms | **463 ms** |
+| Jeff-2B | 24 ms | 60 ms | 708 ms |
+| Jeff-Gemma4-E2B | 29 ms | — | 1,0 s |
+
+Deux choses à en retenir :
+
+1. **« Petit modèle » ne veut pas dire « tourne partout rapidement ».** Le même checkpoint de 0,8 Md fait 22 ms sur un GPU et 463 ms sur 32 threads CPU — un écart de **21x**. Un modèle de décision n'est un modèle de décision qu'à la latence GPU ; sur CPU, c'est un appel d'API lent que vous hébergez vous-même. Si votre plan était de « saupoudrer ces appels partout dans le chemin de la requête », la colonne CPU est le budget de ce plan.
+2. **2,5 fois plus de paramètres coûtent 2 ms sur le gros GPU.** 22 → 24 ms. À cette taille, un seul passage avant sur ~200 jetons est dominé par la surcharge et la bande passante mémoire, pas par le calcul arithmétique, donc sur une carte rapide le 2 Md est presque gratuit par rapport au 0,8 Md — alors que sur le M4 Max, le même pas vous coûte 2,1x (28 → 60 ms). Choisissez votre modèle en fonction de la *cible de déploiement*, pas du nombre de paramètres.
+
+<Steps items={[
+  {title: "Servez-en un localement avant d'entraîner quoi que ce soit", body: "Installez avec uv, récupérez un checkpoint depuis Hugging Face, démarrez le serveur. Vous voulez le chiffre en zero-shot sur VOS données avant de décider que l'entraînement est nécessaire — le résultat le plus courant rapporté par les praticiens est que le zero-shot n'est pas suffisant, et c'est bien moins coûteux à découvrir en vingt minutes qu'après un entraînement."},
+  {title: "Constituez un ensemble de développement étiqueté de quelques centaines d'exemples réels", body: "Du trafic réel, une distribution de labels réelle, y compris les cas ambigus que vous jetteriez normalement. Cet ensemble sert deux fois : il sélectionne votre checkpoint et il ajuste votre température. Il ne doit jamais chevaucher le panneau sur lequel vous rapportez vos chiffres."},
+  {title: "Mesurez d'abord la baseline ennuyeuse", body: "Embeddings plus une tête de régression logistique, sur le même ensemble de développement. Sur BANKING77, cette approche a été rapportée dans la discussion Jeff à 93,0 % avec un modèle environ 15x plus petit. Si elle gagne sur vos données, arrêtez-vous là — vous vous êtes épargné un fine-tune et un GPU."},
+  {title: "N'affinez que l'écart que vous avez mesuré", body: "Une époque, batch de 256, entropie croisée sur les lettres d'options, lr autour de 5e-6. Gardez au moins la moitié de vos exemples d'entraînement dans la disposition exacte du panneau que vous utiliserez à l'inférence. Sélectionnez le checkpoint sur l'ensemble de développement."},
+  {title: "Ajustez la température, puis rapportez les deux chiffres", body: "Un scalaire sur l'ensemble de développement, stocké avec le checkpoint. Publiez ensuite l'exactitude ET l'erreur de calibration, pour vous-même. Un modèle de décision non calibré est un classifieur avec un champ de confiance auquel vous n'avez pas le droit de faire confiance — ce qui va à l'encontre de l'objectif même de la catégorie."},
+  {title: "Fixez le seuil à partir de la courbe de fiabilité, pas d'un chiffre rond", body: "Trouvez la confiance à laquelle l'exactitude observée est réellement suffisante pour se passer d'une revue humaine ou d'un modèle frontière. Tout ce qui est en dessous escalade. Ce chiffre est une propriété de vos données et ne sera pas 0,9 simplement parce que 0,9 fait propre."}
+]} />
+
+<PromptCard title="Servir un modèle compatible Jev en local et lui envoyer une requête réelle">
+{`# Apple silicon (MLX backend)
+uv sync --no-default-groups --extra mac
+uv run --no-default-groups hf download mstrasser/Jeff-Qwen3.5-0.8B --local-dir checkpoints/jeff-0.8b
+JEFF_BACKEND=mlx JEFF_CHECKPOINT=checkpoints/jeff-0.8b PORT=8765 \\
+  uv run --no-default-groups --extra mac jeff-serve
+
+# Two independent questions, one request, one parallel pass
+curl -s localhost:8765/v1/systemone -H 'content-type: application/json' -d '{
+  "model": "jeff-latest",
+  "state": "Refund request: the customer says the parcel arrived crushed and wants their money back.",
+  "questions": {
+    "route": {"type": "choice", "instructions": "Which team should handle this?",
+              "criteria": {"1": "Refunds and payments", "2": "Damaged or lost parcels", "3": "Account and login problems"}},
+    "angry": {"type": "noul", "instructions": "Is the customer angry?"}
+  }
+}'`}
+</PromptCard>
+
+## La question qui dérange : avez-vous vraiment besoin d'un modèle ?
+
+La critique la plus acérée dans le fil Hacker News n'était pas que Jeff performe mal. Elle était structurelle : *si vous devez de toute façon le fine-tuner sur vos propres données étiquetées, vous n'avez pas acheté un classifieur zero-shot — vous avez acheté une façon un peu maladroite d'entraîner un classifieur*, et le domaine en propose déjà de moins chères.
+
+Les chiffres de ce fil vont dans ce sens. Un commentateur a rapporté avoir testé le 0,8 Md en zero-shot sur la classification d'offres d'emploi et l'avoir trouvé inutilisable, le 2 Md ratant encore des catégories. Un autre a rapporté que de simples **embeddings plus une tête de régression logistique atteignaient 93,0 % sur BANKING77 avec un modèle environ 15x plus petit** que les modèles de décision comparés — contre la forme confiance de 87,4 %/exactitude de 75,3 % trouvée par le pilote indépendant de Jev sur le même jeu de données.
+
+D'où le tableau de décision honnête :
+
+| Situation | À utiliser |
+| --- | --- |
+| Poignée de labels fixes, beaucoup d'exemples, la latence compte | **Embeddings + régression logistique.** Le plus petit, le plus rapide, s'entraîne en quelques secondes. À battre avant d'envisager autre chose. |
+| Les labels changent souvent, ou les questions sont écrites en prose à chaque requête | **Modèle de décision en zero-shot** — le schéma *est* l'interface, qui est le véritable produit |
+| Un domaine à fort volume, vous avez des labels, vous avez un GPU pour un après-midi | **Fine-tune.** Le run d'échecs de Jeff est passé de 15,5 % à 55,8 % ; un fine-tune de navigation vocale sur ~11 000 exemples est passé de 31,7 % à 95,8 % en moins de 30 minutes |
+| Jugements réellement difficiles, en plusieurs étapes | **Raisonnement** — Jeeves, ou un modèle frontière derrière une cascade |
+| Vous en avez besoin cet après-midi et le volume est faible | **API hébergée.** Votre propre GPU n'est pas gratuit non plus |
+
+La règle générale sous-jacente : un modèle de décision mérite sa place quand c'est le *schéma* qui a de la valeur — des questions typées arbitraires, en prose, résolues en une passe. Quand votre ensemble de labels est fixe et connu, vous payez des coûts de forme « modèle » pour un travail de forme « classifieur ».
+
+## Jeeves : remettre la réflexion
+
+Le postulat fondateur de Jev était que cette classe de modèles ne génère pas de texte. Jeeves de PostHog teste ce postulat directement en laissant un modèle de décision réfléchir d'abord, puis décider, sur Qwen3.5-9B avec LoRA r=16 et une pointer head.
+
+L'entraînement se déroule en trois étapes : **SFT** (19 126 questions issues de 12 jeux de données publics plus des données de politique synthétiques, la moitié portant des chaînes de raisonnement, 2 époques / 596 pas sur 8 GPU), puis **apprentissage par renforcement CISPO** (9 992 questions, 8 déploiements chacune à température 1, la réflexion plafonnée à 2 560 jetons — un calendrier de 624 pas délibérément **arrêté au pas 402** parce que la calibration se dégradait au-delà), puis le même ajustement de température scalaire.
+
+Résultats rapportés :
+
+| Benchmark | Jeeves | Jev | Kev-9B |
+| --- | --- | --- | --- |
+| Test global | **0,889** | 0,857 | 0,822 |
+| JevBench global (231 items) | **0,935** | 0,866 | 0,715 |
+| JevBench difficile (111 items) | **0,865** | 0,730 | 0,451 |
+
+Et l'ablation qui compte plus que toutes ces lignes : **0,804 sans raisonnement, 0,840 avec.** La réflexion vaut environ 3,6 points sur ce modèle.
+
+Reste à en évaluer le prix. Sur un seul H100, Jeeves répond en **~0,3 s sans raisonnement** et **3,3 s en médiane avec — 17,1 s au p90.** C'est environ 11 fois la latence médiane et une queue de distribution pire d'un ordre de grandeur, pour 3,6 points. L'atténuation propre au README est l'ingénierie intéressante : plafonner la réflexion à 2 560 jetons *et* ajouter un **seuil de confiance de 0,9** qui arrête tôt quand le modèle est déjà sûr de lui, ce qui ramène la médiane à **2,0 s.** Le raisonnement devient quelque chose que l'on dépense uniquement sur les items qui en ont besoin.
+
+Jeeves publie deux mises en garde sur lui-même : il est **moins bon que Jev sur les tâches à forte densité de connaissances** (MMLU 0,793 contre 0,900) — le raisonnement n'ajoute pas de faits — et ses chaînes de raisonnement n'ont jamais été récompensées pour leur cohérence linguistique, donc elles ne sont pas lisibles de façon fiable. Si vous vouliez utiliser la chaîne comme piste d'audit, vérifiez qu'elle est lisible avant de promettre quoi que ce soit à quiconque.
+
+## Pièges qui vous coûteront une journée
+
+- **La cohérence de la formulation prime sur sa qualité.** Jeff rapporte que le nombre de traversées à Frogger est passé de 15 à 23 simplement en formulant chaque option de la même manière que ses voisines. Les options sont comparées entre elles en une seule passe — une formulation asymétrique fait pencher la balance. Gardez les clés courtes et mettez la description dans le texte.
+- **Les formats de prompt ne se transposent pas d'un modèle de décision à l'autre.** Le style à numéros de relèvement de Jev ne s'est pas transféré à Jeff ; il a fallu une formulation axée sur les conséquences à la place. Traitez un changement de modèle de décision comme un travail de re-calibrage, exactement comme [le portage de prompts entre modèles](/docs/models/porting-prompts-across-models).
+- **Le plafond à 26 options est silencieux.** Rien ne renvoie d'erreur. Les options 27 et au-delà ne gagnent simplement jamais. Découpez les grands ensembles de labels en une décision à deux étapes.
+- **Anglais, texte uniquement** pour Jeff. AutoJev accepte les images en base64 ; pas Jeff.
+- **La qualité en zero-shot dépend de la forme de la charge de travail et déçoit souvent.** Plusieurs praticiens ont rapporté que les petits modèles étaient inutilisables sur leurs propres tâches de classification réelles. Mesurez sur vos données dès le premier jour.
+- **Le filtrage des fuites de données d'entraînement est votre responsabilité.** Jeff génère des données synthétiques localement avec un filtrage des fuites précisément parce qu'un modèle de décision entraîné trop près de son panneau d'évaluation produit un chiffre qui ne veut rien dire.
+- **Les deux dépôts ont quelques jours.** Les options, les noms de checkpoints et les valeurs par défaut évoluent. Rien ici ne remplace le README actuel.
+
+<Flashcards title="Vocabulaire du DIY pour modèles de décision" cards={[
+  {front: "Entropie croisée sur les lettres d'options", back: "L'objectif d'entraînement de Jeff/AutoJev : présenter les options comme un panneau lettré et entraîner une entropie croisée classique sur le jeton de la bonne lettre, puis lire et renormaliser les logits des lettres à l'inférence. Peu coûteux — et la raison pour laquelle le nombre d'options s'arrête à 26."},
+  {front: "Pointer head", back: "L'alternative de Jeeves : comparer un état caché projeté au point de décision à l'embedding de chaque option via un produit scalaire mis à l'échelle. Pas de lettres, donc pas de plafond alphabétique."},
+  {front: "Marqueurs à jetons rares", back: "Réutiliser des jetons du tokenizer qui n'apparaissent jamais dans du texte réel (`<|fim_prefix|>`, `<|box_start|>`, …) comme délimiteurs structurels pour l'état, les questions et les options — pas de croissance du vocabulaire, pas de collision avec le contenu."},
+  {front: "Calibration par température", back: "Un scalaire unique ajusté sur un ensemble de développement mis de côté APRÈS l'entraînement et livré avec le checkpoint. Divise les logits avant le softmax. Corrige la surconfiance sans toucher à l'exactitude."},
+  {front: "ECE / Brier", back: "Les deux chiffres qui indiquent si une probabilité est honnête. AutoJev : ECE 0,06483 → 0,04282, Brier 0,40834 → 0,22027 par rapport à son modèle de base. Rapportez-les à côté de l'exactitude, sinon vous n'avez pas mesuré la calibration."},
+  {front: "CISPO", back: "La méthode d'apprentissage par renforcement (de MiniMax) utilisée pour la deuxième étape de Jeeves. Son calendrier de 624 pas a été coupé au pas 402 parce que la calibration s'est dégradée au-delà de ce point — plus de RL n'est pas toujours meilleur."},
+  {front: "Réflexion à seuil de confiance", back: "Arrêter la chaîne de raisonnement tôt dès que la confiance dépasse un seuil (0,9 chez Jeeves) au lieu de toujours aller jusqu'au plafond de jetons. Réduit la latence médiane de 3,3 s à 2,0 s tout en conservant l'essentiel du gain."},
+  {front: "La baseline par embeddings", back: "Embeddings de phrases plus une tête de régression logistique — rapportée à 93,0 % sur BANKING77 avec un modèle ~15x plus petit. Le chiffre que votre fine-tune doit battre avant d'avoir la moindre valeur."}
+]} />
+
+<Quiz questions={[
+  {
+    q: "Jeff-0.8B obtient 96,4 % sur Financial PhraseBank contre 77,0 % pour Jev, mais 64,0 % sur BBH contre 94,3 % pour Jev. Quelle est la bonne conclusion ?",
+    options: [
+      "Jeff est globalement meilleur que Jev, puisqu'il gagne le benchmark le plus pratique",
+      "Le score global fait la moyenne de deux régimes très différents — choisissez selon la forme de la charge de travail : les tâches étroites et reconnaissables favorisent le petit fine-tune, le raisonnement en plusieurs étapes non",
+      "Les benchmarks se contredisent, donc aucun des deux n'est utilisable",
+      "Jev n'est meilleur que parce qu'il est plus grand, donc un Jeff plus gros le battrait partout"
+    ],
+    answer: 1,
+    explain: "Les deux lignes décrivent des types de travail différents. Les tâches étroites, à fort volume, de forme reconnaissable (sentiment, ancrage) sont celles où un petit fine-tune bat carrément l'API ; tout ce qui exige une chaîne de raisonnement est là où il perd de 26 à 30 points. La ligne « globale » est une moyenne sur un mélange de benchmarks qui n'est pas votre mélange de trafic."
+  },
+  {
+    q: "Pourquoi Jeff vous plafonne-t-il à 26 options par question ?",
+    options: [
+      "L'attention sur plus de 26 options devient numériquement instable",
+      "C'est une restriction de licence héritée de Qwen3.5",
+      "Les options sont encodées comme des lettres-jetons uniques A–Z et entraînées avec une entropie croisée sur cette lettre, donc l'alphabet est le plafond",
+      "26 est le plus grand nombre d'options présent dans un benchmark public"
+    ],
+    answer: 2,
+    explain: "La limite découle directement de la recette d'entraînement : le modèle place de la masse de probabilité sur un seul jeton de lettre. Les positions après Z ne sont jamais sélectionnées — silencieusement, sans erreur. Découpez les grands ensembles de labels en une décision à deux étapes."
+  },
+  {
+    q: "Votre modèle de décision fine-tuné atteint 88 % d'exactitude sur votre ensemble de développement. Que reste-t-il à faire avant de le laisser se passer d'une revue humaine ?",
+    options: [
+      "Rien — 88 % d'exactitude est le chiffre pertinent pour un seuil d'automatisation",
+      "Ajuster une température et vérifier la calibration, puis fixer le seuil à partir de la courbe de fiabilité plutôt que d'un chiffre rond",
+      "Réentraîner sur plus d'époques jusqu'à dépasser 95 % d'exactitude",
+      "Passer au modèle 2 Md, puisque les modèles plus grands sont mieux calibrés par défaut"
+    ],
+    answer: 1,
+    explain: "L'exactitude et la calibration sont des propriétés distinctes : un modèle peut classer correctement et être tout de même mal calibré par excès de confiance, ce qui est exactement la forme trouvée par le pilote indépendant de Jev (87,4 % de confiance déclarée pour 75,3 % d'exactitude). Ajustez la température scalaire sur des données mises de côté, puis lisez la confiance à laquelle l'exactitude observée est réellement acceptable."
+  },
+  {
+    q: "Jeeves rapporte 0,804 d'exactitude sans raisonnement et 0,840 avec, à 0,3 s contre 3,3 s en médiane (17,1 s au p90). Quel est l'enseignement d'ingénierie ?",
+    options: [
+      "Toujours activer le raisonnement — 3,6 points est un gain important pour un classifieur",
+      "Ne jamais activer le raisonnement — un coût de latence x11 ne peut jamais être justifié",
+      "Dépenser le raisonnement sélectivement : un seuil de confiance qui s'arrête tôt sur les items faciles a récupéré l'essentiel du gain à 2,0 s en médiane",
+      "Le modèle de 9 Md est simplement trop petit, et le raisonnement serait gratuit sur un plus grand"
+    ],
+    answer: 2,
+    explain: "L'atténuation propre à Jeeves est un seuil de confiance de 0,9 associé au plafond de réflexion de 2 560 jetons, ramenant la médiane à 2,0 s. Traitez la réflexion comme un budget dépensé sur les items qui en ont besoin, pas comme un interrupteur global — et surveillez le p90, là où un SLO de latence de queue se brise réellement."
+  },
+  {
+    q: "Avant d'entraîner votre propre modèle de décision sur un ensemble de labels fixe, quelle baseline devriez-vous mesurer en premier ?",
+    options: [
+      "Le plus grand modèle à poids ouverts que vous pouvez faire tenir, en zero-shot",
+      "Des embeddings de phrases plus une tête de régression logistique — rapportés à 93,0 % sur BANKING77 avec un modèle environ 15x plus petit",
+      "Un ensemble de règles d'expressions régulières écrites à la main",
+      "L'API hébergée à son seuil de confiance le plus bas"
+    ],
+    answer: 1,
+    explain: "Quand l'ensemble de labels est fixe et que vous avez des exemples, une pile classique embeddings plus classifieur est plus petite, plus rapide et s'entraîne en quelques secondes. Un modèle de décision mérite son coût quand le schéma est le produit — des questions typées arbitraires en prose — pas quand vous connaissez déjà tous vos labels."
+  }
+]} />
+
+## Sources et lectures complémentaires
+
+- [firelex/jeff](https://github.com/firelex/jeff) — le README avec le benchmark complet, les tableaux de latence et de jeux, les commandes d'entraînement, la limite à 26 options et les résultats des fine-tunes échecs/voix.
+- [PostHog/jeeves](https://github.com/PostHog/jeeves) — entraînement en trois étapes (SFT → CISPO → température), pointer head, marqueurs à jetons rares, l'ablation du raisonnement et les chiffres de latence/seuil.
+- [denis-pplx/autojev](https://github.com/denis-pplx/autojev) — la recette d'origine : SFT pleins poids de Qwen3.8-27B sur 73 000 exemples, un seul H200, avec l'avant/après exactitude/ECE/Brier.
+- [Hacker News — discussion Jeff (item 49883844)](https://news.ycombinator.com/item?id=49883844) — 536 points, 204 commentaires : les retours d'échec en zero-shot, la critique de ModernBERT et le chiffre embeddings + régression logistique sur BANKING77.
+- [Hacker News — discussion Jeeves (item 49891290)](https://news.ycombinator.com/item?id=49891290) — le débat raisonnement contre latence.
+- [AILmanac — Modèles de décision System One : Jev, Kev et les clones ouverts](/docs/models/system-one-decision-models-jev-kev) — la catégorie elle-même, le pilote indépendant de calibration sur BANKING77, et les limites et tarifs de l'API hébergée.
+
+## Suite
+
+- [Modèles de décision System One : Jev, Kev et les clones ouverts](/docs/models/system-one-decision-models-jev-kev) — à lire en premier si la catégorie est nouvelle pour vous ; couvre l'API, l'affirmation « ne peut pas halluciner » et le test indépendant.
+- [Patterns de routage de modèles](/docs/models/model-routing-patterns) — là où une probabilité calibrée trouve réellement sa place : cascades, portes de confiance et escalade.
+- [Faire tourner des modèles en local avec Ollama](/docs/models/run-models-locally-ollama) — le socle général de service local que cette page suppose acquis.
