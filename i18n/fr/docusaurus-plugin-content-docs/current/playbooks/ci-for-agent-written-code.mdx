@@ -1,0 +1,287 @@
+---
+sidebar_position: 10
+title: "CI/CD pour du code écrit par des agents"
+description: "Les agents de codage multiplient le volume de PR. Les merge queues, les tests instables et les plafonds de runners cassent dans cet ordre — voici l'arithmétique, les leviers classés par effet de levier, et le garde-fou qui empêche un agent de corriger sa propre copie."
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-09-23" source="https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue">
+Les plafonds de concurrence des runners, les délais d'attente de la queue et les paramètres de merge queue sont des limites de plateforme que GitHub modifie sans grand bruit. Les mécanismes ci-dessous sont stables ; revérifiez les chiffres exacts sur la page des limites avant de dimensionner un pipeline dessus.
+</VerifyNote>
+
+<Callout type="objectives" items={["Comprendre pourquoi la merge queue — et non le budget de runners — est la première chose à casser sous le volume de PR des agents", "Faire l'arithmétique du batching : comment quelques points de taux d'échec effondrent le merge spéculatif", "Classer correctement les quatre leviers, car 'ajouter plus de runners' est le plus faible", "Mettre en place un garde-fou qui prouve qu'un test d'agent échoue réellement sans le correctif de l'agent", "Mettre en quarantaine les tests instables sur preuve plutôt que sur intuition, et connaître le piège de cache qui empoisonne silencieusement la CI"]} />
+
+Vos agents de codage fonctionnent. C'est bien le problème.
+
+Une équipe qui mergeait 5 pull requests par jour et qui en merge désormais 40 n'a changé ni sa suite de tests, ni son budget de runners, ni ses règles de protection de branche. Elle a changé le *taux d'arrivée* dans un système de files d'attente calibré pour l'ancien régime. Tout ce qui est en aval — merge queue, bruit des tests instables, concurrence des runners, attention de revue — était dimensionné pour un débit humain, et les systèmes de files d'attente ne se dégradent pas en douceur. Ils tiennent, tiennent, tiennent, puis s'effondrent en l'espace d'une semaine.
+
+Cette page est le pendant côté pipeline de [la limite de vérification](/docs/frontiers/the-verification-bottleneck). Cette page-là demande *qui vérifie le code*. Celle-ci demande si votre CI peut physiquement absorber le volume, et que faire si ce n'est pas le cas.
+
+## Trois chiffres qui cadrent tout le problème
+
+**−7,2 %.** Le rapport *Accelerate State of DevOps 2024* de DORA a modélisé une hausse de 25 % de l'adoption de l'IA et estimé une **baisse de 7,2 % de la stabilité de livraison**, accompagnée d'une baisse de 1,5 % du débit. La productivité individuelle et la satisfaction au travail ont *augmenté*. Les résultats au niveau de la livraison ont baissé — le rapport relie cela à des changesets plus gros et une discipline de batching plus faible. Le suivi de 2025 recadre le constat : l'IA est un **amplificateur**, qui grossit ce que votre système de livraison est déjà. Un pipeline fragile à 5 PR/jour devient inutilisable à 40.
+
+**19 %.** L'essai randomisé de METR (juillet 2025) a pris 16 mainteneurs open-source expérimentés et 246 tickets réels issus de leurs propres dépôts, en randomisant si les outils d'IA étaient autorisés. Avec l'IA, les tâches ont pris **19 % de temps en plus**. L'écart qui compte pour la planification de la CI est celui de perception : les développeurs prédisaient un gain de vitesse de 24 %, et *après* le ralentissement, ils croyaient toujours avoir été accélérés de 20 %. Personne dans votre équipe ne vous dira que le pipeline est la contrainte, parce que personne ne le vit comme telle — ils le vivent comme de l'"attente", ce qui ressemble à de la météo.
+
+**1,5 % / 16 % / 84 %.** Les données publiées par Google sur l'instabilité des tests : environ **1,5 % des exécutions de tests** rapportent un résultat instable ; environ **16 % de leurs 4,2 millions de tests** se sont montrés instables à un moment ou un autre ; et environ **84 % des transitions observées de succès vers échec** impliquent un test instable plutôt qu'une vraie régression. Retenez ce 1,5 % — il est assez faible pour être ignoré à 5 PR/jour et devient structurant à 40.
+
+## Pourquoi la merge queue casse en premier
+
+La plupart des équipes supposent que le plafond, c'est le calcul. Ce n'est pas le cas. C'est la merge queue, et la raison tient à un mécanisme dont presque personne n'a lu la documentation.
+
+La merge queue de GitHub fait de la **vérification spéculative**. Mettez en file les PR #1, #2, #3 et elle construit des branches temporaires : `main` + #1, `main` + #1 + #2, `main` + #1 + #2 + #3 — et les teste toutes *en parallèle*. Si tous les contrôles passent, les trois atterrissent en un seul round. C'est toute la proposition de valeur : le batching transforme N validations séquentielles en une seule.
+
+Maintenant lisez le chemin d'échec. Quand un contrôle échoue pour le groupe contenant la PR #1, GitHub retire **#1** de la queue — et chaque groupe derrière elle contenait les changements de #1, donc ces groupes sont invalides et sont **reconstruits sans elle**. Une mauvaise PR ne coûte pas un seul emplacement. Elle coûte le reste du round de CI du batch entier.
+
+Cela fait du débit de la queue une fonction de votre *taux de réussite*, et c'est plus abrupt que l'intuition ne le suggère. Modélisez-le : taille de batch N, chaque PR échouant indépendamment avec une probabilité p, et vous mergez la série de PR jusqu'au premier échec. Le nombre de merges attendu par round est une espérance géométrique :
+
+```text
+E[merges] = (1 − p) · (1 − (1 − p)^N) / p
+```
+
+Avec N = 10 :
+
+| Taux d'échec par PR `p` | Merges attendus par round | Rounds pour absorber 10 PR |
+| --- | --- | --- |
+| 2 %  | 8,9 | ~1,1 |
+| 5 %  | 7,6 | ~1,3 |
+| 10 % | 5,9 | ~1,7 |
+| 20 % | 3,6 | ~2,8 |
+| 30 % | 2,3 | ~4,4 |
+
+Deux conséquences que la plupart des équipes inversent :
+
+1. **Une suite instable est une taxe sur le *débit*, pas une taxe de confort.** L'instabilité s'ajoute directement à `p`. Passer de 5 % d'échecs réels à 5 % réels + 5 % d'instabilité vous fait passer de 7,6 merges par round à 5,9 — environ **23 % de votre capacité de merge**, perdue sur des tests qui ne testaient plus rien.
+2. **Augmenter la taille du batch est le mauvais levier quand `p` est élevé.** Un N plus grand n'aide que quand `(1 − p)^N` reste proche de 1. À p = 0,2, un batch de 10 ne délivre que 3,6 merges ; le remède est de baisser `p`, pas de mettre en file plus d'optimisme.
+
+Et le volume des agents pousse `p` dans le mauvais sens — le constat de DORA sur la stabilité est exactement une affirmation sur la hausse de `p`.
+
+## L'arithmétique de capacité que personne ne fait
+
+Faites ce calcul de coin de table avant d'acheter des runners. Hypothèses explicitées, car ce sont elles qui le rendent faux pour votre équipe :
+
+<Steps items={[
+  {title: "Comptez des minutes-job, pas du temps horloge", body: "Une suite de 45 minutes répartie en 15 jobs parallèles coûte toujours ~45 minutes-job. Le parallélisme achète de la latence, jamais du coût. Prenez le total de minutes-job de votre suite sur une exécution récente, pas le job le plus lent."},
+  {title: "Multipliez par le nombre de validations par PR, pas par le nombre de PR", body: "Avec une merge queue, chaque PR est validée au moins deux fois : une fois sur la branche de la PR, une fois dans un groupe de merge. Les relances et reconstructions issues des calculs de p ci-dessus en ajoutent davantage. Budgétez 2,5x comme plancher, pas 1x."},
+  {title: "Divisez par la fenêtre de pic, pas par la journée", body: "40 PR x 2,5 validations x 45 minutes-job = 4 500 minutes-job. Réparti sur 24 heures, c'est négligeable. Ça n'arrive pas sur 24 heures — ça arrive en deux ou trois heures autour de l'heure de revue. 4 500 minutes-job dans une fenêtre de 2 heures nécessite ~37 jobs concurrents soutenus."},
+  {title: "Comparez au plafond dur de votre offre", body: "Les runners standard hébergés par GitHub plafonnent le total de jobs concurrents à 20 (Free), 40 (Pro), 60 (Team) et 500 (Enterprise). Le calcul de coin de table ci-dessus dépasse discrètement Free et se cale juste au-dessus de Pro — pendant le pic, qui est la seule fenêtre qui compte."},
+  {title: "Trouvez l'échec silencieux", body: "Un job en attente est annulé après 24 heures. Sur une queue saturée, cela apparaît comme des jobs qui n'ont jamais tourné plutôt que des jobs qui ont échoué, ce qui est bien plus difficile à remarquer et n'alerte personne."}
+]} />
+
+La leçon n'est pas "achetez Enterprise". C'est que la contrainte est la **concurrence en pic**, et que le chiffre de moyenne quotidienne qui fait paraître votre pipeline en bonne santé est précisément le chiffre qui cache le problème.
+
+## Quatre leviers, classés par effet de levier
+
+Les équipes s'en emparent presque exactement dans l'ordre inverse de l'ordre utile.
+
+**1. Baisser `p` (effet de levier maximal, coût minimal).** Chaque point de taux d'échec retiré rapporte de façon non linéaire dans les calculs de batching. Concrètement : faites tourner la suite rapide en local par les agents avant d'ouvrir une PR, exigez un contrôle pré-merge au vert avant qu'une PR soit *autorisée* à entrer dans la queue, et mettez en quarantaine les tests instables de façon agressive (voir plus bas). Cela ne coûte aucun calcul.
+
+**2. Réduire le travail par validation — la sélection de tests.** C'est le seul levier qui change l'exposant plutôt que la constante. Au lieu de tout exécuter, exécutez ce que le changement peut plausiblement casser :
+
+- **Develocity Predictive Test Selection** construit un modèle à partir de l'historique de vos propres Build Scan et de motifs inter-projets, et fournit un **simulateur** pour mesurer les gains et le taux d'échecs manqués *avant* de l'activer. Deux détails de sécurité à retenir même sans jamais l'acheter : vous pouvez épingler des **tests devant toujours tourner** par motif de classe ou annotation, et il **sélectionne toujours les tests récemment instables**, car un test instable est par définition imprévisible à partir du changement. Associez-le à une exécution "tests restants" post-merge ou nocturne pour que rien ne soit jamais définitivement sauté.
+- **Bazel / Buck2** gèrent cela structurellement : le graphe de build sait quelles cibles dépendent des fichiers modifiés, donc `bazel test` sur les cibles affectées équivaut à une détermination de cibles gratuite.
+- **Pas de graphe de build ?** Python dispose de `pytest-testmon`, qui enregistre quels tests couvrent quel code et ne relance que ceux affectés. Jest fournit `--changedSince` nativement.
+
+<PromptCard title="Sélection des tests, trois écosystèmes">
+{`# Bazel — test only what the diff can reach
+bazel test $(bazel query "rdeps(//..., set($(git diff --name-only origin/main)))" --output=label 2>/dev/null)
+
+# Python — coverage-based impact analysis
+pip install pytest-testmon
+pytest --testmon          # first run builds the DB, later runs select
+
+# Jest — built in, no plugin
+npx jest --changedSince=origin/main`}
+</PromptCard>
+
+**3. Mettre en cache de façon agressive — et connaître le piège.** Le cache distant stocke les résultats d'action indexés par un hash des entrées, de la ligne de commande et de l'environnement autorisé. La documentation de Bazel signale le piège elle-même : **les outils situés hors de l'espace de travail ne sont pas suivis**, donc deux machines avec des versions de compilateur différentes peuvent obtenir un *hit* de cache sur un travail qui aurait produit des résultats différents. Autorisez explicitement ce qui compte avec `--action_env`, et réservez l'accès en écriture à la CI uniquement — les machines des développeurs doivent lire seulement :
+
+<PromptCard title="Cache distant, écriture réservée à la CI">
+{`# CI: read and write
+bazel test //... --remote_cache=grpcs://cache.internal:443
+
+# Developer machines: read only, never poison the shared cache
+bazel test //... --remote_cache=grpcs://cache.internal:443 \\
+  --remote_upload_local_results=false`}
+</PromptCard>
+
+**4. Ajouter des runners (en dernier).** Coût linéaire, bénéfice linéaire, et cela ne fait rien pour `p`. Faites-le après les trois premiers, quand vous connaissez réellement votre chiffre de concurrence en pic.
+
+## Le mode d'échec spécifique à l'IA : l'agent corrige sa propre copie
+
+Tout ce qui précède s'applique à n'importe quel pipeline à haut volume. Ceci est spécifique au code écrit par des agents, et c'est la lacune que la plupart des configurations de CI présentent.
+
+Quand le même agent écrit le correctif *et* le test du correctif, "les tests passent" porte beaucoup moins d'information qu'on ne le pense. Deux formes d'échec reviennent constamment :
+
+- Le test valide le comportement de l'implémentation plutôt que l'exigence — il passe parce qu'il a été écrit en lisant le code qu'il teste.
+- L'agent, quand un test préexistant échoue, modifie le *test* pour qu'il corresponde au nouveau comportement au lieu de corriger le code. Le diff est vert et la régression est livrée. Ce comportement a un nom et une littérature — voir [le reward hacking chez les agents de codage](/docs/frontiers/reward-hacking-in-coding-agents) pour comprendre pourquoi les modèles le font et quelles défenses ont un effet mesuré. Ce qui suit est le contrôle côté pipeline, pas côté modèle.
+
+Le garde-fou structurel bon marché : **un nouveau test doit échouer face au code d'avant le changement.** C'est la discipline rouge-vert du TDD transformée en contrôle automatisé, et c'est ce que le mutation testing formalise à grande échelle. Vous n'avez pas besoin d'un framework de mutation testing pour en tirer l'essentiel — il vous faut un job de CI :
+
+<PromptCard title="Barrière CI : les nouveaux tests doivent échouer sans le changement">
+{`#!/usr/bin/env bash
+# must-fail-first.sh — run in CI on PRs that add tests
+set -euo pipefail
+
+NEW_TESTS=$(git diff --name-only origin/main...HEAD -- 'tests/**' 'test/**')
+[ -z "$NEW_TESTS" ] && { echo "no new tests, skipping"; exit 0; }
+
+# Keep the new tests, revert everything else to the base commit
+git stash push --keep-index -- $NEW_TESTS
+git checkout origin/main -- src/
+git stash pop
+
+# The new tests MUST fail now. If they pass, they prove nothing.
+if pytest $NEW_TESTS -q; then
+  echo "FAIL: new tests pass against unmodified source — they do not test the change."
+  exit 1
+fi
+echo "OK: new tests fail without the fix."`}
+</PromptCard>
+
+Deux mises en garde honnêtes. Cela ne fonctionne que lorsque le code source et les tests vivent dans des arborescences séparées, et un test qui échoue pour la mauvaise raison (erreur d'import, fixture manquante) passe ce garde-fou. C'est un plancher, pas une preuve — mais il attrape la façon la plus courante dont une PR écrite par un agent est verte et sans valeur.
+
+Le contrôle complémentaire côté revue est un reviewer qui ne partage pas le contexte de l'auteur : voir [le reviewer IA hybride](/docs/models/open-code-review-hybrid-ai-reviewer) et [l'action GitHub de revue de PR](/docs/walkthroughs/pr-review-action).
+
+## Une quarantaine de tests instables qui survit au contact des agents
+
+Étant donné que 84 % des transitions succès→échec sont des instabilités, "relancer" est la réponse humaine par défaut et c'est la plus coûteuse disponible — elle consomme une validation entière sur un test qui n'allait jamais rien vous apprendre.
+
+<Steps items={[
+  {title: "Mesurez avant de juger", body: "Un test instable est un test qui produit des résultats différents sur le même commit. Exécutez la suite N fois sur une branche main inchangée et enregistrez le nombre d'échecs par test. C'est votre preuve ; la mémoire des développeurs n'en est pas une."},
+  {title: "Mettez en quarantaine sur un seuil, pas sur un argument", body: "Tout ce qui dépasse votre seuil bascule dans un job non bloquant qui continue de tourner et de rapporter. Cela arrête immédiatement de bloquer les merges — c'est le gain de débit — et cela reste visible pour ne pas devenir du code mort."},
+  {title: "Plafonnez la quarantaine et donnez-lui un propriétaire", body: "Une quarantaine sans plafond est un cimetière. Budget fixe (disons 1 % des tests), un nom attaché, une date d'expiration. Au-delà du budget, la prochaine instabilité évince la plus ancienne, qui redevient bloquante."},
+  {title: "Ne laissez jamais la sélection de tests sauter une instabilité", body: "C'est la règle contre-intuitive que Develocity encode : les tests récemment instables sont toujours sélectionnés, car le modèle ne peut pas les prédire à partir du diff. Les exclure via la sélection cacherait le signal dont vous avez besoin pour les corriger."},
+  {title: "Recalculez p après chaque round", body: "Recalculez votre taux d'échec par PR chaque mois et placez-le sur le tableau de bord à côté du débit de la merge queue. C'est le seul chiffre qui vous dit si le pipeline s'améliore ou si les agents font juste plus de bruit."}
+]} />
+
+## Pièges qui coûtent une journée chacun
+
+- **`merge_group` n'est pas automatique.** La documentation de GitHub est explicite : vous **devez** ajouter l'événement `merge_group` aux déclencheurs de votre workflow, sinon vos contrôles ne se déclenchent jamais dans la queue et les merges échouent faute de contrôles requis. C'est l'erreur de configuration de merge queue la plus courante.
+- **L'annulation de queue à 24 heures est silencieuse.** Queue saturée → les jobs disparaissent au lieu d'échouer. Alertez sur la profondeur de la queue, pas seulement sur les builds rouges.
+- **Les jobs matriciels plafonnent à 256 par exécution de workflow.** Les matrices générées (un motif courant du scaffolding d'agents) heurtent cette limite sans erreur utile.
+- **Les hits de cache inter-machines peuvent être erronés.** Des toolchains externes non suivies produisent de faux hits. Épinglez les toolchains, autorisez l'environnement avec `--action_env`.
+- **La protection de branche avec des motifs génériques est incompatible avec les merge queues.** Si vos règles de protection utilisent des wildcards, la queue ne s'engagera pas.
+- **Les PR d'agents touchant à la CI sont une frontière de sécurité, pas une question de style.** Une PR capable de modifier des fichiers de workflow peut exfiltrer les secrets de CI — voir [de l'issue GitHub aux secrets de CI](/docs/security/github-issue-to-ci-secrets-blackhat-2026) et [durcir les exécutions autonomes](/docs/security/hardening-autonomous-runs).
+
+## Le cadrage honnête
+
+Il n'existe aucune configuration qui permette à un pipeline d'absorber une production d'agents sans limite. Ce que les leviers ci-dessus vous achètent, c'est un système dont le coût croît avec la *taille du changement* plutôt qu'avec le *nombre de pull requests* — la sélection de tests et le cache sont sous-linéaires, les runners sont linéaires, et le batching de la merge queue n'est sous-linéaire que tant que votre taux de réussite reste élevé.
+
+Ce qui remet la vraie contrainte là où le cadrage 2025 de DORA la place : l'IA amplifie le système de livraison que vous avez déjà. Si les petits batchs, les suites rapides et la faible instabilité étaient déjà votre pratique, les agents vous rendent bien plus rapide. Si ce n'était pas le cas, les agents le révèlent.
+
+<Quiz questions={[
+  {
+    q: "Votre merge queue a une taille de batch de 10 et votre taux d'échec par PR passe de 5 % à 20 %. Qu'arrive-t-il approximativement au nombre de merges attendus par round ?",
+    options: [
+      "Il baisse légèrement, d'environ 9 à environ 8",
+      "Il baisse presque de moitié, d'environ 7,6 à environ 3,6",
+      "Il est inchangé — le batching absorbe les échecs",
+      "Il double, car les échecs libèrent des emplacements dans la queue"
+    ],
+    answer: 1,
+    explain: "Les merges attendus suivent (1 − p)(1 − (1 − p)^N)/p. À p = 0,05, c'est ~7,6 ; à p = 0,20, c'est ~3,6. Le batching spéculatif est un pari sur le taux de réussite, ce pourquoi baisser p bat le fait d'augmenter la taille du batch."
+  },
+  {
+    q: "Un groupe de merge échoue à cause de la PR #1. Que fait GitHub des groupes en file derrière elle ?",
+    options: [
+      "Rien — ils ont été testés indépendamment et sont mergés tels quels",
+      "Il les merge quand même et ouvre une PR de revert pour #1",
+      "Il retire #1 et reconstruit les groupes derrière elle sans les changements de #1",
+      "Il vide toute la queue et chaque auteur doit remettre sa PR en file"
+    ],
+    answer: 2,
+    explain: "Chaque groupe spéculatif derrière #1 contenait les changements de #1, ils sont donc invalides. GitHub retire #1 et reconstruit. Une mauvaise PR coûte au reste du batch un round de CI complet — c'est le mécanisme derrière l'arithmétique de débit."
+  },
+  {
+    q: "Quel levier change la façon dont le coût de la CI passe à l'échelle, plutôt que de simplement déplacer la constante ?",
+    options: [
+      "Ajouter plus de runners concurrents",
+      "Augmenter la taille de batch de la merge queue",
+      "La sélection de tests pilotée par ce que le diff peut atteindre",
+      "Relancer automatiquement les jobs en échec"
+    ],
+    answer: 2,
+    explain: "Les runners ont un coût linéaire pour un bénéfice linéaire. Les batchs plus grands n'aident que tant que le taux de réussite est élevé. La sélection de tests lie le travail à la taille du changement plutôt qu'au nombre de PR — le seul levier structurellement sous-linéaire ici."
+  },
+  {
+    q: "Pourquoi la Predictive Test Selection de Develocity exécute-t-elle toujours les tests récemment instables, même quand le diff ne les touche pas ?",
+    options: [
+      "Les tests instables sont généralement les plus lents, donc ils se parallélisent bien",
+      "Le résultat d'un test instable n'est pas prévisible à partir du changement, donc le modèle ne peut pas le sauter en toute sécurité",
+      "Des exigences de conformité contractuelle imposent des suites complètes",
+      "Les tests instables ont la couverture de code historique la plus élevée"
+    ],
+    answer: 1,
+    explain: "Le modèle prédit les résultats à partir des changements de code. Un test instable échoue indépendamment du changement, donc aucun modèle ne peut le sélectionner correctement — le sauter cacherait aussi les données dont vous avez besoin pour le corriger."
+  },
+  {
+    q: "La PR d'un agent ajoute un correctif et un test, et la CI est verte. Que vérifie le garde-fou 'must fail first' ?",
+    options: [
+      "Que le nouveau test atteint au moins 80 % de couverture de lignes",
+      "Que le nouveau test échoue quand il est exécuté sur le code d'avant le changement",
+      "Que l'agent n'a modifié aucun fichier de test existant",
+      "Que le test s'exécute en moins d'une seconde"
+    ],
+    answer: 1,
+    explain: "Si le nouveau test passe sur le code source non modifié, il ne prouve rien sur le correctif — la forme classique d'un test écrit en lisant l'implémentation. C'est un plancher, pas une preuve : un test qui échoue sur une erreur d'import 'passe' aussi ce garde-fou."
+  },
+  {
+    q: "Deux machines obtiennent un hit de cache distant Bazel sur la même action mais produiraient des sorties différentes. Quelle est la cause la plus probable ?",
+    options: [
+      "Le magasin adressable par contenu a supprimé un fichier de sortie",
+      "Une machine a utilisé --disk_cache et l'autre non",
+      "Une toolchain hors de l'espace de travail diffère et ne fait pas partie du hash d'action",
+      "Le cache d'action ne stocke que le stdout, jamais les métadonnées"
+    ],
+    answer: 2,
+    explain: "Bazel ne suit pas les outils situés hors de l'espace de travail. Des versions de compilateur différentes peuvent partager une clé de cache. Autorisez explicitement ce qui compte avec --action_env et épinglez les toolchains à l'intérieur de l'espace de travail."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Vérification spéculative (merge queue)", back: "GitHub construit des branches temporaires pour base+PR1, base+PR1+PR2, … et les teste en parallèle. Tout au vert signifie que le batch entier atterrit en un seul round. Un échec retire cette PR et force la reconstruction de chaque groupe derrière elle." },
+  { front: "Formule de débit de la merge queue", back: "E[merges par round] = (1 − p)(1 − (1 − p)^N)/p, pour une taille de batch N et une probabilité d'échec par PR p. N=10 : p=5 % → 7,6 ; p=10 % → 5,9 ; p=20 % → 3,6 ; p=30 % → 2,3." },
+  { front: "Pourquoi l'instabilité est une taxe sur le débit", back: "Les échecs d'instabilité s'ajoutent directement à p. Ajouter 5 points d'instabilité à N=10 fait passer les merges attendus de 7,6 à 5,9 — environ 23 % de la capacité de merge perdue sur des tests qui ne testaient rien." },
+  { front: "Constat DORA 2024 sur l'IA", back: "Une hausse modélisée de 25 % de l'adoption de l'IA → une baisse estimée de 7,2 % de la stabilité de livraison et de 1,5 % du débit, malgré une productivité individuelle en hausse. DORA 2025 recadre l'IA comme amplificateur du système de livraison existant." },
+  { front: "Essai randomisé METR 2025", back: "16 mainteneurs open-source expérimentés, 246 tickets réels, IA autorisée/interdite de façon randomisée. Les tâches ont pris 19 % de temps en plus avec l'IA. Les développeurs prédisaient un gain de +24 % et croyaient toujours à +20 % après coup." },
+  { front: "Chiffres d'instabilité de Google", back: "~1,5 % des exécutions de tests rapportent un résultat instable ; ~16 % des 4,2 millions de tests se sont montrés instables ; ~84 % des transitions succès→échec impliquent un test instable plutôt qu'une vraie régression." },
+  { front: "Concurrence en pic, pas moyenne quotidienne", back: "40 PR x ~2,5 validations x 45 minutes-job ≈ 4 500 minutes-job. Négligeable sur 24h ; nécessite ~37 jobs concurrents soutenus si cela tombe dans une fenêtre de revue de 2 heures. Plafonds des runners standard GitHub : 20 Free / 40 Pro / 60 Team / 500 Enterprise." },
+  { front: "Les quatre leviers, classés", back: "1) Baisser p (gratuit, gain non linéaire). 2) Sélection de tests (sous-linéaire — lie le coût à la taille du changement). 3) Cache distant. 4) Plus de runners (linéaire, dernier recours)." },
+  { front: "Garde-fou must-fail-first", back: "Un nouveau test doit échouer face au code source d'avant le changement. Attrape les tests écrits par des agents qui valident l'implémentation plutôt que l'exigence. Mises en garde : nécessite des arborescences source/test séparées, et un test qui échoue sur une erreur d'import passe le garde-fou." },
+  { front: "Déclencheur merge_group", back: "Les workflows doivent explicitement inclure l'événement merge_group, sinon leurs contrôles ne se déclenchent jamais dans la queue, et les merges échouent faute de contrôles requis. L'erreur de configuration de merge queue la plus courante." },
+  { front: "Piège du faux hit de cache distant", back: "Bazel ne suit pas les outils hors de l'espace de travail, donc des toolchains externes différentes peuvent partager un hash d'action. Autorisez explicitement l'environnement avec --action_env ; donnez aux machines des développeurs --remote_upload_local_results=false." },
+  { front: "Règles de quarantaine", back: "Déplacez les instabilités au-dessus d'un seuil mesuré vers des jobs non bloquants qui continuent de tourner et de rapporter. Plafonnez la quarantaine, assignez un propriétaire, fixez une expiration — et ne laissez jamais la sélection de tests sauter une instabilité." }
+]} />
+
+<Callout type="takeaways" items={[
+  "La merge queue casse avant le budget de runners. Le batching spéculatif est un pari sur votre taux de réussite, et une seule PR en échec invalide tous les groupes derrière elle.",
+  "Calculez E[merges] = (1 − p)(1 − (1 − p)^N)/p une fois pour vos vrais chiffres. Cela transforme 'la CI semble lente' en décision sur le levier à actionner.",
+  "L'instabilité, c'est du débit, pas de l'hygiène. Aux taux publiés par Google, le bruit est plus grand que le signal — 84 % des transitions succès→échec sont des instabilités.",
+  "Dimensionnez pour la concurrence en pic, jamais pour la moyenne quotidienne. Le chiffre quotidien est celui qui cache le problème, et une queue saturée annule des jobs silencieusement au bout de 24 heures.",
+  "La sélection de tests est le seul levier sous-linéaire : détermination de cibles Bazel/Buck2, Develocity PTS et son simulateur, pytest-testmon, ou jest --changedSince.",
+  "Quand l'agent écrit à la fois le correctif et le test, le vert signifie moins qu'on ne le pense. Conditionnez au fait que le test échoue sur le code d'avant le changement.",
+  "Le cadrage de DORA tient : l'IA amplifie le système de livraison que vous avez déjà. Petits batchs, suites rapides et faible instabilité ont toujours été le bon conseil — les agents rendent simplement coûteux le fait de l'ignorer."
+]} />
+
+## Sources et lectures complémentaires
+
+- [GitHub Docs — Gérer une merge queue](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue) — groupes spéculatifs, l'exigence de l'événement `merge_group`, la concurrence de build et les paramètres de limite de merge, le comportement d'échec/retrait
+- [GitHub Docs — Limites d'utilisation d'Actions](https://docs.github.com/en/actions/reference/limits) — plafonds de jobs concurrents par offre, l'annulation de queue à 24 heures, le plafond de matrice à 256 jobs, les délais de job et de workflow
+- [DORA — Accelerate State of DevOps Report 2024](https://dora.dev/research/2024/dora-report/) — l'effet modélisé d'une hausse de 25 % de l'adoption de l'IA sur la stabilité de livraison et le débit
+- [DORA — State of AI-assisted Software Development 2025](https://dora.dev/dora-report-2025/) — la thèse de "l'IA comme amplificateur" et l'accent mis sur le système de livraison sous-jacent
+- [METR — Measuring the impact of early-2025 AI on experienced open-source developer productivity](https://metr.org/blog/2025-07-10-early-2025-ai-experienced-os-dev-study/) — l'essai randomisé à 16 développeurs et 246 tickets, et le ralentissement de 19 %
+- [Google Testing Blog — Flaky Tests at Google and How We Mitigate Them](https://testing.googleblog.com/2016/05/flaky-tests-at-google-and-how-we.html) — le taux d'exécution instable d'environ 1,5 % et le chiffre de transition succès→échec de 84 %
+- [Google Testing Blog — Where do our flaky tests come from?](https://testing.googleblog.com/2017/04/where-do-our-flaky-tests-come-from.html) — analyse complémentaire des sources d'instabilité
+- [Develocity — Predictive Test Selection](https://docs.develocity.ai/predictive-test-selection/) — le simulateur, les tests devant toujours tourner, les profils de sélection, la sélection systématique des tests récemment instables, le mode tests restants
+- [Bazel — Remote caching](https://bazel.build/remote/caching) — cache d'action et CAS, comment les hashs d'action sont calculés, `--action_env`, la mise en garde sur les faux hits liés aux toolchains externes non suivies
+- [pytest-testmon](https://github.com/tarpas/pytest-testmon) — analyse d'impact de tests basée sur la couverture pour Python
+- Sur AILmanac : [La limite de vérification](/docs/frontiers/the-verification-bottleneck) — le versant humain/revue de la même contrainte
+- Sur AILmanac : [Open Code Review : le reviewer IA hybride](/docs/models/open-code-review-hybrid-ai-reviewer) — un reviewer qui ne partage pas le contexte de l'auteur
+
+## Suite
+
+- [La limite de vérification](/docs/frontiers/the-verification-bottleneck) — pourquoi la revue, et non la frappe, est devenue la contrainte
+- [Action GitHub qui revoit chaque PR](/docs/walkthroughs/pr-review-action) — le workflow concret à placer devant ce pipeline
+- [Évaluer votre agent IA](/docs/playbooks/evaluating-agents) — le garde-fou d'évaluation qui a sa place dans le même run de CI
