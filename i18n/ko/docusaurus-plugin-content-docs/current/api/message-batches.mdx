@@ -1,0 +1,224 @@
+---
+sidebar_position: 9.2
+title: "Message Batches — 50% 할인되는 비동기 작업"
+description: "대량 작업을 비동기 Batches API로 옮겨 비용을 절반으로 줄이고 처리량을 끌어올리는 방법 — 사람들이 흔히 걸려 넘어지는 함정까지 함께."
+keywords: [message batches, batch api, anthropic batch, 50% discount, async claude, bulk generation, evals]
+---
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={[
+  "Message Batches API가 하루 만에 본전을 뽑는 워크로드를 알아보기",
+  "배치를 제출하고, 상태를 폴링하고, 결과를 스트리밍해 돌려받기 — 처음부터 끝까지",
+  "배치 할인과 프롬프트 캐싱을 둘 다 깨뜨리지 않고 겹쳐 쓰기",
+  "요청을 조용히 배치 대상에서 탈락시키는 네 가지 기능을 피하기",
+  "같은 패턴을 OpenAI와 Gemini로 이식하기 — 세 곳 모두 비동기 작업을 50% 할인한다"
+]} />
+
+Anthropic 청구액의 절반쯤은 아마 동기 처리가 필요하지 않습니다. 야간 평가, 백필, 모더레이션 일괄 점검, 대량 콘텐츠 생성은 응답이 800 ms 만에 오는지 40분 만에 오는지 전혀 신경 쓰지 않습니다 — 그리고 Anthropic은 그 트레이드오프를 받아들이면 **50% 더 적게** 청구합니다. Message Batches API가 바로 그 할인을 챙기는 방법입니다.
+
+## 배치가 본전을 뽑는 시점
+
+다음 조건이 *모두* 참일 때 배치를 쓰세요 — 하나라도 "아니오"라면 일반 Messages API가 더 나을 가능성이 큽니다.
+
+| 신호 | 배치가 맞는 경우… |
+|---|---|
+| **지연 시간** | 최대 24시간까지 기다릴 수 있다. 대부분의 배치는 1시간 이내에 끝나지만 SLA는 24시간이다. |
+| **물량** | 보낼 요청이 최소 수백 개는 된다. API는 배치당 최대 100,000개를 받는다. |
+| **상호작용성** | 스피너를 보고 있는 사용자가 없다. 오프라인 작업용이다. |
+| **결과 형태** | 실시간 토큰 스트림이 아니라 JSONL 결과 파일을 소비할 수 있다. |
+
+전형적인 승리 사례:
+
+- **평가(evals)** — 릴리스 전에 모델 출력 5,000건을 루브릭에 맞춰 채점하기.
+- **백필** — 프롬프트가 바뀌었을 때 기존 데이터셋을 재분류하기.
+- **대량 생성** — 카탈로그 규모의 제품 설명, 요약, 메타 태그, 번역.
+- **모더레이션 / 라벨링** — 매일 일정에 맞춰 사용자 콘텐츠를 훑기.
+- **합성 데이터** — 더 작은 다운스트림 모델용 학습 쌍 생성하기.
+
+## 작업의 형태를 결정하는 한계들
+
+<VerifyNote lastVerified="2026-08-20" source="https://platform.claude.com/docs/en/build-with-claude/batch-processing">
+배치 한계, 할인율, 미지원 파라미터는 변할 수 있습니다 — 특정 숫자를 전제로 아키텍처를 설계하기 전에 Anthropic 배치 처리 문서를 다시 확인하세요.
+</VerifyNote>
+
+| 한계 | 값 |
+|---|---|
+| **할인** | 지원되는 모든 모델에서 표준 입력 *및* 출력 토큰 가격의 50% 할인. |
+| **배치 크기** | 요청 100,000개 또는 256 MB 중 먼저 걸리는 쪽. |
+| **처리 시간** | 대부분 1시간 이내; 24시간 하드 만료 — 24시간 후에도 처리되지 않은 것은 `expired`로 돌아온다. |
+| **결과 보관 기간** | 배치 생성 후 29일, 그 뒤로는 결과를 받을 수 없다(배치 메타데이터는 남는다). |
+| **모델 지원** | 활성 상태인 모든 Claude 모델 — Fable 5, Mythos 5, Opus 5, Opus 4.x, Sonnet 5, Sonnet 4.x, Haiku 4.5. |
+| **범위** | Workspace 단위. Workspace A의 키로는 Workspace B의 배치를 볼 수 없다. |
+| **지출 한도** | 동시 처리 때문에 배치가 설정된 워크스페이스 지출 상한을 약간 넘길 수 있다. |
+
+## 3단계 루프
+
+모든 배치 작업은 같은 형태를 따릅니다 — 생성, 폴링, 결과 스트리밍.
+
+<Steps items={[
+  {title: "배치 생성하기", body: "requests 배열과 함께 POST /v1/messages/batches를 호출합니다. 각 항목에는 고유한 custom_id(내 데이터로 다시 조인하는 키)와, 일반 Messages 호출과 완전히 똑같이 생긴 params 블록이 들어갑니다. API는 배치 id와 in_progress 상태의 processing_status를 반환합니다."},
+  {title: "완료될 때까지 폴링하기", body: "GET /v1/messages/batches/[id]를 루프로 호출합니다 — 60초 간격이면 충분합니다. 배치는 밀리초 단위 작업이 아닙니다. processing_status가 ended로 바뀌면 멈추세요. request_counts를 보면 실시간 진행 상황(processing / succeeded / errored / canceled / expired)을 읽을 수 있습니다."},
+  {title: "결과 스트리밍하기", body: "배치 응답은 JSONL 파일을 제공하는 results_url을 노출합니다 — 요청당 한 줄이고, 각 줄에 내 custom_id가 태그됩니다. 버퍼링하지 말고 스트리밍하세요: 10만 건 요청의 결과 파일은 수백 메가바이트가 될 수 있고, SDK는 한 줄씩 순회하므로 전체를 메모리에 올리지 않아도 됩니다."}
+]} />
+
+## 배치 생성하기 (cURL)
+
+최소한으로 동작하는 배치 — Opus 5 호출 두 개, 각각 결과를 원본 행과 조인할 수 있도록 태그가 달려 있습니다.
+
+<PromptCard title="POST /v1/messages/batches">{`curl https://api.anthropic.com/v1/messages/batches \\
+  --header "x-api-key: $ANTHROPIC_API_KEY" \\
+  --header "anthropic-version: 2023-06-01" \\
+  --header "content-type: application/json" \\
+  --data '{
+    "requests": [
+      {
+        "custom_id": "row-00001",
+        "params": {
+          "model": "claude-opus-5",
+          "max_tokens": 1024,
+          "messages": [
+            {"role": "user", "content": "Summarize: ..."}
+          ]
+        }
+      },
+      {
+        "custom_id": "row-00002",
+        "params": {
+          "model": "claude-opus-5",
+          "max_tokens": 1024,
+          "messages": [
+            {"role": "user", "content": "Summarize: ..."}
+          ]
+        }
+      }
+    ]
+  }'`}</PromptCard>
+
+`custom_id`는 `^[a-zA-Z0-9_-]{1,64}$`에 맞아야 하고 배치 내에서 고유해야 합니다. 이것을 외래 키로 다루세요 — 대부분의 사람은 결과가 깔끔하게 다시 합쳐지도록 행 id나 입력의 해시를 여기에 넣습니다.
+
+## 상태 폴링하기 (Python)
+
+<PromptCard title="배치가 끝날 때까지 기다리기">{`import time, anthropic
+
+client = anthropic.Anthropic()
+batch_id = "msgbatch_..."
+
+while True:
+    batch = client.messages.batches.retrieve(batch_id)
+    if batch.processing_status == "ended":
+        break
+    print(batch.request_counts)  # live progress
+    time.sleep(60)`}</PromptCard>
+
+## 결과 스트리밍과 유형별 처리
+
+모든 요청은 네 가지 버킷 중 하나에 떨어집니다. **청구되는 것은 `succeeded`뿐입니다** — 오류, 취소, 만료는 무료입니다.
+
+| 결과 유형 | 의미 | 조치 |
+|---|---|---|
+| `succeeded` | Message를 돌려받았다. | `custom_id`로 병합한다. |
+| `errored` | 잘못된 요청 또는 일시적인 서버 오류. | `invalid_request_error`는 고쳐서 다시 제출하고, 서버 오류는 바로 재시도한다. |
+| `canceled` | 이 요청이 실행되기 전에 배치를 취소했다. | 여전히 필요하면 다시 제출한다. |
+| `expired` | 이 요청이 실행되기 전에 24시간 창이 지났다. | 다시 제출한다 — 보통 배치가 너무 컸거나 플랫폼이 혼잡했다는 신호다. |
+
+<PromptCard title="결과 스트리밍하기 (Python)">{`for r in client.messages.batches.results(batch_id):
+    match r.result.type:
+        case "succeeded":
+            save(r.custom_id, r.result.message)
+        case "errored":
+            if r.result.error.error.type == "invalid_request_error":
+                log_bad_row(r.custom_id, r.result.error)
+            else:
+                retry_queue.append(r.custom_id)
+        case "expired":
+            retry_queue.append(r.custom_id)`}</PromptCard>
+
+순진하게 `requests.get(...).text`로 결과 파일 전체를 내려받지 마세요 — 큰 배치에서는 RAM을 고갈시킵니다. SDK 헬퍼는 이미 한 줄씩 순회하며, cURL에서의 등가 방식은 응답을 전부 메모리에 올리는 대신 `jq -c`로 파이프하는 것입니다.
+
+## 복합 효과: 배치와 프롬프트 캐싱 겹쳐 쓰기
+
+할인은 [프롬프트 캐싱](/docs/api/prompt-caching)과 겹쳐 적용되고, 바로 여기서 경제성이 우스울 정도로 좋아집니다. 캐시 히트는 입력 가격의 10%이고, 배치는 거기서 다시 절반으로 줄입니다. 모든 요청이 동일한 2만 토큰 시스템 프롬프트와 루브릭을 공유하는 큰 평가 작업에서는 입력 항목이 **정가의 5%**까지 떨어집니다 — 20배 절감입니다.
+
+알아둘 것이 두 가지 있습니다:
+
+1. **1시간 캐시 지속 시간을 쓰세요.** 기본값인 5분 TTL은 큰 배치가 다 처리되기 전에 보통 만료됩니다. Anthropic 공식 문서도 배치용으로는 1시간 캐시를 권장합니다.
+2. **`max_tokens: 0`(캐시 사전 워밍)은 배치 안에서 *허용되지 않습니다*** — 배치 처리 중에 작성된 임시(ephemeral) 항목은 후속 호출이 실행되기 전에 만료되므로, 플랫폼이 아예 거부합니다.
+
+이기는 형태는 이렇습니다: 일반 Messages 호출 한 번으로 캐시를 사전 워밍하고, 캐시가 기록될 때까지 기다린 다음, 이후 1시간 동안 그 캐시 접두사를 재사용하는 배치를 발사합니다.
+
+## 배치에 넣을 수 있는 것 — 그리고 넣을 수 없는 것
+
+**넣을 수 있음:** 비전, 모든 서버 도구(웹 검색, 웹 페치, 코드 실행, MCP 커넥터, advisor, 도구 검색), 시스템 메시지, 멀티턴, 확장 사고, 대부분의 베타 기능. 일반 Messages API에서 동작한다면 배치 안에서도 거의 확실히 동작합니다.
+
+**넣을 수 없음, 검증 시점에 거부됨:**
+
+| 파라미터 | 차단되는 이유 |
+|---|---|
+| `stream: true` | 결과는 실시간 스트림이 아니라 파일로 돌아온다. |
+| `speed` (Fast 모드) | Fast 모드는 동기 지연 시간을 조정하는 것이라 비동기에서는 의미가 없다. |
+| `store` / `previous_thread_event_id` (Threads) | Threads는 상태를 가지지만 배치는 그렇지 않다. |
+| `cache_hint` / `context_hint` | 라우팅 힌트는 동기 스케줄링에만 영향을 준다. |
+| `max_tokens: 0` | 쓰기도 전에 만료될 캐시 항목을 작성하게 된다. |
+| `research_preview_2026_02: "active"` | 리서치 프리뷰 모드는 배치 경로에 없다. |
+
+검증은 **비동기로** 실행되므로, 형식이 잘못된 요청은 배치 전체가 끝날 때에야 보고됩니다. 50,000건을 제출하기 전에, 요청 형태가 검증을 통과하는지 확인하려고 한 건을 일반 Messages API로 보내 보세요.
+
+## 여러 제공사에 걸친 동일한 패턴
+
+배치 가격은 수렴했습니다. 주요 프런티어 제공사 세 곳이 모두 동일한 큰 그림 — 50% 할인, 약 24시간 SLA, JSONL 입출력 — 을 제공하므로, 이것은 Claude 전용 꼼수가 아니라 진짜로 이식 가능한 패턴입니다.
+
+| 제공사 | 할인 | SLA | 제출 방식 | 교차 참조 |
+|---|---|---|---|---|
+| **Anthropic** — Message Batches | 입력+출력 50% 할인 | 대부분 1시간 미만, 24시간 하드 만료 | JSON 본문(`requests[]`), 최대 10만 건 / 256 MB | [문서](https://platform.claude.com/docs/en/build-with-claude/batch-processing) |
+| **OpenAI** — Batch API | 입력+출력 50% 할인 | 대부분 1–6시간, 24시간 SLA | JSONL 파일 업로드, 배치당 최대 5만 건 | [문서](https://developers.openai.com/api/docs/guides/batch) |
+| **Google** — Gemini Batch API | 입력+출력 50% 할인 | 대부분 24시간 SLA 이내 | 인라인 또는 GCS 기반 배치 작업; 컨텍스트 캐싱 지원 | [문서](https://ai.google.dev/gemini-api/docs/batch-api) |
+
+<VerifyNote lastVerified="2026-08-20" source="https://developers.openai.com/api/docs/guides/batch">
+제공사 간 배치 가격과 한계는 안정적이지만 고정된 것은 아닙니다 — 특정 숫자를 전제로 라우팅 레이어를 설계하기 전에 각 벤더의 페이지에서 다시 확인하세요.
+</VerifyNote>
+
+이식 가능한 아키텍처는 이렇습니다: 소스 테이블을 읽어 행을 1만 행 단위 배치로 쪼개고, 제공사별로 제출하고, 폴링하고, `custom_id`로 결과를 병합하는 작은 "잡 러너". 달라지는 것은 제출 / 폴링 / 결과 호출뿐이고, 파이프라인의 나머지는 제공사와 무관합니다. 같은 아이디어를 프롬프트 자체에 적용한 사례는 [크로스 AI 프롬프트 번역](/docs/prompting/cross-ai-translation)을 보세요.
+
+## 흔한 실수
+
+- **상호작용 트래픽을 배치로 돌리기.** 사용자가 페이지에 있다면 60초 대기조차 망가진 제품입니다. 배치는 오프라인 예약 작업용입니다.
+- **아주 작은 작업을 배치로 돌리기.** 요청 20건은 폴링 루프와 24시간 상한을 감수할 가치가 없습니다. 수백 건 아래라면 그냥 일반 Messages API를 동시성과 함께 쓰세요.
+- **스트리밍할 수 있는데 배치 전체를 기다리며 블로킹하기.** JSONL 파일 전체를 메모리로 내려받는 방식은 50행에서는 동작하고 50,000행에서는 OOM이 납니다. 순회하세요.
+- **`expired` 결과 무시하기.** 무료이긴 하지만 끝나지 않은 작업입니다. 추적해서 다시 큐에 넣으세요 — 그러지 않으면 수요가 몰리는 시간대에 파이프라인이 조용히 행을 잃습니다.
+- **검증이 동기라고 가정하기.** 한 행의 잘못된 요청은 즉시 실패하지 않고, 나머지와 함께 마지막에 돌아옵니다. 먼저 한 행을 일반 Messages API로 테스트하세요.
+- **조인 키 잃어버리기.** 배치는 순서대로 완료되지 않고 결과 파일도 입력 순서로 정렬되지 않습니다. 의미 있는 `custom_id`를 설정하지 않으면 결과를 원본 데이터에 안정적으로 병합할 수 없습니다.
+- **29일 보관 기간 잊기.** 그 뒤로는 `results_url`이 아무것도 반환하지 않습니다. 결과를 내려받아 자체 스토리지에 영속화하는 단계를 파이프라인에 넣으세요.
+
+<Flashcards title="핵심 정리" cards={[
+  {front: "할인", back: "현재 지원되는 모든 Claude 모델에서 표준 입력 AND 출력 토큰 가격의 50% 할인. 프롬프트 캐싱과 겹쳐 적용된다."},
+  {front: "배치 크기 한계", back: "배치당 요청 100,000개 또는 256 MB — 먼저 도달한 상한이 적용된다."},
+  {front: "처리 시간 SLA", back: "대부분의 배치는 1시간 이내에 끝난다. 24시간에 하드 만료되며, 처리되지 않은 요청은 expired로 돌아온다."},
+  {front: "결과 보관 기간", back: "배치 생성 시점부터 29일. 배치 메타데이터는 영구적으로 보이지만, results_url은 그 기간이 지나면 데이터를 제공하지 않는다."},
+  {front: "청구 규칙", back: "succeeded 요청에만 요금이 부과된다. errored, canceled, expired 요청은 무료다."},
+  {front: "탈락 조건들", back: "stream:true, Fast 모드(speed), Threads(store / previous_thread_event_id), cache_hint / context_hint, max_tokens:0, 그리고 현재의 리서치 프리뷰 모드는 모두 검증 시점에 거부된다."},
+  {front: "Custom ID", back: "원본 데이터로 돌아가는 외래 키. [캐럿 a-zA-Z 0-9 밑줄 하이픈, 길이 1에서 64, 달러] 패턴에 맞아야 하고 배치 내에서 고유해야 한다. 결과는 정렬되지 않은 채로 돌아오므로 병합하려면 이것이 필요하다."},
+  {front: "배치용 캐시 지속 시간", back: "기본값인 5분이 아니라 1시간 프롬프트 캐싱 TTL을 쓰자 — 큰 배치는 보통 짧은 창보다 오래 살아남는다."}
+]} />
+
+<Quiz title="스스로 확인하기" questions={[
+  {q: "다음 중 Batches API에 가장 맞지 않는 워크로드는?", options: ["평가 프롬프트 8,000건을 매일 밤 다시 채점하는 작업", "제품 설명 40,000건의 일회성 백필", "사용자가 응답을 기다리고 있는 실시간 채팅 기능"], answer: 2, explain: "배치는 24시간 SLA를 가지며 실시간 스트림이 없습니다. 사람이 지켜보는 작업은 일반 Messages API에 남겨 두어야 합니다."},
+  {q: "요청 10,000건을 배치로 보냈습니다. 9,200건 성공, 500건 오류, 200건 취소, 100건 만료. 요금을 내는 건수는?", options: ["10,000", "9,700", "9,200"], answer: 2, explain: "succeeded 요청만 청구됩니다. errored, canceled, expired는 모두 무료입니다 — 다만 만료된 100건은 다시 큐에 넣어야 하는 미완 작업입니다."},
+  {q: "40,000건 배치에서 거대한 시스템 프롬프트를 재사용하려 합니다. 어떤 캐시 TTL을 써야 할까요?", options: ["기본값인 5분 캐시", "1시간 캐시", "캐시 없음 — 배치는 캐싱을 건너뛴다"], answer: 1, explain: "4만 건 배치는 거의 확실히 5분보다 오래 실행됩니다. Anthropic은 배치용으로 1시간 캐시 지속 시간을 명시적으로 권장하며, 배치는 캐싱 할인과 50% 배치 할인을 겹쳐 적용합니다."},
+  {q: "큰 작업의 배치 결과 파일이 400 MB입니다. 올바른 소비 방식은?", options: ["단일 HTTP GET으로 파일 전체를 내려받아 파싱한다", "SDK 헬퍼로 JSONL을 한 줄씩 스트리밍한다", "results_url을 건너뛰고 인라인 결과가 올 때까지 배치를 다시 폴링한다"], answer: 1, explain: "배치는 JSONL 파일을 가리키는 results_url을 노출하고, 공식 SDK는 바로 이런 파일이 수백 MB가 될 수 있기 때문에 한 줄씩 순회합니다. 전체를 내려받으면 OOM 위험이 있습니다."}
+]} />
+
+<Callout type="takeaways" items={[
+  "배치는 오프라인 워크로드에서 Anthropic 지출을 줄이는 가장 큰 단일 레버다 — 50% 할인, 프롬프트 재작성 불필요.",
+  "거래 대상은 지연 시간과 상호작용성이며 품질이 아니다. 같은 모델, 같은 출력 형태, 같은 기능.",
+  "진짜 경제성을 보려면 프롬프트 캐싱과 1시간 TTL을 겹쳐 쓰자 — 접두사를 공유하는 워크로드에서는 정가 입력 가격의 5%까지 닿을 수 있다.",
+  "항상 의미 있는 custom_id를 설정하고, 항상 결과 파일을 스트리밍하고, 항상 expired 행을 다시 큐에 넣자.",
+  "패턴은 이식된다: OpenAI와 Gemini 모두 약 24시간 SLA로 비동기 작업을 50% 할인한다 — 잡 러너 하나를 만들어 제공사 간에 라우팅하자."
+]} />
+
+## 다음
+
+- 복합 할인을 겹쳐 쓰기 → [프롬프트 캐싱 & 비용 최적화](/docs/api/prompt-caching)
+- 배치를 쓰는 오프라인 평가 설계하기 → [평가](/docs/foundations/evals)
+- 같은 잡 러너를 제공사 간에 이식하기 → [크로스 AI 프롬프트 번역](/docs/prompting/cross-ai-translation)
+- 규모를 키우기 전에 비용을 처음부터 끝까지 지켜보기 → [토큰 & 가격](/docs/api/tokens-and-pricing)
