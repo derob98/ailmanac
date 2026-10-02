@@ -1,0 +1,412 @@
+---
+sidebar_position: 16.5
+title: "Mod: estensioni in-process"
+description: "Le mod sono middleware TypeScript che girano dentro Claude Code — riscrivi chiamate ai tool, prompt, turni e l'interfaccia stessa."
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-10-02" source="https://code.claude.com/docs/en/plugins/mods/overview">
+Le mod sono arrivate il 2026-10-01 in Claude Code **v2.1.287** e sono attive di default. I nomi degli eventi, i metodi della API delle mod, gli elementi e i limiti qui sotto provengono dalle pagine ufficiali sulle mod a quella versione. Anthropic dichiara che la superficie può cambiare tra una release e l'altra e che le dichiarazioni di tipo che Claude Code scrive per la *tua* build sono il riferimento autorevole — fidati di quelle più che di qualsiasi pagina, questa inclusa.
+</VerifyNote>
+
+Una **mod** è un plugin che distribuisce funzioni JavaScript o TypeScript che Claude Code chiama *dentro il proprio processo*. Dove un [hook](/docs/claude-code/hooks) è un comando shell che riceve un payload JSON e risponde con un exit code, l'handler di una mod si colloca in una catena di middleware **davanti al comportamento stesso di Claude Code** — può osservare un evento, riscriverlo o rispondergli in modo che il comportamento integrato non venga mai eseguito.
+
+Quest'ultima capacità è il punto centrale. Diverse funzionalità di Claude Code sono ormai mod: `/diff` e il caricamento di `AGENTS.md` sono distribuiti come `cc-plugin-diff` e `cc-plugin-agents-md`, con il sorgente nella [directory `mods/` del repo di Claude Code](https://github.com/anthropics/claude-code/tree/main/mods). Se il vendor può sostituire un comando integrato con una mod, puoi farlo anche tu.
+
+<Callout type="objectives" items={["Il modello middleware: osservare, riscrivere o rispondere a un evento — e perché next(e) raggiunge il motore stesso", "I tre file che servono a una mod, e il ciclo modifica-ricarica con --plugin-dir", "Il gate dell'analisi statica: perché const ui = $.ui è un errore di caricamento, non una pignoleria stilistica", "La mappa degli eventi (tool, prompt, turni, sessione, UI) e i namespace $ che un hook può chiamare", "Cinque trappole che mordono in produzione: hook che falliscono in apertura, il worker condiviso, il budget di 10 s, i reset dello stato, l'asimmetria delle regole deny", "Cosa può raggiungere una mod sulla tua macchina, come verificarla prima di installarla, e le impostazioni gestite con cui un amministratore le recinta"]} />
+
+## Mod, hook, skill o server MCP?
+
+Tutti e quattro estendono Claude Code e si sovrappongono. Scegli in base a *cosa ti serve cambiare*:
+
+| | **Mod** | **Hook da settings** | **Skill** | **Server MCP** |
+| --- | --- | --- | --- | --- |
+| Che cos'è | Funzioni in un plugin, eseguite nel processo di Claude Code | Un comando shell / richiesta HTTP / prompt attivato su un evento del ciclo di vita | Un `SKILL.md` di istruzioni | Un processo esterno che espone tool |
+| Cosa può cambiare | Chiamate ai tool, prompt, turni, comandi **e ciò che l'interfaccia disegna** | Se un'azione procede; argomenti e risultato di un tool; il contesto per Claude | Ciò che Claude sa e fa | Quali tool ha Claude |
+| Può disegnare UI? | **Sì** | No | No | No |
+| Tu scrivi | JS / TS | Uno script + una voce in `settings.json` | Markdown | Un server, in qualsiasi linguaggio |
+| Da usare quando | Vuoi un riquadro, una banda sopra il prompt, un `/command` istantaneo, o riscrivere un evento | Hai già uno script che deve bloccare, consentire o loggare | Continui a incollare le stesse istruzioni | Claude ha bisogno di un sistema esterno |
+
+Niente è deprecato: gli hook da settings continuano a girare, accanto alle mod. Un singolo plugin può portare insieme una mod, una skill, dei comandi e un server MCP — vedi [Plugin e marketplace](/docs/claude-code/plugins-marketplaces).
+
+## Il modello middleware
+
+Ogni hook riceve gli stessi tre argomenti — la API delle mod come `$`, l'evento congelato come `e`, e `next`. Gli handler di un evento formano una catena; l'**ultimo** `next` è il comportamento stesso di Claude Code. Cosa fai con `next` determina quale delle tre cose stai facendo.
+
+| Modalità | Come | Effetto |
+| --- | --- | --- |
+| **Osservare** | `return next(e)` | L'evento procede inalterato. Fai prima `await next(e)` per agire *dopo* di esso. |
+| **Riscrivere** | `return next({ ...e, text })` | Gli handler successivi e il motore vedono la tua copia e mai l'originale. |
+| **Rispondere** | restituisci un risultato, non chiamare mai `next` | Corto-circuita la catena: le mod successive *e il comportamento integrato* non vengono eseguiti. |
+
+```javascript
+// Observe: log the tool, then let it run
+on('tool.call', async ($, e, next) => {
+  $.ui.log('Claude is about to use ' + e.tool)
+  return next(e)
+})
+
+// Rewrite: trim every prompt before the turn starts
+on('prompt.submit', async ($, e, next) => next({ ...e, text: e.text.trim() }))
+
+// Answer: refuse force-pushes, and tell Claude why
+on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+  if (/git push .*--force/.test(e.command)) {
+    return { deny: 'Force pushes are not allowed here. Push to a new branch instead.' }
+  }
+  return next(e)
+})
+```
+
+Due cose da interiorizzare. Primo, `e` è **congelato in profondità** — assegnare a un campo solleva un'eccezione; a `next` passi una copia. Secondo, quando rispondi a un `tool.call` senza chiamare `next`, **non appare nessun prompt di permesso** e il tool non viene mai eseguito, quindi ciò che restituisci è tutto quello che Claude apprende su quanto è accaduto.
+
+Il secondo argomento di `on` è un **matcher**: un oggetto confrontato campo per campo con l'evento. Un campo può essere un valore, un array o una regex.
+
+```javascript
+on('tool.call', { tool: 'Bash' }, hook)                  // one tool
+on('tool.call', { tool: ['Edit', 'Write'] }, hook)       // any of these
+on('tool.call', { tool: /^mcp__github__/ }, hook)        // one MCP server's tools
+```
+
+`'*'` intercetta ogni evento tranne quelli di telemetria. Registra ogni evento **una volta per matcher** — due chiamate `on('session.start', …)` senza matcher fanno fallire il caricamento del modulo con `on("session.start") is registered twice without a matcher`.
+
+## Costruirne una in tre file
+
+Niente Node.js, niente bundler, nessuno step di build — Claude Code carica `.js` e `.ts` direttamente.
+
+<Steps items={[{title: "Crea la directory del plugin", body: "mkdir -p first-mod/.claude-plugin first-mod/hooks — una mod È un plugin, quindi ha bisogno del normale manifest di plugin in .claude-plugin/plugin.json."}, {title: "Punta hooks.json al tuo codice", body: "hooks/hooks.json porta un array modules con un percorso relativo a quel file, per esempio ./register.js. È la presenza di quella chiave modules a rendere il plugin una mod. Un'esecuzione di validate che non elenca nessuna riga hooks di solito significa che questa chiave manca o è scritta male."}, {title: "Scrivi il modulo degli hook", body: "hooks/register.js esporta register(on, options). Ogni chiamata on() registra un hook. options contiene i valori userConfig dal manifest, con i default già riempiti. Deve essere un ES module — import, mai require."}, {title: "Caricala per una sessione", body: "claude --plugin-dir ./first-mod carica la directory senza installarla, e ricarica a caldo il modulo ogni volta che salvi. Ripeti il flag per caricarne diverse."}, {title: "Controlla cosa ha letto davvero Claude Code", body: "claude plugin validate ./first-mod esegue la stessa analisi statica del loader, senza eseguire il tuo codice. Stampa una riga hooks (eventi, con i matcher tra graffe) e una riga calls (ogni metodo della API delle mod). Se un evento manca lì, Claude Code non chiamerà quell'hook nemmeno a runtime."}, {title: "Testala senza una sessione", body: "claude plugin test esegue ogni file *.test.ts / *.test.tsx — nessuna sessione, nessun login, nessuna rete. Un test emette eventi al posto di Claude Code e verifica cosa hanno fatto i tuoi hook."}]} />
+
+La mod iniziale canonica conta le chiamate ai tool e mostra il conteggio accanto allo spinner:
+
+```javascript
+// hooks/register.js — shared by every hook in this module
+let calls = 0
+
+export function register(on) {
+  on('session.start', async ($, e, next) => {
+    await $.command.register({ name: 'tally', description: 'Show how many tool calls Claude has made' })
+    return next(e)
+  })
+
+  on('tool.call', async ($, e, next) => {
+    calls += 1
+    $.ui.invalidate('ui.render')   // ask for a redraw so the new count shows
+    return next(e)
+  })
+
+  on('command.run', { command: 'tally' }, async () => {
+    return { text: 'Claude has made ' + calls + ' tool calls since this mod loaded' }
+  })
+
+  on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
+    return next({ ...e, props: { ...e.props, suffix: ' · tool calls: ' + calls + '…' } })
+  })
+}
+```
+
+La variabile `calls` condivisa a livello di modulo è il pattern idiomatico: **un hook raccoglie, un altro mostra.** È esattamente ciò che gli hook da settings non possono fare per struttura, perché ognuno è un processo separato.
+
+Non devi scriverla a mano. Claude Code include una skill `plugin-authoring` integrata (elencata in `/plugin` come `cc-plugin-plugin-authoring`), quindi descrivere la mod funziona:
+
+<PromptCard title="Fai scrivere la mod a Claude">
+{`make a mod that shows the current git branch above the prompt`}
+</PromptCard>
+
+Claude la scrive sotto `~/.claude/dev-mods/<session-id>/<mod-name>/`, chiede una volta se abilitare il ricaricamento a caldo per la sessione, e la ricarica alla fine di ogni turno che modifica i suoi file. Attenzione alla trappola: quella cartella è **per sessione** e Claude Code la elimina quando diventa più vecchia di `cleanupPeriodDays`. Copia la directory in un posto tuo per conservare la mod.
+
+<PromptCard title="Verifica le capacità di una mod prima di eseguirla">
+{`claude plugin validate ./some-mod`}
+</PromptCard>
+
+## Il gate dell'analisi statica
+
+Questa è la parte che sorprende gli sviluppatori JS esperti, ed è il meccanismo più importante della pagina. Claude Code **rifiuta di caricare una mod il cui uso di `$` non riesce a leggere staticamente.** È questo che rende `claude plugin validate` un manifest di capacità affidabile — il loader non deve eseguire il tuo codice per sapere cosa può fare.
+
+Quindi tutti questi casi *non superano la validazione*:
+
+| Hai scritto | Errore |
+| --- | --- |
+| `const ui = $.ui` | `$.ui is used as a value` |
+| `on(eventName, hook)` con una variabile o un ciclo sui nomi | `the event name passed to on() is not a string literal` |
+| Un secondo `on` dichiarato dentro `register` | `"on" is declared again (shadowed)` |
+| `await import('./other.js')` | `a dynamic import(); a hooks module imports its own files with an import declaration` |
+| `require(...)`, o un bare import diverso da `claude-code` | Il modulo non è un hooks module valido |
+| `on('tool.calls', …)` | `"tool.calls" is not an event` |
+
+Scrivi ogni chiamata per intero — `$`, namespace, metodo — come in `$.store.get('notes')`. *Puoi* passare `$` a una funzione dichiarata al livello più esterno dello stesso file; `validate` attribuisce allora la chiamata, per esempio `$.store.get (via loadNotes)`. Passare `$` dentro un metodo, una closure definita all'interno dell'hook, o una funzione importata fa fallire la validazione.
+
+L'output che stai leggendo è questo:
+
+```text
+  ❯ ./register.js hooks: session.start, tool.call, command.run{command=tally}, ui.render{component=Spinner}
+  ❯ ./register.js calls: $.command.register, $.ui.invalidate
+
+✔ Validation passed
+```
+
+Le mod che toccano variabili d'ambiente o `$.state` ottengono anche le righe `env reads:` / `env writes:` / `state reads:` / `state writes:`. `--strict` trasforma i warning in errori; `--json` rende l'output leggibile da una macchina, che è quello che vuoi in CI.
+
+## La mappa degli eventi
+
+Gli eventi scattano in ogni punto in cui Claude Code sta per agire. L'insieme completo alla v2.1.287, raggruppato:
+
+| Gruppo | Eventi | Ciò che un hook può restituire di norma |
+| --- | --- | --- |
+| **Tool** | `tool.call`, `tool.check`, `tool.describe` | `next(e)`, `{ deny: reason }`, `{ result }`; `tool.check` restituisce `{ decision }` = `allow` / `ask` / `deny` |
+| **Prompt e contesto** | `prompt.submit`, `prompt.fill`, `prompt.suggest`, `prompt.edit`, `prompt.compose`, `prompt.section`, `prompt.context`, `prompt.attachment`, `skill.prompt`, `attribution.text` | Testo modificato, `{ sections }`, `{ blocks }`, `{ text: null }` per omettere, `{ drop: reason }` |
+| **Comandi e configurazione** | `command.run`, `command.describe`, `config.set`, `config.describe` | `{ text }`, `{ description, argumentHint, isHidden }`, `{ deny: reason }` |
+| **Turni** | `turn.start`, `turn.step`, `turn.complete` | `turn.step` è un generatore asincrono — `yield* next(e)`; può cambiare `model` o `effort` per singola richiesta |
+| **Sessione** | `session.start`, `session.end`, `session.compact`, `session.send`, `session.receive`, `session.append`, `session.attach`, `session.detach`, `session.measure` | `{ skip: reason }` su compact, `{ consumed: reason }` su receive, righe riscritte su append |
+| **Subagent** | `agent.offer`, `agent.spawn` | `{ isOffered: false }` per negare un tipo, `{ model }` o `{ deny: reason }` |
+| **Interfaccia** | `ui.render`, `ui.resolve`, `ui.press`, `ui.input`, `ui.select`, `ui.focus`, `ui.scroll`, `ui.close`, `ui.message` | Un albero di elementi, o `next` con props modificate |
+| **Altre mod** | `plugin.register`, `engine.create` | `{ refuse: reason }` per impedire il caricamento di un'altra mod |
+| **Telemetria** | `telemetry.log`, `telemetry.mark` | Richiede il matcher `{ to: 'collector' }` o `validate` fallisce; `'*'` non li intercetta |
+
+Due tipi di evento sono facili da perdersi:
+
+- **`classic.<Event>`** — ogni evento degli hook da settings è anche un evento delle mod, quindi `on('classic.Stop', …)` o `on('classic.PostToolUse', …)` funziona ed `e` è lo stesso JSON che un hook da settings legge su stdin, `transcript_path` incluso. `'classic.*'` li intercetta tutti.
+- **Ogni metodo della API delle mod è esso stesso un evento**, con il nome senza il `$.` — `fs.read`, `model.complete`, `ui.open`. Un hook su uno di essi **intercetta quella chiamata fatta da ogni mod che gira dopo di lui**, e può restituire `next(e)`, `{ deny: reason }` o `{ value }`. È l'hook che una mod di policy aziendale usa per verificare o bloccare ciò che fanno le altre mod.
+
+### Leggere i numeri reali dei token
+
+`turn.step` è in streaming, quindi il suo hook è un generatore asincrono. È il modo onesto più economico per vedere il tuo tasso di hit della [cache dei prompt](/docs/api/prompt-caching) per singola richiesta:
+
+```javascript
+on('turn.step', async function* ($, e, next) {
+  const result = yield* next(e)
+  if (result.usage) {
+    $.ui.log('cache read ' + result.usage.cache_read_input_tokens +
+             ' · wrote ' + result.usage.cache_creation_input_tokens)
+  }
+  return result
+})
+```
+
+`result.usage` porta `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` e il `model` che ha risposto. L'hook scatta anche per le richieste dei **subagent**, quindi filtra su `e.agentId` quando vuoi solo il thread principale. E nota il corollario per chi riscrive `prompt.section` o `prompt.context`: il testo prodotto da quegli hook che cambia tra una richiesta e l'altra **invalida la cache dei prompt**.
+
+## I namespace di `$`
+
+| Namespace | Metodi |
+| --- | --- |
+| `$.plugin` | `name`, `root` |
+| `$.ui` | `resolve`, `invalidate`, `open`, `close`, `panes`, `focus`, `scroll`, `toast`, `status`, `log`, `notice`, `ask`, `copy`, `blit` |
+| `$.command` / `$.tool` / `$.agent` | `register`, `run`/`call`, `list` (`$.tool` anche `check`) |
+| `$.model` | `complete`, `fork`, `classify` |
+| `$.prompt` | `submit`, `read`, `fill`, `suggest`, `compose` |
+| `$.turn` | `abort` |
+| `$.session` | `messages`, `cwd`, `root`, `model`, `turns`, `id`, `repo`, `surfaces`, `usage`, `version`, `compact`, `send`, `append`, `authorize` |
+| `$.config` / `$.settings` / `$.env` | `list`/`set`, `read`, `get`/`set` |
+| `$.fs` | `read`, `write`, `list`, `exists`, `stat`, `ancestors` |
+| `$.store` | `get`, `set`, `delete`, `keys` — su tutta la macchina, condiviso da ogni sessione |
+| `$.state` | `get`, `set`, più `atom`, `read`, `update`, `derive`, `memberOf` importati da `claude-code` |
+| `$.clock` / `$.http` / `$.process` / `$.mcp` | `now`, `sleep`, `after`, `every` · `fetch` · `run`, `spawn` · `call`, `connect` |
+| `$.audio` / `$.telemetry` | `play`, `speak` · `log`, `mark` |
+
+`$.session.usage()` è quello che vale la pena conoscere a memoria: restituisce `{ startedAt, context, rateLimits, cost }`, dove `context` ha `tokens`, `window` e `percent`, e `rateLimits` è una lista di `{ kind, percentUsed, resetsAt }`. È un indicatore dei limiti del piano in circa quattro righe — vedi [Audit del budget di contesto](/docs/claude-code/context-budget-audit) per cosa farne.
+
+## Disegnare
+
+Un hook `ui.render` restituisce un albero di elementi in un **punto di rendering**. Tra i punti ci sono `Pane` e `AbovePrompt` (spazio tutto tuo), più quelli che ti permettono di ridisegnare lo stile di ciò che Claude Code già disegna: `UserMessage`, `AssistantMessage`, `ToolUse`, `ToolResult`, `ToolGroup`, `CommandOutput`, `AskUserQuestion`, `Spinner`, `TurnDuration`, `InfoNotice`, `SessionMode`, `PromptHint`, e `ToolProgress` solo su terminale.
+
+Gli elementi sono `Box`, `Text`, `Button`, `Link`, `Code`, `Markdown`, `Input`, `Select`, `Client`, più `Svg` (solo Desktop) e `Raster` / `Image` (solo terminale). Adatta l'albero al suo punto leggendo `e.props.bodyColumns` per la larghezza ed `e.props.scroll.bodyRows` per l'altezza quando `e.props.placement` è `'dock'`.
+
+**Dove la tua mod appare davvero non è dove girano i suoi hook.** Questa è la tabella da controllare prima di promettere un riquadro a un collega:
+
+| Dove esegui Claude Code | Gli hook girano | Il disegno appare |
+| --- | --- | --- |
+| `claude` in un terminale (inclusi i terminali degli editor, plugin JetBrains) | Sì | Sì |
+| App desktop, tab **Code** | Sì | Sì, tranne gli elementi solo-terminale |
+| App desktop, sessione **WSL** | **No** — i plugin non sono disponibili lì | No |
+| Pannello chat dell'estensione VS Code | Sì | **No** |
+| `claude -p` e l'[Agent SDK](/docs/claude-code/headless-and-agent-sdk) | Sì | **No** |
+| Remote Control da claude.ai / mobile | Sì, nella sessione sulla tua macchina | In quel terminale |
+| Sessione cloud | Sì, se il plugin ci arriva | **No** |
+
+Quindi una mod che disegna dovrebbe controllare la propria superficie e ripiegare su una riga nella trascrizione o sulla risposta testuale di un comando.
+
+## Cinque trappole che mordono in produzione
+
+Ognuna di queste è un comportamento documentato, non un bug — e ognuna ha già scottato qualcuno.
+
+**1. Un hook di guardia fallisce *in apertura*.** Se un hook solleva un'eccezione, va in timeout o restituisce la forma sbagliata **prima** di chiamare `next`, Claude Code lo salta e l'handler successivo gira al suo posto — il che significa che il comando che stavi presidiando **viene eseguito**. Se il fallimento è avvenuto *dopo* che `next` si era risolto, quel risultato resta valido. Per fallire in chiusura, aggancia un `.catch`:
+
+```javascript
+on('tool.call', { tool: 'Bash' }, guard).catch(async ($, e, next) => {
+  // next.error.kind is 'throw' or 'timeout'
+  return { deny: 'The command guard failed, so this command was not run: ' + next.error.kind }
+})
+```
+
+**2. Il budget di 10 secondi conta i *tuoi* await, non quelli della API.** Un hook ha 10 s di tempo di esecuzione proprio per ogni evento, escluso il tempo dentro `next` o dentro una chiamata alla API delle mod diversa da `$.clock.sleep`. Quindi `await $.ui.ask(...)` può trattenere una chiamata a un tool a tempo indefinito mentre l'utente decide — ma `await myOwnPromise()` consuma il budget, e un hook che va in timeout viene **saltato**, perciò il comando trattenuto viene eseguito. Leggi `next.budget.remainingMs` se hai bisogno di sapere a che punto sei.
+
+**3. Le mod installate condividono un unico thread worker.** Un hook che lo blocca — un ciclo che non fa mai await — si fa scaricare la mod con `it crashed the hooks worker`. Se il worker muore tre volte e Claude Code non riesce ad attribuire i crash a una sola mod, scarica **tutte** le mod non integrate per quella sessione, comprese quelle della tua organizzazione, finché qualcuno non esegue `/reload-plugins`.
+
+**4. Lo stato si azzera in tre modi diversi.** Le variabili a livello di modulo si reinizializzano a ogni ricaricamento (quindi `calls` torna a `0` ogni volta che salvi). `$.state` torna ai valori di default dopo `/clear`, `/resume` o `/branch` — e `session.start` **non** scatta di nuovo, quindi ricarica i valori salvati da un hook `classic.SessionStart`. Tutto ciò che viene scritto da più sessioni va in `$.store`, non in `$.fs.write`, perché `$.fs.write` non è atomico e un altro processo può leggere un file scritto a metà.
+
+**5. Le tue modifiche non raggiungono una copia installata.** Claude Code mette in cache un plugin installato *per versione*, quindi sviluppa con `--plugin-dir` e incrementa la versione nel manifest prima di reinstallare.
+
+Due trappole minori che vale la pena conoscere: un `$.ui.open` non richiesto dall'utente ha bisogno di **144 colonne di terminale** la prima volta (110 una volta che l'utente ha aperto quel riquadro da sé), e `$.session.messages()` restituisce solo le **4.096** voci più recenti.
+
+## Limiti
+
+| Limite | Valore |
+| --- | --- |
+| Tempo di esecuzione di un hook, un evento | 10 s |
+| Handler `.catch` | 1 s |
+| Tutti gli hook `session.end` insieme | 1,5 s |
+| Timeout di `$.process.run` | 30 s di default, 10 min max |
+| `maxTokens` di `$.model.complete` | 1024 di default, fino a 64.000 o il tetto di output del modello |
+| `$.fs.read` / `$.fs.write`, un file | 4 MiB |
+| `$.store`, totale | 4 MiB di JSON |
+| `$.session.messages()` | le 4.096 voci più recenti |
+| Ridisegni di `ui.render` | limitati a 10/s (30/s nel terminale per il riquadro visibile, la banda espansa, la riga di hint) |
+| Un singolo figlio stringa di `Text` | 10.000 caratteri |
+| Testo di `Code` / `Markdown` | 10.000 caratteri · `Svg` 131.072 · `Image` 2 MiB |
+| `Raster` | `columns` ≤ 512, `rows` ≤ 256 |
+| Nomi di comandi / tool / agent / riquadri | lettere, cifre, `_`, `-`, ≤ 64 caratteri |
+| Un singolo test di `claude plugin test` | 5 s salvo che imposti `timeoutMs` |
+
+## Sicurezza: cosa raggiunge davvero una mod
+
+:::danger Le mod non sono in sandbox
+Una mod gira **nel processo di Claude Code, con i tuoi permessi**. Una volta caricata può leggere e scrivere qualsiasi file accessibile al tuo account, avviare programmi, fare richieste di rete, leggere le tue variabili d'ambiente e i file di impostazioni (**compresa una chiave API conservata in uno dei due**), vedere ogni prompt e ogni chiamata a un tool, riscriverli, inviare un prompt come se l'avessi digitato tu, approvare una chiamata a un tool prima che ti venga chiesto, e spendere il credito del tuo piano o della tua API tramite `$.model.complete`. Se abiliti il [sandboxing](/docs/claude-code/permissions), questo isola i comandi Bash che esegue *Claude* — un processo avviato da una mod gira **fuori** da esso.
+:::
+
+C'è un'asimmetria che merita una riga a sé, perché smentisce il modello mentale più comune: **le regole di permesso `deny` vincolano le chiamate ai tool di Claude, non le chiamate proprie di una mod.** Con `Read(.env)` negato, una mod può comunque leggere quel file con `$.fs.read`, o avviare un programma che lo fa. Le regole di permesso non sono un confine di contenimento per il codice di una mod. Né una mod può ridisegnare lo stile del prompt di permesso stesso — quell'unica superficie è off-limits, quindi ciò che un prompt ti mostra è sempre reale.
+
+La difesa pratica è la riga di audit, non la fiducia: esegui `claude plugin validate` sulla directory e leggi `calls:`. Queste sono le voci che dovrebbero farti fermare a leggere il sorgente — `$.fs.read` / `$.fs.write`, `$.process.run` / `$.process.spawn`, `$.http.fetch`, `$.env.get` / `$.settings.read` (chiavi API), `$.env.set` (cambia ciò che eseguono tutti i comandi e i server MCP successivi), `$.model.complete` (il tuo credito), `$.prompt.submit` (può inviare testo *come se fossero parole dell'utente*), `$.session.send` (alimenta il Claude di un'altra sessione). Nella riga `hooks:`, `tool.call` e `prompt.submit` significano che vede e può cambiare tutto; `session.append` significa che può riscrivere le righe di conversazione memorizzate; `tool.check` significa che può consentire o negare prima che appaia qualsiasi prompt.
+
+Anthropic pubblica mod di esempio in [`claude-code-playground`](https://github.com/anthropics/claude-code-playground/tree/main/claude-code/mods) — `token-weather` (previsione della finestra di contesto sopra il prompt), `blast-radius` (trattiene un comando shell rischioso e mostra cosa cambierebbe), `replay-theater` (un comando `/replay` che ripercorre le modifiche del turno). Condivise così come sono, senza supporto, e girano con i tuoi permessi come qualsiasi altra. Stessa disciplina di revisione di [Revisionare codice di terze parti](/docs/security/reviewing-third-party-code).
+
+### Disattivarle
+
+| Ambito | Come |
+| --- | --- |
+| Una singola mod | Disabilita o disinstalla il suo plugin dal tab **Installed** in `/plugin` |
+| Tutte le mod installate, una sessione | `claude --safe-mode` (disabilita anche le tue altre personalizzazioni) |
+| Tutte le mod installate, sempre | `"disableAllHooks": true` in `~/.claude/settings.json` — si fermano anche i tuoi hook da settings e la status line personalizzata |
+
+Le mod integrate non sono toccate da nessuna di queste; ognuna ha il proprio interruttore in `/plugin`. Per verificare se le mod possono caricarsi del tutto, esegui `claude plugin test` da una directory senza mod: `no hooks module to load` significa sì; `hooks modules are turned off here` significa che un'impostazione o una policy aziendale le blocca; `hooks modules are turned off in this process` significa che Anthropic ha disabilitato le mod installate da remoto e nulla di locale le riabilita.
+
+Se durante l'accesso anticipato avevi impostato `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`, rimuovilo — dalla v2.1.287 viene ignorato a qualsiasi valore, quindi uno `0` lì **non** tiene le mod disattivate.
+
+### Il lato organizzazione
+
+Su una macchina con impostazioni gestite, o per un accesso Team/Enterprise, Claude Code carica una guardia integrata — `sec-default@builtin`, mostrata come `cc-plugin-sec-default` — davanti a ogni mod installata dall'utente. Di default protegge solo ciò che l'organizzazione gestisce (input e decisioni degli hook gestiti, il system prompt, le istruzioni gestite, le impostazioni come le legge qualsiasi mod, i tool MCP gestiti) e impone che la mod di un utente non possa approvare una chiamata che una regola `deny` rifiuta. Tutto il resto resta consentito. Il suo sorgente è pubblico in [`mods/sec-default`](https://github.com/anthropics/claude-code/tree/main/mods/sec-default).
+
+| Obiettivo dell'amministratore | Impostazione gestita |
+| --- | --- |
+| Nessuna mod installata dall'utente, hook intatti | `allowManagedModsOnly: true` sotto `pluginConfigs` → `cc-plugin-sec-default@builtin` → `options` |
+| Solo le mod dell'organizzazione | quanto sopra + installale così da farle contare come dell'organizzazione |
+| Qualsiasi mod, ma solo da marketplace approvati | mantieni le restrizioni sui marketplace + `disableSideloadFlags: true` |
+| Qualsiasi mod, con la mod dell'organizzazione a vigilarle | elenca la mod dell'organizzazione insieme a `sec-default@builtin` in `prependPlugins` |
+| Niente del tutto, hook gestiti inclusi | `disableAllHooks: true` |
+
+La guardia legge le proprie opzioni **soltanto** dalle impostazioni gestite, con la chiave **soltanto** `cc-plugin-sec-default@builtin` (`prependPlugins` accetta anche la forma breve `sec-default@builtin`; `pluginConfigs` no), e **fallisce in chiusura** — se non riesce a leggere le impostazioni gestite rifiuta ogni mod dell'utente. Se imposti `prependPlugins` da te, nomina la guardia nella lista o smette di caricarsi.
+
+Una mod di policy riceve `plugin.register` per ogni mod che sta per caricarsi, con `e.tier` (`prepend` / `user` / `append` / `builtin`) ed `e.uses.calls` — la stessa lista che stampa `validate`, scritta senza il `$.`. Restituire `{ refuse: reason }` impedisce il caricamento di quella mod. Nota la stessa trappola del fail-open vista sopra: se il tuo controllo solleva un'eccezione, la mod che stava controllando **si carica**, quindi metti il controllo in una funzione con nome e aggiungi un `.catch` che rifiuta il tier `user`.
+
+## Debugging
+
+Dove appare una riga di errore dipende dalla sessione, ed è per questo che "la mia mod non fa niente" è un problema così comune:
+
+- **Ricaricamento a caldo di una directory di plugin** (`--plugin-dir`, o mod scritte da Claude con il ricaricamento a caldo attivo): una riga tenue nella trascrizione.
+- **Qualsiasi altra sessione interattiva**, compresa una mod installata da un marketplace: **solo il log di debug** — parti con `claude --debug`.
+- **`claude -p --plugin-dir`**: stderr nel formato testuale di default; il rifiuto di un'altra mod va solo nel log di debug.
+
+```bash
+claude --debug-file ./mod-debug.log --plugin-dir ./first-mod
+tail -f ./mod-debug.log | grep first-mod
+```
+
+Una mod caricata stampa una riga come `hooks module first-mod@inline loaded (worker, environment 2, tier user); events: session.start,tool.call,command.run,ui.render`. Le mod caricate con `--plugin-dir` portano il suffisso `@inline`. Scrivi righe tue con `$.ui.log('message', { to: 'debug' })` — senza il secondo argomento `$.ui.log` aggiunge invece una riga tenue nella trascrizione. Messaggi che vale la pena riconoscere: `hook skipped:` + motivo (eccezione, timeout, forma sbagliata), `reload failed, the previous version stays loaded:` (l'ultima versione funzionante continua a girare), `ui.render (Pane) refused:` (il tuo albero non ha superato la validazione — il motore ha disegnato il proprio), e `… registered /tally but no command.run hook answered it`.
+
+<Flashcards title="Vocabolario delle mod" cards={[
+  {front: "Hooks module", back: "Il file di ingresso della mod, puntato dall'array modules in hooks/hooks.json. Esporta register(on, options). È un ES module; .js/.ts/.mjs/.cjs/.jsx/.mts/.cts/.tsx."},
+  {front: "`$`, `e`, `next`", back: "I tre argomenti che riceve ogni hook: la API delle mod, l'evento congelato in profondità e l'handler successivo nella catena. L'ultimo next è il comportamento stesso di Claude Code."},
+  {front: "Matcher", back: "Il secondo argomento opzionale di on() — un oggetto che filtra i campi dell'evento. Valori, array o regex. Registra ogni evento una volta per matcher."},
+  {front: "Tier", back: "Il gruppo di priorità di una mod nella catena: prepend, user, append o builtin. Leggibile come next.origin.tier; il motore stesso è { plugin: 'engine', tier: 'core' }."},
+  {front: "`tool.call` vs `tool.check`", back: "tool.call scatta prima che il tool venga eseguito e può negarlo o rispondergli. tool.check scatta al momento della decisione sul permesso, DOPO le regole e gli hook PreToolUse, e restituisce allow / ask / deny."},
+  {front: "`$.store` vs `$.state` vs variabile di modulo", back: "$.store: su tutta la macchina, condiviso da ogni sessione, 4 MiB. $.state: reattivo, si azzera su /clear, /resume, /branch. Una variabile di modulo: si azzera a ogni ricaricamento."},
+  {front: "Fail open", back: "Un hook che solleva un'eccezione o va in timeout prima di chiamare next viene saltato e l'evento procede. Una guardia fallisce quindi IN APERTURA, a meno che tu non agganci .catch."},
+  {front: "`claude plugin validate`", back: "Analisi statica, nessuna esecuzione: stampa gli hook trovati (con i matcher) e ogni chiamata alla API delle mod. L'audit delle capacità da eseguire prima di installare una mod."}
+]} />
+
+<Quiz questions={[
+  {
+    q: "Il tuo hook tool.call blocca i comandi Bash rischiosi. Solleva un TypeError inatteso prima di arrivare a next(e). Cosa accade al comando?",
+    options: [
+      "Il comando viene negato — Claude Code tratta un hook che solleva un'eccezione come una negazione",
+      "Il comando viene eseguito: Claude Code salta l'hook fallito e l'handler successivo gira al suo posto",
+      "La sessione termina con un errore",
+      "La mod viene scaricata e il comando viene trattenuto perché l'utente decida"
+    ],
+    answer: 1,
+    explain: "Gli hook falliscono in apertura. Un hook che solleva un'eccezione, va in timeout o restituisce la forma sbagliata prima di chiamare next viene saltato, e gira al suo posto l'handler successivo — alla fine Claude Code stesso. Aggancia .catch(…) che restituisce { deny: … } per fallire in chiusura."
+  },
+  {
+    q: "Perché `const ui = $.ui` fa fallire il caricamento di una mod?",
+    options: [
+      "Le mod devono usare TypeScript, e quella riga non è tipizzata",
+      "$.ui è disponibile solo dentro gli hook ui.render",
+      "Il loader determina le capacità di una mod leggendo il sorgente staticamente, quindi $ deve essere usato per intero come $.namespace.metodo",
+      "È una protezione sulle prestazioni, contro il mantenere un riferimento attraverso i ricaricamenti"
+    ],
+    answer: 2,
+    explain: "L'analisi statica di Claude Code è ciò che rende `claude plugin validate` una lista di capacità affidabile senza eseguire codice. Alias, destrutturazione o indicizzazione calcolata su $ la rompono, quindi fallisce con `$.ui is used as a value`."
+  },
+  {
+    q: "Una regola deny nelle tue impostazioni rifiuta Read(.env). Una mod che hai installato chiama $.fs.read('.env'). Cosa accade?",
+    options: [
+      "La lettura viene negata — le regole deny si applicano a ogni accesso ai file nella sessione",
+      "La lettura riesce: le regole di permesso vincolano le chiamate ai tool di Claude, non le chiamate proprie di una mod alla API delle mod",
+      "L'utente riceve un prompt di permesso",
+      "La mod viene scaricata per violazione della policy"
+    ],
+    answer: 1,
+    explain: "Le regole deny e gli hook PreToolUse gestiti governano le chiamate ai tool di Claude. Le chiamate proprie di una mod a $.fs e $.process non sono coperte — la documentazione lo dice esplicitamente. Per vincolare quelle devi impedire il caricamento della mod o intercettare la chiamata per nome in una mod di policy."
+  },
+  {
+    q: "Vuoi che un riquadro disegnato dalla tua mod sia visibile nel pannello chat dell'estensione VS Code. Può esserlo?",
+    options: [
+      "Sì, tutti i punti di rendering funzionano in ogni superficie",
+      "Sì, ma solo gli elementi Box e Text",
+      "No — gli hook girano lì ma nulla di ciò che una mod disegna appare; ripiega su una riga nella trascrizione",
+      "No, perché i plugin non si caricano affatto nell'estensione VS Code"
+    ],
+    answer: 2,
+    explain: "Gli hook girano nell'estensione VS Code, in claude -p, nell'Agent SDK e nelle sessioni cloud, ma il disegno raggiunge solo il terminale e il tab Code dell'app desktop. Le sessioni WSL nell'app desktop non eseguono né l'uno né l'altro. Una mod che disegna dovrebbe controllare la propria superficie e degradare con grazia."
+  },
+  {
+    q: "Quale affermazione sul budget di 10 secondi di un hook è corretta?",
+    options: [
+      "Copre tutto ciò che fa l'hook, compreso il tempo passato dentro next(e)",
+      "Esclude il tempo dentro next e dentro le chiamate alla API delle mod, quindi attendere $.ui.ask può trattenere una chiamata a un tool a tempo indefinito",
+      "Si applica solo agli hook ui.render",
+      "Può essere alzato per singolo hook con un'opzione timeoutMs"
+    ],
+    answer: 1,
+    explain: "Il budget è il tempo di esecuzione proprio dell'hook, escluso next e le chiamate alla API delle mod diverse da $.clock.sleep. È per questo che trattenere una chiamata a un tool dentro $.ui.ask funziona — ma attendere una promise tua consuma il budget, e un hook andato in timeout viene saltato, perciò il comando trattenuto viene eseguito."
+  }
+]} />
+
+## Fonti e approfondimenti
+
+- [Panoramica delle mod](https://code.claude.com/docs/en/plugins/mods/overview) — che cos'è una mod, il modello di fiducia, dove girano le mod, le mod integrate
+- [Creare una mod](https://code.claude.com/docs/en/plugins/mods/create) — i tre file, il ciclo di ricaricamento con `--plugin-dir`, le regole dell'analisi statica, `claude plugin test`
+- [Reagire agli eventi](https://code.claude.com/docs/en/plugins/mods/events) — osservare/riscrivere/rispondere, matcher, ordine della catena, `.catch`
+- [Riferimento delle mod](https://code.claude.com/docs/en/plugins/mods/reference) — ogni evento, ogni metodo `$`, i punti di rendering, gli elementi, i limiti, le impostazioni
+- [Usare la API delle mod](https://code.claude.com/docs/en/plugins/mods/api) · [Disegnare nell'interfaccia](https://code.claude.com/docs/en/plugins/mods/interface) · [Galleria dell'interfaccia](https://code.claude.com/docs/en/plugins/mods/gallery) · [Testare una mod](https://code.claude.com/docs/en/plugins/mods/test)
+- [Risolvere i problemi di una mod](https://code.claude.com/docs/en/plugins/mods/troubleshoot) — sintomi, messaggi di rifiuto, il log di debug
+- [Gestire le mod per la tua organizzazione](https://code.claude.com/docs/en/plugins/mods/admin) — la guardia integrata, `allowManagedModsOnly`, le mod di policy
+- [`anthropics/claude-code` → `mods/`](https://github.com/anthropics/claude-code/tree/main/mods) — sorgente delle mod integrate `diff`, `agents-md`, `sec-default` e `telemetry`
+- [`mods/types/claude-code.d.ts`](https://github.com/anthropics/claude-code/blob/main/mods/types/claude-code.d.ts) — le dichiarazioni di tipo; quando non concordano, vince la copia che Claude Code scrive per la *tua* build
+- [`anthropics/claude-code-playground` → `claude-code/mods/`](https://github.com/anthropics/claude-code-playground/tree/main/claude-code/mods) — `token-weather`, `blast-radius`, `replay-theater`
+
+## Prossimi passi
+
+- [Plugin e marketplace](/docs/claude-code/plugins-marketplaces) — il contenitore in cui viaggia una mod, e come pubblicarla
+- [Eval dei plugin](/docs/claude-code/plugin-evals) — dimostra che il plugin si guadagna il suo posto prima di consegnarlo a un team
+- [Hook: automazione deterministica](/docs/claude-code/hooks) — i fratelli out-of-process accanto a cui gira una mod, raggiungibili come `classic.<Event>`
+- [Revisionare codice di terze parti](/docs/security/reviewing-third-party-code) — la disciplina da applicare prima di installarne una
