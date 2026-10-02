@@ -1,0 +1,485 @@
+---
+sidebar_position: 22.997
+title: "Pi 1.0: ミニマルなハーネスと、MCP のトークン肥大を解消する codemode の技"
+description: "Pi 1.0 は 2026年10月1日にリリースされ、Hacker News で1位になった。面白いのは TUI ではなく、コンテキストエンジニアリングのほうだ。ツール結果がモデルのコンテキストに一切入らない QuickJS/WASM サンドボックス、4つの MCP 露出モード、インライン化されるツール宣言の 3,000 トークン上限、そしてツール定義を書き換える代わりに新しいシステムプロンプトのセクションをトランスクリプトに追記してプロンプトキャッシュを生き残らせる技。さらに意図的な欠落（サブエージェントなし、プランモードなし）、0.05ドルのキャッシュウォーミング規則、そしてクローンしたリポジトリの AGENTS.md を確認なしで読み込んでしまう信頼のギャップについても。"
+keywords: [Pi 1.0, Earendil, pi.dev, codemode, QuickJS sandbox, MCP token cost, deferred tool loading, tool exposure, cache warming, agent harness, Claude Code alternative, agent CLI, AGENTS.md, project trust]
+---
+
+<LevelBadge level="advanced" />
+
+**Pi 1.0** は 2026年10月1日にリリースされ、翌朝には 1,500 ポイント超で Hacker
+News のトップに座っていた。売り文句はほとんど攻撃的なくらい地味だ。「自分のものに
+作り変えられる、ミニマルで拡張可能なエージェントハーネス」。MIT ライセンス、
+TypeScript、ターミナルコマンド1つ。
+
+この売り文句は実態を過小に見せている。TUI の下で Pi が出荷しているのは、どのエー
+ジェントハーネスも3か月目にぶつかる問題に対して、これまで誰も公開したことがない
+ほど完全な答えだ。すなわち **MCP サーバーはコンテキストウィンドウを破壊するのに、
+誰もそれを認めたがらない** という問題である。Pi は1年にわたり公然と MCP のサポート
+を拒み続け、そして出荷した——ツールをプロンプトに一切入れないという方法で。その仕組
+みは文書化されており、計測可能で、あなたが Pi を動かすかどうかに関係なくコピーで
+きる。
+
+このページはその仕組み、その背後にある数字、そして自分のハーネスについての考え方を
+変えることになる Pi の3つの設計判断についての話だ。
+
+<Callout type="objectives" items={[
+  "codemode を理解する: ネストしたツール呼び出しがモデルのコンテキストに一切入らない QuickJS/WASM サンドボックス——入るのはスクリプトの出力だけ",
+  "Pi の4つの MCP 露出モードと、デフォルト（codemode）がモデルに対して何ひとつ宣言しない理由を学ぶ",
+  "正確な予算を見る: インライン化されるツール宣言に 3,000 トークン、MCP 結果が削られ始めるまで 20 KB、スクリプトには見えてモデルには見えない bash 出力が 1 MiB",
+  "プロンプトキャッシュの技をコピーする: ツール定義を書き換える代わりに、変化したシステムプロンプトのセクションをトランスクリプトに追記する",
+  "意図的な欠落（サブエージェントなし、プランモードなし、呼び出しごとの承認なし）と、クローンしたリポジトリの AGENTS.md を確認なしで読み込む信頼のギャップを知る",
+]} />
+
+## 1段落版
+
+Pi は **Earendil**（Radius と Lefos も作っている）によるモデル非依存のターミナル
+エージェントだ。リポジトリ `github.com/earendil-works/pi` は、個別に利用できる13
+パッケージの TypeScript モノレポである。約30プロバイダにまたがる統一 LLM API、
+エージェントループ、TUI ライブラリ、スタンドアロンの MCP クライアント、WASM サンド
+ボックス、そして実験的な永続ランタイム。Node.js 22.19+ が必要だ。意図的に
+**サブエージェントなし**、**プランモードなし** で出荷され、すべてのツール呼び出しの
+前に承認を求めることもしない。代わりに出荷されているのはコンテキストエンジニア
+リングだ。`codemode`——モデルがスクリプトを書くための JavaScript サンドボックスで、
+ツール呼び出しはトランスクリプトの*外側*で起き、戻ってくるのはスクリプトが蒸留した
+出力だけである。
+
+<VerifyNote lastVerified="2026-10-02" source="https://github.com/earendil-works/pi">
+バージョン、ライセンス、依存関係、パッケージに関する事実は、2026年10月2日にリポジ
+トリと GitHub API から読み取ったもの: タグ `v1.0.0` は 2026-10-01T19:20:55Z に公開、
+MIT、リポジトリ作成は 2025-08-09、執筆時点で約 111.6k スター / 約 14.2k フォーク。
+設定のデフォルト値と上限は、`main` に追従するリポジトリ内ドキュメント
+`packages/coding-agent/docs/` から引用している——`codemode.inlineBudget` のような
+数字は設定値であり、設定値は再調整される。特定の値に依存する前に、リポジトリの
+`settings.md` と `mcp.md` を読み直すこと。
+</VerifyNote>
+
+## インストールしなくても重要な理由
+
+どのハーネスも始まり方は同じだ。便利そうだから MCP サーバーを3つ追加する。それぞれ
+が20個のツール定義をシステムプロンプトに流し込む。こうして、あらゆるセッションの
+あらゆるモデル呼び出しが、呼ばれることのない大半を含む60個のツールスキーマの代金を
+払うことになり、サーバーが再接続してツール一覧がずれるたびにプロンプトキャッシュが
+壊れる。
+
+AILmanac は以前これを計測している——
+[MCP サーバーが実際にトークンでいくらかかるのか](/docs/claude-code/mcp-token-cost)
+を参照。Pi の答えは「サーバーを減らせ」とは構造的に違う。
+
+## codemode: 実際の仕組み
+
+`codemode` ツールは入力として **生の JavaScript ソース** を受け取る——JSON でも、
+フェンス付きコードブロックでもない。Pi はそれを **WebAssembly にコンパイルされた
+QuickJS VM** の中で async 関数の本体として実行するので、トップレベルの `await` と
+`return` が使える。
+
+このサンドボックスの唯一の能力は、注入されたツールを呼ぶことだ。タイマーも
+`fetch` も `process` も `require` もモジュールも、ネストした `WebAssembly` もない。
+（`eval` と `Function` は動くが、同じ VM 内にコードをさらに生むだけだ。）リモートの
+画像 URL は拒否され、base64 の `data:` URL と画像ブロックだけが通る。
+
+その帰結こそが要点そのものである。
+
+> ネストしたツール呼び出しは LLM のコンテキストに入らない。入るのはスクリプトの出力
+> と戻り値だけだ。
+
+だからスクリプトは10個のツール呼び出しを並列にファンアウトし、400 KB の結果を4行に
+絞り込める。そしてモデルが見るのは4行だ。10回の呼び出し、その引数、生の結果は、
+一度もトランスクリプトのエントリにならない。
+
+<Steps items={[
+  {
+    title: "モデルが受け取るのはツール一覧ではなく道具箱",
+    body: "スクリプトの中では、呼び出せるすべてのツールが `tools` のメソッドになる。JavaScript の識別子として無効な文字はアンダースコアになるので、MCP ツール `mcp__dev-radius__search` は `tools.mcp__dev_radius__search` で到達できる。モデルがこれらを呼ぶのに、プロンプトでの宣言は必要ない。"
+  },
+  {
+    title: "ツールは手渡されるのではなく発見される",
+    body: "スクリプトには `ALL_TOOLS`（呼び出し可能な全ツールの名前と説明）、BM25 関連度でツールをランク付けしデフォルト上限8件の `searchTools(query)`、ツールの TypeScript 宣言を返す `describeTool(name)`、MCP サーバーの説明・指示・ツール名を返す `describeNamespace(name)` が渡される。ツール発見は、プロンプト時のダンプではなく実行時のクエリになる。"
+  },
+  {
+    title: "出力は予算管理され、盲目的に切り捨てられはしない",
+    body: "スクリプトはオプション行から始めてもよい。`max_output_tokens` のデフォルトは 10,000 で、それより長い出力は先頭と末尾が保たれ、全文は一時ファイルに書き出されてそのパスが結果に含まれる——だからモデルは本当に必要ならツールで読みに行ける。`timeout_ms` はデフォルトで未設定で、スクリプト全体に対する厳格な期限になる。"
+  },
+  {
+    title: "副作用は本物で、失敗してもロールバックしない",
+    body: "ドキュメントは明示している。失敗より前に行われた呼び出しは取り消されない。スクリプト終了時にまだ実行中の呼び出しはキャンセルされ、await されていない promise は破棄される。失敗したスクリプトは部分的な出力を保持し、その後 `Script error:` とエラーを報告する。10回のうち7回目でタイムアウトすれば6回は完了済みで残るのだから、再実行しても安全なスクリプトを書くこと。"
+  },
+  {
+    title: "小さな状態はスクリプト間で生き残る",
+    body: "`store(key, value)` と `load(key)` は codemode 呼び出しをまたいで JSON を保持する。書き込みはスクリプトが成功したときだけ残され、値を保存した成功スクリプトはそれぞれセッションに `codemode-store` エントリを追記する——だから再開したセッションは値を保ち、フォークしたブランチは自分の経路で書かれたものだけを見る。"
+  }
+]} />
+
+<PromptCard title="MCP サーバーなしで codemode を有効化し、試してみる">{`# Pi activates codemode automatically when an MCP server with
+# "codemode" exposure connects. To have it always on, add it to
+# ~/.pi/agent/settings.json alongside the default tools:
+#
+#   { "defaultTools": ["+codemode"] }
+
+pi
+
+# Then ask for something that would normally flood the context, e.g.:
+#   "Use codemode: run the test suite, and return only the names of
+#    failing tests plus the first assertion line of each."
+#
+# The full test output never becomes a transcript entry.`}</PromptCard>
+
+### 覚えておく価値のある bash の数字
+
+直接の `bash` 呼び出しがモデルに見せる結果は 2,000 行または 50 KB が上限だ。codemode
+スクリプトの内側から呼ばれると、同じツールは構造化された値に解決され、その `output`
+フィールドは **最大 1 MiB** を保持する——それより長い場合は、省略マーカーを挟んで先頭
+と末尾の 512 KiB を残し、`truncated` を立て、全出力を `full_output_path` で指し示す。
+
+これは*スクリプト*に対してコマンド出力の窓が20倍広いということであり、そのスクリプト
+が*モデル*に何を見せていいかを決める。MCP も同様だ。**20 KB** を超えるテキスト結果は
+`…N chars truncated…` マーカーの周りで中央を除去されてモデルに届くが、codemode
+スクリプトは `structuredContent` と `isError` を含む完全な `CallToolResult` を受け取る。
+
+## 4つの露出モード
+
+これは自分の設計ノートにコピーすべき表だ。Pi の各 MCP サーバーには `exposure` があり、
+それがモデルからそのサーバーのツールへの到達方法を決める。各ツールは
+`mcp__<server>__<tool>` として登録される。
+
+| 露出 | モデルに見えるもの | 使いどころ |
+|---|---|---|
+| `codemode` **(デフォルト)** | 何も見えない。宣言されず、codemode の説明にすら列挙されない。スクリプトが `searchTools()`、`describeTool()`、`ALL_TOOLS` で見つける。 | 一般的なサーバー、とくにスクリプトが呼び出しを組み合わせたり絞り込むべき場合 |
+| `deferred` | 何も見えない。`tool_search` が次のモデル呼び出しのためにマッチをロードするまでは。ロード後は宣言され、そのブランチ上では宣言されたままになる。 | 発見後に直接呼ぶべきツールを持つ大きなサーバー |
+| `direct` | 組み込みツールのように宣言され、codemode からも呼べる。 | 小さく、頻繁に使うツール群 |
+| `hidden` | 登録はされるが到達不能。 | 利用不可のままにしておくべきサーバーやツール |
+
+`toolExposure` はサーバー単位の設定をツールごとに上書きする。キーは厳密なツール名か
+`*` パターンで、厳密な名前がパターンに勝ち、パターン同士では最初にマッチしたものが
+勝つ。だから `hidden` なサーバーがちょうど1つのツールだけを公開することもできるし、
+`deferred` なサーバーが破壊的なツールを到達不能に保つこともできる。
+
+<PromptCard title=".pi/mcp.json でのツールごとの露出">{`{
+  "mcpServers": {
+    "github": {
+      "exposure": "deferred",
+      "toolExposure": {
+        "search_code": "direct",
+        "get_*": "codemode",
+        "delete_*": "hidden"
+      }
+    }
+  }
+}`}</PromptCard>
+
+見落としやすい詳細が2つある。第一に、`codemode` と `deferred` のツールは*どちらの*
+間接的な仕組みからも到達できる——スクリプトが呼べるし、`tool_search` がロードもできる
+——そして **codemode の呼び出しはアクティブなツールセットに依存しない** ので、ブランチ
+切り替えや再開、フォークのあとでも動く。第二に、`codemode` も `tool_search` もアク
+ティブでない場合、Pi は一度だけ警告する。その状態では direct 以外のツールは単に
+呼べないからだ。
+
+## プロンプトキャッシュの技
+
+このページで最もコピーしやすい唯一のアイデアがここにある。
+
+Pi はセッション開始時に、有効なすべての MCP サーバーをバックグラウンドで接続する。
+`codemode` または `deferred` のツールを持つサーバーは、システムプロンプトの
+`mcp_servers` セクションに列挙される——1行ずつ、設定された `description` から、あるいは
+接続後はサーバー自身の指示から。
+
+そのセクションはサーバーが接続するにつれて変化する。素朴なハーネスならシステム
+プロンプトかツール宣言を書き換えるだろうが、それはその背後のキャッシュ済みプレ
+フィックスをすべて無効化する。Pi はそうではなく、
+
+> ツール宣言を変更する代わりに、新しいセクションを会話に追記するので、より前の
+> メッセージはキャッシュされたままになる。
+
+*プレフィックス*の変更はキャッシュ全体のコストを払わせる。*サフィックス*の変更はコスト
+ゼロだ。Pi はプロンプトの書き換えをトランスクリプトへの追記に変換している。だからこそ
+`codemode` ツールの説明文そのものも、サーバーが接続する間に変化しないよう設計されて
+いる——deferred 露出のツールは意図的にそこから除外されているのだ。
+
+最初のプロンプトが待つのは最大 **10秒** で、しかも `direct` ツールを持つサーバーに
+限られる。それらはリクエストで宣言しなければならないからだ。それ以外はすべて遅延的に
+待たれる。スクリプトは自分が名前を挙げたサーバーを待ち、`searchTools()` を呼ぶか
+`ALL_TOOLS` を読むときだけ全サーバーを待つ。
+
+Anthropic の API の上に構築しているなら、同じ理屈が自分のプレフィックスにも当てはまる
+——[プロンプトキャッシング](/docs/api/prompt-caching) と
+[会話中のツール変更](/docs/api/mid-conversation-tool-changes) を参照。これはまさに
+Pi 1.0 が「会話中のシステムメッセージ」と呼んでいる機能だ。
+
+## 予算、1つの表で
+
+| 項目 | 値 | どこ |
+|---|---|---|
+| `codemode` の説明にインライン化されるツール宣言 | **3,000** 推定トークン（文字数 ÷ 4）、`0` なら名前空間のみ列挙 | `codemode.inlineBudget` |
+| スクリプト出力のデフォルト `max_output_tokens` | **10,000** | codemode のオプション行 |
+| `searchTools()` のデフォルト結果件数 | **8**（BM25 ランキング） | codemode のグローバル |
+| 中央が除去される前の MCP テキスト結果 | **20 KB** | MCP ツール結果 |
+| *モデル*が直接見る `bash` 出力 | 2,000 行または 50 KB | 組み込みツール |
+| *スクリプト*が見る `bash` 出力 | 最大 **1 MiB**（それより長い場合は先頭 + 末尾 512 KiB） | codemode |
+| store の1値 / 全値合計 | JSON で **262,144** / **1,048,576** 文字 | codemode の store |
+| スクリプトあたりの分類器・画像モデル呼び出しの同時実行数 | **4** | codemode の `models` |
+| 408/429/5xx における MCP HTTP リトライ | **2** | MCP トランスポート |
+| プロバイダが受け付けるツール名の上限 | `[A-Za-z0-9_-]` で64文字 | pi-mcp |
+
+`codemode.mode` をデフォルトの `"on"` ではなく `"only"` に設定すると、組み込みツールと
+拡張ツールはモデルから完全に隠され、代わりに codemode の説明に列挙される——モデルは
+すべてにスクリプト経由で到達する。これはこのアイデアの最も極端な形であり、設定キー
+1つの距離にある。
+
+## サンドボックス内の非 LLM モデル
+
+codemode スクリプト内の `models` グローバルは、セッションの資格情報で **分類器** と
+**画像** モデルを実行できる。チャットモデルは列挙されるがスクリプトから実行はできない
+——この境界は意図的なものだ。
+
+分類器のインターフェースは `state` オブジェクトと質問のマップを取り、それらすべてに
+1回の呼び出しで答える。質問には3つの形がある。`choice`（ラベルを1つ選ぶ、`criteria`
+が各ラベルの意味を対応づける）、`score`（最低値を先頭に記述した順序付きスケール）、
+そして `bool`。答えは散文ではなく、確率と確信度として返ってくる。
+
+これは AILmanac が
+[System One の決定モデル: Jev、Kev とオープンなクローン](/docs/models/system-one-decision-models-jev-kev)
+と [自分の決定モデルを訓練する](/docs/models/train-your-own-decision-model)
+で扱っている System One / 決定モデルと同じカテゴリだ。Pi は **TypeSafe** を第一級の
+プロバイダとして出荷しており、ドキュメントはモデル ID がプロバイダごとに異なること
+——`typesafe/jev-latest` 対 `openrouter/typesafe/jev-1.13`——を注記している。だから
+ハードコードせず `models.getAvailableOfType("classifier")` で解決する。
+
+これが開く型はこうだ。フロンティアモデルが、MCP サーバーから150件のイシューを取得し、
+それぞれを安価な校正済み分類器で4並列に分類し、重要な6件を返すスクリプトを書く。150件
+のイシューは高価なモデルのコンテキストに一度も触れない。
+
+<Callout type="warning" items={[
+  "`classify()` と `generateImages()` はプロバイダのエラーで throw しない——`stopReason` と `errorMessage` を自分で確認しないと、失敗を結果として黙って扱ってしまう。",
+  "スクリプト内の分類器・画像の使用量は codemode のツール結果に加算され、セッションコストに計上される。1回あたりが安いことは、150回でも無料という意味ではない。",
+  "画像生成は数分かかることがある。画像を生成するスクリプトに短い `timeout_ms` を付けると、途中で殺されてしまう。"
+]} />
+
+## キャッシュウォーミングと 0.05ドルの規則
+
+Pi には `cacheWarming` 設定があり、値は3つ——`"off"`、`"streaming"`（デフォルト、実行
+中にウォーミング）、`"idle"`（実行の合間にも）。
+
+面白いのはゲートのほうだ。キャッシュウォーミングが走るのは、モデルがキャッシュ寿命を
+宣言し、**かつ** Pi が回避できるキャッシュミスのコストを少なくとも **0.05ドル** と
+見積もるときだけである。リフレッシュの使用量はセッション合計に計上されるが
+**モデルのコンテキストには入らない**。`/session` が次の判断を表示し、拡張は
+`cache_warming_decision` フックでそれを上書きできる。
+
+オープンソースのハーネスの中にドル建ての閾値がハードコードされているのは、異例なほど
+正直なエンジニアリングだ。キャッシュのウォーミング自体が課金対象のリクエストなので、
+ある損益分岐点より下では最適化ではなく税金になる。自分でウォーミングループを作った
+のにその閾値を計算したことがないなら、おそらくその税金を払っている。経済学は
+[プロンプトキャッシングの経済学](/docs/frontiers/prompt-caching-economics)
+と同じものだ。
+
+## 設定、そして何が置換され何が追加されるのか
+
+ユーザーレベルの設定は **エージェントディレクトリ** に置かれ、デフォルトは
+`~/.pi/agent`（`PI_CODING_AGENT_DIR` で上書き）。プロジェクト設定は作業ディレクトリ
+配下の `.pi/` にあり、プロジェクトの信頼が付与されたあとにのみ読み込まれる。
+
+| パス | 役割 |
+|---|---|
+| `<agent-dir>/settings.json` | 設定、デフォルト値、リソースパス、パッケージ宣言 |
+| `<agent-dir>/mcp.json`、`models.json`、`auth.json` | グローバルな MCP サーバー、互換エンドポイントと上書き、保存された資格情報 |
+| `<agent-dir>/SYSTEM.md` | Pi のデフォルトシステムプロンプトを **置換** |
+| `<agent-dir>/APPEND_SYSTEM.md` | Pi のシステムプロンプトに **追加** |
+| `<agent-dir>/AGENTS.md` — または `CLAUDE.md` | 作業ディレクトリ横断で適用されるユーザー指示 |
+| `<agent-dir>/extensions/`、`skills/`、`prompts/`、`themes/` | ユーザーリソース、`prompts/` はスラッシュコマンドになる |
+| `.pi/SYSTEM.md`、`.pi/APPEND_SYSTEM.md` | プロジェクト版。信頼されたプロジェクトのファイルがエージェントディレクトリのものに **優先する** ——同名ファイルは結合されない |
+
+内面化しておく価値があることが2つ。Pi は `CLAUDE.md` をコンテキストファイルとして
+読むので、既存の Claude Code のリポジトリはすでに Pi 用に設定済みということになる——
+[コーディングエージェント CLI 比較](/docs/models/coding-agent-clis-compared)
+からのポータビリティの論点は双方向に成り立つ。そして `AGENTS.override.md` が
+`AGENTS.md` や `CLAUDE.md` を置換するのは **同じディレクトリ内でのみ** で、エージェント
+ディレクトリや祖先ディレクトリから継承されたコンテキストファイルを抑制はしない。
+
+組み込みツールは `read`、`bash`、`powershell`、`edit`、`write`、`grep`、`find`、`ls`
+で、デフォルトで有効なのは `read`、`bash`、`edit`、`write` だけだ。組み込み拡張は
+`builtin:mcp`、`builtin:llama.cpp`、`builtin:codemode`、`builtin:tool-search`
+——**llama.cpp が第一級の組み込み** であることに注目。ローカルの重みはここでは後付けでは
+ない。
+
+## セキュリティモデル、率直に述べる
+
+Pi 自身のセキュリティドキュメントは気持ちよく率直で、以下の3文は自分が書いていない
+リポジトリに向けて Pi を走らせる前に真剣に受け取るべきものだ。
+
+<Callout type="warning" items={[
+  "Pi はすべてのツール呼び出しの前に承認を求めない。拡張、パッケージインストーラ、言語サーバーは、Pi を起動したアカウントと同じ権限で子プロセスとして動く。拡張は Pi のプロセスにロードされる TypeScript モジュールであり——サンドボックス化されていない。codemode の VM が守るのはモデルの出力経路であって、あなたのマシンではない。",
+  "プロジェクトの信頼は起動時の境界ではない。Pi は信頼を解決する前にプロジェクトの `sessionDir` 設定を読むので、信頼を拒否してもその参照は取り消せない。`.pi` ディレクトリが空なら信頼のプロンプトはそもそも出ない。",
+  "コンテキストファイルの発見にプロジェクトの信頼は不要だ。クローンしたリポジトリの `AGENTS.md` や `CLAUDE.md` は、あなたに尋ねることなくシステムプロンプトに読み込まれる——これは設定上の便利さではなく、プロンプトインジェクションの攻撃面である。",
+  "ドキュメントは率直に言っている。トランスクリプトを見張ること、プロジェクトの信頼を使うこと、変更をレビューすることは、セキュリティ境界を作らない。境界はコンテナ、VM、または専用の OS ユーザーだ。"
+]} />
+
+最後の点が初耳なら、次は
+[攻撃されるコーディングエージェント](/docs/security/coding-agents-under-attack) と
+[ローカルおよびハイブリッドなエージェントを守る](/docs/models/securing-local-and-hybrid-agents)
+を読むこと。Pi が正しくやっている小さな緩和が1つある。npm のインストール経路が
+`npm install -g --ignore-scripts @earendil-works/pi-coding-agent` として文書化されて
+おり、通常のインストールで Pi は依存関係のライフサイクルスクリプトを必要としない。
+
+## Pi が意図的に持たないもの
+
+| 欠けているもの | Pi の立場 |
+|---|---|
+| サブエージェント | 出荷しない。欲しいものを Pi に作らせるか、パッケージを入れること。 |
+| プランモード | 出荷しない。 |
+| 呼び出しごとの承認プロンプト | そのモデルを採らない。境界は分離であって、確認ダイアログではない。 |
+| 公式 MCP SDK への依存 | `pi-mcp` はスタンドアロンのクライアントで、公式 SDK や他の pi パッケージに依存しない。 |
+| 開かれたコントリビューションの受け口 | 新規コントリビューターからの Issue と PR は **自動的にクローズされる**。メンテナはクローズされた投稿を毎日レビューしている。まず `CONTRIBUTING.md` を読むこと。 |
+
+欠落こそがプロダクトだ。機能が自らを証明するまで拒むハーネスは、コンテキスト予算が
+読み取り可能なまま保たれるハーネスである——これは
+[エージェントがトークンを燃やす理由](/docs/models/why-agents-burn-tokens)
+と同じ議論を、引き算によって述べたものだ。
+
+逆のトレードオフ——1ターンあたりのコンテキストではなく*ターン数*を最適化するハーネス
+——については、公開された Terminal-Bench 4.0 の走行が Pi の44ターンに対して28ターンで
+終わっている
+[非同期ファーストなエージェントハーネス](/docs/models/async-first-agent-harness-unreal)
+と比べてみてほしい。
+
+## Pi Durable、ひと息で
+
+`@earendil-works/pi-durable` は **実験的** とフラグが立てられており——API はリリース間
+で予告なく変わる——リポジトリの中で最もアーキテクチャ的に興味深いパッケージだ。会話、
+モデルのターン、ツール呼び出し、そしてあなた自身の状態は、何かが表示される*前*に
+ストレージへコミットされる。プロセスがターンの途中で死んでも、ストレージを開き直せば
+止まったところから続く。
+
+その語彙はインストールしなくても盗む価値がある。**conversation** は不変の **entry**
+（`pi.user`、`pi.assistant`、`pi.tool-result`、`pi.system`、`pi.reset`）のトランス
+クリプト。**document** はトランスクリプトの隣に保存される型付き JSON の状態
+（モデル選択の `pi.agent`、実行中の生成の `pi.live`、キューに入った投入の `pi.inbox`、
+支出の `pi.usage`）。**task** はすべてのステップでチェックポイントを打つ永続的な状態
+機械で、だから `pi.generation` が自分のツール呼び出しの `pi.tool` タスクを所有し、
+再起動したプロセスは最後のチェックポイントから続く。そしてモデルが見るのは
+**最新の reset 以降** のエントリだけだ——reset は削除ではなく、トランスクリプトの
+エントリである。
+
+[エージェントのメモリアーキテクチャ](/docs/frontiers/agent-memory-architectures)
+と [長時間稼働するエージェントハーネス](/docs/frontiers/long-running-agent-harnesses)
+と比べてみてほしい。
+
+## 乗り換えるべきか
+
+正直な答え: おそらく全面的にはしなくていい。そしてそれでいい——成果物はアイデアのほう
+なのだから。
+
+- **Pi を試すべきなのは** 多数のプロバイダをまたぐ1つのハーネスが欲しい場合、ローカル
+  の重みを動かしている場合（llama.cpp が組み込み）、あるいは MCP の表面積がコンテキスト
+  ウィンドウを超えて育ってしまった場合。
+- **今の場所に留まるべきなのは** サブエージェント、プランモード、呼び出しごとの承認
+  プロンプトに依存している場合。Pi にはそれらがなく、そのことを謝る気もない。
+- **いずれにせよ盗むべきもの:** 露出のはしご（`codemode` / `deferred` / `direct` /
+  `hidden`）、プロンプトのセクション変更をサフィックス追記にする技、そしてキャッシュを
+  ウォーミングする前に損益分岐点を計測すること。
+
+<Quiz questions={[
+  {
+    q: "Pi の codemode で、10回のツール呼び出しを行うスクリプトからモデルのコンテキストに届くのは何か?",
+    options: [
+      "スクリプトの出力と戻り値だけ",
+      "10回のツール呼び出しとその結果すべてが、トランスクリプトのエントリとして",
+      "より安価なモデルが生成した、10回の呼び出しの要約",
+      "何も届かない——codemode の結果はモデルに一切示されない"
+    ],
+    answer: 0,
+    explain: "ネストしたツール呼び出しは LLM のコンテキストに入らない。入るのはスクリプトの出力アイテム（text()、image()、console.log() 由来）と戻り値だけだ。だからこそ並列ファンアウトと絞り込みが安く済む。"
+  },
+  {
+    q: "あるサーバーがデフォルトの `codemode` 露出で設定されている。モデルはプロンプトで何を見るか?",
+    options: [
+      "個々のツールについては何も見えない——`mcp_servers` セクションの1行のエントリだけ",
+      "そのすべてのツールについて完全な TypeScript 宣言",
+      "ツール名のみ、説明なし",
+      "ツールは宣言されるが、サーバーが接続するまで利用不可と記される"
+    ],
+    answer: 0,
+    explain: "`codemode` 露出では、ツールはモデルに宣言されず、codemode の説明にも列挙されない。サーバーはシステムプロンプトの `mcp_servers` セクションに1行として現れ、スクリプトが searchTools()、describeTool()、ALL_TOOLS でそのツールを見つける。"
+  },
+  {
+    q: "MCP サーバーがセッション中に接続し、その要約行が変化したとき、Pi はプロンプトキャッシュを守るために何をするか?",
+    options: [
+      "ツール宣言を変更する代わりに、新しいセクションを会話に追記する",
+      "システムプロンプトを書き換えて、キャッシュミス1回を受け入れる",
+      "更新を次のセッションまで延期する",
+      "次のターンの前にバックグラウンドでキャッシュを再構築する"
+    ],
+    answer: 0,
+    explain: "プレフィックスが変わるとその背後のキャッシュ済みトークンすべてが無効になるが、サフィックスの変更はコストゼロだ。Pi は書き換えをトランスクリプトへの追記に変換している。deferred 露出のツールが codemode の説明から除外されているのも同じ理由だ——サーバーが接続する間、その説明をバイト単位で安定させるためである。"
+  },
+  {
+    q: "Pi のキャッシュウォーミングは特定の条件でゲートされている。どれか?",
+    options: [
+      "モデルがキャッシュ寿命を宣言し、かつ Pi が回避できるキャッシュミスのコストを少なくとも 0.05ドルと見積もること",
+      "セッションが少なくとも60秒アイドルであること",
+      "トランスクリプトが 50,000 トークンを超えること",
+      "プロバイダが Anthropic で、セッションが対話的であること"
+    ],
+    answer: 0,
+    explain: "キャッシュのウォーミング自体が課金対象のリクエストなので、損益分岐点より下では税金になる。Pi はその分岐点を、回避できるキャッシュミスのコストの見積もり 0.05ドルとしてハードコードしており、しかもモデルが実際にキャッシュ寿命を宣言しているときに限られる。リフレッシュの使用量はセッション合計に計上されるが、モデルのコンテキストには入らない。"
+  },
+  {
+    q: "codemode のスクリプトが、10回のツール呼び出しのうち7回を完了した時点でタイムアウトした。システムの状態はどうなるか?",
+    options: [
+      "完了した7回はそのまま残る——失敗は副作用をロールバックしない",
+      "10回すべてがアトミックにロールバックされる",
+      "7回はロールバックされ、保留中の3回はリトライされる",
+      "Pi が次のターンでスクリプトを最初から再生する"
+    ],
+    answer: 0,
+    explain: "ドキュメントは明示している。ツール呼び出しは本物で、失敗より前に行われた呼び出しは取り消されない。スクリプト終了時にまだ実行中の呼び出しはキャンセルされ、await されていない promise は破棄される。再実行しても安全なスクリプトを書くこと。"
+  },
+  {
+    q: "Pi において、プロジェクト信頼のプロンプトなしで読み込まれるのは次のどれか?",
+    options: [
+      "クローンしたリポジトリの AGENTS.md または CLAUDE.md コンテキストファイル",
+      "`.pi/extensions/`",
+      "`.pi/mcp.json`",
+      "`.pi/SYSTEM.md`"
+    ],
+    answer: 0,
+    explain: "コンテキストファイルの発見にプロジェクトの信頼は不要だ——だからクローンしたばかりのリポジトリが、あなたが何かを承認する前にシステムプロンプトへ指示を入れられる。信頼でゲートされているのは `.pi/` のリソース（settings、mcp.json、extensions、skills、prompts、themes、SYSTEM.md、APPEND_SYSTEM.md）のほうだ。"
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Pi 1.0 — 何を、いつ、誰が", back: "Earendil（Radius と Lefos も作っている）による、ミニマルで拡張可能、モデル非依存のターミナルエージェントハーネス。v1.0.0 は 2026-10-01 公開。MIT、TypeScript、Node.js 22.19+ が必要。リポジトリは github.com/earendil-works/pi、作成は 2025-08-09、ローンチ時点で約 111.6k スター。2026年10月2日に 1,500 ポイント超で Hacker News 1位。" },
+  { front: "codemode を一文で", back: "モデルが生の JavaScript を書き、それが WebAssembly にコンパイルされた QuickJS VM 内で async 関数の本体として実行される。その VM の唯一の能力は注入されたツールを呼ぶこと。ネストしたツール呼び出しはモデルのコンテキストに入らない——入るのはスクリプトの出力と戻り値だけだ。" },
+  { front: "codemode サンドボックスに無いもの", back: "タイマーなし、fetch なし、process なし、require なし、モジュールなし、ネストした WebAssembly なし、ファイルシステムなし、ネットワークなし。eval と Function は動くが、同じ VM 内にコードをさらに生むだけ。リモートの画像 URL は拒否される。" },
+  { front: "4つの MCP 露出モード", back: "`codemode`（デフォルト）: 宣言されず、列挙されず、スクリプトからのみ到達可能。`deferred`: tool_search がマッチをロードするまで宣言されず、ロード後はそのブランチで宣言される。`direct`: 組み込みツールのように宣言される。`hidden`: 登録されるが到達不能。`toolExposure` がツールごとに上書きし、厳密な名前が `*` パターンに勝つ。" },
+  { front: "プロンプトキャッシュの技", back: "`mcp_servers` のシステムプロンプトセクションが変化したとき（サーバーが接続したとき）、Pi はツール宣言を書き換える代わりに新しいセクションを会話に追記するので、より前のメッセージはキャッシュされたままになる。プレフィックスの変更はキャッシュ全体のコストを払わせ、サフィックスの変更はコストゼロ。" },
+  { front: "スクリプト内のツール発見グローバル", back: "`ALL_TOOLS`（呼び出し可能な全ツールの名前 + 説明）、`searchTools(query, { limit, namespace })`（BM25、デフォルト上限8）、`describeTool(name)`（説明 + TypeScript 宣言）、`describeNamespace(name)`（MCP サーバーの説明、指示、ツール名）。" },
+  { front: "bash の非対称性", back: "直接の bash 呼び出しはモデルに 2,000 行または 50 KB を見せる。同じツールを codemode スクリプトから呼ぶと構造化された値に解決され、その output は最大 1 MiB を保持する——それより長い場合は省略マーカーの周りに先頭と末尾の 512 KiB、`truncated` が立ち、`full_output_path` が全文ファイルを指す。" },
+  { front: "codemode の store の上限", back: "store()/load() は codemode 呼び出しをまたいで JSON を保持する。1値は JSON で最大 262,144 文字。全値合計は 1,048,576。書き込みはスクリプトが成功したときだけ永続化され、`codemode-store` セッションエントリとして記録される。だから再開したセッションは値を保ち、各フォークは自分の経路の書き込みだけを見る。" },
+  { front: "キャッシュウォーミングのゲート", back: "`cacheWarming` は 「off」 | 「streaming」（デフォルト）| 「idle」。走るのは、モデルがキャッシュ寿命を宣言し、かつ Pi が回避できるキャッシュミスのコストを少なくとも 0.05ドルと見積もるときだけ。リフレッシュの使用量はセッション合計に計上されるが、モデルのコンテキストには入らない。`/session` が次の判断を表示する。" },
+  { front: "codemode 内の分類器", back: "`models.classify(model, { state, questions })` は全質問に1回の呼び出しで答える。質問の型: choice（ラベル + criteria）、score（順序付きスケール、最低値を先頭）、bool。答えは散文ではなく確率と確信度を返す。チャットモデルは列挙されるがスクリプトから実行できない。分類器・画像の呼び出しはスクリプトあたり最大4つまで同時実行される。" },
+  { front: "Pi の意図的な欠落", back: "サブエージェントなし。プランモードなし。すべてのツール呼び出し前の承認プロンプトなし。公式 MCP SDK への依存なし。新規コントリビューターの Issue と PR は自動的にクローズされ、メンテナが毎日レビューする。" },
+  { front: "設定パス", back: "ユーザー: `~/.pi/agent/`（settings.json、keybindings.json、mcp.json、models.json、auth.json、SYSTEM.md、APPEND_SYSTEM.md、AGENTS.md または CLAUDE.md、extensions/、skills/、prompts/、themes/）。プロジェクト: `.pi/`、信頼のあとに読み込まれる。SYSTEM.md はシステムプロンプトを置換、APPEND_SYSTEM.md は追加、同名ファイルは決して結合されない。" },
+  { front: "Pi のセキュリティ境界", back: "トランスクリプトでもプロジェクトの信頼でもコードレビューでもない——それらは境界ではない。境界はコンテナ、VM、または専用の OS ユーザーだ。拡張はサンドボックスなしで Pi のプロセスにロードされる。プロジェクトの信頼は `sessionDir` のあとに読まれ、コンテキストファイルの発見（AGENTS.md / CLAUDE.md）には信頼がまったく要らない。" },
+  { front: "pi-durable の語彙", back: "実験的。entry は不変のトランスクリプト記録（pi.user、pi.assistant、pi.tool-result、pi.system、pi.reset）。document は型付き JSON の状態（pi.agent、pi.live、pi.inbox、pi.usage）。task は各ステップでチェックポイントを打つ永続的な状態機械で、pi.generation が自分の pi.tool タスクを所有する。モデルが見るのは最新の reset 以降のエントリだけ。" }
+]} />
+
+## 出典とさらに読むもの
+
+- [Pi 1.0 — Earendil のアナウンス（2026年10月1日）](https://earendil.com/posts/pi-1-0/) — リリース投稿: codemode、遅延ツールロード、キャッシュウォーミング、会話中のシステムメッセージ、Pi Durable。
+- [「You Said No MCP!」— Earendil](https://earendil.com/posts/you-said-no-mcp/) — Pi が MCP に抵抗した理由、合成可能性への反論、そして何が変わったか。
+- [GitHub の earendil-works/pi](https://github.com/earendil-works/pi) — MIT のモノレポ。`packages/` に agent、ai、chord、client、codemode、coding-agent、durable、evals、mcp、protocol、server、telemetry、tui が入っている。
+- [`packages/coding-agent/docs/codemode.md`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/codemode.md) — グローバル、オプション行、store のセマンティクス、`models` インターフェース、出力予算。
+- [`packages/coding-agent/docs/mcp.md`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/mcp.md) — 露出の表、`toolExposure`、キャッシュを保つ追記、接続とリトライの挙動。
+- [`packages/coding-agent/docs/settings.md`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/settings.md) — `codemode.inlineBudget`、`codemode.mode`、`cacheWarming`、`defaultTools`、組み込み拡張。
+- [`packages/coding-agent/docs/security.md`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/security.md) — 分離の表、プロジェクト信頼のスコープ、そして明示的に境界ではないもの。
+- [`packages/coding-agent/docs/configuration.md`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/configuration.md) — エージェントディレクトリとプロジェクト `.pi` のレイアウト、コンテキストファイルの発見。
+- [`packages/codemode/README.md`](https://github.com/earendil-works/pi/blob/main/packages/codemode/README.md) — スタンドアロンの `CodemodeSandbox` API、メモリ上限、store 書き込みの報告、`CODEMODE_SOURCE_GRAMMAR`。
+- [`packages/durable/README.md`](https://github.com/earendil-works/pi/blob/main/packages/durable/README.md) — harness、conversation、entry、commit、document、task の語彙。
+- [`packages/ai/README.md`](https://github.com/earendil-works/pi/blob/main/packages/ai/README.md) — プロバイダ一覧（TypeSafe の System One 分類器 API と任意の OpenAI 互換エンドポイントを含む）、認証の解決、プロバイダ間の引き継ぎ。
+- [pi.dev](https://pi.dev) — インストールスクリプトとレンダリング済みドキュメント。
+
+## 次に
+
+- [コーディングエージェント CLI 比較](/docs/models/coding-agent-clis-compared) — Claude Code、Codex CLI、opencode、Aider に対して Pi がどこに位置するか
+- [MCP サーバーが実際にトークンでいくらかかるのか](/docs/claude-code/mcp-token-cost) — codemode が解こうとしている問題を、自分の環境で計測する
+- [非同期ファーストなエージェントハーネス: Unreal Agent が変えるもの](/docs/models/async-first-agent-harness-unreal) — コスト議論のもう半分: ターンを小さくするのではなく、ターンを減らす
