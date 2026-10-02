@@ -1,0 +1,412 @@
+---
+sidebar_position: 16.5
+title: "Mod: プロセス内拡張"
+description: "Mod は Claude Code の内部で動作する TypeScript ミドルウェアです。ツール呼び出し、プロンプト、ターン、そしてインターフェイス自体を書き換えられます。"
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-10-02" source="https://code.claude.com/docs/en/plugins/mods/overview">
+Mod は 2026-10-01 に Claude Code **v2.1.287** で出荷され、デフォルトで有効です。以下のイベント名、mods API メソッド、要素、上限はそのバージョンの公式 mods ページに基づいています。Anthropic は、この面はリリース間で変わりうること、そして Claude Code が *あなたの* ビルド向けに書き出す型宣言こそが正式なリファレンスであることを明言しています。どのページよりも（このページも含めて）そちらを信頼してください。
+</VerifyNote>
+
+**mod** は、Claude Code が *自身のプロセス内で* 呼び出す JavaScript または TypeScript の関数を提供するプラグインです。[フック](/docs/claude-code/hooks)が JSON ペイロードを受け取って終了コードで答えるシェルコマンドであるのに対し、mod のハンドラは **Claude Code 自身の振る舞いの手前にある** ミドルウェアチェーンに座ります。イベントを監視することも、書き換えることも、組み込みの振る舞いが一切走らないように自分で応答することもできます。
+
+最後の能力こそが要点です。Claude Code 自身の機能のいくつかは、いまや mod です。`/diff` と `AGENTS.md` の読み込みは `cc-plugin-diff` と `cc-plugin-agents-md` として出荷されており、ソースは [Claude Code リポジトリの `mods/` ディレクトリ](https://github.com/anthropics/claude-code/tree/main/mods)にあります。ベンダーが組み込みコマンドを mod で置き換えられるなら、あなたにもできます。
+
+<Callout type="objectives" items={["ミドルウェアモデル: イベントを観測する、書き換える、あるいは応答する — そして next(e) がエンジン自身にまで届く理由", "mod に必要な 3 つのファイルと、--plugin-dir による編集・リロードのループ", "静的解析のゲート: const ui = $.ui がスタイルの些事ではなくロードエラーになる理由", "イベントマップ (ツール、プロンプト、ターン、セッション、UI) とフックが呼べる $ の名前空間", "本番で刺さる 5 つの落とし穴: フェイルオープンするフック、共有ワーカー、10 秒の予算、状態のリセット、deny ルールの非対称性", "mod があなたのマシン上で何に手を伸ばせるか、インストール前の監査方法、そして管理者が囲い込むための managed settings"]} />
+
+## mod、フック、スキル、それとも MCP サーバー?
+
+4 つはいずれも Claude Code を拡張し、互いに重なります。*何を変えたいか* で選んでください。
+
+| | **mod** | **設定フック** | **スキル** | **MCP サーバー** |
+| --- | --- | --- | --- | --- |
+| 正体 | プラグイン内の関数。Claude Code のプロセスで動く | ライフサイクルイベントで発火するシェルコマンド / HTTP リクエスト / プロンプト | 指示を書いた `SKILL.md` | ツールを公開する外部プロセス |
+| 変えられるもの | ツール呼び出し、プロンプト、ターン、コマンド、**そしてインターフェイスが描くもの** | アクションを進めるか否か。ツールの引数と結果。Claude 向けのコンテキスト | Claude が知っていること・すること | Claude が持つツール |
+| UI を描ける? | **はい** | いいえ | いいえ | いいえ |
+| 書くもの | JS / TS | スクリプト + `settings.json` のエントリ | Markdown | サーバー。言語は自由 |
+| こんなときに | ペイン、プロンプト上のバンド、即応の `/command` が欲しい、あるいはイベントを書き換えたい | ブロック・許可・ログを行うスクリプトが既にある | 同じ指示を貼り続けている | Claude が外部システムを必要としている |
+
+非推奨になったものはありません。設定フックは mod と並んで今も動きます。1 つのプラグインに mod、スキル、コマンド、MCP サーバーをまとめて載せることもできます。[プラグインとマーケットプレイス](/docs/claude-code/plugins-marketplaces)を参照してください。
+
+## ミドルウェアモデル
+
+すべてのフックは同じ 3 つの引数を受け取ります。mods API の `$`、凍結されたイベントの `e`、そして `next` です。1 つのイベントに対するハンドラはチェーンを形成し、**最後の** `next` が Claude Code 自身の振る舞いです。`next` をどう扱うかで、3 つのうちどれをやっているのかが決まります。
+
+| モード | やり方 | 効果 |
+| --- | --- | --- |
+| **観測** | `return next(e)` | イベントはそのまま進む。イベントの *後* に動きたいなら先に `await next(e)`。 |
+| **書き換え** | `return next({ ...e, text })` | 後続のハンドラとエンジンはあなたのコピーだけを見て、元のイベントは見ない。 |
+| **応答** | 結果を返し、`next` を呼ばない | チェーンを短絡させる。後続の mod *と組み込みの振る舞い* は走らない。 |
+
+```javascript
+// Observe: log the tool, then let it run
+on('tool.call', async ($, e, next) => {
+  $.ui.log('Claude is about to use ' + e.tool)
+  return next(e)
+})
+
+// Rewrite: trim every prompt before the turn starts
+on('prompt.submit', async ($, e, next) => next({ ...e, text: e.text.trim() }))
+
+// Answer: refuse force-pushes, and tell Claude why
+on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+  if (/git push .*--force/.test(e.command)) {
+    return { deny: 'Force pushes are not allowed here. Push to a new branch instead.' }
+  }
+  return next(e)
+})
+```
+
+内在化すべきことが 2 つあります。第一に、`e` は **深く凍結されています**。フィールドへの代入は例外を投げるので、コピーを `next` に渡します。第二に、`next` を呼ばずに `tool.call` に応答した場合、**権限プロンプトは出ず**、ツールも実行されません。したがって、あなたが返したものが、何が起きたかについて Claude が知るすべてになります。
+
+`on` の第 2 引数は **マッチャー** です。イベントとフィールド単位で比較されるオブジェクトです。フィールドには値、配列、正規表現を指定できます。
+
+```javascript
+on('tool.call', { tool: 'Bash' }, hook)                  // one tool
+on('tool.call', { tool: ['Edit', 'Write'] }, hook)       // any of these
+on('tool.call', { tool: /^mcp__github__/ }, hook)        // one MCP server's tools
+```
+
+`'*'` はテレメトリ系を除くすべてのイベントにマッチします。各イベントは **マッチャーごとに 1 回だけ** 登録してください。マッチャーなしの `on('session.start', …)` を 2 回呼ぶと、`on("session.start") is registered twice without a matcher` でモジュールのロードが失敗します。
+
+## 3 つのファイルで作る
+
+Node.js もバンドラもビルドステップも不要です。Claude Code は `.js` と `.ts` を直接ロードします。
+
+<Steps items={[{title: "プラグインディレクトリを作る", body: "mkdir -p first-mod/.claude-plugin first-mod/hooks — mod はプラグインそのものなので、通常のプラグインマニフェストが .claude-plugin/plugin.json に必要です。"}, {title: "hooks.json をコードに向ける", body: "hooks/hooks.json には、そのファイルからの相対パスを 1 つ含む modules 配列を書きます。たとえば ./register.js です。この modules キーがあることが、プラグインを mod にします。validate の実行結果に hooks の行が出ない場合、たいていこのキーが欠けているか綴りが違います。"}, {title: "フックモジュールを書く", body: "hooks/register.js は register(on, options) をエクスポートします。各 on() 呼び出しが 1 つのフックを登録します。options にはマニフェストの userConfig の値が、デフォルトを埋めた形で入ります。ES モジュールでなければなりません — import を使い、require は使えません。"}, {title: "1 セッションだけロードする", body: "claude --plugin-dir ./first-mod はインストールせずにディレクトリをロードし、保存するたびにモジュールをホットリロードします。複数ロードしたいならフラグを繰り返します。"}, {title: "Claude Code が実際に読んだものを確認する", body: "claude plugin validate ./first-mod は、あなたのコードを実行せずに、ローダーと同じ静的解析を走らせます。hooks の行 (イベントと、波かっこ内のマッチャー) と calls の行 (すべての mods API メソッド) を出力します。そこにイベントが出てこないなら、Claude Code もそのフックを呼びません。"}, {title: "セッションなしでテストする", body: "claude plugin test はすべての *.test.ts / *.test.tsx ファイルを実行します — セッションなし、サインインなし、ネットワークなしです。テストは Claude Code の代わりにイベントを発火させ、フックが何をしたかをアサートします。"}]} />
+
+定番のスターターは、ツール呼び出しを数えてスピナーの隣にその数を表示します。
+
+```javascript
+// hooks/register.js — shared by every hook in this module
+let calls = 0
+
+export function register(on) {
+  on('session.start', async ($, e, next) => {
+    await $.command.register({ name: 'tally', description: 'Show how many tool calls Claude has made' })
+    return next(e)
+  })
+
+  on('tool.call', async ($, e, next) => {
+    calls += 1
+    $.ui.invalidate('ui.render')   // ask for a redraw so the new count shows
+    return next(e)
+  })
+
+  on('command.run', { command: 'tally' }, async () => {
+    return { text: 'Claude has made ' + calls + ' tool calls since this mod loaded' }
+  })
+
+  on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
+    return next({ ...e, props: { ...e.props, suffix: ' · tool calls: ' + calls + '…' } })
+  })
+}
+```
+
+モジュールレベルで共有される `calls` 変数が定番のパターンです。**一方のフックが集め、もう一方が表示する。** これは設定フックが構造上できないことです。設定フックはそれぞれ別のプロセスだからです。
+
+手で書く必要はありません。Claude Code には組み込みの `plugin-authoring` スキルが同梱されており（`/plugin` では `cc-plugin-plugin-authoring` として表示されます）、mod を説明するだけで動きます。
+
+<PromptCard title="Claude に mod を書かせる">
+{`make a mod that shows the current git branch above the prompt`}
+</PromptCard>
+
+Claude は `~/.claude/dev-mods/<session-id>/<mod-name>/` 以下に書き、そのセッションでホットリロードを有効にするかを一度だけ尋ね、ファイルを変更したターンの終わりごとにリロードします。罠に注意してください。そのフォルダは **セッション単位** で、`cleanupPeriodDays` より古くなると Claude Code が削除します。mod を残したいなら、ディレクトリを自分の場所にコピーしてください。
+
+<PromptCard title="実行前に mod の能力を監査する">
+{`claude plugin validate ./some-mod`}
+</PromptCard>
+
+## 静的解析のゲート
+
+ここが経験豊富な JS 開発者を驚かせる部分で、このページで最も重要な仕組みです。Claude Code は **`$` の使い方を静的に読み取れない mod のロードを拒否します。** だからこそ `claude plugin validate` は信頼できる能力マニフェストになります。ローダーは、mod が何をできるかを知るためにコードを実行する必要がないのです。
+
+したがって、以下はすべて *バリデーションに失敗します*。
+
+| 書いたもの | 失敗内容 |
+| --- | --- |
+| `const ui = $.ui` | `$.ui is used as a value` |
+| 変数を使った `on(eventName, hook)`、または名前のリストに対するループ | `the event name passed to on() is not a string literal` |
+| `register` の内側で宣言された 2 つめの `on` | `"on" is declared again (shadowed)` |
+| `await import('./other.js')` | `a dynamic import(); a hooks module imports its own files with an import declaration` |
+| `require(...)`、または `claude-code` 以外のベア import | モジュールが有効なフックモジュールではない |
+| `on('tool.calls', …)` | `"tool.calls" is not an event` |
+
+すべての呼び出しを省略せずに書いてください。`$.store.get('notes')` のように `$`、名前空間、メソッドを揃えます。同一ファイルのトップレベルで宣言された関数に `$` を渡すことは *できます*。その場合 `validate` は呼び出しを帰属させ、たとえば `$.store.get (via loadNotes)` と出ます。メソッド、フック内部で定義されたクロージャ、import された関数に `$` を渡すと失敗します。
+
+読むべき出力はこれです。
+
+```text
+  ❯ ./register.js hooks: session.start, tool.call, command.run{command=tally}, ui.render{component=Spinner}
+  ❯ ./register.js calls: $.command.register, $.ui.invalidate
+
+✔ Validation passed
+```
+
+環境変数や `$.state` に触る mod には `env reads:` / `env writes:` / `state reads:` / `state writes:` の行も出ます。`--strict` は警告をエラーに変え、`--json` は機械可読にします。CI で欲しいのは後者です。
+
+## イベントマップ
+
+イベントは Claude Code が何かをしようとするあらゆる地点で発火します。v2.1.287 時点の全集合をグループ分けしたものです。
+
+| グループ | イベント | フックが典型的に返せるもの |
+| --- | --- | --- |
+| **ツール** | `tool.call`, `tool.check`, `tool.describe` | `next(e)`, `{ deny: reason }`, `{ result }`。`tool.check` は `{ decision }` = `allow` / `ask` / `deny` を返す |
+| **プロンプトとコンテキスト** | `prompt.submit`, `prompt.fill`, `prompt.suggest`, `prompt.edit`, `prompt.compose`, `prompt.section`, `prompt.context`, `prompt.attachment`, `skill.prompt`, `attribution.text` | 変更後のテキスト、`{ sections }`、`{ blocks }`、省略するための `{ text: null }`、`{ drop: reason }` |
+| **コマンドと設定** | `command.run`, `command.describe`, `config.set`, `config.describe` | `{ text }`, `{ description, argumentHint, isHidden }`, `{ deny: reason }` |
+| **ターン** | `turn.start`, `turn.step`, `turn.complete` | `turn.step` は非同期ジェネレータ — `yield* next(e)`。リクエストごとに `model` や `effort` を差し替えられる |
+| **セッション** | `session.start`, `session.end`, `session.compact`, `session.send`, `session.receive`, `session.append`, `session.attach`, `session.detach`, `session.measure` | compact では `{ skip: reason }`、receive では `{ consumed: reason }`、append では書き換えた行 |
+| **サブエージェント** | `agent.offer`, `agent.spawn` | タイプを出さないための `{ isOffered: false }`、`{ model }` または `{ deny: reason }` |
+| **インターフェイス** | `ui.render`, `ui.resolve`, `ui.press`, `ui.input`, `ui.select`, `ui.focus`, `ui.scroll`, `ui.close`, `ui.message` | 要素ツリー、または props を変えた `next` |
+| **他の mod** | `plugin.register`, `engine.create` | 他の mod のロードを止める `{ refuse: reason }` |
+| **テレメトリ** | `telemetry.log`, `telemetry.mark` | `{ to: 'collector' }` マッチャーが必須で、ないと `validate` が失敗する。`'*'` はこれらにマッチしない |
+
+見落としやすいイベントが 2 種類あります。
+
+- **`classic.<Event>`** — すべての設定フックイベントは mod イベントでもあるので、`on('classic.Stop', …)` や `on('classic.PostToolUse', …)` が機能し、`e` は設定フックが stdin で読むのと同じ JSON（`transcript_path` も含む）になります。`'classic.*'` はそのすべてにマッチします。
+- **すべての mods API メソッドはそれ自体がイベント** でもあり、`$.` を外した名前になります。`fs.read`、`model.complete`、`ui.open` のように。あるメソッドにフックを掛けると、**それ以降に走るすべての mod が行うその呼び出しを傍受** でき、`next(e)`、`{ deny: reason }`、`{ value }` を返せます。組織ポリシー mod が他の mod のふるまいを監査したり拒否したりするのに使うのが、このフックです。
+
+### 本物のトークン数を読む
+
+`turn.step` はストリームするので、そのフックは非同期ジェネレータになります。これは自分の[プロンプトキャッシュ](/docs/api/prompt-caching)のヒット率をリクエストごとに見る、最も安くて正直な方法です。
+
+```javascript
+on('turn.step', async function* ($, e, next) {
+  const result = yield* next(e)
+  if (result.usage) {
+    $.ui.log('cache read ' + result.usage.cache_read_input_tokens +
+             ' · wrote ' + result.usage.cache_creation_input_tokens)
+  }
+  return result
+})
+```
+
+`result.usage` は `input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens` と、応答した `model` を保持します。このフックは **サブエージェント** のリクエストでも発火するので、メインスレッドだけを見たいときは `e.agentId` でフィルタしてください。そして `prompt.section` や `prompt.context` を書き換える人への当然の帰結として、それらのフックが出すテキストがリクエスト間で変わると **プロンプトキャッシュが無効化されます**。
+
+## `$` の名前空間
+
+| 名前空間 | メソッド |
+| --- | --- |
+| `$.plugin` | `name`, `root` |
+| `$.ui` | `resolve`, `invalidate`, `open`, `close`, `panes`, `focus`, `scroll`, `toast`, `status`, `log`, `notice`, `ask`, `copy`, `blit` |
+| `$.command` / `$.tool` / `$.agent` | `register`, `run`/`call`, `list`（`$.tool` には `check` も） |
+| `$.model` | `complete`, `fork`, `classify` |
+| `$.prompt` | `submit`, `read`, `fill`, `suggest`, `compose` |
+| `$.turn` | `abort` |
+| `$.session` | `messages`, `cwd`, `root`, `model`, `turns`, `id`, `repo`, `surfaces`, `usage`, `version`, `compact`, `send`, `append`, `authorize` |
+| `$.config` / `$.settings` / `$.env` | `list`/`set`, `read`, `get`/`set` |
+| `$.fs` | `read`, `write`, `list`, `exists`, `stat`, `ancestors` |
+| `$.store` | `get`, `set`, `delete`, `keys` — マシン全体で、すべてのセッションが共有する |
+| `$.state` | `get`, `set`。加えて `claude-code` から import する `atom`, `read`, `update`, `derive`, `memberOf` |
+| `$.clock` / `$.http` / `$.process` / `$.mcp` | `now`, `sleep`, `after`, `every` · `fetch` · `run`, `spawn` · `call`, `connect` |
+| `$.audio` / `$.telemetry` | `play`, `speak` · `log`, `mark` |
+
+名前で覚えておく価値があるのは `$.session.usage()` です。`{ startedAt, context, rateLimits, cost }` を返し、`context` は `tokens`、`window`、`percent` を持ち、`rateLimits` は `{ kind, percentUsed, resetsAt }` のリストです。これでプラン上限のゲージが 4 行ほどで作れます。その数字をどう使うかは[コンテキスト予算の監査](/docs/claude-code/context-budget-audit)を参照してください。
+
+## 描画
+
+`ui.render` フックは **レンダーサイト** に要素ツリーを返します。サイトには `Pane` と `AbovePrompt`（あなた自身の領地）があり、さらに Claude Code が既に描いているものを再スタイルできるものとして、`UserMessage`、`AssistantMessage`、`ToolUse`、`ToolResult`、`ToolGroup`、`CommandOutput`、`AskUserQuestion`、`Spinner`、`TurnDuration`、`InfoNotice`、`SessionMode`、`PromptHint`、そしてターミナル専用の `ToolProgress` があります。
+
+要素は `Box`、`Text`、`Button`、`Link`、`Code`、`Markdown`、`Input`、`Select`、`Client`、加えて `Svg`（Desktop のみ）と `Raster` / `Image`（ターミナルのみ）です。`e.props.placement` が `'dock'` のときは、幅を `e.props.bodyColumns`、高さを `e.props.scroll.bodyRows` で読んで、ツリーをサイトに合わせてください。
+
+**mod が実際に現れる場所は、そのフックが走る場所とは別です。** 同僚にペインを約束する前に確認すべきなのは、この表です。
+
+| Claude Code を動かしている場所 | フックは走る | 描画は現れる |
+| --- | --- | --- |
+| ターミナルの `claude`（エディタ内ターミナル、JetBrains プラグインを含む） | はい | はい |
+| Desktop アプリの **Code** タブ | はい | はい。ターミナル専用要素を除く |
+| Desktop アプリの **WSL** セッション | **いいえ** — そこではプラグインが利用できない | いいえ |
+| VS Code 拡張のチャットパネル | はい | **いいえ** |
+| `claude -p` と [Agent SDK](/docs/claude-code/headless-and-agent-sdk) | はい | **いいえ** |
+| claude.ai / モバイルからのリモートコントロール | はい。あなたのマシン上のセッションで | そのターミナルの中で |
+| クラウドセッション | はい。プラグインがそこまで届けば | **いいえ** |
+
+ですから、描画する mod は自分のサーフェスを確認し、トランスクリプトの 1 行やコマンドのテキスト応答にフォールバックすべきです。
+
+## 本番で刺さる 5 つの落とし穴
+
+いずれもバグではなく文書化された挙動です。そしてどれも、すでに誰かを焼いています。
+
+**1. ガードフックは *オープン* に失敗する。** フックが `next` を呼ぶ **前に** 例外を投げる、タイムアウトする、あるいは不正な形を返した場合、Claude Code はそのフックをスキップし、代わりに次のハンドラが走ります。つまりあなたが守ろうとしていたコマンドは **実行されます**。`next` が解決した *後* に失敗した場合は、その結果が有効になります。クローズに失敗させたいなら `.catch` を付けてください。
+
+```javascript
+on('tool.call', { tool: 'Bash' }, guard).catch(async ($, e, next) => {
+  // next.error.kind is 'throw' or 'timeout'
+  return { deny: 'The command guard failed, so this command was not run: ' + next.error.kind }
+})
+```
+
+**2. 10 秒の予算は *あなたの* await を数える。API のものは数えない。** フックはイベントごとに自分自身の実行時間として 10 秒を得ますが、`next` の内部や、`$.clock.sleep` 以外の mods API 呼び出しの内部の時間は除外されます。だから `await $.ui.ask(...)` はユーザーが判断するまでツール呼び出しを無期限に保留できます。しかし `await myOwnPromise()` は予算を消費し、タイムアウトしたフックは **スキップ** されるので、保留していたコマンドが実行されます。残りを知りたければ `next.budget.remainingMs` を読んでください。
+
+**3. インストール済みの mod は 1 つのワーカースレッドを共有する。** それをブロックするフック（await しないループなど）は、`it crashed the hooks worker` であなたの mod をアンロードさせます。ワーカーが 3 回死に、Claude Code がそのクラッシュを 1 つの mod に帰属させられない場合、そのセッションでは **すべて** の非組み込み mod が、あなたの組織のものを含めてアンロードされ、誰かが `/reload-plugins` を実行するまで戻りません。
+
+**4. 状態は 3 通りの仕方でリセットされる。** モジュールレベルの変数はリロードごとに再初期化されます（だから保存するたびに `calls` は `0` に戻ります）。`$.state` は `/clear`、`/resume`、`/branch` の後にデフォルトへ戻ります。しかも `session.start` は **再発火しない** ので、保存した値は `classic.SessionStart` フックから読み直してください。複数セッションが書くものは `$.fs.write` ではなく `$.store` に置きます。`$.fs.write` はアトミックではなく、別のプロセスが書きかけのファイルを読めてしまうからです。
+
+**5. あなたの編集はインストール済みのコピーには届かない。** Claude Code はインストール済みプラグインを *バージョン単位で* キャッシュするので、開発は `--plugin-dir` に対して行い、再インストールの前にマニフェストのバージョンを上げてください。
+
+知っておく価値のある小さめのものが 2 つ。ユーザーの操作を伴わない `$.ui.open` は、初回は **ターミナルの 144 カラム** を必要とします（ユーザーが自分でそのペインを開いたことがあれば 110）。そして `$.session.messages()` は最新の **4,096** 件しか返しません。
+
+## 上限
+
+| 上限 | 値 |
+| --- | --- |
+| フックの実行時間（1 イベント） | 10 秒 |
+| `.catch` ハンドラ | 1 秒 |
+| すべての `session.end` フックの合計 | 1.5 秒 |
+| `$.process.run` のタイムアウト | デフォルト 30 秒、最大 10 分 |
+| `$.model.complete` の `maxTokens` | デフォルト 1024、最大 64,000 またはモデルの出力上限 |
+| `$.fs.read` / `$.fs.write`（1 ファイル） | 4 MiB |
+| `$.store` の合計 | JSON で 4 MiB |
+| `$.session.messages()` | 最新 4,096 件 |
+| `ui.render` の再描画 | 10/秒に制限（ターミナルでは表示中のペイン、展開されたバンド、ヒント行で 30/秒） |
+| `Text` の 1 つの文字列の子 | 10,000 文字 |
+| `Code` / `Markdown` のテキスト | 10,000 文字 · `Svg` 131,072 · `Image` 2 MiB |
+| `Raster` | `columns` ≤ 512、`rows` ≤ 256 |
+| コマンド / ツール / エージェント / ペインの名前 | 英字、数字、`_`、`-`、64 文字以下 |
+| `claude plugin test` の 1 テスト | `timeoutMs` を設定しない場合 5 秒 |
+
+## セキュリティ: mod が実際に手を伸ばせる範囲
+
+:::danger mod はサンドボックス化されていません
+mod は **Claude Code のプロセス内で、あなたの権限で** 動きます。いったんロードされれば、あなたのアカウントが読み書きできるあらゆるファイルを読み書きし、プログラムを起動し、ネットワークリクエストを送り、環境変数や設定ファイル（**どちらかに置かれた API キーを含む**）を読み、すべてのプロンプトとすべてのツール呼び出しを見て、それらを書き換え、あなたが入力したかのようにプロンプトを送信し、あなたが尋ねられる前にツール呼び出しを承認し、`$.model.complete` 経由であなたのプランや API クレジットを消費できます。[サンドボックス化](/docs/claude-code/permissions)を有効にしても、それが隔離するのは *Claude* が実行する Bash コマンドであり、mod が起動したプロセスはその **外側** で動きます。
+:::
+
+それ自体で 1 行を割く価値のある非対称性が 1 つあります。もっとも一般的なメンタルモデルを打ち砕くからです。**`deny` 権限ルールは Claude のツール呼び出しを縛るが、mod 自身の呼び出しは縛らない。** `Read(.env)` を deny していても、mod は `$.fs.read` でそのファイルを読めますし、読むプログラムを起動することもできます。権限ルールは mod コードに対する封じ込め境界ではありません。一方で、mod が権限プロンプトそれ自体を再スタイルすることもできません。その 1 つのサーフェスは立入禁止なので、プロンプトが見せるものは常に本物です。
+
+実務上の防御は信頼ではなく監査行です。ディレクトリに対して `claude plugin validate` を実行し、`calls:` を読んでください。手を止めてソースを読むべきエントリはこれらです。`$.fs.read` / `$.fs.write`、`$.process.run` / `$.process.spawn`、`$.http.fetch`、`$.env.get` / `$.settings.read`（API キー）、`$.env.set`（以降のすべてのコマンドと MCP サーバーが何を実行するかを変える）、`$.model.complete`（あなたのクレジット）、`$.prompt.submit`（*ユーザー自身の言葉として* テキストを送信できる）、`$.session.send`（別のセッションの Claude に流し込む）。`hooks:` の行では、`tool.call` と `prompt.submit` はすべてを見て変更できることを意味し、`session.append` は保存された会話の行を書き換えられることを意味し、`tool.check` はどんなプロンプトも出る前に許可または拒否できることを意味します。
+
+Anthropic は [`claude-code-playground`](https://github.com/anthropics/claude-code-playground/tree/main/claude-code/mods) にサンプル mod を公開しています。`token-weather`（プロンプト上にコンテキストウィンドウの予報を表示）、`blast-radius`（危険なシェルコマンドを保留し、何が変わるかを表示）、`replay-theater`（そのターンの編集を順に辿る `/replay` コマンド）です。現状のまま、サポートなしで共有されており、他と同様にあなたの権限で動きます。[サードパーティコードのレビュー](/docs/security/reviewing-third-party-code)と同じ審査の規律を適用してください。
+
+### オフにする
+
+| 範囲 | やり方 |
+| --- | --- |
+| 1 つの mod | `/plugin` の **Installed** タブからそのプラグインを無効化またはアンインストールする |
+| インストール済みの全 mod、1 セッション | `claude --safe-mode`（他のカスタマイズも無効になる） |
+| インストール済みの全 mod、常時 | `~/.claude/settings.json` の `"disableAllHooks": true` — 設定フックとカスタムステータスラインも止まる |
+
+組み込み mod はこれらのいずれにも影響されません。それぞれ `/plugin` に独自のスイッチがあります。mod がそもそもロードできるかをテストするには、mod のないディレクトリから `claude plugin test` を実行します。`no hooks module to load` ならロードできます。`hooks modules are turned off here` なら設定または組織ポリシーがブロックしています。`hooks modules are turned off in this process` なら Anthropic がインストール済み mod をリモートで無効化しており、ローカルでは何をしても再有効化できません。
+
+早期アクセス時に `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` を設定していたなら、外してください。v2.1.287 以降はどんな値でも無視するので、そこに `0` を置いても mod はオフに **なりません**。
+
+### 組織側
+
+managed settings があるマシン、または Team/Enterprise のサインインでは、Claude Code は組み込みのガード — `sec-default@builtin`、`cc-plugin-sec-default` として表示されます — を、ユーザーがインストールしたすべての mod の前にロードします。デフォルトでは、組織が管理するもの（managed フックの入力と判断、システムプロンプト、managed instructions、どの mod が読んでも設定、managed MCP ツール）だけを保護し、ユーザーの mod が `deny` ルールで拒否される呼び出しを承認できないことを強制します。それ以外はすべて許可されたままです。ソースは [`mods/sec-default`](https://github.com/anthropics/claude-code/tree/main/mods/sec-default) で公開されています。
+
+| 管理者の目的 | managed setting |
+| --- | --- |
+| ユーザーがインストールした mod を禁止し、フックはそのまま | `pluginConfigs` → `cc-plugin-sec-default@builtin` → `options` の下に `allowManagedModsOnly: true` |
+| 組織の mod だけ | 上記 + 組織のものとして数えられるようインストールする |
+| 承認済みマーケットプレイスの mod だけ | マーケットプレイスの制限を維持 + `disableSideloadFlags: true` |
+| どの mod も可。ただし組織の mod がそれらを取り締まる | 組織の mod を `sec-default@builtin` とともに `prependPlugins` に列挙する |
+| managed フックも含めて一切なし | `disableAllHooks: true` |
+
+ガードはオプションを **managed settings からのみ** 読み、キーは **`cc-plugin-sec-default@builtin` のみ** です（`prependPlugins` は短い `sec-default@builtin` も受け付けますが、`pluginConfigs` は受け付けません）。そして **クローズに失敗します**。managed settings を読めない場合、ユーザーの mod をすべて拒否します。`prependPlugins` を自分で設定するなら、リストにガードを含めてください。でなければガードはロードされなくなります。
+
+ポリシー mod は、ロードされようとしているすべての mod について `plugin.register` を受け取り、`e.tier`（`prepend` / `user` / `append` / `builtin`）と `e.uses.calls` を得ます。後者は `validate` が出力するのと同じリストで、`$.` を外した形で書かれています。`{ refuse: reason }` を返すとその mod のロードが止まります。上と同じフェイルオープンの罠に注意してください。あなたのチェックが例外を投げると、チェック対象の mod は **ロードされます**。ですからチェックは名前付き関数に入れ、`user` ティアを拒否する `.catch` を追加してください。
+
+## デバッグ
+
+失敗を示す行がどこに現れるかはセッションによって変わります。だから「mod が何もしない」がこれほど多いのです。
+
+- **プラグインディレクトリのホットリロード**（`--plugin-dir`、またはホットリロードを有効にした Claude が書いた mod）: トランスクリプトの薄い色の行。
+- **それ以外のあらゆる対話セッション**（マーケットプレイスからインストールした mod を含む）: **デバッグログのみ**。まず `claude --debug` から。
+- **`claude -p --plugin-dir`**: デフォルトのテキスト形式では stderr へ。他の mod による拒否はデバッグログのみ。
+
+```bash
+claude --debug-file ./mod-debug.log --plugin-dir ./first-mod
+tail -f ./mod-debug.log | grep first-mod
+```
+
+ロードされた mod は `hooks module first-mod@inline loaded (worker, environment 2, tier user); events: session.start,tool.call,command.run,ui.render` のような行を出力します。`--plugin-dir` でロードされた mod には `@inline` サフィックスが付きます。自分の行は `$.ui.log('message', { to: 'debug' })` で書きます。第 2 引数がない場合、`$.ui.log` は代わりにトランスクリプトへ薄い色の行を追加します。見分けられるようにしておく価値のあるメッセージは、`hook skipped:` + 理由（例外、タイムアウト、形が不正）、`reload failed, the previous version stays loaded:`（最後に動いたバージョンが走り続ける）、`ui.render (Pane) refused:`（あなたのツリーがバリデーションを通らず、エンジンが自前のものを描いた）、そして `… registered /tally but no command.run hook answered it` です。
+
+<Flashcards title="mod の用語" cards={[
+  {front: "フックモジュール", back: "mod のエントリファイル。hooks/hooks.json の modules 配列から指される。register(on, options) をエクスポートする。ES モジュールであること。.js/.ts/.mjs/.cjs/.jsx/.mts/.cts/.tsx。"},
+  {front: "`$`, `e`, `next`", back: "すべてのフックが受け取る 3 つの引数: mods API、深く凍結されたイベント、チェーン内の次のハンドラ。最後の next は Claude Code 自身の振る舞い。"},
+  {front: "マッチャー", back: "on() の省略可能な第 2 引数 — イベントのフィールドを絞り込むオブジェクト。値、配列、正規表現が使える。各イベントはマッチャーごとに 1 回だけ登録する。"},
+  {front: "ティア", back: "チェーン内での mod の優先グループ: prepend、user、append、builtin。next.origin.tier で読める。エンジン自身は { plugin: 'engine', tier: 'core' }。"},
+  {front: "`tool.call` と `tool.check`", back: "tool.call はツールが走る前に発火し、拒否や自前の応答ができる。tool.check は権限の判断時点、つまりルールと PreToolUse フックの後に発火し、allow / ask / deny を返す。"},
+  {front: "`$.store` と `$.state` とモジュール変数", back: "$.store: マシン全体、すべてのセッションで共有、4 MiB。$.state: リアクティブで、/clear、/resume、/branch でリセットされる。モジュール変数: リロードごとにリセットされる。"},
+  {front: "フェイルオープン", back: "next を呼ぶ前に例外を投げたりタイムアウトしたフックはスキップされ、イベントはそのまま進む。したがってガードは、.catch を付けない限りオープンに失敗する。"},
+  {front: "`claude plugin validate`", back: "静的解析で、実行はしない: 見つけたフック (マッチャー付き) とすべての mods API 呼び出しを出力する。mod をインストールする前に走らせる能力監査。"}
+]} />
+
+<Quiz questions={[
+  {
+    q: "あなたの tool.call フックは危険な Bash コマンドをブロックします。ところが next(e) に到達する前に予期しない TypeError を投げました。コマンドはどうなりますか?",
+    options: [
+      "コマンドは拒否される — Claude Code は例外を投げたフックを拒否として扱う",
+      "コマンドは実行される: Claude Code は失敗したフックをスキップし、代わりに次のハンドラが走る",
+      "セッションがエラーで終了する",
+      "mod がアンロードされ、コマンドはユーザーの判断待ちで保留される"
+    ],
+    answer: 1,
+    explain: "フックはフェイルオープンします。next を呼ぶ前に例外を投げる、タイムアウトする、あるいは不正な形を返したフックはスキップされ、次のハンドラ — 最終的には Claude Code 自身 — が代わりに走ります。クローズに失敗させたいなら { deny: … } を返す .catch(…) を付けてください。"
+  },
+  {
+    q: "なぜ `const ui = $.ui` は mod のロードを失敗させるのですか?",
+    options: [
+      "mod は TypeScript を使わなければならず、この行には型がないから",
+      "$.ui は ui.render フックの内側でしか使えないから",
+      "ローダーはソースを静的に読んで mod の能力を判定するので、$ は $.namespace.method の形で省略せずに使わなければならないから",
+      "リロードをまたいで参照を保持することを防ぐパフォーマンスガードだから"
+    ],
+    answer: 2,
+    explain: "Claude Code の静的解析こそが、コードを実行せずに `claude plugin validate` を信頼できる能力リストにしているものです。$ に対するエイリアス、分割代入、計算されたインデックスはそれを壊すので、`$.ui is used as a value` で失敗します。"
+  },
+  {
+    q: "あなたの設定の deny ルールが Read(.env) を拒否しています。インストールした mod が $.fs.read('.env') を呼びました。何が起きますか?",
+    options: [
+      "読み取りは拒否される — deny ルールはセッション内のすべてのファイルアクセスに適用される",
+      "読み取りは成功する: 権限ルールは Claude のツール呼び出しを縛るが、mod 自身の mods API 呼び出しは縛らない",
+      "ユーザーに権限プロンプトが出る",
+      "ポリシー違反で mod がアンロードされる"
+    ],
+    answer: 1,
+    explain: "deny ルールと managed な PreToolUse フックが支配するのは Claude のツール呼び出しです。mod 自身の $.fs および $.process 呼び出しは対象外で、ドキュメントにも明記されています。それらを制約したければ、その mod のロードを止めるか、ポリシー mod で呼び出しを名前で傍受するしかありません。"
+  },
+  {
+    q: "あなたの mod が描くペインを VS Code 拡張のチャットパネルで見えるようにしたい。可能ですか?",
+    options: [
+      "はい、すべてのレンダーサイトはあらゆるサーフェスで機能する",
+      "はい、ただし Box と Text の要素だけ",
+      "いいえ — そこではフックは走るが mod が描くものは何も現れない。トランスクリプトの 1 行にフォールバックすること",
+      "いいえ。VS Code 拡張ではそもそもプラグインがロードされないから"
+    ],
+    answer: 2,
+    explain: "フックは VS Code 拡張、claude -p、Agent SDK、クラウドセッションで走りますが、描画が届くのはターミナルと Desktop アプリの Code タブだけです。Desktop の WSL セッションはどちらも走りません。描画する mod は自分のサーフェスを確認し、優雅に劣化すべきです。"
+  },
+  {
+    q: "10 秒のフック予算について正しい主張はどれですか?",
+    options: [
+      "next(e) の内部で費やされた時間も含め、フックが行うすべてを対象にする",
+      "next の内部と mods API 呼び出しの内部の時間を除外するので、$.ui.ask を await すればツール呼び出しを無期限に保留できる",
+      "ui.render フックにのみ適用される",
+      "timeoutMs オプションでフックごとに引き上げられる"
+    ],
+    answer: 1,
+    explain: "予算はフック自身の実行時間で、next と、$.clock.sleep 以外の mods API 呼び出しは除外されます。だから $.ui.ask の中でツール呼び出しを保留するのが成立します。ただし自分の Promise を await した分は数えられ、タイムアウトしたフックはスキップされるので、保留していたコマンドは実行されます。"
+  }
+]} />
+
+## 出典とさらに読む
+
+- [Mods overview](https://code.claude.com/docs/en/plugins/mods/overview) — mod とは何か、信頼モデル、mod が動く場所、組み込み mod
+- [Create a mod](https://code.claude.com/docs/en/plugins/mods/create) — 3 つのファイル、`--plugin-dir` のリロードループ、静的解析のルール、`claude plugin test`
+- [React to events](https://code.claude.com/docs/en/plugins/mods/events) — 観測 / 書き換え / 応答、マッチャー、チェーンの順序、`.catch`
+- [Mods reference](https://code.claude.com/docs/en/plugins/mods/reference) — すべてのイベント、すべての `$` メソッド、レンダーサイト、要素、上限、設定
+- [Use the mods API](https://code.claude.com/docs/en/plugins/mods/api) · [Draw in the interface](https://code.claude.com/docs/en/plugins/mods/interface) · [Interface gallery](https://code.claude.com/docs/en/plugins/mods/gallery) · [Test a mod](https://code.claude.com/docs/en/plugins/mods/test)
+- [Troubleshoot a mod](https://code.claude.com/docs/en/plugins/mods/troubleshoot) — 症状、拒否メッセージ、デバッグログ
+- [Manage mods for your organization](https://code.claude.com/docs/en/plugins/mods/admin) — 組み込みガード、`allowManagedModsOnly`、ポリシー mod
+- [`anthropics/claude-code` → `mods/`](https://github.com/anthropics/claude-code/tree/main/mods) — 組み込みの `diff`、`agents-md`、`sec-default`、`telemetry` mod のソース
+- [`mods/types/claude-code.d.ts`](https://github.com/anthropics/claude-code/blob/main/mods/types/claude-code.d.ts) — 型宣言。食い違ったときは Claude Code が *あなたの* ビルド向けに書き出すコピーが優先される
+- [`anthropics/claude-code-playground` → `claude-code/mods/`](https://github.com/anthropics/claude-code-playground/tree/main/claude-code/mods) — `token-weather`、`blast-radius`、`replay-theater`
+
+## 次へ
+
+- [プラグインとマーケットプレイス](/docs/claude-code/plugins-marketplaces) — mod が出荷される入れ物と、その公開方法
+- [プラグイン Eval](/docs/claude-code/plugin-evals) — チームに渡す前に、そのプラグインが居場所に値することを証明する
+- [フック: 決定論的な自動化](/docs/claude-code/hooks) — mod と並んで走るプロセス外の兄弟。`classic.<Event>` として届く
+- [サードパーティコードのレビュー](/docs/security/reviewing-third-party-code) — インストールする前に適用すべき規律
