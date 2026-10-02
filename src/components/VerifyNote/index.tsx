@@ -8,6 +8,15 @@ import styles from './styles.module.css';
  * upstream source. Use it on VOLATILE content (anything quoting model names,
  * prices, limits, UI labels or features that change release-to-release).
  */
+
+/**
+ * `source` becomes an href, so only a single absolute URL can be linked. Many
+ * notes cite several works, or a paper plus a "these numbers move" caveat, and
+ * carry prose there instead — which the browser would resolve as a *relative*
+ * path, producing a link that looks fine and 404s on click. Render those as
+ * plain text rather than a dead link.
+ */
+const isLinkable = (source: string): boolean => /^https?:\/\/\S+$/.test(source.trim());
 export default function VerifyNote({
   lastVerified,
   source,
@@ -36,15 +45,20 @@ export default function VerifyNote({
             freshness.
           </Translate>
         )}{' '}
-        {source && (
-          <>
-            <Translate id="verify.confirm">Confirm against the</Translate>{' '}
-            <a href={source} target="_blank" rel="noreferrer">
-              <Translate id="verify.source">official source</Translate>
-            </a>
-            .
-          </>
-        )}
+        {source &&
+          (isLinkable(source) ? (
+            <>
+              <Translate id="verify.confirm">Confirm against the</Translate>{' '}
+              <a href={source} target="_blank" rel="noreferrer">
+                <Translate id="verify.source">official source</Translate>
+              </a>
+              .
+            </>
+          ) : (
+            <Translate id="verify.sources" values={{sources: source}}>
+              {'Sources: {sources}'}
+            </Translate>
+          ))}
       </div>
     </aside>
   );
