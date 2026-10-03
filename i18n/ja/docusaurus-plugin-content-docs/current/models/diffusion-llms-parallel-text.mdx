@@ -1,0 +1,423 @@
+---
+sidebar_position: 20.5
+title: "拡散 LLM:左から右に書かないモデルたち"
+description: "Mercury 2 は 1,009 tok/s で、推論を伴う質問にまるごと 1.7 秒で答えます。Gemini Diffusion は 1,479 tok/s でサンプリングし、Gemini 2.5 Flash の 272.4 を大きく上回ります。同じトランスフォーマー、違うデコードアルゴリズムです。実務ガイド:オープンウェイトの先駆者の README 自身が「1 トークンあたり 1 ステップのときに品質が最大になる」と書いている理由、並列デコードを単に粗くするのではなく誤りにしてしまう条件付き独立性のバグ、KV キャッシュを取り戻した修正としてのブロック拡散、DiffusionGemma が自己回帰型の Gemma 4 を学習予算の 10% 未満で変換した方法、そしてアラインメント済みの dLLM に対して 100% を叩き出すマスク穴埋めジェイルブレイク。"
+keywords: [diffusion LLM, dLLM, masked diffusion, Mercury, Inception Labs, Gemini Diffusion, LLaDA, Dream 7B, DiffusionGemma, block diffusion, parallel decoding, Fast-dLLM, non-autoregressive generation, DIJA, tokens per second]
+---
+
+<LevelBadge level="advanced" />
+
+AILmanac でこれまで扱ってきたモデルはすべて、同じやり方でテキストを生成します。1
+トークン、次のトークン、左から右へ、ひたすら。それをしないモデルの一族がいます。
+マスクされた位置が並んだ白紙のキャンバスから始め、**その全部を一度に**予測し、
+自信のあるものだけを残して、また繰り返す。40 番目の位置が 7 番目より先に
+決まることもあります。
+
+誰もが気にするのは数字のほうです。Inception の Mercury 2 — しかも*推論*モデル
+— は、報告では **Blackwell GPU 上で 1,009 トークン/秒、エンドツーエンドの
+レイテンシ 1.7 秒**で動き、推論を有効にした同等の競合よりおよそ 8〜14 倍速いと
+されています([The Decoder](https://the-decoder.com/inception-launches-mercury-2-the-first-diffusion-based-language-reasoning-model/))。
+Google の実験的な Gemini Diffusion は**オーバーヘッドを除いて 1,479
+トークン/秒**でサンプリングし、Gemini 2.5 Flash の 272.4 と対比されています
+([Techmeme のまとめ](https://www.techmeme.com/250521/p54))。
+
+ところが、このアプローチをスケールで成立させた 8B のオープンウェイトモデル
+LLaDA の README は、サンプリングステップ数が**応答長と等しいとき**に品質が
+最大になると書いています。1 トークンあたり 1 回の順伝播。自己回帰モデルと
+まったく同じ、しかも KV キャッシュがないので*より遅い*。
+
+どちらの事実も本当です。このレッスンはその 2 つの橋渡しです。アルゴリズムが
+実際に何をしているのか、どのノブが速度を買い、その代価は何か、初期の拡散 LLM
+を使い物にならなくしていた 2 つの構造的限界と、実際に出荷された修正、そして
+本番に入れる前に知っておくべき 3 つの落とし穴(ストリーミング、長さの課金、
+そして自己回帰モデルには存在しないジェイルブレイクの一種)です。
+
+<Callout type="objectives" items={["マスク拡散生成を、キャンバス・ノイズ除去パス・コミット判断という言葉で説明でき、双方向アテンションが何を買い何を失うかを言える", "steps ノブを正しく使う:順伝播 1 回あたりのトークン数を計算し、並列化を攻めすぎることが単に品質を落とすのではなく誤りになる条件付き独立性の失敗を説明できる", "今日呼び出せるあらゆる dLLM にブロック拡散が入っている理由を説明できる — それが KV キャッシュ、可変長出力、トークンストリーミングを取り戻したものだから", "dLLM が本当に勝つ仕事を選べる:穴埋めと任意順の編集、レイテンシ律速の音声、境界のある判断 — 「すべてを、ただ速く」ではない", "オープンな dLLM エンドポイントは境界ではアラインメントされていないものとして扱う。マスク穴埋めプロンプトは、自己回帰モデルの拒否では起こりえない形でアラインメントを迂回するため"]} />
+
+<VerifyNote lastVerified="2026-10-02" source="https://www.inceptionlabs.ai/models">
+ここに出てくる価格、コンテキストウィンドウ、1 秒あたりトークン数、レイテンシの
+数字はすべて生鮮品です — この分野は月単位で動いており、Inception のレートカードは
+現在プロモーション割引を含んでいます。意思決定で数字を引用する前に、ベンダー自身の
+モデルページと独立系のリーダーボードを必ず確認してください。研究上の主張は論文に
+出典をつけていますが、いくつかはプレプリントであり、追試された結果ではありません。
+</VerifyNote>
+
+## 仕組み — 頭の中で描くしかない 1 枚の図
+
+自己回帰(AR)モデルのループはこうです。プレフィックス全体を読み、**1 つ**の位置
+(次の位置)についての確率分布を出し、サンプリングし、末尾に足し、繰り返す。これを
+安く保っているのが KV キャッシュです — それより前のトークンのキーとバリューは
+一度計算したら変わりません。アテンションが因果的で、右側にはまだ何も存在しない
+からです。
+
+マスク拡散 LLM はこれを反転させます。アテンションが**双方向**です。あらゆる位置が、
+両方向のあらゆる位置を参照します。だから 1 回の順伝播で、モデルは*すべての*
+マスク位置についての分布を同時に出します。生成は答えをなぞる歩行ではなく、答え
+全体の反復的な洗練になります。
+
+<Steps items={[
+  {title: "キャンバスを敷く", body: "生成長 L を決める。L 個の位置すべてを特別なマスクトークンで埋める。純粋なマスク dLLM(LLaDA、Dream)では L は最初の順伝播の前に固定され、モデルは進みながら系列を伸ばすことはできない。"},
+  {title: "1 回のノイズ除去パスがすべてを予測する", body: "トランスフォーマーがプロンプト + キャンバスの上を 1 回走り、すべてのマスクされたスロットについての分布を一度に返す。「次のトークン」ではない — スロット 3、スロット 17、スロット 240 を、同じパスで。"},
+  {title: "一部をコミットする(ここが勝負のすべて)", body: "それらの予測のいくつかをアンマスクし、本物のトークンとして凍結する。どれを、いくつ選ぶかがデコード方針だ:ランダム順、top-1 信頼度の最大、top1−top2 のマージン最大、あるいはエントロピー最小。それ以外はマスクのまま残る。"},
+  {title: "コミット済みトークンを文脈として再実行する", body: "次のパスは凍結されたトークンを見て、残ったマスクを再予測する — そしてアテンションが双方向なので、答えの END でコミットされたトークンが、まだ中央に欠けているトークンを条件づける。これが AR モデルにはできないことだ。"},
+  {title: "キャンバスが埋まったら止める", body: "総コスト = (パス数) × (順伝播 1 回)。したがって順伝播 1 回あたりのトークン数 = L / steps。見出しの tok/s が出てくる場所は、ハードウェアではなくこの比率だ。"}
+]} />
+
+最後の 1 行は覚えておく価値があります。AR モデルは順伝播 1 回あたり 1 トークンに
+固定されています。拡散 LLM では自分で選べます。Google のオープンウェイト参入作
+DiffusionGemma は、256 個のブロックを並列に洗練しながら**順伝播 1 回あたり
+およそ 20 トークン**を報告しており、これが H100 1 枚で約 1,500 出力トークン/秒に
+到達する仕組みです([DiffusionGemma Technical Report](https://arxiv.org/abs/2608.00146))。
+
+## steps というノブ、そしてそれを回しすぎるのが「粗くなる」ではなく「間違う」理由
+
+Dream 7B はこのノブを明示的に公開しています。`diffusion_generate()` は `steps` を
+「拡散タイムステップ」として説明し、1 ステップあたり `max_new_tokens / steps`
+トークンが生成されるとし、ステップが少ないほど速いが粗くなるとはっきり書いています
+([DreamLM/Dream](https://github.com/DreamLM/Dream)、Apache-2.0)。
+
+では、なぜ常に少ないステップを使わないのか。それが持ち込む誤差がノイズではなく、
+特定可能で名前のついたバグだからです。
+
+1 回の順伝播が与えるのは、各マスクスロットについての**周辺**分布です。つまり、
+まだ分からないすべてについて平均された*その位置での*トークンの確率です。同じ
+パスから 2 つのスロットをコミットすると、あなたは両者の**周辺分布の積**から
+サンプリングしていることになり、同時分布からではありません。両者のあいだの
+依存関係は黙って捨てられます。Fast-dLLM の著者は根本原因をそのまま述べています。
+真の同時分布に依存関係があるのに、マスク拡散モデルは周辺確率から独立にトークンを
+サンプリングするため、並列デコードのもとで生成品質が劣化する、と
+([Fast-dLLM, arXiv:2505.22618](https://arxiv.org/abs/2505.22618))。
+
+直感的にはこうです。都市名を尋ねると、隣り合う 2 つのスロットが*それぞれ自分の
+位置について*「New」と「Delhi」を最尤トークンと評価することがあります。
+「New York」も「New Delhi」もどちらもありえるからです。両方を 1 回のパスで
+コミットすると、どちらでもないものが出てきます。並列化しすぎたデコードの
+失敗モードは、文章がぼやけることではなく、継ぎ目のところで自信たっぷりに
+組み立てられたナンセンスです。
+
+この分野を実用にした修正が**信頼度を考慮した並列デコード**です。マスクされた
+各スロットについて信頼度(通常は softmax の最大確率)を計算し、しきい値を
+超えたスロットだけをコミットし、1 つも超えなければループが前に進むように最も
+高い 1 つだけをコミットする。ほぼ独立なトークンは一緒にデコードされ、互いに
+依存するトークンは待たされます。Fast-dLLM は、LLaDA と Dream において各種
+ベンチマークで最大 **27.6 倍のスループット改善**を、精度低下はごくわずかで
+報告しています — 学習不要、デコードを変えるだけです。
+
+これがこの研究領域全体の形です。並列性はタダ、*独立性*はタダではない、そして
+仕事はどのトークンを安全に一緒にできるかを見分けるところにあります。
+
+<Callout type="note" items={["信頼度しきい値は、実際に筋道を立てて考えられる品質ダイヤルだ:しきい値を上げるとパスあたりのコミット数が減り、パス数が増え、遅くなり、AR の品質に近づく。Fast-dLLM v2 はしきい値 0.9 で GSM8K において 2.6 倍の高速化を精度低下ごくわずかで報告している — 「全部コミット」ではなく、そのあたりが出発点にすべき設定だ。"]} />
+
+## 2 つの構造的な限界 — そして今日 dLLM を呼び出せる理由であるブロック拡散
+
+LLaDA 自身のリポジトリは、効率面の制約を婉曲表現なしに列挙しています。サンプリング
+時のコンテキスト長が固定、**KV キャッシュ非対応**、そしてサンプリングステップが
+応答長を下回ると性能が劣化する。著者はこれを意図的なものとして位置づけています —
+最適化する前に、このアプローチの天井を見きわめたかったのだと
+([ML-GSAI/LLaDA](https://github.com/ML-GSAI/LLaDA)、MIT、約 4k スター、Base と
+Instruct の重みに加えて LLaDA 1.5、LLaDA-MoE-7B-A1B、iLLaDA の各派生)。
+
+これを積み上げると、純粋なマスク dLLM はプロダクトとしてほぼ使い物になりません。
+
+1. **KV キャッシュがない。** 双方向アテンションは、どのパスもどのトークンの文脈も
+   変えうることを意味するので、キャッシュされたキーとバリューは無効になります。
+   毎ステップ、系列全体を再計算します。
+2. **出力長が固定。** 生成前に L を選ばなければなりません。小さすぎれば切り詰め、
+   大きすぎれば捨てる位置に計算を浪費します。
+3. **レイテンシが AR より悪い。** 1 と 2 が重なると、「並列」なモデルが置き換える
+   はずの逐次モデルよりエンドツーエンドで遅くなりえます。
+
+**ブロック拡散**は、純粋であることをやめることで 3 つすべてを解決します。ブロック
+単位で生成し、前のブロックには**自己回帰的に**条件づけ、現在のブロックの**内側**で
+拡散を回す。これが柔軟な系列長とブロック間の KV キャッシュをもたらします — ICLR
+2025 の oral である BD3-LM の定式化です
+([arXiv:2503.09573](https://arxiv.org/abs/2503.09573)、
+[kuleshov-group/bd3lms](https://github.com/kuleshov-group/bd3lms))。
+
+Fast-dLLM v2([arXiv:2509.26328](https://arxiv.org/abs/2509.26328))は、チューニング
+された版がどんな姿になるかを示しており、その細部は知っておく価値があります。
+あなたが観測するベンダーの挙動を説明してくれるからです。
+
+- **ハイブリッドなアテンションマスク。** ブロックの*内側*ではブロック対角
+  (双方向)、ブロック*どうし*のあいだではブロック因果(左から右)。効くところには
+  双方向の文脈を、キャッシュが住むところには AR のセマンティクスを。
+- **2 段のキャッシュ。** 完了したブロックを綺麗なプレフィックス文脈として保持する
+  ブロックレベルのキャッシュに加えて、ブロック内デコードがまだ必要とする再計算の
+  ためのサブブロックキャッシュ(DualCache)。
+- **学習時の相補マスキング。** 各サンプルをマスク `m` と `1 − m` の 2 つのビューに
+  複製するので、すべてのトークンがマスクの予測対象としても文脈としても教師される。
+- **報告された結果。** 標準的な AR デコードに対して最大 2.5 倍;H100 でバッチ
+  サイズ 64 のとき 1.8 倍;7B のベンチマーク平均スコアは Dream の 57.6 に対して
+  60.3、内訳には HumanEval 63.4 対 57.9、GSM8K 62.0 対 39.2 を含む。
+
+そして学習コストが、この分野の見方を変える細部です。Fast-dLLM v2 は AR モデルからの
+ファインチューニングをおよそ **1B トークン — Dream の 580B より約 500 分の 1** で
+行い、7B を A100 64 枚で約 12 時間で学習したと報告しています。
+
+## 拡散は別種のモデルではなく、後付けできるデコードモードである
+
+DiffusionGemma はその点を見逃しようのない形で示します。ゼロから学習したものでは
+ありません。活性 3.8B / 総計 25.2B パラメータの mixture-of-experts モデルである
+**Gemma 4** をファインチューニングして拡散モデルにしており、使ったのは**出発点の
+AR モデルの総学習トークン予算の 10% 未満** — 教師ありノイズ除去ファインチューニング、
+その後に強化学習とサンプラー蒸留です
+([arXiv:2608.00146](https://arxiv.org/abs/2608.00146)、CC-BY-4.0 の重み)。
+
+驚くべきなのは、変換を生き延びたものです。レポートは、ベースモデルの思考モード、
+マルチモーダル入力、長いコンテキストが保たれ、さらに**自己回帰的に生成する能力も
+維持**されており、劣化はわずかだと述べています。1 組の重み、2 つのデコードモード。
+
+この結果が持ちこたえるなら、「拡散 LLM」は独立したプロダクトのカテゴリであることを
+やめ、サービング時の選択肢になります。同じ系列のモデルに、推論側の並列性ダイヤルが
+付いているだけ、ということです。これは 1 秒あたりトークン数のどんな記録よりも
+はるかに重大な主張であり、プロバイダーがあなたの使っているモデルでフラグを立てて
+から学ぶのではなく、いま仕組みを学んでおくべき理由です。
+
+## 拡散 LLM が本当に得意なこと
+
+速度は見出しであり、この主張のいちばん弱い部分です。速度は争われているからです
+— 専用の AR ハードウェアも毎秒数百トークンを出してきています
+([トークン速度](/docs/models/fast-inference-and-token-speed) を参照)。持続する
+優位は、アルゴリズムの*形*から導かれるもののほうです。
+
+**任意順の生成とネイティブな穴埋め。** どのスロットをコミットするか自分で選べる
+ので、系列の途中に穴を空けたまま、両側の完全な文脈を使ってモデルに埋めさせること
+ができます。Dream はこれを `alg` パラメータとして公開しています — `origin`
+(ランダム順)、`maskgit_plus`(top-1 信頼度)、`topk_margin`(top1 − top2 の
+マージン)、`entropy` — さらにそれらの戦略にランダム性を加える `alg_temp` も
+あります。コードの編集、テンプレートの補完、固定された JSON の骨組みへの
+フィールド埋めでは、AR モデルに 40 行目を変えるためファイル全体を出し直させる
+よりも構造的に相性が良いのです。
+
+**レイテンシ律速のインタラクション。** Inception の Mercury Voice は 128K
+コンテキストで**170 ms 未満**の初トークン到達時間を掲げ、執筆時点で入力/出力
+100 万トークンあたり $0.20/$1.50 の価格です。音声はレイテンシ*そのもの*が
+プロダクトである最も明快なケースです。そのしきい値が効く理由は
+[全二重音声 AI](/docs/models/full-duplex-voice-ai) のページで扱っています。
+
+**エンドツーエンドの推論ターンアラウンド。** Mercury 2 が報告する、推論を伴う
+答え 1 件あたり 1.7 秒という数字は、スループットとは別の主張です — エージェント
+ループが毎ターン実際に体感する数字です。
+
+**散文ではなく境界のある答え。** Inception の Mercury Decide は、選択肢、スコア、
+あるいは校正済み確率付きの yes/no を、テキストとして書き出すのではなくモデルから
+読み出して返します — 最大で毎秒 14 件の判断と報告されており、これが「全ケースで
+走らせて、怪しいものだけエスカレーションする」を手頃にします。このカテゴリと
+その注意点は
+[System One 決定モデル](/docs/models/system-one-decision-models-jev-kev)
+で詳しく扱っています。そこでは拡散のバックボーンは実装の詳細であって、本題では
+ありません。
+
+**価格への圧力。** Mercury 2.5 は現在、260K コンテキストで入力/出力 100 万
+トークンあたり $0.04/$0.15(プロモーション、定価 $0.20/$0.75 から)、キャッシュ
+済み入力は 100 万あたり $0.004 を掲示しています。プロモ価格は一時的なものとして
+扱い、請求額は定価で見積もってください。
+
+## 本番投入の前に知っておく 3 つの落とし穴
+
+<Callout type="warning" items={["tok/s はベンダーが選んだ並列度で測られている。あなたの品質基準はもっと多いステップを必要とするかもしれず、その分だけ高速化は失われる。自分のプロンプトで、自分の精度しきい値のもとでベンチマークすること。", "出力は左から右に確定していくわけではない。単調なのはブロック境界だけで、ブロックの内側ではスロットがまだマスクされていたり書き換わったりする。「トークン N はもう変わらない」と前提する UI やパーサーはすべて間違っている。", "純粋なマスク dLLM は、あなたが前もって選んだ長さを計算し、その分を課金する。ブロック拡散はそれをブロック単位の粒度に落とすだけで、なくすわけではない。"]} />
+
+3 つ目は箇条書き以上の扱いに値します。これはセキュリティ上の性質であり、自己回帰
+モデルには対応物が存在しないからです。
+
+AR モデルのアラインメントには構造的な利点があります。拒否が*最初に*起こるのです。
+モデルが断ると決めれば、それ以降のすべてのトークンは「それはお手伝いできません」に
+条件づけられます。拡散 LLM にはそういう瞬間がありません。拒否が生成の残りを
+引き継ぐ左から右の時点が存在せず、マスクされたスロットはすでにキャンバスに
+載っているものと整合するように埋められていきます。
+
+DIJA(「The Devil behind the mask」、ICLR 2026、
+[arXiv:2507.11097](https://arxiv.org/abs/2507.11097)、
+[ZichenWen1/DIJA](https://github.com/ZichenWen1/DIJA))はそれを攻撃に変えます。
+敵対的プロンプトは有害な意図を**アンマスクされた**トークンに置き、文脈的に
+整合するようモデルに補完させるためのマスク区間を残します。報告された結果は、
+**Dream-Instruct に対してキーワードベースの攻撃成功率が最大 100%**、
+JailbreakBench での評価器ベース ASR で最強の既存ベースラインを最大 78.5%、
+StrongREJECT スコアで 37.7 ポイント上回り、しかも**有害な内容の書き換えや
+難読化を一切必要としない**というものです。著者の結論は、既存のアラインメント
+機構は文脈を考慮したマスク入力プロンプトから dLLM を守らない、というものです。
+逐次モデルのように推論の途中で安全でない生成をフィルタすることが、モデルには
+できないからです。
+
+後続研究([arXiv:2602.00388](https://arxiv.org/abs/2602.00388))は、絵柄は
+両面的だと論じています — 拡散はある設定では安全性の*恵み*をもたらし、それが
+文脈のもとで崩れる — これはどちらかを仮定するのではなく測るべき理由になります。
+
+実務上の持ち帰り:オープンウェイトの dLLM を公開するなら、その指示チューニングを
+ガードレールとして扱わないこと。リクエストとレスポンスの両方について、ベース
+モデルに対してするのとまったく同じように、境界でフィルタと分類を行ってください。
+[ローカルおよびハイブリッドエージェントのセキュリティ](/docs/models/securing-local-and-hybrid-agents)
+のページで境界パターンを扱っています。
+
+## 10 分で試してみる
+
+<Steps items={[
+  {title: "ホスティング版、セットアップ不要", body: "Inception は Mercury を OpenAI 互換 API で提供しており、モデルは OpenRouter にも掲載されている(例:openrouter.ai/inception/mercury-2)。既存の OpenAI SDK のスクリプトをそこに向け、モデル文字列を変えるだけ — リクエストの形に拡散固有のものは何もない。"},
+  {title: "オープンウェイト、ローカル", body: "LLaDA-8B-Instruct(MIT)と Dream-v0-Instruct-7B(Apache-2.0)はどちらも Hugging Face に推論コードを同梱している。DiffusionGemma の重みは CC-BY-4.0。純粋なマスク dLLM には KV キャッシュがないので、毎ステップ系列全体を再計算する分の VRAM を見込んでおくこと。"},
+  {title: "steps スイープを走らせる", body: "最も情報量の多い実験はこれ一つ:プロンプトを固定し、steps を変え、自分が気にするタスク指標に対して実時間をプロットする。自分自身の品質の崖が見つかり、それはベンチマークの表が置いた場所にはない。"},
+  {title: "そのうえで継ぎ目を試す", body: "答えが複数トークンのまとまりを含むプロンプトを使う — 固有名詞、単位付きの数値、識別子、JSON のキー。条件付き独立性の誤りが最初に現れるのはそこであり、信頼度しきい値がコストに見合う働きをするのもそこだ。"}
+]} />
+
+<PromptCard title="OpenAI SDK でホスティング版の拡散 LLM を呼ぶ(変わるのはモデル文字列だけ)">{`# Inception serves an OpenAI-compatible API; OpenRouter also lists the models.
+# Check the provider's model list for the current slug before you hard-code one.
+
+curl https://openrouter.ai/api/v1/chat/completions \\
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "inception/mercury-2",
+    "messages": [
+      {"role": "user", "content": "Rewrite this function to stream its output, and explain the two failure modes you introduced."}
+    ],
+    "stream": true
+  }'
+
+# What to watch for, beyond the content:
+#  - time to first token vs time to last token (the diffusion win is usually in the gap)
+#  - whether the stream arrives in chunks that look like BLOCKS rather than words`}</PromptCard>
+
+<PromptCard title="Dream 7B での steps スイープ — 自分の品質の崖を見つける">{`import time, torch
+from transformers import AutoModel, AutoTokenizer
+
+NAME = "Dream-org/Dream-v0-Instruct-7B"
+tok = AutoTokenizer.from_pretrained(NAME, trust_remote_code=True)
+model = AutoModel.from_pretrained(
+    NAME, torch_dtype=torch.bfloat16, trust_remote_code=True
+).to("cuda").eval()
+
+PROMPT = "List the five largest cities in Germany with their populations."
+MAX_NEW = 256
+
+# steps == MAX_NEW is the authors' best-quality setting: one token per
+# forward pass. Each halving doubles tokens-per-pass and doubles the
+# number of independence assumptions you are making.
+for steps in [256, 128, 64, 32, 16]:
+    inputs = tok.apply_chat_template(
+        [{"role": "user", "content": PROMPT}],
+        return_tensors="pt", return_dict=True, add_generation_prompt=True,
+    ).to("cuda")
+
+    t0 = time.perf_counter()
+    out = model.diffusion_generate(
+        inputs.input_ids,
+        attention_mask=inputs.attention_mask,
+        max_new_tokens=MAX_NEW,
+        steps=steps,
+        temperature=0.0,
+        alg="entropy",          # commit the lowest-entropy slots first
+        alg_temp=0.0,
+    )
+    dt = time.perf_counter() - t0
+    text = tok.decode(out[0][len(inputs.input_ids[0]):], skip_special_tokens=True)
+
+    print(f"--- steps={steps}  tokens/pass={MAX_NEW/steps:.0f}  {dt:.2f}s ---")
+    print(text.strip()[:400])
+
+# Read the OUTPUTS, not just the timings. The numbers and the city names are
+# the multi-token units that break first when too many slots are committed
+# from one pass. That corruption is the conditional-independence bug, visible.`}</PromptCard>
+
+## これが自分に関係あるかどうかの判断
+
+<Callout type="takeaways" items={["拡散 LLM の速度はたった 1 つの比率から来る — 生成長をノイズ除去ステップ数で割ったもの、つまり順伝播 1 回あたりにコミットされるトークン数だ。AR モデルは 1 に固定されている。それ以外はすべてこのダイヤルの帰結である。", "並列化しすぎたデコードは粗いのではなく誤っている:相関のあるスロットを 1 回のパスからコミットすると、同時分布ではなく周辺分布の積からサンプリングすることになる。信頼度しきい値によるデコードがその修正であり、Fast-dLLM は最大 27.6 倍のスループットを精度低下ごくわずかで報告している。", "純粋なマスク拡散には KV キャッシュがなく、出力長が固定だ。ブロック拡散(ブロック間は AR、ブロック内は拡散)がキャッシュ、可変長、ストリーミングを取り戻したものであり、今日呼び出せる dLLM がすべてブロックモデルである理由だ。", "DiffusionGemma は自己回帰型の Gemma 4 MoE を、元の学習トークン予算の 10% 未満で拡散モデルに変換しつつ、思考モード、マルチモーダル性、AR 生成を保った。拡散はモデルの別種というより、デコードモードに見えてきている。", "穴埋めと任意順の編集、200 ms 未満の音声ターン、高速で境界のある判断、エンドツーエンドのターンレイテンシのために選ぶこと — そしてそのアラインメントは効かないと仮定すること。マスク穴埋めプロンプトは、アラインメント済みのオープン dLLM に対して最大 100% の ASR に達するからだ。"]} />
+
+<Flashcards cards={[
+  { front: "マスク拡散 LLM を一文で", back: "双方向アテンションを持つトランスフォーマーで、固定長のマスクトークンのキャンバスから始め、1 回の順伝播でマスクされたすべての位置を予測し、自信のある一部をコミットし、キャンバスが埋まるまで繰り返すもの。" },
+  { front: "順伝播 1 回あたりのトークン数", back: "生成長 L をノイズ除去ステップ数で割った値。dLLM の速度主張を説明する唯一の数字。自己回帰モデルは 1 に固定され、DiffusionGemma は約 20 を報告している。" },
+  { front: "ステップを減らすと品質が壊れる理由", back: "1 回のパスが返すのはマスクスロットごとの「周辺」分布だ。相関のある 2 つのスロットを同じパスからコミットすると、同時分布ではなく周辺分布の積からサンプリングすることになり、両者のあいだの依存関係が捨てられる。出典:Fast-dLLM, arXiv:2505.22618。" },
+  { front: "信頼度を考慮した並列デコード", back: "softmax 最大確率がしきい値を超えたマスクスロットだけをコミットし、1 つも超えなければループが進むように最も高い 1 つだけをコミットする。Fast-dLLM は LLaDA と Dream で最大 27.6 倍のスループットを精度低下ごくわずかで報告している。" },
+  { front: "ブロック拡散(BD3-LM)", back: "前のブロックには自己回帰的に条件づけ、現在のブロックの内側で拡散を回す。ブロック間の KV キャッシュと可変長出力を取り戻す。ICLR 2025 oral、arXiv:2503.09573、リポジトリは kuleshov-group/bd3lms。" },
+  { front: "Fast-dLLM v2 のハイブリッドなアテンションマスク", back: "ブロックの内側はブロック対角(双方向)、ブロック間はブロック因果(左から右)。加えて 2 段のキャッシュ:完了ブロック用のブロックレベルキャッシュと、ブロック内の再計算用の DualCache。AR デコードに対して最大 2.5 倍と報告。" },
+  { front: "LLaDA が自ら挙げる 3 つの限界", back: "サンプリング時のコンテキスト長が固定、KV キャッシュ非対応、サンプリングステップが応答長を下回ると品質が劣化 — つまり 1 トークンあたり 1 ステップで品質が最大。ML-GSAI/LLaDA のリポジトリ自身に書かれている。" },
+  { front: "Dream の alg パラメータ", back: "次にどのマスクスロットをコミットするかを選ぶ:origin(ランダム)、maskgit_plus(top-1 信頼度)、topk_margin(top1 引く top2)、entropy(エントロピー最小)。alg_temp がランダム性を加える。これがネイティブな穴埋めと任意順の生成を可能にしている。" },
+  { front: "DiffusionGemma", back: "Gemma 4 MoE(活性 3.8B / 総計 25.2B)を、AR モデルの学習トークン予算の 10% 未満で拡散モデルにファインチューニングしたもの。256 のブロック、順伝播 1 回あたり約 20 トークン、H100 1 枚で約 1,500 出力 tok/s、CC-BY-4.0、しかも自己回帰生成も依然として可能。" },
+  { front: "DIJA", back: "dLLM に固有のジェイルブレイクの一種:有害な意図をアンマスクのトークンに置き、整合するようモデルに埋めさせるマスク区間を残す。難読化なしで Dream-Instruct に対しキーワードベース ASR 最大 100%。ICLR 2026、arXiv:2507.11097。" },
+  { front: "Mercury 2 / 2.5 / Voice(2026-10-02 時点)", back: "Mercury 2:Blackwell で 1,009 tok/s、エンドツーエンド 1.7 秒、128K、2026 年 2 月公開と報告。Mercury 2.5:260K コンテキスト、プロモーション価格 100 万あたり $0.04/$0.15(定価 $0.20/$0.75)、キャッシュ済み入力 $0.004/M。Mercury Voice:TTFT 170 ms 未満、128K。すべて生鮮品。" },
+]} />
+
+<Quiz questions={[
+  {
+    q: "マスク拡散 LLM に、256 トークンの答えを 32 回のノイズ除去ステップで求めたとする。これは何を意味するか?",
+    options: [
+      "順伝播 1 回あたり 8 トークンがコミットされるので、1 パスごとに 8 個の条件付き独立性の仮定が置かれる",
+      "モデルは 256 回の順伝播を走らせるが、それを 32 回ずつバッチ化する",
+      "各トークンは確定する前に 32 回洗練される",
+      "KV キャッシュが 1 ステップに 1 回、計 32 回再利用される"
+    ],
+    answer: 0,
+    explain: "順伝播 1 回あたりのトークン数 = L / steps = 256 / 32 = 8。同じパスでコミットされるスロットはそれぞれ自分の周辺分布からサンプリングされるので、その 8 個のあいだの依存関係は捨てられる。これがまさに、信頼度しきい値によるデコードが抑えるために存在する誤差だ。"
+  },
+  {
+    q: "純粋なマスク拡散 LLM が従来型の KV キャッシュを使えないのはなぜか?",
+    options: [
+      "アテンションが双方向なので、後のコミットが前の位置の文脈を変え、キャッシュされたキーとバリューを無効にしうるから",
+      "拡散モデルはアテンションをまったく使わないから",
+      "有用なコンテキスト長ならどこでもキャッシュが VRAM を超えてしまうから",
+      "マスクトークンにはキーもバリューの表現も存在しないから"
+    ],
+    answer: 0,
+    explain: "因果的な AR モデルは右側に何も存在しないのでキャッシュできる。双方向アテンションではどのパスもどの位置の文脈も変えうるので、キャッシュは無効になる。LLaDA のリポジトリはまさにこれを 3 つの効率上の限界の 1 つとして挙げており、ブロック拡散がブロック間のアテンションをブロック因果にすることで直すのはこの点だ。"
+  },
+  {
+    q: "ブロック拡散(BD3-LM)は純粋なマスク拡散に対して何を変えるか?",
+    options: [
+      "ブロックを自己回帰的に条件づけつつ各ブロックの内側で拡散を回し、ブロック間の KV キャッシュと可変長出力を取り戻す",
+      "双方向アテンションを完全に取り除き、モデルを自己回帰的にする",
+      "品質を上げるためノイズ除去ステップ数を増やす",
+      "信頼度しきい値をランダムな再マスクに置き換える"
+    ],
+    answer: 0,
+    explain: "ブロック間は AR、ブロック内は拡散。そのハイブリッドが KV キャッシュと柔軟な系列長を買い戻すものであり、単調なのがブロック境界だけであるがゆえに、ホスティング版 dLLM がそもそもストリーミングできる理由でもある。"
+  },
+  {
+    q: "DiffusionGemma の最も重大な報告結果は次のどれか?",
+    options: [
+      "自己回帰型の Gemma 4 が、元の学習トークン予算の 10% 未満で拡散に変換され、思考モード、マルチモーダル性、AR 生成を保った",
+      "これまでに測定された中で最速の拡散モデルであり、毎秒 1,500 トークンに達する",
+      "拡散モデルはマルチモーダルにできないことを証明した",
+      "どの自己回帰モデルよりも安く、拡散 LLM をゼロから学習した"
+    ],
+    answer: 0,
+    explain: "速度の数字は結構だが争われている。大きいのは構造的な主張だ:拡散は既存の AR チェックポイントに、その学習コストのごく一部で後付けできるらしい、ということ。これが拡散を別個のモデルファミリーではなくサービングの選択肢にする。"
+  },
+  {
+    q: "オープンウェイトで指示チューニング済みの dLLM を信頼できないユーザーに公開している。dLLM 固有のリスクは何か?",
+    options: [
+      "マスク穴埋めプロンプトが有害な意図をアンマスクのトークンに載せ、モデルにマスク区間を整合的に埋めさせられる。拒否が残りを引き継げる左から右の瞬間が存在しない",
+      "拡散モデルはノイズ除去の軌跡を通じて必ず学習データを漏らす",
+      "KV キャッシュがないことで、他のユーザーが自分のコンテキストを読めてしまう",
+      "双方向アテンションは原理的にプロンプトインジェクションの検出を不可能にする"
+    ],
+    answer: 0,
+    explain: "これが DIJA の結果(ICLR 2026)だ:有害な内容の難読化なしで、Dream-Instruct に対しキーワードベース ASR 最大 100%。AR の拒否はそれ以降のすべてを条件づけるが、dLLM にはそうした順序が存在しない。境界でフィルタし、指示チューニングは耐荷重でないものとして扱うこと。"
+  }
+]} />
+
+下地の機構にまだ馴染みがない場合は、[LLM とは何か](/docs/foundations/what-is-an-llm)
+と [トークンとコンテキスト](/docs/foundations/tokens-and-context) が、このページが
+出発点として離れていく自己回帰のベースラインを扱っています。
+[トークン速度](/docs/models/fast-inference-and-token-speed) は、同じレイテンシの
+問題に反対側から攻めるハードウェアとソフトウェアの乗数を扱っています。
+
+## 出典とさらに読む
+
+- [Mercury: Ultra-Fast Language Models Based on Diffusion (arXiv:2506.17298)](https://arxiv.org/abs/2506.17298) — Inception Labs;Artificial Analysis によると H100 上で Mercury Coder Mini と Small が 1,109 と 737 tok/s
+- [Inception — Our Models](https://www.inceptionlabs.ai/models) — 現在の Mercury 2.5 / Voice / Router のレートカード、コンテキストウィンドウ、レイテンシの主張
+- [The Decoder — Inception launches Mercury 2, the first diffusion-based language reasoning model](https://the-decoder.com/inception-launches-mercury-2-the-first-diffusion-based-language-reasoning-model/) — Blackwell で 1,009 tok/s、エンドツーエンド 1.7 秒、ベンチマーク表
+- [Fast-dLLM: Training-free Acceleration of Diffusion LLM by Enabling KV Cache and Parallel Decoding (arXiv:2505.22618)](https://arxiv.org/abs/2505.22618) — 条件付き独立性の診断と信頼度しきい値による修正;[プロジェクトページ](https://nvlabs.github.io/Fast-dLLM/)
+- [Fast-dLLM v2: Efficient Block-Diffusion LLM (arXiv:2509.26328)](https://arxiv.org/abs/2509.26328) — ハイブリッドなアテンションマスク、DualCache、相補マスキング、AR モデルからの約 1B トークンでの変換
+- [Block Diffusion: Interpolating Between Autoregressive and Diffusion Language Models (arXiv:2503.09573)](https://arxiv.org/abs/2503.09573) — ICLR 2025 oral;コードは [kuleshov-group/bd3lms](https://github.com/kuleshov-group/bd3lms)
+- [DiffusionGemma Technical Report (arXiv:2608.00146)](https://arxiv.org/abs/2608.00146) — Gemma 4 MoE を AR 学習予算の 10% 未満で拡散に変換する
+- [ML-GSAI/LLaDA](https://github.com/ML-GSAI/LLaDA) — 8B のマスク拡散 LLM、MIT。固定長 / KV キャッシュなし / ステップ数は応答長と等しく、という著者自身の限界の記述つき
+- [DreamLM/Dream](https://github.com/DreamLM/Dream) と [Dream 7B の解説記事](https://hkunlp.github.io/blog/2025/dream/) — Apache-2.0 の重みと `steps` / `alg` / `alg_temp` のデコードノブ
+- [The Devil behind the mask: An emergent safety vulnerability of Diffusion LLMs (arXiv:2507.11097)](https://arxiv.org/abs/2507.11097) — DIJA、ICLR 2026;コードは [ZichenWen1/DIJA](https://github.com/ZichenWen1/DIJA)
+- [Safer by Diffusion, Broken by Context (arXiv:2602.00388)](https://arxiv.org/abs/2602.00388) — dLLM の安全性についての両面的な見方
+- [A Survey on Parallel Text Generation: From Parallel Decoding to Diffusion Language Models (arXiv:2508.08712)](https://arxiv.org/abs/2508.08712) — AR と非 AR を含む、この領域全体の地図
+- [Techmeme — Gemini Diffusion generates 1,000–2,000 tokens/second](https://www.techmeme.com/250521/p54) — Google DeepMind の実験的なテキスト拡散モデル、ウェイトリスト制
+- AILmanac の関連ページ:[トークン速度](/docs/models/fast-inference-and-token-speed) · [System One 決定モデル](/docs/models/system-one-decision-models-jev-kev) · [全二重音声 AI](/docs/models/full-duplex-voice-ai) · [モデルの選び方](/docs/models/choosing-a-model)
+
+## 次のステップ
+
+- [トークン速度:推論が急に 10〜15 倍速くなった理由](/docs/models/fast-inference-and-token-speed) — 同じレイテンシ問題へのハードウェアとソフトウェアからの攻め方
+- [System One 決定モデル](/docs/models/system-one-decision-models-jev-kev) — 散文ではなく校正済み確率を返すモデル。そこでは拡散のバックボーンは実装の詳細にすぎない
+- [モデルの選び方](/docs/models/choosing-a-model) — これが自分のスタックに入るべきかを判断するための、長く使える枠組み
