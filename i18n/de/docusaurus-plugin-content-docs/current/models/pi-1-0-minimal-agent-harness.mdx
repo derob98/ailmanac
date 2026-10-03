@@ -1,0 +1,523 @@
+---
+sidebar_position: 22.997
+title: "Pi 1.0: Das minimale Harness und der Codemode-Trick, der MCP-Token-Wucher behebt"
+description: "Pi 1.0 erschien am 1. Oktober 2026 und landete auf Platz 1 bei Hacker News. Das Interessante ist nicht die TUI — es ist das Context Engineering: eine QuickJS/WASM-Sandbox, in der Tool-Ergebnisse nie in den Kontext des Modells gelangen, vier MCP-Expositionsmodi, eine Obergrenze von 3.000 Token für inline eingebettete Tool-Deklarationen und ein Trick, der einen neuen System-Prompt-Abschnitt an das Transkript anhängt, statt Tool-Definitionen zu verändern — damit dein Prompt-Cache überlebt. Dazu die bewussten Auslassungen (keine Sub-Agents, kein Plan-Modus), die 0,05-$-Regel beim Cache-Warming und die Vertrauenslücke, die die AGENTS.md eines geklonten Repos ohne Rückfrage lädt."
+keywords: [Pi 1.0, Earendil, pi.dev, codemode, QuickJS sandbox, MCP token cost, deferred tool loading, tool exposure, cache warming, agent harness, Claude Code alternative, agent CLI, AGENTS.md, project trust]
+---
+
+<LevelBadge level="advanced" />
+
+**Pi 1.0** erschien am 1. Oktober 2026 und stand am nächsten Morgen mit über
+1.500 Punkten an der Spitze von Hacker News. Der Pitch ist fast aggressiv
+langweilig: „ein minimales, erweiterbares Agent-Harness, das du zu deinem
+eigenen machen kannst.“ MIT-Lizenz, TypeScript, ein einziger Terminalbefehl.
+
+Der Pitch verkauft sich zu billig. Unter der TUI liefert Pi die
+vollständigste Antwort, die bisher jemand auf das Problem veröffentlicht hat,
+das jedes Agent-Harness im dritten Monat trifft: **MCP-Server zerstören dein
+Kontextfenster, und niemand will es zugeben.** Pi hat sich ein Jahr lang
+öffentlich geweigert, MCP zu unterstützen, und es dann ausgeliefert — indem die
+Tools gar nicht erst in den Prompt kommen. Der Mechanismus ist dokumentiert,
+messbar und kopierbar, ganz unabhängig davon, ob du Pi jemals ausführst.
+
+Diese Seite handelt von diesem Mechanismus, den Zahlen dahinter und den drei
+Designentscheidungen in Pi, die verändern werden, wie du über dein eigenes
+Harness denkst.
+
+<Callout type="objectives" items={[
+  "Codemode verstehen: eine QuickJS/WASM-Sandbox, in der verschachtelte Tool-Aufrufe nie in den Kontext des Modells gelangen — nur die Ausgabe des Skripts",
+  "Pis vier MCP-Expositionsmodi kennenlernen und verstehen, warum der Standard (codemode) dem Modell überhaupt nichts deklariert",
+  "Die exakten Budgets sehen: 3.000 Token für inline eingebettete Tool-Deklarationen, 20 KB bevor ein MCP-Ergebnis ausgedünnt wird, 1 MiB Bash-Ausgabe, die ein Skript sehen darf und das Modell nicht",
+  "Den Prompt-Cache-Trick übernehmen: einen geänderten System-Prompt-Abschnitt an das Transkript anhängen, statt Tool-Definitionen zu verändern",
+  "Die bewussten Auslassungen kennen (keine Sub-Agents, kein Plan-Modus, keine Freigabe pro Aufruf) und die Vertrauenslücke, die die AGENTS.md eines geklonten Repos ohne Rückfrage lädt",
+]} />
+
+## Die Kurzfassung in einem Absatz
+
+Pi ist ein modellagnostischer Terminal-Agent von **Earendil** (die auch Radius
+und Lefos bauen). Das Repo — `github.com/earendil-works/pi` — ist ein
+TypeScript-Monorepo aus dreizehn Paketen, die du unabhängig voneinander nutzen
+kannst: eine einheitliche LLM-API über ~30 Provider, ein Agent-Loop, eine
+TUI-Bibliothek, ein eigenständiger MCP-Client, eine WASM-Sandbox und eine
+experimentelle Durable Runtime. Es benötigt Node.js 22.19+. Es erscheint
+bewusst **ohne** Sub-Agents und **ohne** Plan-Modus, und es fragt nicht vor
+jedem Tool-Aufruf um Erlaubnis. Was es stattdessen liefert, ist Context
+Engineering: `codemode`, eine JavaScript-Sandbox, für die das Modell Skripte
+schreibt und in der Tool-Aufrufe *außerhalb* des Transkripts passieren — nur
+die destillierte Ausgabe des Skripts kommt zurück.
+
+<VerifyNote lastVerified="2026-10-02" source="https://github.com/earendil-works/pi">
+Version, Lizenz, Abhängigkeiten und Paketangaben am 2. Oktober 2026 aus dem
+Repository und der GitHub-API gelesen: Tag `v1.0.0` veröffentlicht am
+2026-10-01T19:20:55Z, MIT, Repo erstellt am 2025-08-09, ~111,6k Sterne /
+~14,2k Forks zum Zeitpunkt der Erstellung. Standardwerte und Limits der
+Einstellungen sind aus den Repo-internen Docs unter
+`packages/coding-agent/docs/` zitiert, die `main` folgen — Zahlen wie
+`codemode.inlineBudget` sind Einstellungen, und Einstellungen werden
+nachjustiert. Lies `settings.md` und `mcp.md` im Repo erneut, bevor du dich auf
+einen bestimmten Wert verlässt.
+</VerifyNote>
+
+## Warum das zählt, selbst wenn du es nie installierst
+
+Jedes Harness beginnt gleich. Du fügst drei MCP-Server hinzu, weil sie
+nützlich aussehen. Jeder davon kippt zwanzig Tool-Definitionen in den
+System-Prompt. Jetzt bezahlt jeder einzelne Modellaufruf in jeder Session für
+sechzig Tool-Schemata, von denen die meisten nie aufgerufen werden, und dein
+Prompt-Cache bricht jedes Mal, wenn ein Server sich neu verbindet und sich die
+Tool-Liste verschiebt.
+
+AILmanac hat das schon gemessen — siehe
+[Was MCP-Server dich wirklich an Token kosten](/docs/claude-code/mcp-token-cost).
+Pis Antwort ist strukturell anders als „nutze weniger Server“.
+
+## Codemode: der eigentliche Mechanismus
+
+Das `codemode`-Tool nimmt **rohen JavaScript-Quellcode** als Eingabe — kein
+JSON, keinen eingezäunten Codeblock. Pi führt ihn als Körper einer
+async-Funktion in einer **nach WebAssembly kompilierten QuickJS-VM** aus, also
+funktionieren `await` und `return` auf oberster Ebene.
+
+Die einzige Fähigkeit der Sandbox ist das Aufrufen injizierter Tools. Es gibt
+keine Timer, kein `fetch`, kein `process`, kein `require`, keine Module, kein
+verschachteltes `WebAssembly`. (`eval` und `Function` funktionieren, erzeugen
+aber nur weiteren Code innerhalb derselben VM.) Entfernte Bild-URLs werden
+abgelehnt; nur base64-`data:`-URLs und Image-Blöcke kommen durch.
+
+Die Konsequenz ist der ganze Punkt:
+
+> Verschachtelte Tool-Aufrufe gelangen nie in den LLM-Kontext. Nur die Ausgabe
+> und der Rückgabewert des Skripts.
+
+Ein Skript kann also zehn Tool-Aufrufe parallel ausfächern, 400 KB Ergebnisse
+auf vier Zeilen herunterfiltern — und das Modell sieht vier Zeilen. Die zehn
+Aufrufe, ihre Argumente und ihre Rohergebnisse werden nie zu
+Transkripteinträgen.
+
+<Steps items={[
+  {
+    title: "Das Modell bekommt einen Werkzeugkasten, keine Tool-Liste",
+    body: "Innerhalb eines Skripts ist jedes aufrufbare Tool eine Methode auf `tools`. Zeichen, die in einem JavaScript-Identifier nicht erlaubt sind, werden zu Unterstrichen — das MCP-Tool `mcp__dev-radius__search` ist also als `tools.mcp__dev_radius__search` erreichbar. Das Modell braucht diese nicht in seinem Prompt deklariert, um sie aufzurufen."
+  },
+  {
+    title: "Es entdeckt Tools, anstatt sie überreicht zu bekommen",
+    body: "Skripte erhalten `ALL_TOOLS` (jedes aufrufbare Tool als Name plus Beschreibung), `searchTools(query)`, das Tools nach BM25-Relevanz mit einem Standardlimit von 8 rankt, `describeTool(name)`, das die TypeScript-Deklaration eines Tools zurückgibt, und `describeNamespace(name)`, das Beschreibung, Instructions und Tool-Namen eines MCP-Servers zurückgibt. Tool-Discovery wird zu einer Abfrage zur Laufzeit, nicht zu einem Dump zur Prompt-Zeit."
+  },
+  {
+    title: "Die Ausgabe wird budgetiert, nicht blind abgeschnitten",
+    body: "Ein Skript darf mit einer Optionszeile beginnen. `max_output_tokens` steht standardmäßig auf 10.000; längere Ausgaben behalten ihren Anfang und ihr Ende, und der vollständige Text wird in eine temporäre Datei geschrieben, deren Pfad im Ergebnis enthalten ist — das Modell kann sie also mit einem Tool nachlesen, wenn es sie wirklich braucht. `timeout_ms` ist standardmäßig nicht gesetzt und ist eine harte Deadline für das gesamte Skript."
+  },
+  {
+    title: "Seiteneffekte sind echt, und Fehlschläge werden nicht zurückgerollt",
+    body: "Die Docs sind eindeutig: Aufrufe, die vor einem Fehlschlag erfolgt sind, werden nicht rückgängig gemacht. Aufrufe, die beim Ende des Skripts noch laufen, werden abgebrochen, und nicht abgewartete Promises werden verworfen. Ein fehlgeschlagenes Skript behält seine Teilausgabe und meldet dann `Script error:` samt Fehler. Schreibe Skripte, die sich gefahrlos erneut ausführen lassen, denn ein Timeout bei Aufruf sieben von zehn lässt sechs erledigt zurück."
+  },
+  {
+    title: "Kleiner Zustand überlebt zwischen Skripten",
+    body: "`store(key, value)` und `load(key)` halten JSON über codemode-Aufrufe hinweg. Schreibvorgänge werden nur behalten, wenn das Skript erfolgreich ist, und jedes erfolgreiche Skript, das Werte speichert, hängt einen `codemode-store`-Eintrag an die Session an — eine fortgesetzte Session behält also ihre Werte, und ein geforkter Branch sieht nur, was auf seinem eigenen Pfad geschrieben wurde."
+  }
+]} />
+
+<PromptCard title="Codemode ohne jeden MCP-Server aktivieren und ausprobieren">{`# Pi activates codemode automatically when an MCP server with
+# "codemode" exposure connects. To have it always on, add it to
+# ~/.pi/agent/settings.json alongside the default tools:
+#
+#   { "defaultTools": ["+codemode"] }
+
+pi
+
+# Then ask for something that would normally flood the context, e.g.:
+#   "Use codemode: run the test suite, and return only the names of
+#    failing tests plus the first assertion line of each."
+#
+# The full test output never becomes a transcript entry.`}</PromptCard>
+
+### Die Bash-Zahl, die man sich merken sollte
+
+Ein direkter `bash`-Aufruf zeigt dem Modell ein Ergebnis, das bei 2.000 Zeilen
+oder 50 KB gekappt wird. Aus einem codemode-Skript heraus aufgerufen, löst
+dasselbe Tool zu einem strukturierten Wert auf, dessen `output`-Feld **bis zu
+1 MiB** aufnimmt — und wenn es länger ist, behält es die ersten und letzten
+512 KiB rund um eine Auslassungsmarkierung, setzt `truncated` und benennt die
+vollständige Ausgabe in `full_output_path`.
+
+Das ist ein 20× größeres Fenster auf die Befehlsausgabe für das *Skript*,
+welches dann entscheidet, was das *Modell* sehen darf. Dasselbe bei MCP:
+Textergebnisse über **20 KB** erreichen das Modell mit entfernter Mitte, rund
+um eine `…N chars truncated…`-Markierung, während ein codemode-Skript das
+komplette `CallToolResult` inklusive `structuredContent` und `isError` erhält.
+
+## Die vier Expositionsmodi
+
+Das ist die Tabelle, die du in deine eigenen Designnotizen kopieren solltest.
+Jeder MCP-Server in Pi hat eine `exposure`, und sie entscheidet, wie das Modell
+die Tools dieses Servers erreichen kann. Jedes Tool wird als
+`mcp__<server>__<tool>` registriert.
+
+| Exposure | Was das Modell sieht | Wofür du sie nutzt |
+|---|---|---|
+| `codemode` **(Standard)** | Nichts. Nicht deklariert und nicht einmal in der codemode-Beschreibung aufgeführt. Skripte finden es über `searchTools()`, `describeTool()` oder `ALL_TOOLS`. | Allgemeine Server, besonders wenn Skripte Aufrufe kombinieren oder filtern sollen |
+| `deferred` | Nichts, bis `tool_search` für den nächsten Modellaufruf einen Treffer lädt. Danach ist es deklariert und bleibt auf diesem Branch deklariert. | Große Server, deren Tools nach der Entdeckung direkt aufgerufen werden sollen |
+| `direct` | Wie ein eingebautes Tool deklariert und zusätzlich aus codemode aufrufbar. | Kleine, häufig genutzte Tool-Sets |
+| `hidden` | Registriert, aber nicht erreichbar. | Server oder Tools, die unverfügbar bleiben sollen |
+
+`toolExposure` überschreibt die Einstellung auf Serverebene pro Tool. Keys sind
+exakte Tool-Namen oder `*`-Muster; exakte Namen schlagen Muster, und unter den
+Mustern gewinnt der erste Treffer. Ein `hidden`-Server kann also genau ein Tool
+freigeben, oder ein `deferred`-Server kann seine destruktiven Tools
+unerreichbar halten:
+
+<PromptCard title="Exposition pro Tool in .pi/mcp.json">{`{
+  "mcpServers": {
+    "github": {
+      "exposure": "deferred",
+      "toolExposure": {
+        "search_code": "direct",
+        "get_*": "codemode",
+        "delete_*": "hidden"
+      }
+    }
+  }
+}`}</PromptCard>
+
+Zwei Details, die man leicht überliest. Erstens sind `codemode`- und
+`deferred`-Tools über *beide* indirekten Mechanismen erreichbar — Skripte
+können sie aufrufen und `tool_search` kann sie laden — und **codemode-Aufrufe
+hängen nicht vom aktiven Tool-Set ab**, sie funktionieren also auch nach einem
+Branch-Wechsel, einem Resume oder einem Fork. Zweitens warnt Pi einmal, wenn
+weder `codemode` noch `tool_search` aktiv ist, denn dann sind deine
+nicht-direkten Tools einfach nicht aufrufbar.
+
+## Der Prompt-Cache-Trick
+
+Hier kommt die am besten kopierbare Idee dieser Seite.
+
+Pi verbindet beim Start einer Session jeden aktivierten MCP-Server im
+Hintergrund. Server mit `codemode`- oder `deferred`-Tools werden in einem
+`mcp_servers`-Abschnitt des System-Prompts aufgeführt — je eine Zeile, aus der
+konfigurierten `description` oder, sobald verbunden, aus den eigenen
+Instructions des Servers.
+
+Dieser Abschnitt ändert sich, während Server sich verbinden. Ein naives Harness
+würde den System-Prompt oder die Tool-Deklarationen neu schreiben, was jedes
+dahinterliegende gecachte Präfix invalidiert. Pi macht stattdessen Folgendes:
+
+> Es hängt den neuen Abschnitt an die Konversation an, statt die
+> Tool-Deklarationen zu ändern, sodass frühere Nachrichten gecacht bleiben.
+
+Ein geändertes *Präfix* kostet dich den gesamten Cache. Ein geändertes *Suffix*
+kostet dich nichts. Pi verwandelt eine Prompt-Mutation in ein Anhängen an das
+Transkript — und genau deshalb ist auch die Beschreibung des `codemode`-Tools
+selbst so entworfen, dass sie sich während des Verbindens der Server nicht
+ändert: Tools mit `deferred`-Exposition sind bewusst nicht darin enthalten.
+
+Der erste Prompt wartet nur bei Servern mit `direct`-Tools bis zu
+**10 Sekunden**, weil diese in der Anfrage deklariert werden müssen. Auf alles
+andere wird faul gewartet: Ein Skript wartet auf die Server, die es benennt,
+und wartet nur dann auf alle, wenn es `searchTools()` aufruft oder `ALL_TOOLS`
+liest.
+
+Wenn du auf Anthropics API baust, gilt dieselbe Argumentation für deine eigenen
+Präfixe — siehe [Prompt Caching](/docs/api/prompt-caching) und
+[Tool-Änderungen mitten im Gespräch](/docs/api/mid-conversation-tool-changes),
+was genau die Fähigkeit ist, die Pi 1.0 „mid-conversation system messages“
+nennt.
+
+## Die Budgets, in einer Tabelle
+
+| Sache | Wert | Wo |
+|---|---|---|
+| Inline eingebettete Tool-Deklarationen in der `codemode`-Beschreibung | **3.000** geschätzte Token (Zeichen ÷ 4); `0` listet nur Namespaces | `codemode.inlineBudget` |
+| Standard-`max_output_tokens` für die Ausgabe eines Skripts | **10.000** | codemode-Optionszeile |
+| Standardanzahl der Ergebnisse von `searchTools()` | **8** (BM25-Ranking) | codemode-Globals |
+| MCP-Textergebnis, bevor die Mitte entfernt wird | **20 KB** | MCP-Tool-Ergebnisse |
+| `bash`-Ausgabe, die das *Modell* direkt sieht | 2.000 Zeilen oder 50 KB | eingebautes Tool |
+| `bash`-Ausgabe, die ein *Skript* sieht | bis zu **1 MiB** (erste + letzte 512 KiB, wenn länger) | codemode |
+| Ein Store-Wert / alle Store-Werte | **262.144** / **1.048.576** Zeichen JSON | codemode-Store |
+| Gleichzeitige Classifier- oder Bildmodell-Aufrufe pro Skript | **4** | codemode `models` |
+| MCP-HTTP-Retries bei 408/429/5xx | **2** | MCP-Transport |
+| Von Providern akzeptierte Tool-Namenslänge | 64 Zeichen aus `[A-Za-z0-9_-]` | pi-mcp |
+
+Steht `codemode.mode` auf `"only"` statt auf dem Standard `"on"`, werden
+eingebaute Tools und Erweiterungs-Tools dem Modell vollständig verborgen und
+stattdessen in der codemode-Beschreibung aufgeführt — das Modell erreicht alles
+über Skripte. Das ist die extremste Version der Idee, und sie ist einen
+Settings-Key entfernt.
+
+## Nicht-LLM-Modelle innerhalb der Sandbox
+
+Das `models`-Global in einem codemode-Skript kann **Classifier**- und
+**Bild**-Modelle mit den Credentials der Session ausführen. Chat-Modelle werden
+aufgeführt, können aber nicht aus einem Skript ausgeführt werden — diese Grenze
+ist bewusst gesetzt.
+
+Die Classifier-Schnittstelle nimmt ein `state`-Objekt plus eine Map von Fragen
+und beantwortet alle in einem Aufruf. Fragen gibt es in drei Formen: `choice`
+(ein Label wählen, wobei `criteria` jedem Label seine Bedeutung zuordnet),
+`score` (eine geordnete Skala, beschrieben vom niedrigsten Wert aufwärts) und
+`bool`. Antworten kommen mit Wahrscheinlichkeiten und einer Konfidenz zurück,
+nicht als Prosa.
+
+Das ist dieselbe System-One-/Entscheidungsmodell-Kategorie, die AILmanac in
+[System-One-Entscheidungsmodelle: Jev, Kev und die offenen Klone](/docs/models/system-one-decision-models-jev-kev)
+und [Trainiere dein eigenes Entscheidungsmodell](/docs/models/train-your-own-decision-model)
+behandelt. Pi liefert **TypeSafe** als erstklassigen Provider mit, und die Docs
+weisen darauf hin, dass sich Modell-IDs je Provider unterscheiden —
+`typesafe/jev-latest` versus `openrouter/typesafe/jev-1.13` —, du löst sie also
+mit `models.getAvailableOfType("classifier")` auf, statt sie hart zu
+verdrahten.
+
+Das Muster, das das freischaltet: Dein Frontier-Modell schreibt ein Skript, das
+150 Issues von einem MCP-Server zieht, jedes davon mit einem günstigen,
+kalibrierten Classifier bei vierfacher Parallelität klassifiziert und die sechs
+zurückgibt, auf die es ankommt. Die 150 Issues berühren den Kontext des teuren
+Modells nie.
+
+<Callout type="warning" items={[
+  "`classify()` und `generateImages()` werfen bei Provider-Fehlern keine Exception — prüfe `stopReason` und `errorMessage` selbst, sonst behandelst du Fehlschläge stillschweigend als Ergebnisse.",
+  "Classifier- und Bildnutzung innerhalb eines Skripts wird dem codemode-Tool-Ergebnis hinzugefügt und zählt zu den Session-Kosten. Günstig pro Aufruf heißt nicht kostenlos bei 150 Aufrufen.",
+  "Bildgenerierung kann Minuten dauern. Ein kurzes `timeout_ms` bei einem Skript, das Bilder generiert, killt es mitten im Flug."
+]} />
+
+## Cache-Warming und die 0,05-$-Regel
+
+Pi hat eine `cacheWarming`-Einstellung mit drei Werten — `"off"`,
+`"streaming"` (der Standard, Warming während aktiver Läufe) und `"idle"`
+(auch zwischen Läufen).
+
+Interessant ist das Gate. Cache-Warming läuft **nur**, wenn das Modell eine
+Cache-Lebensdauer deklariert *und* Pi mindestens **0,05 $** an vermiedenen
+Cache-Miss-Kosten schätzt. Die Refresh-Nutzung zählt zu den Session-Summen,
+**gelangt aber nicht in den Modellkontext**. `/session` zeigt die nächste
+Entscheidung, und eine Erweiterung kann sie über einen
+`cache_warming_decision`-Hook überschreiben.
+
+Ein hart verdrahteter Dollar-Schwellenwert in einem Open-Source-Harness ist ein
+ungewöhnlich ehrliches Stück Engineering: Einen Cache zu wärmen ist selbst eine
+abrechenbare Anfrage, unterhalb eines Break-even ist es also eine Steuer und
+keine Optimierung. Wenn du deinen eigenen Warming-Loop gebaut und diesen
+Schwellenwert nie berechnet hast, zahlst du sie wahrscheinlich. Die Ökonomie
+ist dieselbe wie in
+[Die Ökonomie des Prompt Caching](/docs/frontiers/prompt-caching-economics).
+
+## Konfiguration — und was ersetzt versus anhängt
+
+Die Konfiguration auf Nutzerebene liegt im **Agent-Verzeichnis**, standardmäßig
+`~/.pi/agent` (überschreibbar mit `PI_CODING_AGENT_DIR`). Die
+Projektkonfiguration liegt in `.pi/` unterhalb des Arbeitsverzeichnisses und
+wird erst geladen, nachdem Projektvertrauen erteilt wurde.
+
+| Pfad | Was er tut |
+|---|---|
+| `<agent-dir>/settings.json` | Präferenzen, Standardwerte, Ressourcenpfade, Paketdeklarationen |
+| `<agent-dir>/mcp.json`, `models.json`, `auth.json` | Globale MCP-Server, kompatible Endpunkte und Overrides, gespeicherte Credentials |
+| `<agent-dir>/SYSTEM.md` | **Ersetzt** Pis Standard-System-Prompt |
+| `<agent-dir>/APPEND_SYSTEM.md` | **Ergänzt** Pis System-Prompt |
+| `<agent-dir>/AGENTS.md` — oder `CLAUDE.md` | Nutzerinstruktionen, die über Arbeitsverzeichnisse hinweg gelten |
+| `<agent-dir>/extensions/`, `skills/`, `prompts/`, `themes/` | Nutzerressourcen; `prompts/` werden zu Slash-Befehlen |
+| `.pi/SYSTEM.md`, `.pi/APPEND_SYSTEM.md` | Projektäquivalente; die vertrauenswürdige Projektdatei **gewinnt gegenüber** der aus dem Agent-Verzeichnis — gleichnamige Dateien werden nicht kombiniert |
+
+Zwei Dinge, die man sich einprägen sollte. Pi liest `CLAUDE.md` als
+Kontextdatei, ein bestehendes Claude Code-Repo ist also bereits für Pi
+konfiguriert — der Portabilitätspunkt aus
+[Coding-Agent-CLIs im Vergleich](/docs/models/coding-agent-clis-compared) gilt
+in beide Richtungen. Und `AGENTS.override.md` ersetzt `AGENTS.md` oder
+`CLAUDE.md` **nur im selben Verzeichnis**; es unterdrückt keine Kontextdateien,
+die aus dem Agent-Verzeichnis oder aus übergeordneten Verzeichnissen vererbt
+werden.
+
+Die eingebauten Tools sind `read`, `bash`, `powershell`, `edit`, `write`,
+`grep`, `find` und `ls`, von denen nur `read`, `bash`, `edit` und `write`
+standardmäßig aktiv sind. Die eingebauten Erweiterungen sind `builtin:mcp`,
+`builtin:llama.cpp`, `builtin:codemode` und `builtin:tool-search` — beachte,
+dass **llama.cpp ein erstklassiger Built-in ist**, lokale Gewichte sind hier
+also kein nachträglicher Einfall.
+
+## Das Sicherheitsmodell, klar ausgesprochen
+
+Pis eigenes Sicherheitsdokument ist erfrischend direkt, und die drei Sätze
+unten sind die, die du ernst nehmen solltest, bevor du es auf ein Repo richtest,
+das du nicht selbst geschrieben hast.
+
+<Callout type="warning" items={[
+  "Pi fragt nicht vor jedem Tool-Aufruf um Erlaubnis. Erweiterungen, Package-Installer und Language-Server laufen als Kindprozesse mit denselben Rechten wie das Konto, das Pi gestartet hat. Erweiterungen sind TypeScript-Module, die in den Pi-Prozess geladen werden — sie sind nicht sandboxed, und die codemode-VM schützt den Ausgabepfad des Modells, nicht deine Maschine.",
+  "Projektvertrauen ist keine Startgrenze. Pi liest die Projekteinstellung `sessionDir`, bevor es Vertrauen auflöst — Vertrauen zu verweigern kann diesen Lookup also nicht rückgängig machen. Ein leeres `.pi`-Verzeichnis löst überhaupt keine Vertrauensabfrage aus.",
+  "Das Auffinden von Kontextdateien erfordert kein Projektvertrauen. Die `AGENTS.md` oder `CLAUDE.md` eines geklonten Repos wird ohne Rückfrage in den System-Prompt geladen — und das ist eine Prompt-Injection-Angriffsfläche, keine Konfigurationsbequemlichkeit.",
+  "Die Docs sagen es unverblümt: Das Transkript zu beobachten, Projektvertrauen zu nutzen und Änderungen zu prüfen, schafft keine Sicherheitsgrenze. Die Grenze ist ein Container, eine VM oder ein dedizierter Betriebssystem-Nutzer."
+]} />
+
+Wenn dir dieser letzte Punkt neu ist, lies als Nächstes
+[Coding-Agents unter Angriff](/docs/security/coding-agents-under-attack) und
+[Lokale und hybride Agents absichern](/docs/models/securing-local-and-hybrid-agents).
+Eine kleine Abmilderung, die Pi richtig macht: Der npm-Installationspfad ist
+als `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`
+dokumentiert, und Pi benötigt für eine normale Installation keine
+Lifecycle-Skripte von Abhängigkeiten.
+
+## Was Pi bewusst nicht hat
+
+| Fehlt | Pis Position |
+|---|---|
+| Sub-Agents | Nicht ausgeliefert. Bitte Pi, zu bauen, was du willst, oder installiere ein Paket. |
+| Plan-Modus | Nicht ausgeliefert. |
+| Freigabeabfragen pro Aufruf | Nicht das Modell. Isolation ist die Grenze, nicht Bestätigungsdialoge. |
+| Eine Abhängigkeit vom offiziellen MCP-SDK | `pi-mcp` ist ein eigenständiger Client ohne Abhängigkeit vom offiziellen SDK oder von anderen pi-Paketen. |
+| Ein offener Beitragstrichter | Issues und PRs von neuen Beitragenden werden **automatisch geschlossen**; Maintainer prüfen geschlossene Einsendungen täglich. Lies zuerst `CONTRIBUTING.md`. |
+
+Die Auslassungen sind das Produkt. Ein Harness, das Features verweigert, bis
+sie sich beweisen, ist ein Harness, dessen Kontextbudget lesbar bleibt — und
+das ist dasselbe Argument wie in
+[Warum Agents Token verbrennen](/docs/models/why-agents-burn-tokens), nur durch
+Subtraktion geführt.
+
+Für den umgekehrten Trade-off — ein Harness, das die *Anzahl der Turns* statt
+den Kontext pro Turn optimiert — vergleiche
+[Async-first-Agent-Harnesses](/docs/models/async-first-agent-harness-unreal),
+dessen veröffentlichter Terminal-Bench-4.0-Lauf in 28 Turns fertig war,
+gegenüber Pis 44.
+
+## Pi Durable, in einem Atemzug
+
+`@earendil-works/pi-durable` ist als **experimentell** markiert — die API
+ändert sich ohne Vorankündigung zwischen Releases — und es ist das
+architektonisch interessanteste Paket im Repo. Konversationen, Modell-Turns,
+Tool-Aufrufe und dein eigener Zustand werden in den Speicher committet,
+*bevor* irgendetwas angezeigt wird; stirbt der Prozess mitten im Turn, nimmt
+das erneute Öffnen des Speichers dort wieder auf, wo er stehen geblieben ist.
+
+Das Vokabular lohnt sich auch, wenn du es nie installierst: Eine
+**Konversation** ist ein Transkript unveränderlicher **Entries** (`pi.user`,
+`pi.assistant`, `pi.tool-result`, `pi.system`, `pi.reset`); **Documents** sind
+typisierter JSON-Zustand, der neben dem Transkript gespeichert wird
+(`pi.agent` für Modellentscheidungen, `pi.live` für die laufende Generierung,
+`pi.inbox` für eingereihte Submissions, `pi.usage` für Ausgaben); ein **Task**
+ist eine durable Zustandsmaschine, die bei jedem Schritt einen Checkpoint
+setzt, sodass `pi.generation` die `pi.tool`-Tasks seiner Tool-Aufrufe besitzt
+und ein neu gestarteter Prozess beim letzten Checkpoint weitermacht. Und das
+Modell sieht nur die Entries **ab dem neuesten Reset** — Reset ist ein
+Transkripteintrag, keine Löschung.
+
+Vergleiche mit [Agent-Memory-Architekturen](/docs/frontiers/agent-memory-architectures)
+und [Langlaufende Agent-Harnesses](/docs/frontiers/long-running-agent-harnesses).
+
+## Solltest du wechseln?
+
+Ehrliche Antwort: wahrscheinlich nicht komplett, und das ist in Ordnung — die
+Ideen sind das Lieferbare.
+
+- **Probiere Pi, wenn** du ein Harness über viele Provider hinweg willst, du
+  lokale Gewichte betreibst (llama.cpp ist eingebaut) oder deine MCP-Oberfläche
+  dein Kontextfenster überwachsen hat.
+- **Bleib, wo du bist, wenn** du von Sub-Agents, Plan-Modus oder
+  Freigabeabfragen pro Aufruf abhängig bist. Pi hat sie nicht und
+  entschuldigt sich auch nicht dafür.
+- **Klaue trotzdem:** die Expositionsleiter (`codemode` / `deferred` /
+  `direct` / `hidden`), den Suffix-Anhänge-Trick für wechselnde
+  Prompt-Abschnitte und einen gemessenen Break-even-Schwellenwert, bevor du
+  überhaupt einen Cache wärmst.
+
+<Quiz questions={[
+  {
+    q: "Was gelangt in Pis codemode aus einem Skript, das zehn Tool-Aufrufe macht, in den Kontext des Modells?",
+    options: [
+      "Nur die Ausgabe und der Rückgabewert des Skripts",
+      "Alle zehn Tool-Aufrufe und ihre Ergebnisse, als Transkripteinträge",
+      "Eine von einem günstigeren Modell generierte Zusammenfassung der zehn Aufrufe",
+      "Nichts — codemode-Ergebnisse werden dem Modell nie gezeigt"
+    ],
+    answer: 0,
+    explain: "Verschachtelte Tool-Aufrufe gelangen nie in den LLM-Kontext. Nur die Ausgabe-Items des Skripts (aus text(), image(), console.log()) und sein Rückgabewert. Genau das macht paralleles Ausfächern plus Filtern günstig."
+  },
+  {
+    q: "Ein Server ist mit der Standardexposition `codemode` konfiguriert. Was sieht das Modell in seinem Prompt?",
+    options: [
+      "Nichts über seine einzelnen Tools — nur einen einzeiligen Eintrag im `mcp_servers`-Abschnitt",
+      "Vollständige TypeScript-Deklarationen für jedes seiner Tools",
+      "Nur Tool-Namen, ohne Beschreibungen",
+      "Die Tools sind deklariert, aber als nicht verfügbar markiert, bis der Server sich verbindet"
+    ],
+    answer: 0,
+    explain: "Mit der Exposition `codemode` werden die Tools dem Modell weder deklariert noch in der codemode-Beschreibung aufgeführt. Der Server erscheint als eine Zeile im `mcp_servers`-Abschnitt des System-Prompts, und Skripte finden seine Tools mit searchTools(), describeTool() oder ALL_TOOLS."
+  },
+  {
+    q: "Wenn ein MCP-Server sich mitten in der Session verbindet und seine Zusammenfassungszeile sich ändert, was tut Pi, um den Prompt-Cache zu schützen?",
+    options: [
+      "Es hängt den neuen Abschnitt an die Konversation an, statt die Tool-Deklarationen zu ändern",
+      "Es schreibt den System-Prompt neu und akzeptiert einen Cache-Miss",
+      "Es verschiebt die Aktualisierung auf die nächste Session",
+      "Es baut den Cache im Hintergrund vor dem nächsten Turn neu auf"
+    ],
+    answer: 0,
+    explain: "Ein geändertes Präfix invalidiert jedes dahinterliegende gecachte Token; ein geändertes Suffix kostet nichts. Pi wandelt die Mutation in ein Anhängen an das Transkript um — und genau deshalb werden Tools mit deferred-Exposition aus der codemode-Beschreibung herausgehalten, damit diese Beschreibung byte-stabil bleibt, während Server sich verbinden."
+  },
+  {
+    q: "Pis Cache-Warming ist an eine bestimmte Bedingung gekoppelt. An welche?",
+    options: [
+      "Das Modell deklariert eine Cache-Lebensdauer UND Pi schätzt mindestens 0,05 $ an vermiedenen Cache-Miss-Kosten",
+      "Die Session war mindestens 60 Sekunden untätig",
+      "Das Transkript übersteigt 50.000 Token",
+      "Der Provider ist Anthropic und die Session ist interaktiv"
+    ],
+    answer: 0,
+    explain: "Einen Cache zu wärmen ist selbst eine abrechenbare Anfrage, unterhalb eines Break-even ist es also eine Steuer. Pi verdrahtet diesen Break-even hart bei geschätzten 0,05 $ an vermiedenen Cache-Miss-Kosten, und nur dann, wenn das Modell tatsächlich eine Cache-Lebensdauer deklariert. Die Refresh-Nutzung zählt zu den Session-Summen, gelangt aber nicht in den Modellkontext."
+  },
+  {
+    q: "Ein codemode-Skript läuft in einen Timeout, nachdem es sieben seiner zehn Tool-Aufrufe abgeschlossen hat. Wie ist der Zustand des Systems?",
+    options: [
+      "Die sieben abgeschlossenen Aufrufe bleiben bestehen — Fehlschläge rollen Seiteneffekte nicht zurück",
+      "Alle zehn Aufrufe werden atomar zurückgerollt",
+      "Die sieben Aufrufe werden zurückgerollt, die drei ausstehenden werden erneut versucht",
+      "Pi spielt das Skript im nächsten Turn von Anfang an erneut ab"
+    ],
+    answer: 0,
+    explain: "Die Docs sind eindeutig: Tool-Aufrufe sind echt, und Aufrufe, die vor einem Fehlschlag erfolgt sind, werden nicht rückgängig gemacht. Aufrufe, die beim Ende des Skripts noch laufen, werden abgebrochen, und nicht abgewartete Promises werden verworfen. Schreibe Skripte, die sich gefahrlos erneut ausführen lassen."
+  },
+  {
+    q: "Was von diesem wird in Pi OHNE eine Projektvertrauens-Abfrage geladen?",
+    options: [
+      "Die AGENTS.md- oder CLAUDE.md-Kontextdatei eines geklonten Repositorys",
+      "`.pi/extensions/`",
+      "`.pi/mcp.json`",
+      "`.pi/SYSTEM.md`"
+    ],
+    answer: 0,
+    explain: "Das Auffinden von Kontextdateien erfordert kein Projektvertrauen — ein Repo, das du gerade geklont hast, kann also Instruktionen in deinen System-Prompt schreiben, bevor du irgendetwas freigibst. Die `.pi/`-Ressourcen (settings, mcp.json, extensions, skills, prompts, themes, SYSTEM.md, APPEND_SYSTEM.md) sind die, die durch Vertrauen gegated sind."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Pi 1.0 — was, wann, wer", back: "Ein minimales, erweiterbares, modellagnostisches Terminal-Agent-Harness von Earendil (die auch Radius und Lefos bauen). v1.0.0 veröffentlicht am 2026-10-01. MIT, TypeScript, benötigt Node.js 22.19+. Repo github.com/earendil-works/pi, erstellt am 2025-08-09; ~111,6k Sterne zum Launch. Platz 1 bei Hacker News mit über 1.500 Punkten am 2. Oktober 2026." },
+  { front: "Codemode, in einem Satz", back: "Das Modell schreibt rohes JavaScript, das als Körper einer async-Funktion in einer nach WebAssembly kompilierten QuickJS-VM läuft, deren einzige Fähigkeit das Aufrufen injizierter Tools ist. Verschachtelte Tool-Aufrufe gelangen nie in den Kontext des Modells — nur die Ausgabe und der Rückgabewert des Skripts." },
+  { front: "Was die codemode-Sandbox NICHT hat", back: "Keine Timer, kein fetch, kein process, kein require, keine Module, kein verschachteltes WebAssembly, kein Dateisystem, kein Netzwerk. eval und Function funktionieren, erzeugen aber nur weiteren Code innerhalb derselben VM. Entfernte Bild-URLs werden abgelehnt." },
+  { front: "Die vier MCP-Expositionsmodi", back: "`codemode` (Standard): nicht deklariert, nicht aufgeführt, nur aus Skripten erreichbar. `deferred`: nicht deklariert, bis tool_search einen Treffer lädt, danach auf diesem Branch deklariert. `direct`: wie ein eingebautes Tool deklariert. `hidden`: registriert, aber nicht erreichbar. `toolExposure` überschreibt pro Tool, wobei exakte Namen `*`-Muster schlagen." },
+  { front: "Der Prompt-Cache-Trick", back: "Wenn sich der `mcp_servers`-Abschnitt des System-Prompts ändert (ein Server hat sich verbunden), hängt Pi den neuen Abschnitt an die Konversation an, statt die Tool-Deklarationen zu verändern — frühere Nachrichten bleiben so gecacht. Ein geändertes Präfix kostet den gesamten Cache; ein geändertes Suffix kostet nichts." },
+  { front: "Globals für Tool-Discovery in einem Skript", back: "`ALL_TOOLS` (jedes aufrufbare Tool als Name + Beschreibung), `searchTools(query, { limit, namespace })` (BM25, Standardlimit 8), `describeTool(name)` (Beschreibung + TypeScript-Deklaration), `describeNamespace(name)` (Beschreibung, Instructions und Tool-Namen eines MCP-Servers)." },
+  { front: "Die Bash-Asymmetrie", back: "Ein direkter bash-Aufruf zeigt dem Modell 2.000 Zeilen oder 50 KB. Dasselbe Tool, aus einem codemode-Skript aufgerufen, löst zu einem strukturierten Wert auf, dessen output bis zu 1 MiB aufnimmt — erste und letzte 512 KiB rund um eine Auslassungsmarkierung, wenn länger, mit gesetztem `truncated` und `full_output_path`, das die vollständige Datei benennt." },
+  { front: "Limits des codemode-Stores", back: "store()/load() halten JSON über codemode-Aufrufe hinweg. Ein Wert: höchstens 262.144 Zeichen JSON. Alle Werte zusammen: 1.048.576. Schreibvorgänge bleiben nur bestehen, wenn das Skript erfolgreich ist, festgehalten als `codemode-store`-Session-Eintrag — fortgesetzte Sessions behalten so ihre Werte, und jeder Fork sieht nur die Schreibvorgänge seines eigenen Pfads." },
+  { front: "Gate für Cache-Warming", back: "`cacheWarming` ist `off` | `streaming` (Standard) | `idle`. Es läuft nur, wenn das Modell eine Cache-Lebensdauer deklariert UND Pi mindestens 0,05 $ an vermiedenen Cache-Miss-Kosten schätzt. Die Refresh-Nutzung zählt zu den Session-Summen, gelangt aber nicht in den Modellkontext. `/session` zeigt die nächste Entscheidung." },
+  { front: "Classifier innerhalb von codemode", back: "`models.classify(model, { state, questions })` beantwortet alle Fragen in einem Aufruf. Fragetypen: choice (Labels + criteria), score (geordnete Skala, niedrigster Wert zuerst), bool. Antworten liefern Wahrscheinlichkeiten und Konfidenz zurück, keine Prosa. Chat-Modelle werden aufgeführt, können aber nicht aus Skripten ausgeführt werden. Höchstens vier Classifier-/Bild-Aufrufe laufen pro Skript gleichzeitig." },
+  { front: "Pis bewusste Auslassungen", back: "Keine Sub-Agents. Kein Plan-Modus. Keine Freigabeabfrage vor jedem Tool-Aufruf. Keine Abhängigkeit vom offiziellen MCP-SDK. Issues und PRs neuer Beitragender werden automatisch geschlossen und von den Maintainern täglich geprüft." },
+  { front: "Konfigurationspfade", back: "Nutzer: `~/.pi/agent/` (settings.json, keybindings.json, mcp.json, models.json, auth.json, SYSTEM.md, APPEND_SYSTEM.md, AGENTS.md oder CLAUDE.md, extensions/, skills/, prompts/, themes/). Projekt: `.pi/`, geladen nach Vertrauen. SYSTEM.md ersetzt den System-Prompt; APPEND_SYSTEM.md ergänzt ihn; gleichnamige Dateien werden nie kombiniert." },
+  { front: "Pis Sicherheitsgrenze", back: "Nicht das Transkript, nicht Projektvertrauen, nicht Code-Review — das sind keine Grenzen. Die Grenze ist ein Container, eine VM oder ein dedizierter Betriebssystem-Nutzer. Erweiterungen werden ohne Sandbox in den Pi-Prozess geladen. Projektvertrauen wird nach `sessionDir` gelesen, und das Auffinden von Kontextdateien (AGENTS.md / CLAUDE.md) erfordert überhaupt kein Vertrauen." },
+  { front: "pi-durable-Vokabular", back: "Experimentell. Entries sind unveränderliche Transkriptsätze (pi.user, pi.assistant, pi.tool-result, pi.system, pi.reset); Documents sind typisierter JSON-Zustand (pi.agent, pi.live, pi.inbox, pi.usage); Tasks sind durable Zustandsmaschinen, die jeden Schritt per Checkpoint sichern, wobei pi.generation seine pi.tool-Tasks besitzt. Das Modell sieht Entries ab dem neuesten Reset." }
+]} />
+
+## Quellen & weiterführende Literatur
+
+- [Pi 1.0 — Ankündigung von Earendil (1. Oktober 2026)](https://earendil.com/posts/pi-1-0/) — der Release-Post: codemode, deferred Tool Loading, Cache-Warming, Mid-Conversation System Messages, Pi Durable.
+- [„You Said No MCP!“ — Earendil](https://earendil.com/posts/you-said-no-mcp/) — warum Pi sich MCP widersetzte, der Einwand zur Komponierbarkeit und was sich geändert hat.
+- [earendil-works/pi auf GitHub](https://github.com/earendil-works/pi) — MIT-Monorepo; `packages/` enthält agent, ai, chord, client, codemode, coding-agent, durable, evals, mcp, protocol, server, telemetry, tui.
+- [`packages/coding-agent/docs/codemode.md`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/codemode.md) — Globals, die Optionszeile, Store-Semantik, die `models`-Schnittstelle, Ausgabebudgets.
+- [`packages/coding-agent/docs/mcp.md`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/mcp.md) — die Expositionstabelle, `toolExposure`, das cache-schonende Anhängen, Verbindungs- und Retry-Verhalten.
+- [`packages/coding-agent/docs/settings.md`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/settings.md) — `codemode.inlineBudget`, `codemode.mode`, `cacheWarming`, `defaultTools`, eingebaute Erweiterungen.
+- [`packages/coding-agent/docs/security.md`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/security.md) — die Isolationstabelle, der Geltungsbereich des Projektvertrauens und was ausdrücklich keine Grenze ist.
+- [`packages/coding-agent/docs/configuration.md`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/configuration.md) — Agent-Verzeichnis und Layout des Projekt-`.pi`, Auffinden von Kontextdateien.
+- [`packages/codemode/README.md`](https://github.com/earendil-works/pi/blob/main/packages/codemode/README.md) — die eigenständige `CodemodeSandbox`-API, Speicherlimits, Reporting von Store-Schreibvorgängen, `CODEMODE_SOURCE_GRAMMAR`.
+- [`packages/durable/README.md`](https://github.com/earendil-works/pi/blob/main/packages/durable/README.md) — Vokabular zu Harness, Conversation, Entry, Commit, Document, Task.
+- [`packages/ai/README.md`](https://github.com/earendil-works/pi/blob/main/packages/ai/README.md) — die Provider-Liste (einschließlich TypeSafes System-One-Classifier-API und jedem OpenAI-kompatiblen Endpunkt), Auth-Auflösung, providerübergreifende Übergabe.
+- [pi.dev](https://pi.dev) — Installationsskripte und die gerenderte Dokumentation.
+
+## Weiter
+
+- [Coding-Agent-CLIs im Vergleich](/docs/models/coding-agent-clis-compared) — wo Pi gegenüber Claude Code, Codex CLI, opencode und Aider steht
+- [Was MCP-Server dich wirklich an Token kosten](/docs/claude-code/mcp-token-cost) — miss das Problem, das codemode löst, in deinem eigenen Setup
+- [Async-first-Agent-Harnesses: was Unreal Agent verändert](/docs/models/async-first-agent-harness-unreal) — die andere Hälfte des Kostenarguments: weniger Turns, nicht kleinere Turns

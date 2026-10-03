@@ -1,0 +1,457 @@
+---
+sidebar_position: 20.5
+title: "Diffusion-LLMs: die Modelle, die nicht von links nach rechts schreiben"
+description: "Mercury 2 beantwortet eine vollständige Reasoning-Frage in 1,7 Sekunden bei 1.009 Tok/s; Gemini Diffusion sampelt mit 1.479 Tok/s gegen die 272,4 von Gemini 2.5 Flash. Gleiche Transformer, anderer Decoding-Algorithmus. Der praktische Leitfaden: warum das README des Open-Weight-Pioniers selbst sagt, dass die Qualität bei einem Schritt pro Token am höchsten ist, der Conditional-Independence-Bug, der paralleles Decoding falsch macht, Block Diffusion als Fix, der den KV-Cache zurückgebracht hat, wie DiffusionGemma ein autoregressives Gemma 4 für unter 10 % seines Trainingsbudgets umgewandelt hat, und der Masked-Infill-Jailbreak, der bei einem alignten dLLM 100 % erreicht."
+keywords: [diffusion LLM, dLLM, masked diffusion, Mercury, Inception Labs, Gemini Diffusion, LLaDA, Dream 7B, DiffusionGemma, block diffusion, parallel decoding, Fast-dLLM, non-autoregressive generation, DIJA, tokens per second]
+---
+
+<LevelBadge level="advanced" />
+
+Jedes Modell auf AILmanac erzeugt Text bisher auf dieselbe Weise: ein Token, dann
+das nächste, von links nach rechts, endlos. Eine andere Modellfamilie tut das
+nicht. Sie beginnt mit einer leeren Leinwand maskierter Positionen, sagt **alle
+gleichzeitig** voraus, behält die, bei denen sie sich sicher ist, und wiederholt
+das. Position 40 kann vor Position 7 entschieden werden.
+
+Die Zahlen sind der Grund, warum sich überhaupt jemand dafür interessiert.
+Inceptions Mercury 2 — ein *Reasoning*-Modell — läuft Berichten zufolge mit
+**1.009 Tokens/Sek. auf Blackwell-GPUs bei 1,7 s End-to-End-Latenz**, also etwa
+8–14× schneller als vergleichbare Wettbewerber mit aktiviertem Reasoning
+([The Decoder](https://the-decoder.com/inception-launches-mercury-2-the-first-diffusion-based-language-reasoning-model/)).
+Googles experimentelles Gemini Diffusion sampelt mit **1.479 Tokens/Sek. ohne
+Overhead**, gegen die 272,4 von Gemini 2.5 Flash
+([Techmeme-Übersicht](https://www.techmeme.com/250521/p54)).
+
+Und trotzdem sagt dir das README von LLaDA — dem 8B-Open-Weight-Modell, das den
+Ansatz im großen Maßstab belegt hat —, dass seine Qualität am höchsten ist, wenn
+die Anzahl der Sampling-Schritte **der Antwortlänge entspricht**. Ein Forward
+Pass pro Token. Genau wie bei einem autoregressiven Modell, aber ohne KV-Cache,
+also *langsamer*.
+
+Beides ist wahr. Diese Lektion ist die Brücke dazwischen: was der Algorithmus
+tatsächlich macht, welcher Regler die Geschwindigkeit kauft und was sie kostet,
+die zwei strukturellen Grenzen, die frühe Diffusion-LLMs unbrauchbar machten, und
+der Fix, der es in die Praxis gebracht hat, sowie die drei Stolperfallen
+(Streaming, Längenabrechnung und eine Jailbreak-Klasse, die es bei
+autoregressiven Modellen nicht gibt), die du kennen musst, bevor du so ein
+Modell in Produktion nimmst.
+
+<Callout type="objectives" items={["Masked-Diffusion-Generierung mit Leinwand, Denoising-Pass und Commit-Entscheidung beschreiben — und sagen, was bidirektionale Attention bringt und was sie kostet", "Den Steps-Regler richtig benutzen: Tokens pro Forward Pass berechnen und erklären, warum der Conditional-Independence-Fehler aggressive Parallelität falsch macht und nicht bloß schlechter", "Erklären, warum Block Diffusion in jedem dLLM steckt, das du heute tatsächlich aufrufen kannst — es hat KV-Cache, variable Ausgabelänge und Token-Streaming zurückgebracht", "Die Aufgaben auswählen, bei denen ein dLLM wirklich gewinnt: Infilling und Edits in beliebiger Reihenfolge, latenzkritische Voice-Anwendungen und begrenzte Entscheidungen — nicht „alles, nur schneller“", "Einen offenen dLLM-Endpunkt an der Grenze als nicht alignt behandeln, weil Masked-Infill-Prompts das Alignment auf eine Weise umgehen, wie autoregressive Verweigerungen es nicht können"]} />
+
+<VerifyNote lastVerified="2026-10-02" source="https://www.inceptionlabs.ai/models">
+Jeder Preis, jedes Kontextfenster und jede Tokens-pro-Sekunde- oder
+Latenzangabe hier ist verderblich — dieses Feld bewegt sich monatlich, und
+Inceptions Preisliste enthält derzeit Aktionsrabatte. Prüfe die Modellseite des
+Anbieters selbst und die unabhängigen Leaderboards, bevor du irgendeine Zahl in
+einer Entscheidung zitierst. Forschungsaussagen sind mit ihren Papers belegt;
+mehrere davon sind Preprints, keine replizierten Ergebnisse.
+</VerifyNote>
+
+## Der Mechanismus, in einem Diagramm, das du dir vorstellen musst
+
+Die Schleife eines autoregressiven (AR) Modells lautet: den gesamten Prefix
+lesen, eine Wahrscheinlichkeitsverteilung über **eine** Position ausgeben (die
+nächste), samplen, anhängen, wiederholen. Der KV-Cache macht das günstig — die
+Keys und Values für jedes früher erzeugte Token wurden einmal berechnet und
+ändern sich nie, weil Attention kausal ist und rechts davon noch nichts
+existiert.
+
+Ein Masked-Diffusion-LLM dreht das um. Attention ist **bidirektional**: jede
+Position attendiert auf jede andere Position, in beide Richtungen. In einem
+einzigen Forward Pass erzeugt das Modell also gleichzeitig eine Verteilung für
+*jede* maskierte Position. Generierung wird zur iterativen Verfeinerung einer
+ganzen Antwort, nicht zu einem Gang entlang dieser Antwort.
+
+<Steps items={[
+  {title: "Eine Leinwand auslegen", body: "Lege eine Generierungslänge L fest. Fülle alle L Positionen mit einem speziellen Mask-Token. Bei einem reinen Masked-dLLM (LLaDA, Dream) ist L vor dem ersten Forward Pass fixiert — das Modell lässt die Sequenz nicht unterwegs wachsen."},
+  {title: "Ein Denoising-Pass sagt alles voraus", body: "Der Transformer läuft einmal über Prompt + Leinwand und gibt für jeden maskierten Slot gleichzeitig eine Verteilung zurück. Nicht „das nächste Token“ — Slot 3, Slot 17 und Slot 240, im selben Pass."},
+  {title: "Eine Teilmenge committen (darum geht das ganze Spiel)", body: "Du demaskierst einige dieser Vorhersagen und frierst sie als echte Tokens ein. Welche und wie viele, ist die Decoding-Policy: zufällige Reihenfolge, höchste Top-1-Konfidenz, größte top1−top2-Marge oder niedrigste Entropie. Alles andere bleibt maskiert."},
+  {title: "Mit den committeten Tokens als Kontext erneut laufen lassen", body: "Der nächste Pass sieht die eingefrorenen Tokens und sagt die verbleibenden Masken neu voraus — und weil Attention bidirektional ist, konditioniert ein am ENDE der Antwort committetes Token die Tokens, die in der Mitte noch fehlen. Das ist genau, was AR-Modelle nicht können."},
+  {title: "Aufhören, wenn die Leinwand voll ist", body: "Gesamtkosten = (Anzahl der Passes) × (ein vollständiger Forward Pass). Also gilt: Tokens pro Forward Pass = L / steps. Aus diesem Verhältnis, nicht aus der Hardware, kommen die Schlagzeilen-Tokens/Sek."}
+]} />
+
+Die letzte Zeile ist die, die man sich merken sollte. Ein AR-Modell ist bei einem
+Token pro Forward Pass festgenagelt. Ein Diffusion-LLM lässt dich wählen.
+DiffusionGemma, Googles Open-Weight-Beitrag, berichtet von etwa **20 Tokens pro
+Forward Pass**, während es Blöcke von 256 parallel verfeinert — so kommt es auf
+~1.500 Output-Tokens/Sek. auf einer einzelnen H100
+([DiffusionGemma Technical Report](https://arxiv.org/abs/2608.00146)).
+
+## Der Steps-Regler, und warum ihn aufzudrehen falsch ist und nicht bloß verlustbehaftet
+
+Dream 7B legt den Regler explizit offen. Seine Funktion `diffusion_generate()`
+dokumentiert `steps` als „diffusion timesteps“, wobei pro Schritt
+`max_new_tokens / steps` Tokens erzeugt werden, und merkt unmissverständlich an,
+dass weniger Schritte schneller, aber grober sind
+([DreamLM/Dream](https://github.com/DreamLM/Dream), Apache-2.0).
+
+Warum also nicht immer wenige Schritte verwenden? Weil der Fehler, den das
+einführt, kein Rauschen ist — es ist ein spezifischer, benennbarer Bug.
+
+Ein einzelner Forward Pass gibt dir für jeden maskierten Slot eine **marginale**
+Verteilung: die Wahrscheinlichkeit eines Tokens *an dieser Position*, gemittelt
+über alles, was noch unbekannt ist. Wenn du zwei Slots aus demselben Pass
+committest, samplest du aus dem **Produkt ihrer Marginalverteilungen**, nicht aus
+ihrer gemeinsamen Verteilung. Jede Abhängigkeit zwischen ihnen wird stillschweigend
+verworfen. Die Autoren von Fast-dLLM nennen die Ursache direkt: die
+Generierungsqualität verschlechtert sich bei parallelem Decoding, weil
+Masked-Diffusion-Modelle Tokens unabhängig voneinander aus Marginalwahrscheinlichkeiten
+samplen, obwohl die echte gemeinsame Verteilung Abhängigkeiten hat
+([Fast-dLLM, arXiv:2505.22618](https://arxiv.org/abs/2505.22618)).
+
+Die Intuition: Frag nach einer Stadt, und zwei benachbarte Slots bewerten
+vielleicht „New“ und „Delhi“ jeweils als wahrscheinlichstes Token *für ihre
+eigene Position*, weil „New York“ und „New Delhi“ beide plausibel sind. Committe
+beide in einem Pass, und du bekommst keines von beiden. Der Fehlermodus von zu
+parallelem Decoding ist nicht vagere Prosa, sondern selbstbewusst zusammengesetzter
+Unsinn an den Nahtstellen.
+
+Der Fix, der das Feld praktikabel gemacht hat, heißt **confidence-aware parallel
+decoding**: berechne pro maskiertem Slot eine Konfidenz (typischerweise die
+maximale Softmax-Wahrscheinlichkeit), committe nur die Slots oberhalb eines
+Schwellenwerts, und wenn keiner ihn überschreitet, committe den höchsten
+einzelnen, damit die Schleife weiter Fortschritt macht. Tokens, die nahezu
+unabhängig sind, werden zusammen dekodiert; Tokens, die voneinander abhängen,
+warten. Fast-dLLM berichtet über Benchmarks hinweg von einer bis zu **27,6×
+höheren Durchsatzleistung** bei LLaDA und Dream mit minimalem Genauigkeitsverlust
+— trainingsfrei, nur eine Änderung im Decoding.
+
+Das ist die Form dieses gesamten Forschungsfelds: die Parallelität ist gratis,
+die *Unabhängigkeit* ist es nicht, und die Arbeit besteht darin zu erkennen,
+welche Tokens gefahrlos zusammen gehen können.
+
+<Callout type="note" items={["Ein Konfidenzschwellenwert ist ein Qualitätsregler, über den man tatsächlich nachdenken kann: höherer Schwellenwert bedeutet weniger committete Tokens pro Pass, mehr Passes, langsamer, näher an AR-Qualität. Fast-dLLM v2 berichtet bei Schwellenwert 0,9 von einem 2,6×-Speedup auf GSM8K mit minimalem Genauigkeitsverlust — das ist die Art Einstellung, mit der man anfängt, nicht „alles committen“."]} />
+
+## Die zwei strukturellen Grenzen — und Block Diffusion, weshalb du heute überhaupt eines aufrufen kannst
+
+LLaDAs eigenes Repository listet seine Effizienzbeschränkungen ohne Beschönigung
+auf: feste Kontextlänge beim Sampling, **keine KV-Cache-Unterstützung** und
+verschlechterte Leistung, wenn die Sampling-Schritte unter die Antwortlänge
+fallen. Die Autoren stellen das als bewusste Entscheidung dar — sie wollten die
+Obergrenze des Ansatzes finden, bevor sie ihn optimieren
+([ML-GSAI/LLaDA](https://github.com/ML-GSAI/LLaDA), MIT, ~4k Sterne, Base- und
+Instruct-Gewichte plus LLaDA 1.5, LLaDA-MoE-7B-A1B und iLLaDA-Varianten).
+
+Stapelt man das auf, ist ein reines Masked-dLLM als Produkt nahezu unbrauchbar:
+
+1. **Kein KV-Cache.** Bidirektionale Attention bedeutet, dass jeder Pass den
+   Kontext jedes Tokens ändern kann, also sind gecachte Keys und Values ungültig.
+   Du berechnest die gesamte Sequenz in jedem Schritt neu.
+2. **Feste Ausgabelänge.** Du musst L vor der Generierung festlegen. Zu klein
+   schneidet ab; zu groß verschwendet Rechenzeit auf Positionen, die du wegwirfst.
+3. **Latenz schlechter als bei AR.** Punkt 1 und 2 zusammen können ein
+   „paralleles“ Modell End-to-End langsamer machen als das sequenzielle, das es
+   ersetzt.
+
+**Block Diffusion** löst alle drei, indem es sich weigert, rein zu sein.
+Generiere in Blöcken: konditioniere **autoregressiv** auf vorherige Blöcke und
+lass die Diffusion **innerhalb** des aktuellen Blocks laufen. Das liefert
+flexible Sequenzlänge und KV-Caching zwischen Blöcken — die BD3-LM-Formulierung,
+ein ICLR-2025-Oral
+([arXiv:2503.09573](https://arxiv.org/abs/2503.09573),
+[kuleshov-group/bd3lms](https://github.com/kuleshov-group/bd3lms)).
+
+Fast-dLLM v2 ([arXiv:2509.26328](https://arxiv.org/abs/2509.26328)) zeigt, wie
+eine getunte Version aussieht, und die Details sind es wert, sie zu kennen, denn
+sie erklären das Anbieterverhalten, das du beobachten wirst:
+
+- **Hybride Attention-Maske.** Blockdiagonal (bidirektional) *innerhalb* eines
+  Blocks, blockkausal (von links nach rechts) *zwischen* Blöcken. Bidirektionaler
+  Kontext dort, wo er hilft, AR-Semantik dort, wo der Cache lebt.
+- **Zwei Cache-Ebenen.** Ein Cache auf Blockebene, der fertige Blöcke als
+  saubere Prefix-Kontexte hält, plus ein Sub-Block-Cache (DualCache) für die
+  Neuberechnung, die das Decoding innerhalb eines Blocks weiterhin braucht.
+- **Komplementäres Maskieren im Training.** Jedes Sample wird in zwei Ansichten
+  mit den Masken `m` und `1 − m` dupliziert, sodass jedes Token sowohl als
+  Mask-Target als auch als Kontext supervidiert wird.
+- **Berichtete Ergebnisse.** Bis zu 2,5× schneller als normales AR-Decoding; 1,8×
+  bei Batch-Größe 64 auf H100s; ein durchschnittlicher 7B-Benchmark-Score von
+  60,3 gegen 57,6 von Dream, darunter HumanEval 63,4 vs. 57,9 und GSM8K 62,0
+  vs. 39,2.
+
+Und die Trainingskosten sind das Detail, das das Feld neu rahmt: Fast-dLLM v2
+berichtet von Fine-Tuning aus einem AR-Modell auf rund **1 Mrd. Tokens — etwa
+500× weniger als die 580 Mrd. von Dream** — ein 7B-Modell, trainiert in ~12
+Stunden auf 64 A100s.
+
+## Diffusion ist ein Decoding-Modus, den man nachrüsten kann, keine eigene Spezies
+
+DiffusionGemma macht diesen Punkt unübersehbar. Es wird nicht von Null trainiert:
+Es fine-tunt **Gemma 4**, ein Mixture-of-Experts-Modell mit 3,8 Mrd. aktivierten
+und 25,2 Mrd. Gesamtparametern, in ein Diffusionsmodell, und zwar mit **weniger
+als 10 % des gesamten Trainings-Token-Budgets des ursprünglichen AR-Modells** —
+supervidiertes Denoising-Fine-Tuning, dann Reinforcement Learning und
+Sampler-Distillation
+([arXiv:2608.00146](https://arxiv.org/abs/2608.00146), CC-BY-4.0-Gewichte).
+
+Was die Umwandlung überlebt, ist der überraschende Teil. Der Report besagt, dass
+es den Thinking-Modus, die multimodalen Eingaben und die langen Kontexte des
+Basismodells behält — und **die Fähigkeit zur autoregressiven Generierung
+bewahrt**, mit nur geringer Verschlechterung. Ein Satz Gewichte, zwei
+Decoding-Modi.
+
+Wenn dieses Ergebnis Bestand hat, hört „Diffusion-LLM“ auf, eine eigene
+Produktkategorie zu sein, und wird zu einer Serving-Option: dieselbe Familie, mit
+einem Parallelitätsregler auf der Inferenzseite. Das ist eine weit folgenreichere
+Behauptung als jeder einzelne Tokens-pro-Sekunde-Rekord, und es ist der Grund,
+den Mechanismus jetzt zu lernen und nicht erst dann, wenn ein Anbieter bei einem
+Modell, das du schon nutzt, einen Schalter umlegt.
+
+## Worin ein Diffusion-LLM tatsächlich besser ist
+
+Geschwindigkeit ist die Schlagzeile und der schwächste Teil der Argumentation,
+denn Geschwindigkeit ist umstritten — spezialisierte AR-Hardware liefert
+ebenfalls hunderte Tokens pro Sekunde (siehe
+[Token-Geschwindigkeit](/docs/models/fast-inference-and-token-speed)). Die
+dauerhaften Vorteile sind die, die aus der *Form* des Algorithmus folgen.
+
+**Generierung in beliebiger Reihenfolge und natives Infilling.** Weil du
+auswählst, welchen Slot du committest, kannst du ein Loch mitten in einer Sequenz
+lassen und es vom Modell mit vollem Kontext auf beiden Seiten füllen lassen.
+Dream legt das als Parameter `alg` offen — `origin` (zufällige Reihenfolge),
+`maskgit_plus` (Top-1-Konfidenz), `topk_margin` (top1 − top2-Marge), `entropy` —
+plus `alg_temp`, um diesen Strategien Zufälligkeit beizumischen. Für Code-Edits,
+Template-Vervollständigung oder das Füllen von Feldern in einem festen
+JSON-Skelett passt das strukturell besser, als ein AR-Modell zu bitten, eine
+ganze Datei neu auszugeben, um Zeile 40 zu ändern.
+
+**Latenzkritische Interaktion.** Inceptions Mercury Voice wirbt mit einer
+Time-to-First-Token **unter 170 ms** bei 128K Kontext, zum Zeitpunkt des
+Schreibens zu 0,20 $ / 1,50 $ pro Million Input-/Output-Tokens. Voice ist der
+klarste Fall, in dem Latenz *das* Produkt ist; unsere Seite zu
+[Full-Duplex-Voice-AI](/docs/models/full-duplex-voice-ai) erklärt, warum diese
+Schwelle wichtig ist.
+
+**End-to-End-Reasoning-Durchlaufzeit.** Die berichteten 1,7 s von Mercury 2 für
+eine komplette Reasoning-Antwort sind eine andere Aussage als Durchsatz — es ist
+die Zahl, die eine Agent-Schleife tatsächlich spürt, Zug um Zug.
+
+**Begrenzte Antworten statt Prosa.** Inceptions Mercury Decide gibt eine
+Auswahl, einen Score oder ein Ja/Nein mit einer kalibrierten Wahrscheinlichkeit
+zurück, die direkt am Modell abgelesen und nicht als Text ausgeschrieben wird —
+berichtet mit bis zu 14 Entscheidungen pro Sekunde, was „auf jeden Fall anwenden
+und die unsicheren eskalieren“ erschwinglich macht. Die Kategorie und ihre
+Einschränkungen werden ausführlich bei
+[System-One-Entscheidungsmodellen](/docs/models/system-one-decision-models-jev-kev)
+behandelt; das Diffusions-Backbone ist dort ein Implementierungsdetail, nicht der
+Punkt.
+
+**Preisdruck.** Mercury 2.5 listet derzeit 260K Kontext zu 0,04 $ / 0,15 $ pro
+Million Input-/Output-Tokens (Aktionspreis, regulär 0,20 $ / 0,75 $) mit
+gecachtem Input zu 0,004 $ pro Million. Behandle Aktionspreise als temporär und
+kalkuliere deine Rechnung mit Listenpreisen.
+
+## Drei Stolperfallen, bevor du eines ausrollst
+
+<Callout type="warning" items={["Tokens/Sek. werden bei der vom Anbieter gewählten Parallelität gemessen. Deine Qualitätsschwelle verlangt vielleicht mehr Schritte, und das kostet dich den Speedup. Benchmarke mit deinen eigenen Prompts an deiner eigenen Genauigkeitsschwelle.", "Die Ausgabe ist nicht endgültig von links nach rechts. Nur Blockgrenzen sind monoton; innerhalb eines Blocks können Slots weiterhin maskiert oder revidiert werden. Jede UI und jeder Parser, der annimmt „Token N wird sich nie ändern“, liegt falsch.", "Ein reines Masked-dLLM rechnet und berechnet eine Länge ab, die du im Vorhinein gewählt hast. Block Diffusion reduziert das auf Granularität pro Block — es beseitigt es nicht."]} />
+
+Die dritte verdient mehr als einen Aufzählungspunkt, denn sie ist eine
+Sicherheitseigenschaft und hat kein autoregressives Gegenstück.
+
+Das Alignment eines AR-Modells hat einen strukturellen Vorteil: die Verweigerung
+passiert *zuerst*. Wenn das Modell beschließt abzulehnen, ist jedes folgende
+Token auf „Dabei kann ich nicht helfen.“ konditioniert. Ein Diffusion-LLM hat
+keinen solchen Moment. Es gibt keinen Punkt von links nach rechts, an dem eine
+Verweigerung den Rest der Generierung übernimmt — maskierte Slots werden so
+gefüllt, dass sie zu allem passen, was bereits auf der Leinwand steht.
+
+DIJA („The Devil behind the mask“, ICLR 2026,
+[arXiv:2507.11097](https://arxiv.org/abs/2507.11097),
+[ZichenWen1/DIJA](https://github.com/ZichenWen1/DIJA)) macht daraus einen
+Angriff. Der adversariale Prompt legt die schädliche Absicht in **unmaskierte**
+Tokens und lässt maskierte Abschnitte offen, die das Modell kontextuell
+konsistent vervollständigt. Die berichteten Ergebnisse: bis zu **100 %
+keyword-basierte Angriffs-Erfolgsrate auf Dream-Instruct**, was die stärkste
+vorherige Baseline um bis zu 78,5 % bei evaluator-basierter ASR auf
+JailbreakBench und um 37,7 Punkte im StrongREJECT-Score übertrifft — und das
+**ohne jedes Umschreiben oder Verschleiern der schädlichen Inhalte**. Das Fazit
+der Autoren: bestehende Alignment-Mechanismen schützen dLLMs nicht gegen
+kontextbewusste Prompts mit maskierten Eingaben, weil das Modell eine unsichere
+Generierung nicht mitten in der Inferenz filtern kann, wie ein sequenzielles es
+vermag.
+
+Eine Folgearbeit ([arXiv:2602.00388](https://arxiv.org/abs/2602.00388)) argumentiert,
+das Bild sei zweiseitig — Diffusion verleihe in manchen Settings einen
+Sicherheits-*Segen*, der dann unter Kontext zerbricht —, was ein Grund ist, zu
+messen statt in irgendeine Richtung zu vermuten.
+
+Praktische Konsequenz: wenn du ein Open-Weight-dLLM exponierst, behandle sein
+Instruction-Tuning nicht als Schutzmechanismus. Filtere und klassifiziere an der
+Grenze, sowohl bei der Anfrage als auch bei der Antwort, genau so, wie du es bei
+einem Basismodell tun würdest. Unsere Seite
+[Lokale und hybride Agents absichern](/docs/models/securing-local-and-hybrid-agents)
+behandelt das Muster für die Grenze.
+
+## Probiere eines in zehn Minuten aus
+
+<Steps items={[
+  {title: "Gehostet, null Setup", body: "Inception stellt Mercury über eine OpenAI-kompatible API bereit, und die Modelle sind auf OpenRouter gelistet (zum Beispiel openrouter.ai/inception/mercury-2). Richte ein bestehendes OpenAI-SDK-Skript darauf und ändere den Model-String — an der Form des Requests ist nichts diffusionsspezifisch."},
+  {title: "Offene Gewichte, lokal", body: "LLaDA-8B-Instruct (MIT) und Dream-v0-Instruct-7B (Apache-2.0) liefern beide Inferenzcode auf Hugging Face mit. Die Gewichte von DiffusionGemma stehen unter CC-BY-4.0. Beachte, dass ein reines Masked-dLLM keinen KV-Cache hat, plane VRAM also für das Neuberechnen der vollständigen Sequenz in jedem Schritt ein."},
+  {title: "Den Steps-Sweep fahren", body: "Das aufschlussreichste Einzelexperiment: halte den Prompt fest, variiere steps und trage die Wall-Clock-Zeit gegen eine Task-Metrik auf, die dir wichtig ist. Du wirst deine eigene Qualitätsklippe finden, und sie wird nicht dort liegen, wo eine Benchmark-Tabelle sie hingesetzt hat."},
+  {title: "Dann die Nahtstellen testen", body: "Nutze Prompts, deren Antworten mehrtokenige Einheiten enthalten — Eigennamen, Zahlen mit Einheiten, Identifier, JSON-Keys. Dort zeigen sich Conditional-Independence-Fehler zuerst, und dort verdient ein Konfidenzschwellenwert seine Kosten."}
+]} />
+
+<PromptCard title="Ein gehostetes Diffusion-LLM mit dem OpenAI SDK aufrufen (nichts ändert sich außer dem Model-String)">{`# Inception serves an OpenAI-compatible API; OpenRouter also lists the models.
+# Check the provider's model list for the current slug before you hard-code one.
+
+curl https://openrouter.ai/api/v1/chat/completions \\
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "inception/mercury-2",
+    "messages": [
+      {"role": "user", "content": "Rewrite this function to stream its output, and explain the two failure modes you introduced."}
+    ],
+    "stream": true
+  }'
+
+# What to watch for, beyond the content:
+#  - time to first token vs time to last token (the diffusion win is usually in the gap)
+#  - whether the stream arrives in chunks that look like BLOCKS rather than words`}</PromptCard>
+
+<PromptCard title="Der Steps-Sweep auf Dream 7B — finde deine eigene Qualitätsklippe">{`import time, torch
+from transformers import AutoModel, AutoTokenizer
+
+NAME = "Dream-org/Dream-v0-Instruct-7B"
+tok = AutoTokenizer.from_pretrained(NAME, trust_remote_code=True)
+model = AutoModel.from_pretrained(
+    NAME, torch_dtype=torch.bfloat16, trust_remote_code=True
+).to("cuda").eval()
+
+PROMPT = "List the five largest cities in Germany with their populations."
+MAX_NEW = 256
+
+# steps == MAX_NEW is the authors' best-quality setting: one token per
+# forward pass. Each halving doubles tokens-per-pass and doubles the
+# number of independence assumptions you are making.
+for steps in [256, 128, 64, 32, 16]:
+    inputs = tok.apply_chat_template(
+        [{"role": "user", "content": PROMPT}],
+        return_tensors="pt", return_dict=True, add_generation_prompt=True,
+    ).to("cuda")
+
+    t0 = time.perf_counter()
+    out = model.diffusion_generate(
+        inputs.input_ids,
+        attention_mask=inputs.attention_mask,
+        max_new_tokens=MAX_NEW,
+        steps=steps,
+        temperature=0.0,
+        alg="entropy",          # commit the lowest-entropy slots first
+        alg_temp=0.0,
+    )
+    dt = time.perf_counter() - t0
+    text = tok.decode(out[0][len(inputs.input_ids[0]):], skip_special_tokens=True)
+
+    print(f"--- steps={steps}  tokens/pass={MAX_NEW/steps:.0f}  {dt:.2f}s ---")
+    print(text.strip()[:400])
+
+# Read the OUTPUTS, not just the timings. The numbers and the city names are
+# the multi-token units that break first when too many slots are committed
+# from one pass. That corruption is the conditional-independence bug, visible.`}</PromptCard>
+
+## Wie du entscheidest, ob das für dich relevant ist
+
+<Callout type="takeaways" items={["Die Geschwindigkeit eines Diffusion-LLM kommt aus einem Verhältnis — Generierungslänge geteilt durch Denoising-Schritte, also committete Tokens pro Forward Pass. Ein AR-Modell liegt fest bei 1. Alles andere ist eine Folge dieses Reglers.", "Zu paralleles Decoding ist falsch, nicht bloß grob: committet man korrelierte Slots aus einem Pass, samplet man das Produkt der Marginalverteilungen statt die gemeinsame Verteilung. Decoding mit Konfidenzschwellenwert ist der Fix, und Fast-dLLM berichtet von bis zu 27,6x Durchsatz mit minimalem Genauigkeitsverlust.", "Reine Masked Diffusion hat keinen KV-Cache und eine feste Ausgabelänge. Block Diffusion (AR zwischen Blöcken, Diffusion innerhalb) hat Caching, variable Länge und Streaming zurückgebracht — deshalb ist jedes heute aufrufbare dLLM ein Blockmodell.", "DiffusionGemma hat ein autoregressives Gemma 4 MoE für unter 10 % seines ursprünglichen Trainings-Token-Budgets in ein Diffusionsmodell umgewandelt und dabei Thinking-Modus, Multimodalität und AR-Generierung behalten. Diffusion sieht eher nach einem Decoding-Modus aus als nach einer eigenen Modellspezies.", "Wähle es für Infilling und Edits in beliebiger Reihenfolge, Voice-Turns unter 200 ms, schnelle begrenzte Entscheidungen und End-to-End-Turn-Latenz — und gehe davon aus, dass sein Alignment nicht hält, denn Masked-Infill-Prompts erreichen bei einem alignten offenen dLLM bis zu 100 % ASR."]} />
+
+<Flashcards cards={[
+  { front: "Masked-Diffusion-LLM, in einem Satz", back: "Ein Transformer mit bidirektionaler Attention, der von einer Leinwand aus Mask-Tokens fester Länge startet, jede maskierte Position in einem Forward Pass vorhersagt, eine zuverlässige Teilmenge committet und das wiederholt, bis die Leinwand voll ist." },
+  { front: "Tokens pro Forward Pass", back: "Generierungslänge L geteilt durch die Anzahl der Denoising-Schritte. Die einzige Zahl, die die Geschwindigkeitsbehauptung eines dLLM erklärt. Ein autoregressives Modell ist auf 1 festgenagelt; DiffusionGemma berichtet ~20." },
+  { front: "Warum weniger Schritte die Qualität brechen", back: "Ein Pass liefert pro maskiertem Slot eine MARGINALE Verteilung. Committet man zwei korrelierte Slots aus demselben Pass, samplet man das Produkt der Marginalverteilungen, nicht die gemeinsame, also werden Abhängigkeiten zwischen ihnen verworfen. Quelle: Fast-dLLM, arXiv:2505.22618." },
+  { front: "Confidence-aware parallel decoding", back: "Committe nur die maskierten Slots, deren maximale Softmax-Wahrscheinlichkeit einen Schwellenwert überschreitet; wenn keiner das tut, committe den höchsten einzelnen, damit die Schleife fortschreitet. Fast-dLLM berichtet von bis zu 27,6x Durchsatz bei LLaDA und Dream mit minimalem Genauigkeitsverlust." },
+  { front: "Block Diffusion (BD3-LM)", back: "Konditioniere autoregressiv auf vorherige Blöcke und lass die Diffusion innerhalb des aktuellen Blocks laufen. Kauft KV-Caching zwischen Blöcken und variable Ausgabelänge zurück. ICLR-2025-Oral, arXiv:2503.09573, Repo kuleshov-group/bd3lms." },
+  { front: "Die hybride Attention-Maske von Fast-dLLM v2", back: "Blockdiagonal (bidirektional) innerhalb eines Blocks, blockkausal (von links nach rechts) zwischen Blöcken, plus ein zweistufiger Cache: ein Cache auf Blockebene für fertige Blöcke und DualCache für die Neuberechnung innerhalb eines Blocks. Berichtet bis zu 2,5x gegenüber AR-Decoding." },
+  { front: "LLaDAs drei erklärte Grenzen", back: "Feste Kontextlänge beim Sampling, keine KV-Cache-Unterstützung und Qualitätsverlust, wenn die Sampling-Schritte unter die Antwortlänge fallen — also beste Qualität bei einem Schritt pro Token. So im Repo ML-GSAI/LLaDA selbst formuliert." },
+  { front: "Dreams Parameter alg", back: "Wählt, welcher maskierte Slot als Nächstes committet wird: origin (zufällig), maskgit_plus (Top-1-Konfidenz), topk_margin (top1 minus top2), entropy (niedrigste Entropie). alg_temp fügt Zufälligkeit hinzu. Das macht natives Infilling und Generierung in beliebiger Reihenfolge möglich." },
+  { front: "DiffusionGemma", back: "Gemma 4 MoE (3,8 Mrd. aktiviert / 25,2 Mrd. gesamt), mit unter 10 % des Trainings-Token-Budgets des AR-Modells in ein Diffusionsmodell fine-getunt. Blöcke von 256, ~20 Tokens pro Forward Pass, ~1.500 Output-Tok/s auf einer H100, CC-BY-4.0, und weiterhin fähig, autoregressiv zu generieren." },
+  { front: "DIJA", back: "Eine für dLLMs spezifische Jailbreak-Klasse: lege die schädliche Absicht in unmaskierte Tokens und lass maskierte Abschnitte offen, die das Modell konsistent füllt. Bis zu 100 % keyword-basierte ASR auf Dream-Instruct ohne Verschleierung. ICLR 2026, arXiv:2507.11097." },
+  { front: "Mercury 2 / 2.5 / Voice (Stand 2026-10-02)", back: "Mercury 2: berichtete 1.009 Tok/s auf Blackwell, 1,7 s End-to-End, 128K, gestartet im Februar 2026. Mercury 2.5: 260K Kontext, Aktionspreis 0,04 $/0,15 $ pro M (Liste 0,20 $/0,75 $), gecachter Input 0,004 $/M. Mercury Voice: TTFT unter 170 ms, 128K. Alles verderblich." },
+]} />
+
+<Quiz questions={[
+  {
+    q: "Ein Masked-Diffusion-LLM wird nach einer 256-Token-Antwort in 32 Denoising-Schritten gefragt. Was bedeutet das?",
+    options: [
+      "Pro Forward Pass werden acht Tokens committet, also werden in jedem Pass acht Conditional-Independence-Annahmen getroffen",
+      "Das Modell führt 256 Forward Passes aus, batcht sie aber zu je 32",
+      "Jedes Token wird 32 Mal verfeinert, bevor es endgültig festgelegt wird",
+      "Der KV-Cache wird 32 Mal wiederverwendet, einmal pro Schritt"
+    ],
+    answer: 0,
+    explain: "Tokens pro Forward Pass = L / steps = 256 / 32 = 8. Jeder im selben Pass committete Slot wird aus seiner eigenen Marginalverteilung gesampelt, also werden die Abhängigkeiten zwischen diesen 8 verworfen. Genau dieser Fehler ist der Grund, warum es Decoding mit Konfidenzschwellenwert gibt."
+  },
+  {
+    q: "Warum kann ein reines Masked-Diffusion-LLM keinen konventionellen KV-Cache nutzen?",
+    options: [
+      "Attention ist bidirektional, sodass ein späterer Commit den Kontext früherer Positionen ändern und gecachte Keys und Values ungültig machen kann",
+      "Diffusionsmodelle nutzen überhaupt keine Attention",
+      "Der Cache würde bei jeder nützlichen Kontextlänge den VRAM überschreiten",
+      "Das Mask-Token hat keine Key- oder Value-Repräsentation"
+    ],
+    answer: 0,
+    explain: "Ein kausales AR-Modell kann cachen, weil rechts davon nichts existiert. Mit bidirektionaler Attention kann jeder Pass den Kontext jeder Position verändern, also ist der Cache ungültig. LLaDAs Repo listet genau das als eine seiner drei Effizienzgrenzen — und es ist das, was Block Diffusion behebt, indem es die Attention zwischen Blöcken blockkausal macht."
+  },
+  {
+    q: "Was ändert Block Diffusion (BD3-LM) gegenüber reiner Masked Diffusion?",
+    options: [
+      "Blöcke werden autoregressiv konditioniert, während die Diffusion innerhalb jedes Blocks läuft, wodurch KV-Caching zwischen Blöcken und variable Ausgabelänge zurückkommen",
+      "Es entfernt bidirektionale Attention vollständig und macht das Modell autoregressiv",
+      "Es erhöht die Anzahl der Denoising-Schritte, um die Qualität zu verbessern",
+      "Es ersetzt den Konfidenzschwellenwert durch zufälliges Remasking"
+    ],
+    answer: 0,
+    explain: "AR über Blöcke hinweg, Diffusion innerhalb. Dieser Hybrid kauft den KV-Cache und die flexible Sequenzlänge zurück — und er ist der Grund, warum gehostete dLLMs überhaupt streamen können, denn nur Blockgrenzen sind monoton."
+  },
+  {
+    q: "Welches ist das folgenreichste berichtete Ergebnis von DiffusionGemma?",
+    options: [
+      "Ein autoregressives Gemma 4 wurde mit unter 10 % seines ursprünglichen Trainings-Token-Budgets zu Diffusion umgewandelt und behielt dabei Thinking-Modus, Multimodalität und AR-Generierung",
+      "Es ist das schnellste je gemessene Diffusionsmodell, mit 1.500 Tokens pro Sekunde",
+      "Es beweist, dass Diffusionsmodelle nicht multimodal gemacht werden können",
+      "Es hat ein Diffusion-LLM von Null günstiger trainiert als jedes autoregressive Modell"
+    ],
+    answer: 0,
+    explain: "Die Geschwindigkeitszahl ist schön, aber umstritten. Die strukturelle Behauptung ist die große: Diffusion sieht so aus, als ließe sie sich für einen kleinen Bruchteil der Trainingskosten auf einen bestehenden AR-Checkpoint nachrüsten, was es zu einer Serving-Option macht statt zu einer eigenen Modellfamilie."
+  },
+  {
+    q: "Du stellst ein Open-Weight-dLLM mit Instruction-Tuning nicht vertrauenswürdigen Nutzern bereit. Was ist das dLLM-spezifische Risiko?",
+    options: [
+      "Masked-Infill-Prompts können die schädliche Absicht in unmaskierten Tokens tragen und das Modell die maskierten Abschnitte konsistent füllen lassen, ohne einen Moment von links nach rechts, an dem eine Verweigerung übernehmen kann",
+      "Diffusionsmodelle leaken über die Denoising-Trajektorie immer ihre Trainingsdaten",
+      "Das Fehlen eines KV-Caches lässt andere Nutzer deinen Kontext lesen",
+      "Bidirektionale Attention macht Prompt Injection prinzipiell unmöglich zu erkennen"
+    ],
+    answer: 0,
+    explain: "Das ist das DIJA-Ergebnis (ICLR 2026): bis zu 100 % keyword-basierte ASR auf Dream-Instruct ohne Verschleierung der schädlichen Inhalte. Eine AR-Verweigerung konditioniert alles danach; ein dLLM hat keine solche Ordnung. Filtere an der Grenze und behandle das Instruction-Tuning als nicht tragend."
+  }
+]} />
+
+Neu bei der zugrunde liegenden Maschinerie? [Was ist ein LLM](/docs/foundations/what-is-an-llm)
+und [Tokens und Kontext](/docs/foundations/tokens-and-context) behandeln die
+autoregressive Grundlage, von der diese Seite abweicht, und
+[Token-Geschwindigkeit](/docs/models/fast-inference-and-token-speed) behandelt
+die Hardware- und Software-Multiplikatoren, die dasselbe Latenzproblem von der
+anderen Seite angehen.
+
+## Quellen & weiterführende Literatur
+
+- [Mercury: Ultra-Fast Language Models Based on Diffusion (arXiv:2506.17298)](https://arxiv.org/abs/2506.17298) — Inception Labs; Mercury Coder Mini und Small mit 1.109 und 737 Tok/s auf H100s laut Artificial Analysis
+- [Inception — Our Models](https://www.inceptionlabs.ai/models) — aktuelle Preisliste für Mercury 2.5 / Voice / Router, Kontextfenster und Latenzangaben
+- [The Decoder — Inception launches Mercury 2, the first diffusion-based language reasoning model](https://the-decoder.com/inception-launches-mercury-2-the-first-diffusion-based-language-reasoning-model/) — 1.009 Tok/s auf Blackwell, 1,7 s End-to-End, Benchmark-Tabelle
+- [Fast-dLLM: Training-free Acceleration of Diffusion LLM by Enabling KV Cache and Parallel Decoding (arXiv:2505.22618)](https://arxiv.org/abs/2505.22618) — die Diagnose der Conditional Independence und der Fix mit Konfidenzschwellenwert; [Projektseite](https://nvlabs.github.io/Fast-dLLM/)
+- [Fast-dLLM v2: Efficient Block-Diffusion LLM (arXiv:2509.26328)](https://arxiv.org/abs/2509.26328) — hybride Attention-Maske, DualCache, komplementäres Maskieren, Konvertierung aus einem AR-Modell mit ~1 Mrd. Tokens
+- [Block Diffusion: Interpolating Between Autoregressive and Diffusion Language Models (arXiv:2503.09573)](https://arxiv.org/abs/2503.09573) — ICLR-2025-Oral; Code bei [kuleshov-group/bd3lms](https://github.com/kuleshov-group/bd3lms)
+- [DiffusionGemma Technical Report (arXiv:2608.00146)](https://arxiv.org/abs/2608.00146) — die Umwandlung von Gemma 4 MoE zu Diffusion für unter 10 % seines AR-Trainingsbudgets
+- [ML-GSAI/LLaDA](https://github.com/ML-GSAI/LLaDA) — 8B-Masked-Diffusion-LLM, MIT, mit der eigenen Aussage der Autoren zu den Grenzen feste Länge / kein KV-Cache / Schritte gleich Länge
+- [DreamLM/Dream](https://github.com/DreamLM/Dream) und das [Dream 7B Writeup](https://hkunlp.github.io/blog/2025/dream/) — Apache-2.0-Gewichte und die Decoding-Regler `steps` / `alg` / `alg_temp`
+- [The Devil behind the mask: An emergent safety vulnerability of Diffusion LLMs (arXiv:2507.11097)](https://arxiv.org/abs/2507.11097) — DIJA, ICLR 2026; Code bei [ZichenWen1/DIJA](https://github.com/ZichenWen1/DIJA)
+- [Safer by Diffusion, Broken by Context (arXiv:2602.00388)](https://arxiv.org/abs/2602.00388) — die zweiseitige Sicht auf dLLM-Sicherheit
+- [A Survey on Parallel Text Generation: From Parallel Decoding to Diffusion Language Models (arXiv:2508.08712)](https://arxiv.org/abs/2508.08712) — die Landkarte des ganzen Felds, AR und nicht-AR
+- [Techmeme — Gemini Diffusion generates 1,000–2,000 tokens/second](https://www.techmeme.com/250521/p54) — Google DeepMinds experimentelles Text-Diffusionsmodell, mit Warteliste
+- Verwandt auf AILmanac: [Token-Geschwindigkeit](/docs/models/fast-inference-and-token-speed) · [System-One-Entscheidungsmodelle](/docs/models/system-one-decision-models-jev-kev) · [Full-Duplex-Voice-AI](/docs/models/full-duplex-voice-ai) · [Ein Modell auswählen](/docs/models/choosing-a-model)
+
+## Weiter
+
+- [Token-Geschwindigkeit: warum Inferenz plötzlich 10–15× schneller wurde](/docs/models/fast-inference-and-token-speed) — der Hardware- und Software-Angriff auf dasselbe Latenzproblem
+- [System-One-Entscheidungsmodelle](/docs/models/system-one-decision-models-jev-kev) — Modelle, die eine kalibrierte Wahrscheinlichkeit statt Prosa zurückgeben, wobei ein Diffusions-Backbone nur ein Implementierungsdetail ist
+- [Wie man ein Modell auswählt](/docs/models/choosing-a-model) — das dauerhafte Framework für die Entscheidung, ob irgendetwas davon in deinen Stack gehört
