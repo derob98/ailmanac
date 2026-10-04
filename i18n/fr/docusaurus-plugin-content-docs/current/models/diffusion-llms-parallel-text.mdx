@@ -1,0 +1,457 @@
+---
+sidebar_position: 20.5
+title: "LLM à diffusion : les modèles qui n'écrivent pas de gauche à droite"
+description: "Mercury 2 répond à une question de raisonnement complète en 1,7 seconde à 1 009 tok/s ; Gemini Diffusion échantillonne à 1 479 tok/s contre 272,4 pour Gemini 2.5 Flash. Mêmes transformeurs, algorithme de décodage différent. Le guide pratique : pourquoi le README du pionnier en poids ouverts affirme lui-même que la qualité culmine avec une étape par token, le bug d'indépendance conditionnelle qui rend le décodage parallèle erroné, la diffusion par blocs comme correctif qui a restauré le cache KV, comment DiffusionGemma a converti un Gemma 4 autorégressif pour moins de 10 % de son budget d'entraînement, et le jailbreak par remplissage masqué qui atteint 100 % sur un dLLM aligné."
+keywords: [diffusion LLM, dLLM, masked diffusion, Mercury, Inception Labs, Gemini Diffusion, LLaDA, Dream 7B, DiffusionGemma, block diffusion, parallel decoding, Fast-dLLM, non-autoregressive generation, DIJA, tokens per second]
+---
+
+<LevelBadge level="advanced" />
+
+Tous les modèles vus jusqu'ici sur AILmanac génèrent du texte de la même façon :
+un token, puis le suivant, de gauche à droite, indéfiniment. Une autre famille de
+modèles ne procède pas ainsi. Elle part d'une toile vierge de positions masquées,
+prédit **toutes ces positions d'un coup**, conserve celles dont elle est sûre, et
+recommence. La position 40 peut être décidée avant la position 7.
+
+Les chiffres sont la raison pour laquelle on s'y intéresse. Mercury 2 d'Inception
+— un modèle de *raisonnement* — tournerait à **1 009 tokens/s sur des GPU
+Blackwell avec 1,7 s de latence de bout en bout**, soit environ 8 à 14× plus vite
+que les concurrents comparables dotés de raisonnement
+([The Decoder](https://the-decoder.com/inception-launches-mercury-2-the-first-diffusion-based-language-reasoning-model/)).
+Le Gemini Diffusion expérimental de Google échantillonne à **1 479 tokens/s hors
+surcharge**, contre 272,4 pour Gemini 2.5 Flash
+([synthèse Techmeme](https://www.techmeme.com/250521/p54)).
+
+Et pourtant, le README de LLaDA — le modèle 8B en poids ouverts qui a prouvé
+l'approche à grande échelle — indique que sa qualité culmine lorsque le nombre
+d'étapes d'échantillonnage **égale la longueur de la réponse**. Une passe avant
+par token. Exactement comme un modèle autorégressif, mais sans cache KV, donc
+*plus lent*.
+
+Les deux faits sont vrais. Cette leçon est le pont entre eux : ce que
+l'algorithme fait réellement, quel réglage achète la vitesse et à quel prix, les
+deux limites structurelles qui rendaient les premiers LLM à diffusion
+inutilisables et le correctif qui a été livré, et les trois pièges (streaming,
+facturation de la longueur, et une classe de jailbreak qui n'existe pas sur les
+modèles autorégressifs) qu'il faut connaître avant d'en mettre un en production.
+
+<Callout type="objectives" items={["Décrire la génération par diffusion masquée en termes de toile, de passe de débruitage et de décision de validation — et dire ce que l'attention bidirectionnelle apporte et ce qu'elle coûte", "Utiliser correctement le réglage des étapes : calculer les tokens par passe avant, et expliquer l'échec d'indépendance conditionnelle qui rend un parallélisme agressif erroné plutôt que simplement moins bon", "Expliquer pourquoi la diffusion par blocs est présente sur tous les dLLM que vous pouvez réellement appeler aujourd'hui — c'est elle qui a restauré le cache KV, la sortie de longueur variable et le streaming de tokens", "Choisir les tâches où un dLLM gagne vraiment : le remplissage et les éditions dans un ordre quelconque, la voix contrainte par la latence et les décisions bornées — pas « tout, mais plus vite »", "Traiter un point de terminaison dLLM ouvert comme non aligné à la frontière, car les prompts à remplissage masqué contournent l'alignement d'une manière que les refus autorégressifs ne permettent pas"]} />
+
+<VerifyNote lastVerified="2026-10-02" source="https://www.inceptionlabs.ai/models">
+Chaque prix, fenêtre de contexte, chiffre de tokens par seconde et de latence
+mentionné ici est périssable — ce domaine bouge tous les mois et la grille
+tarifaire d'Inception comporte actuellement des remises promotionnelles. Vérifiez
+la page de modèle du fournisseur et les classements indépendants avant de citer
+un chiffre dans une décision. Les affirmations de recherche sont rattachées à
+leurs articles ; plusieurs sont des préprints, pas des résultats répliqués.
+</VerifyNote>
+
+## Le mécanisme, dans un schéma qu'il faut imaginer
+
+La boucle d'un modèle autorégressif (AR) est la suivante : lire tout le préfixe,
+émettre une distribution de probabilité sur **une** position (la suivante),
+échantillonner, ajouter, recommencer. Le cache KV est ce qui rend l'opération
+peu coûteuse — les clés et valeurs de chaque token antérieur ont été calculées
+une fois et ne changent jamais, car l'attention est causale et rien n'existe
+encore à droite.
+
+Un LLM à diffusion masquée inverse cela. L'attention est **bidirectionnelle** :
+chaque position regarde toutes les autres positions, dans les deux sens. Ainsi,
+en une seule passe avant, le modèle produit simultanément une distribution pour
+*chaque* position masquée. La génération devient un raffinement itératif d'une
+réponse entière, et non un parcours le long de celle-ci.
+
+<Steps items={[
+  {title: "Disposer une toile", body: "Choisir une longueur de génération L. Remplir les L positions avec un token de masque spécial. Sur un dLLM purement masqué (LLaDA, Dream), L est fixé avant la première passe avant — le modèle n'allonge pas la séquence au fil de la génération."},
+  {title: "Une passe de débruitage prédit tout", body: "Le transformeur s'exécute une fois sur le prompt + la toile et renvoie une distribution pour chaque emplacement masqué d'un coup. Pas « le token suivant » — l'emplacement 3, l'emplacement 17 et l'emplacement 240, dans la même passe."},
+  {title: "Valider un sous-ensemble (c'est là tout l'enjeu)", body: "Vous démasquez certaines de ces prédictions et les figez comme de vrais tokens. Lesquelles, et combien, c'est la politique de décodage : ordre aléatoire, meilleure confiance top-1, plus grande marge top1−top2, ou entropie la plus faible. Tout le reste reste masqué."},
+  {title: "Relancer avec les tokens validés comme contexte", body: "La passe suivante voit les tokens figés et re-prédit les masques restants — et comme l'attention est bidirectionnelle, un token validé à la FIN de la réponse conditionne les tokens encore manquants au milieu. C'est ce que les modèles AR ne peuvent pas faire."},
+  {title: "S'arrêter quand la toile est pleine", body: "Coût total = (nombre de passes) × (une passe avant complète). Donc tokens par passe avant = L / étapes. C'est ce ratio, et non le matériel, qui produit les tokens/s affichés en titre."}
+]} />
+
+Cette dernière phrase vaut la peine d'être mémorisée. Un modèle AR est bloqué à
+un token par passe avant. Un LLM à diffusion vous laisse choisir.
+DiffusionGemma, l'entrée en poids ouverts de Google, rapporte environ **20 tokens
+par passe avant** tout en raffinant des blocs de 256 en parallèle, ce qui lui
+permet d'atteindre ~1 500 tokens de sortie par seconde sur un seul H100
+([rapport technique DiffusionGemma](https://arxiv.org/abs/2608.00146)).
+
+## Le réglage des étapes, et pourquoi le pousser est faux plutôt que simplement dégradant
+
+Dream 7B expose explicitement ce réglage. Son `diffusion_generate()` documente
+`steps` comme les « pas de temps de diffusion » où `max_new_tokens / steps`
+tokens sont produits par étape, et note clairement que moins d'étapes est plus
+rapide mais plus grossier
+([DreamLM/Dream](https://github.com/DreamLM/Dream), Apache-2.0).
+
+Alors pourquoi ne pas toujours utiliser peu d'étapes ? Parce que l'erreur
+introduite n'est pas du bruit — c'est un bug précis et nommable.
+
+Une seule passe avant vous donne, pour chaque emplacement masqué, une
+distribution **marginale** : la probabilité d'un token *à cette position*,
+moyennée sur tout ce qui reste inconnu. Si vous validez deux emplacements issus
+de la même passe, vous échantillonnez depuis le **produit de leurs marginales**,
+et non depuis leur distribution jointe. Toute dépendance entre eux est
+silencieusement écartée. Les auteurs de Fast-dLLM énoncent la cause racine
+directement : la qualité de génération se dégrade sous décodage parallèle parce
+que les modèles à diffusion masquée échantillonnent les tokens indépendamment à
+partir de probabilités marginales alors que la vraie distribution jointe comporte
+des dépendances
+([Fast-dLLM, arXiv:2505.22618](https://arxiv.org/abs/2505.22618)).
+
+L'intuition : demandez une ville et deux emplacements adjacents pourraient
+attribuer à « New » et « Delhi » le statut de token le plus probable *pour leur
+propre position*, parce que « New York » et « New Delhi » sont tous deux
+plausibles. Validez les deux dans une même passe et vous n'obtenez ni l'un ni
+l'autre. Le mode de défaillance d'un décodage trop parallèle n'est pas une prose
+plus floue, c'est un non-sens assemblé avec assurance aux jointures.
+
+Le correctif qui a rendu le domaine praticable est le **décodage parallèle
+sensible à la confiance** : calculer une confiance par emplacement masqué
+(typiquement la probabilité softmax maximale), ne valider que les emplacements
+au-dessus d'un seuil, et si aucun ne le franchit, valider le plus élevé afin que
+la boucle progresse quand même. Les tokens quasi indépendants sont décodés
+ensemble ; les tokens qui dépendent l'un de l'autre attendent. Fast-dLLM
+rapporte jusqu'à **27,6× d'amélioration du débit** sur LLaDA et Dream à travers
+les benchmarks avec une perte de précision minimale — sans entraînement, juste un
+changement de décodage.
+
+C'est la forme de tout ce domaine de recherche : le parallélisme est gratuit,
+l'*indépendance* ne l'est pas, et le travail consiste à détecter quels tokens
+peuvent partir ensemble sans risque.
+
+<Callout type="note" items={["Un seuil de confiance est un curseur de qualité sur lequel on peut réellement raisonner : seuil plus haut signifie moins de tokens validés par passe, plus de passes, plus lent, plus proche de la qualité AR. Fast-dLLM v2 rapporte une accélération de 2,6× sur GSM8K au seuil 0,9 avec une perte de précision minimale — c'est le genre de réglage par lequel commencer, pas « tout valider »."]} />
+
+## Les deux limites structurelles — et la diffusion par blocs, qui explique pourquoi vous pouvez en appeler un aujourd'hui
+
+Le dépôt de LLaDA liste ses contraintes d'efficacité sans euphémisme : longueur
+de contexte fixe pour l'échantillonnage, **aucun support du cache KV**, et
+performance dégradée lorsque les étapes d'échantillonnage descendent sous la
+longueur de la réponse. Les auteurs présentent cela comme délibéré — ils
+voulaient trouver le plafond de l'approche avant de l'optimiser
+([ML-GSAI/LLaDA](https://github.com/ML-GSAI/LLaDA), MIT, ~4k étoiles, poids Base
+et Instruct plus LLaDA 1.5, LLaDA-MoE-7B-A1B et les variantes iLLaDA).
+
+Mettez tout cela bout à bout et un dLLM purement masqué est presque inutilisable
+comme produit :
+
+1. **Pas de cache KV.** L'attention bidirectionnelle signifie que chaque passe
+   peut changer le contexte de n'importe quel token, donc les clés et valeurs en
+   cache sont invalides. Vous recalculez toute la séquence à chaque étape.
+2. **Longueur de sortie fixe.** Vous devez choisir L avant de générer. Trop petit
+   tronque ; trop grand gaspille du calcul sur des positions que vous jetterez.
+3. **Latence pire qu'en AR.** Les points 1 et 2 réunis peuvent rendre un modèle
+   « parallèle » plus lent de bout en bout que le modèle séquentiel qu'il remplace.
+
+La **diffusion par blocs** résout les trois en refusant d'être pure. Générer par
+blocs : conditionner sur les blocs précédents de façon **autorégressive**, faire
+tourner la diffusion **à l'intérieur** du bloc courant. Cela donne une longueur
+de séquence flexible et un cache KV entre blocs — c'est la formulation BD3-LM,
+un oral ICLR 2025
+([arXiv:2503.09573](https://arxiv.org/abs/2503.09573),
+[kuleshov-group/bd3lms](https://github.com/kuleshov-group/bd3lms)).
+
+Fast-dLLM v2 ([arXiv:2509.26328](https://arxiv.org/abs/2509.26328)) montre à quoi
+ressemble une version optimisée, et les détails valent la peine d'être connus
+car ils expliquent le comportement des fournisseurs que vous observerez :
+
+- **Masque d'attention hybride.** Diagonal par blocs (bidirectionnel) *à
+  l'intérieur* d'un bloc, causal par blocs (de gauche à droite) *entre* les
+  blocs. Du contexte bidirectionnel là où il aide, une sémantique AR là où vit le
+  cache.
+- **Deux niveaux de cache.** Un cache au niveau du bloc qui conserve les blocs
+  terminés comme contexte de préfixe propre, plus un cache de sous-bloc
+  (DualCache) pour le recalcul dont le décodage intra-bloc a encore besoin.
+- **Masquage complémentaire à l'entraînement.** Chaque échantillon est dupliqué
+  en deux vues avec les masques `m` et `1 − m`, de sorte que chaque token est
+  supervisé à la fois comme cible masquée et comme contexte.
+- **Résultats rapportés.** Jusqu'à 2,5× plus rapide que le décodage AR standard ;
+  1,8× à une taille de lot de 64 sur des H100 ; un score moyen de benchmark de
+  60,3 pour un 7B contre 57,6 pour Dream, dont HumanEval 63,4 vs 57,9 et GSM8K
+  62,0 vs 39,2.
+
+Et le coût d'entraînement est le détail qui recadre le domaine : Fast-dLLM v2
+rapporte un fine-tuning depuis un modèle AR sur environ **1 Md de tokens — soit
+environ 500× moins que les 580 Md de Dream** — un 7B entraîné en ~12 heures sur
+64 A100.
+
+## La diffusion est un mode de décodage que l'on peut greffer, pas une espèce à part
+
+DiffusionGemma rend ce point impossible à manquer. Il n'est pas entraîné depuis
+zéro : il fine-tune **Gemma 4**, un modèle à mélange d'experts avec 3,8 Md de
+paramètres activés et 25,2 Md au total, pour en faire un modèle à diffusion en
+utilisant **moins de 10 % du budget total de tokens d'entraînement du modèle AR
+de départ** — fine-tuning supervisé de débruitage, puis apprentissage par
+renforcement et distillation d'échantillonneur
+([arXiv:2608.00146](https://arxiv.org/abs/2608.00146), poids CC-BY-4.0).
+
+Ce qui survit à la conversion est la partie surprenante. Le rapport indique qu'il
+conserve le mode de réflexion du modèle de base, les entrées multimodales et les
+contextes longs — et qu'il **garde la capacité de générer de façon
+autorégressive** avec une dégradation seulement mineure. Un seul jeu de poids,
+deux modes de décodage.
+
+Si ce résultat tient, « LLM à diffusion » cesse d'être une catégorie de produit
+distincte et devient une option de service : la même famille, avec un curseur de
+parallélisme côté inférence. C'est une affirmation bien plus lourde de
+conséquences que n'importe quel record de tokens par seconde, et c'est la raison
+d'apprendre le mécanisme maintenant plutôt que le jour où un fournisseur
+basculera un drapeau sur un modèle que vous utilisez déjà.
+
+## Ce qu'un LLM à diffusion fait réellement mieux
+
+La vitesse est l'argument de une et la partie la plus faible du dossier, car la
+vitesse est contestée — du matériel AR spécialisé livre lui aussi des centaines
+de tokens par seconde (voir [Vitesse des tokens](/docs/models/fast-inference-and-token-speed)).
+Les avantages durables sont ceux qui découlent de la *forme* de l'algorithme.
+
+**Génération dans un ordre quelconque et remplissage natif.** Comme vous
+choisissez quel emplacement valider, vous pouvez laisser un trou au milieu d'une
+séquence et faire remplir ce trou par le modèle avec le contexte complet des deux
+côtés. Dream expose cela via le paramètre `alg` — `origin` (ordre aléatoire),
+`maskgit_plus` (confiance top-1), `topk_margin` (marge top1 − top2), `entropy` —
+plus `alg_temp` pour ajouter de l'aléa à ces stratégies. Pour des éditions de
+code, la complétion de gabarits ou le remplissage de champs dans un squelette
+JSON fixe, c'est structurellement plus adapté que de demander à un modèle AR de
+réémettre tout un fichier pour changer la ligne 40.
+
+**Interaction contrainte par la latence.** Mercury Voice d'Inception annonce un
+temps jusqu'au premier token **sous 170 ms** sur un contexte de 128K, facturé
+0,20 $/1,50 $ par million de tokens d'entrée/sortie au moment de la rédaction. La
+voix est le cas le plus clair où la latence *est* le produit ; notre page
+[IA vocale en duplex intégral](/docs/models/full-duplex-voice-ai) explique
+pourquoi ce seuil compte.
+
+**Temps de retour de bout en bout sur le raisonnement.** Les 1,7 s rapportées
+par Mercury 2 pour une réponse de raisonnement complète sont une affirmation
+différente du débit — c'est le chiffre qu'une boucle d'agent ressent vraiment,
+tour après tour.
+
+**Réponses bornées au lieu de prose.** Mercury Decide d'Inception renvoie un
+choix, un score ou un oui/non avec une probabilité calibrée lue directement dans
+le modèle plutôt que rédigée sous forme de texte — rapporté jusqu'à 14 décisions
+par seconde, ce qui rend abordable le « lancer sur chaque cas et escalader ceux
+qui sont incertains ». La catégorie et ses réserves sont traitées en profondeur
+dans [Modèles de décision Système Un](/docs/models/system-one-decision-models-jev-kev) ;
+le socle à diffusion y est un détail d'implémentation, pas le sujet.
+
+**Pression sur les prix.** Mercury 2.5 affiche actuellement un contexte de 260K à
+0,04 $/0,15 $ par million de tokens d'entrée/sortie (promotionnel, contre
+0,20 $/0,75 $) avec l'entrée en cache à 0,004 $ par million. Traitez les prix
+promotionnels comme temporaires et modélisez votre facture au tarif public.
+
+## Trois pièges avant d'en mettre un en production
+
+<Callout type="warning" items={["Les tokens/s sont mesurés au parallélisme choisi par le fournisseur. Votre exigence de qualité peut imposer davantage d'étapes, ce qui vous coûte l'accélération. Faites vos mesures sur vos propres prompts, à votre propre seuil de précision.", "La sortie n'est pas définitive de gauche à droite. Seules les frontières de blocs sont monotones ; à l'intérieur d'un bloc, les emplacements peuvent encore être masqués ou révisés. Toute interface ou tout analyseur qui suppose « le token N ne changera jamais » est faux.", "Un dLLM purement masqué facture et calcule une longueur que vous avez choisie à l'avance. La diffusion par blocs réduit cela à une granularité par bloc — elle ne l'élimine pas."]} />
+
+Le troisième mérite plus qu'une puce, car c'est une propriété de sécurité et
+elle n'a pas d'équivalent autorégressif.
+
+L'alignement d'un modèle AR bénéficie d'un avantage structurel : le refus
+survient *en premier*. Si le modèle décide de refuser, chaque token suivant est
+conditionné par « je ne peux pas vous aider là-dessus ». Un LLM à diffusion n'a
+pas de tel moment. Il n'y a aucun point, de gauche à droite, où un refus prend le
+contrôle du reste de la génération — les emplacements masqués sont remplis pour
+être cohérents avec ce qui se trouve déjà sur la toile.
+
+DIJA (« The Devil behind the mask », ICLR 2026,
+[arXiv:2507.11097](https://arxiv.org/abs/2507.11097),
+[ZichenWen1/DIJA](https://github.com/ZichenWen1/DIJA)) transforme cela en
+attaque. Le prompt adverse place l'intention nuisible dans des tokens **non
+masqués** et laisse des plages masquées que le modèle complète de façon
+contextuellement cohérente. Les résultats rapportés : jusqu'à **100 % de taux de
+réussite d'attaque basé sur les mots-clés sur Dream-Instruct**, dépassant la
+meilleure référence antérieure de jusqu'à 78,5 % en ASR évalué par juge sur
+JailbreakBench et de 37,7 points sur le score StrongREJECT — tout en n'exigeant
+**aucune réécriture ni obfuscation du contenu nuisible**. La conclusion des
+auteurs est que les mécanismes d'alignement existants ne protègent pas les dLLM
+contre les prompts à entrée masquée sensibles au contexte, car le modèle ne peut
+pas filtrer une génération dangereuse en cours d'inférence comme le fait un
+modèle séquentiel.
+
+Un travail de suivi ([arXiv:2602.00388](https://arxiv.org/abs/2602.00388))
+soutient que le tableau est à double face — la diffusion confère une
+*bénédiction* de sûreté dans certains contextes, qui se brise ensuite sous l'effet
+du contexte — ce qui est une raison de mesurer plutôt que de présumer dans un
+sens ou dans l'autre.
+
+À retenir en pratique : si vous exposez un dLLM en poids ouverts, ne traitez pas
+son instruction tuning comme un garde-fou. Filtrez et classez à la frontière, sur
+la requête comme sur la réponse, exactement comme vous le feriez pour un modèle
+de base. Notre page
+[sécuriser les agents locaux et hybrides](/docs/models/securing-local-and-hybrid-agents)
+couvre le motif de frontière.
+
+## Essayez-en un en dix minutes
+
+<Steps items={[
+  {title: "Hébergé, zéro configuration", body: "Inception sert Mercury via une API compatible OpenAI, et les modèles sont listés sur OpenRouter (par exemple openrouter.ai/inception/mercury-2). Pointez un script existant basé sur le SDK OpenAI vers cette API et changez la chaîne du modèle — rien dans la forme de la requête n'est spécifique à la diffusion."},
+  {title: "Poids ouverts, en local", body: "LLaDA-8B-Instruct (MIT) et Dream-v0-Instruct-7B (Apache-2.0) fournissent tous deux du code d'inférence sur Hugging Face. Les poids de DiffusionGemma sont en CC-BY-4.0. Notez qu'un dLLM purement masqué n'a pas de cache KV, donc prévoyez la VRAM pour recalculer toute la séquence à chaque étape."},
+  {title: "Lancez le balayage des étapes", body: "L'expérience la plus instructive : garder le prompt fixe, faire varier steps, et tracer le temps réel contre une métrique de tâche qui vous importe. Vous trouverez votre propre falaise de qualité, et elle ne sera pas là où un tableau de benchmark l'a placée."},
+  {title: "Puis testez les jointures", body: "Utilisez des prompts dont les réponses contiennent des unités multi-tokens — noms propres, nombres avec unités, identifiants, clés JSON. C'est là que les erreurs d'indépendance conditionnelle apparaissent d'abord, et là qu'un seuil de confiance justifie son coût."}
+]} />
+
+<PromptCard title="Appeler un LLM à diffusion hébergé avec le SDK OpenAI (rien ne change sauf la chaîne du modèle)">{`# Inception serves an OpenAI-compatible API; OpenRouter also lists the models.
+# Check the provider's model list for the current slug before you hard-code one.
+
+curl https://openrouter.ai/api/v1/chat/completions \\
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "inception/mercury-2",
+    "messages": [
+      {"role": "user", "content": "Rewrite this function to stream its output, and explain the two failure modes you introduced."}
+    ],
+    "stream": true
+  }'
+
+# What to watch for, beyond the content:
+#  - time to first token vs time to last token (the diffusion win is usually in the gap)
+#  - whether the stream arrives in chunks that look like BLOCKS rather than words`}</PromptCard>
+
+<PromptCard title="Le balayage des étapes sur Dream 7B — trouvez votre propre falaise de qualité">{`import time, torch
+from transformers import AutoModel, AutoTokenizer
+
+NAME = "Dream-org/Dream-v0-Instruct-7B"
+tok = AutoTokenizer.from_pretrained(NAME, trust_remote_code=True)
+model = AutoModel.from_pretrained(
+    NAME, torch_dtype=torch.bfloat16, trust_remote_code=True
+).to("cuda").eval()
+
+PROMPT = "List the five largest cities in Germany with their populations."
+MAX_NEW = 256
+
+# steps == MAX_NEW is the authors' best-quality setting: one token per
+# forward pass. Each halving doubles tokens-per-pass and doubles the
+# number of independence assumptions you are making.
+for steps in [256, 128, 64, 32, 16]:
+    inputs = tok.apply_chat_template(
+        [{"role": "user", "content": PROMPT}],
+        return_tensors="pt", return_dict=True, add_generation_prompt=True,
+    ).to("cuda")
+
+    t0 = time.perf_counter()
+    out = model.diffusion_generate(
+        inputs.input_ids,
+        attention_mask=inputs.attention_mask,
+        max_new_tokens=MAX_NEW,
+        steps=steps,
+        temperature=0.0,
+        alg="entropy",          # commit the lowest-entropy slots first
+        alg_temp=0.0,
+    )
+    dt = time.perf_counter() - t0
+    text = tok.decode(out[0][len(inputs.input_ids[0]):], skip_special_tokens=True)
+
+    print(f"--- steps={steps}  tokens/pass={MAX_NEW/steps:.0f}  {dt:.2f}s ---")
+    print(text.strip()[:400])
+
+# Read the OUTPUTS, not just the timings. The numbers and the city names are
+# the multi-token units that break first when too many slots are committed
+# from one pass. That corruption is the conditional-independence bug, visible.`}</PromptCard>
+
+## Comment décider si tout cela vous concerne
+
+<Callout type="takeaways" items={["La vitesse d'un LLM à diffusion vient d'un seul ratio — la longueur de génération divisée par le nombre d'étapes de débruitage, c'est-à-dire les tokens validés par passe avant. Un modèle AR est fixé à 1. Tout le reste est une conséquence de ce curseur.", "Un décodage trop parallèle est erroné, pas seulement grossier : valider des emplacements corrélés depuis une même passe échantillonne le produit des marginales au lieu de la jointe. Le décodage à seuil de confiance est le correctif, et Fast-dLLM rapporte jusqu'à 27,6x de débit avec une perte de précision minimale.", "La diffusion purement masquée n'a pas de cache KV et a une longueur de sortie fixe. La diffusion par blocs (AR entre les blocs, diffusion à l'intérieur) est ce qui a restauré le cache, la longueur variable et le streaming — c'est pourquoi tout dLLM appelable aujourd'hui est un modèle par blocs.", "DiffusionGemma a converti un Gemma 4 MoE autorégressif en modèle à diffusion pour moins de 10 % de son budget initial de tokens d'entraînement, tout en conservant le mode de réflexion, la multimodalité et la génération AR. La diffusion ressemble de plus en plus à un mode de décodage qu'à une espèce de modèle à part.", "Choisissez-la pour le remplissage et les éditions dans un ordre quelconque, les tours de voix sous 200 ms, les décisions bornées rapides et la latence de tour de bout en bout — et supposez que son alignement ne tient pas, car les prompts à remplissage masqué atteignent jusqu'à 100 % d'ASR sur un dLLM ouvert aligné."]} />
+
+<Flashcards cards={[
+  { front: "Le LLM à diffusion masquée, en une phrase", back: "Un transformeur à attention bidirectionnelle qui part d'une toile de longueur fixe faite de tokens de masque, prédit chaque position masquée en une passe avant, valide un sous-ensemble sûr, et recommence jusqu'à ce que la toile soit pleine." },
+  { front: "Tokens par passe avant", back: "La longueur de génération L divisée par le nombre d'étapes de débruitage. Le seul chiffre qui explique l'affirmation de vitesse d'un dLLM. Un modèle autorégressif est bloqué à 1 ; DiffusionGemma rapporte ~20." },
+  { front: "Pourquoi moins d'étapes casse la qualité", back: "Une passe renvoie une distribution MARGINALE par emplacement masqué. Valider deux emplacements corrélés depuis la même passe échantillonne le produit des marginales, pas la jointe, donc les dépendances entre eux sont écartées. Source : Fast-dLLM, arXiv:2505.22618." },
+  { front: "Décodage parallèle sensible à la confiance", back: "Ne valider que les emplacements masqués dont la probabilité softmax maximale franchit un seuil ; si aucun ne le fait, valider le plus élevé afin que la boucle progresse. Fast-dLLM rapporte jusqu'à 27,6x de débit sur LLaDA et Dream avec une perte de précision minimale." },
+  { front: "Diffusion par blocs (BD3-LM)", back: "Conditionner sur les blocs précédents de façon autorégressive, faire tourner la diffusion à l'intérieur du bloc courant. Récupère le cache KV entre blocs et la sortie de longueur variable. Oral ICLR 2025, arXiv:2503.09573, dépôt kuleshov-group/bd3lms." },
+  { front: "Le masque d'attention hybride de Fast-dLLM v2", back: "Diagonal par blocs (bidirectionnel) à l'intérieur d'un bloc, causal par blocs (de gauche à droite) entre les blocs, plus un cache à deux niveaux : un cache au niveau du bloc pour les blocs terminés et DualCache pour le recalcul intra-bloc. Rapporté jusqu'à 2,5x par rapport au décodage AR." },
+  { front: "Les trois limites énoncées par LLaDA", back: "Longueur de contexte fixe pour l'échantillonnage, aucun support du cache KV, et dégradation de la qualité quand les étapes d'échantillonnage descendent sous la longueur de la réponse — c'est-à-dire meilleure qualité à une étape par token. Énoncé dans le dépôt ML-GSAI/LLaDA lui-même." },
+  { front: "Le paramètre alg de Dream", back: "Choisit quel emplacement masqué valider ensuite : origin (aléatoire), maskgit_plus (confiance top-1), topk_margin (top1 moins top2), entropy (entropie la plus faible). alg_temp ajoute de l'aléa. C'est ce qui rend possibles le remplissage natif et la génération dans un ordre quelconque." },
+  { front: "DiffusionGemma", back: "Gemma 4 MoE (3,8 Md activés / 25,2 Md au total) fine-tuné en modèle à diffusion avec moins de 10 % du budget de tokens d'entraînement du modèle AR. Blocs de 256, ~20 tokens par passe avant, ~1 500 tok/s en sortie sur un seul H100, CC-BY-4.0, et toujours capable de générer de façon autorégressive." },
+  { front: "DIJA", back: "Une classe de jailbreak spécifique aux dLLM : placer l'intention nuisible dans des tokens non masqués et laisser des plages masquées que le modèle remplit de façon cohérente. Jusqu'à 100 % d'ASR basé sur les mots-clés sur Dream-Instruct sans obfuscation. ICLR 2026, arXiv:2507.11097." },
+  { front: "Mercury 2 / 2.5 / Voice (au 02/10/2026)", back: "Mercury 2 : 1 009 tok/s rapportés sur Blackwell, 1,7 s de bout en bout, 128K, lancé en février 2026. Mercury 2.5 : contexte de 260K, promotion 0,04 $/0,15 $ par M (tarif public 0,20 $/0,75 $), entrée en cache 0,004 $/M. Mercury Voice : TTFT sous 170 ms, 128K. Tout cela est périssable." },
+]} />
+
+<Quiz questions={[
+  {
+    q: "On demande à un LLM à diffusion masquée une réponse de 256 tokens en 32 étapes de débruitage. Qu'est-ce que cela implique ?",
+    options: [
+      "Huit tokens sont validés par passe avant, donc huit hypothèses d'indépendance conditionnelle sont faites à chaque passe",
+      "Le modèle exécute 256 passes avant mais les traite par lots de 32",
+      "Chaque token est raffiné 32 fois avant d'être finalisé",
+      "Le cache KV est réutilisé 32 fois, une fois par étape"
+    ],
+    answer: 0,
+    explain: "Tokens par passe avant = L / étapes = 256 / 32 = 8. Chaque emplacement validé dans la même passe est échantillonné depuis sa propre marginale, donc les dépendances entre ces 8 sont écartées. C'est exactement l'erreur que le décodage à seuil de confiance existe pour limiter."
+  },
+  {
+    q: "Pourquoi un LLM à diffusion purement masquée ne peut-il pas utiliser un cache KV conventionnel ?",
+    options: [
+      "L'attention est bidirectionnelle, donc une validation ultérieure peut changer le contexte de positions antérieures et invalider les clés et valeurs en cache",
+      "Les modèles à diffusion n'utilisent pas d'attention du tout",
+      "Le cache dépasserait la VRAM à toute longueur de contexte utile",
+      "Le token de masque n'a pas de représentation en clé ou en valeur"
+    ],
+    answer: 0,
+    explain: "Un modèle AR causal peut mettre en cache parce que rien n'existe à droite. Avec une attention bidirectionnelle, chaque passe peut altérer le contexte de n'importe quelle position, donc le cache est invalide. Le dépôt de LLaDA liste exactement cela comme l'une de ses trois limites d'efficacité — et c'est ce que la diffusion par blocs corrige en rendant l'attention causale par blocs entre les blocs."
+  },
+  {
+    q: "Qu'est-ce que la diffusion par blocs (BD3-LM) change par rapport à la diffusion purement masquée ?",
+    options: [
+      "Les blocs sont conditionnés de façon autorégressive tandis que la diffusion tourne à l'intérieur de chaque bloc, restaurant le cache KV entre blocs et la sortie de longueur variable",
+      "Elle supprime entièrement l'attention bidirectionnelle, rendant le modèle autorégressif",
+      "Elle augmente le nombre d'étapes de débruitage pour améliorer la qualité",
+      "Elle remplace le seuil de confiance par un remasquage aléatoire"
+    ],
+    answer: 0,
+    explain: "AR d'un bloc à l'autre, diffusion à l'intérieur. C'est cet hybride qui récupère le cache KV et la longueur de séquence flexible — et c'est pourquoi les dLLM hébergés peuvent faire du streaming, puisque seules les frontières de blocs sont monotones."
+  },
+  {
+    q: "Lequel de ces résultats rapportés par DiffusionGemma est le plus lourd de conséquences ?",
+    options: [
+      "Un Gemma 4 autorégressif a été converti en diffusion en utilisant moins de 10 % de son budget initial de tokens d'entraînement, en conservant le mode de réflexion, la multimodalité et la génération AR",
+      "C'est le modèle à diffusion le plus rapide jamais mesuré, à 1 500 tokens par seconde",
+      "Il prouve que les modèles à diffusion ne peuvent pas être rendus multimodaux",
+      "Il a entraîné un LLM à diffusion depuis zéro à moindre coût que n'importe quel modèle autorégressif"
+    ],
+    answer: 0,
+    explain: "Le chiffre de vitesse est sympathique mais contesté. L'affirmation structurelle est la grande : la diffusion semble pouvoir être greffée sur un point de contrôle AR existant pour une petite fraction de son coût d'entraînement, ce qui en fait une option de service plutôt qu'une famille de modèles distincte."
+  },
+  {
+    q: "Vous exposez à des utilisateurs non fiables un dLLM en poids ouverts et instruction-tuné. Quel est le risque spécifique aux dLLM ?",
+    options: [
+      "Les prompts à remplissage masqué peuvent porter l'intention nuisible dans des tokens non masqués et faire remplir les plages masquées de façon cohérente par le modèle, sans aucun moment de gauche à droite où un refus pourrait prendre le dessus",
+      "Les modèles à diffusion fuitent toujours leurs données d'entraînement via la trajectoire de débruitage",
+      "L'absence de cache KV permet à d'autres utilisateurs de lire votre contexte",
+      "L'attention bidirectionnelle rend l'injection de prompt impossible à détecter par principe"
+    ],
+    answer: 0,
+    explain: "C'est le résultat DIJA (ICLR 2026) : jusqu'à 100 % d'ASR basé sur les mots-clés sur Dream-Instruct sans obfuscation du contenu nuisible. Un refus AR conditionne tout ce qui le suit ; un dLLM n'a pas cet ordonnancement. Filtrez à la frontière et considérez l'instruction tuning comme non porteur."
+  }
+]} />
+
+Vous débutez sur la machinerie sous-jacente ? [Qu'est-ce qu'un LLM](/docs/foundations/what-is-an-llm)
+et [Tokens et contexte](/docs/foundations/tokens-and-context) couvrent la base
+autorégressive dont cette page s'écarte, et
+[Vitesse des tokens](/docs/models/fast-inference-and-token-speed) couvre les
+multiplicateurs matériels et logiciels qui attaquent le même problème de latence
+par l'autre bout.
+
+## Sources et lectures complémentaires
+
+- [Mercury: Ultra-Fast Language Models Based on Diffusion (arXiv:2506.17298)](https://arxiv.org/abs/2506.17298) — Inception Labs ; Mercury Coder Mini et Small à 1 109 et 737 tok/s sur H100 selon Artificial Analysis
+- [Inception — Our Models](https://www.inceptionlabs.ai/models) — grille tarifaire actuelle Mercury 2.5 / Voice / Router, fenêtres de contexte et affirmations de latence
+- [The Decoder — Inception lance Mercury 2, le premier modèle de raisonnement linguistique basé sur la diffusion](https://the-decoder.com/inception-launches-mercury-2-the-first-diffusion-based-language-reasoning-model/) — 1 009 tok/s sur Blackwell, 1,7 s de bout en bout, tableau de benchmarks
+- [Fast-dLLM: Training-free Acceleration of Diffusion LLM by Enabling KV Cache and Parallel Decoding (arXiv:2505.22618)](https://arxiv.org/abs/2505.22618) — le diagnostic d'indépendance conditionnelle et le correctif par seuil de confiance ; [page du projet](https://nvlabs.github.io/Fast-dLLM/)
+- [Fast-dLLM v2: Efficient Block-Diffusion LLM (arXiv:2509.26328)](https://arxiv.org/abs/2509.26328) — masque d'attention hybride, DualCache, masquage complémentaire, conversion depuis un modèle AR sur ~1 Md de tokens
+- [Block Diffusion: Interpolating Between Autoregressive and Diffusion Language Models (arXiv:2503.09573)](https://arxiv.org/abs/2503.09573) — oral ICLR 2025 ; code sur [kuleshov-group/bd3lms](https://github.com/kuleshov-group/bd3lms)
+- [DiffusionGemma Technical Report (arXiv:2608.00146)](https://arxiv.org/abs/2608.00146) — convertir Gemma 4 MoE en diffusion pour moins de 10 % de son budget d'entraînement AR
+- [ML-GSAI/LLaDA](https://github.com/ML-GSAI/LLaDA) — LLM à diffusion masquée 8B, MIT, avec l'énoncé par les auteurs eux-mêmes des limites longueur fixe / pas de cache KV / étapes égales à la longueur
+- [DreamLM/Dream](https://github.com/DreamLM/Dream) et la [présentation de Dream 7B](https://hkunlp.github.io/blog/2025/dream/) — poids Apache-2.0 et les réglages de décodage `steps` / `alg` / `alg_temp`
+- [The Devil behind the mask: An emergent safety vulnerability of Diffusion LLMs (arXiv:2507.11097)](https://arxiv.org/abs/2507.11097) — DIJA, ICLR 2026 ; code sur [ZichenWen1/DIJA](https://github.com/ZichenWen1/DIJA)
+- [Safer by Diffusion, Broken by Context (arXiv:2602.00388)](https://arxiv.org/abs/2602.00388) — la vision à double face de la sûreté des dLLM
+- [A Survey on Parallel Text Generation: From Parallel Decoding to Diffusion Language Models (arXiv:2508.08712)](https://arxiv.org/abs/2508.08712) — la carte de tout le domaine, AR et non-AR
+- [Techmeme — Gemini Diffusion génère 1 000 à 2 000 tokens/seconde](https://www.techmeme.com/250521/p54) — le modèle expérimental de diffusion textuelle de Google DeepMind, sur liste d'attente
+- À lire aussi sur AILmanac : [Vitesse des tokens](/docs/models/fast-inference-and-token-speed) · [Modèles de décision Système Un](/docs/models/system-one-decision-models-jev-kev) · [IA vocale en duplex intégral](/docs/models/full-duplex-voice-ai) · [Choisir un modèle](/docs/models/choosing-a-model)
+
+## Pour aller plus loin
+
+- [Vitesse des tokens : pourquoi l'inférence est soudain devenue 10 à 15× plus rapide](/docs/models/fast-inference-and-token-speed) — l'attaque matérielle et logicielle sur le même problème de latence
+- [Modèles de décision Système Un](/docs/models/system-one-decision-models-jev-kev) — des modèles qui renvoient une probabilité calibrée au lieu de prose, où un socle à diffusion n'est qu'un détail d'implémentation
+- [Comment choisir un modèle](/docs/models/choosing-a-model) — le cadre durable pour décider si tout cela a sa place dans votre pile
