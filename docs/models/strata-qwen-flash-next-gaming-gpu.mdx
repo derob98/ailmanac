@@ -1,0 +1,437 @@
+---
+sidebar_position: 22.998
+title: "Strata: a 125B MoE at 94 tok/s on a 12 GB Card — and the Exact Bill"
+description: "Strata runs Qwen3.8-Flash-Next (125B, 6B active) on a 12 GB gaming GPU at interactive speed. This page explains the three architecture facts that make it possible, reads the benchmark table honestly, and prices the quality you give up: 91.3% of SWE-bench Verified against 98.7% of LiveCodeBench, a KV-cache setting that passes needle tests while losing 8-12% perplexity, a speed mode that strips refusal directions, and a measured vision regression on identical weights."
+keywords: [Strata, Strata inference, Qwen3.8-Flash-Next, run 125B locally, MoE on gaming GPU, GSQ quantization, RCO expert pruning, expert pruning MoE, ISTA-DASLab GSQ-RCO, Gated DeltaNet, Qwen Sparse Attention, n-cpu-moe, llama.cpp MoE offload, KV cache quantization, local coding agent, 12GB VRAM LLM, expert cache, router lookahead, bits per weight]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Understand the three architecture facts that make a 125B model interactive on a 12 GB card — and why none of them is 'aggressive quantization'","Read Strata's own benchmark table honestly: the headline 94 tok/s is the *lowest* quant on the ladder, and the top quant costs 43% of it","Price the quality bill precisely: 91.3% of SWE-bench Verified next to 98.7% of LiveCodeBench, and what that gap tells you about where pruning actually hurts","Know the four gotchas the README headline does not carry — including a default that passes needle-in-haystack while quietly losing long-document accuracy","Decide between Strata, plain llama.cpp with --n-cpu-moe, and a hosted API for your specific job"]} />
+
+On 24 September 2026 a repository called **Strata** appeared with a one-click
+installer and a claim that reads like a typo: run a 125-billion-parameter
+multimodal model on a gaming PC, at speeds you can hold a conversation with.
+Ten days later it has 10,622 stars, 935 forks and 265 open issues, and its
+Hacker News thread is at 473 points with 245 comments. One commenter's
+summary of the moment: *"LLM threads the world over are spammed with Strata
+links."*
+
+The claim is true. The interesting part is what it costs, because almost
+nobody is writing that part down — the project's own headline numbers contain
+no accuracy column at all. This page supplies it.
+
+## The one-sentence version
+
+Qwen3.8-Flash-Next activates only about 6B of its 125B parameters per token,
+so Strata keeps the per-token path (attention, routers, shared expert, output
+head) in VRAM, pins all 24,576 experts in system RAM, and streams a 28.8 GB
+lookup table from SSD — buying interactive speed instead of the batch speeds
+that expert-streaming engines settle for.
+
+If you have met [Colibrì](/docs/models/colibri-stream-frontier-moe-from-ssd),
+this is the opposite end of the same hierarchy. Colibrì puts the *experts* on
+disk to reach 744B-parameter models at 0.05–6.8 tok/s. Strata puts the experts
+in RAM to reach 44–94 tok/s on a model a fifth the size. Different tier,
+different use case: one is for overnight batch, this one is for a coding agent
+you actually wait on.
+
+## Three architecture facts, none of them "quantization"
+
+People assume the trick is brutal compression. Compression is involved, but
+three properties of the model do most of the work, and knowing them lets you
+predict behaviour on your own machine.
+
+### 1. The sparsity ratio is roughly 20 to 1
+
+| Quantity | Value |
+|---|---|
+| Total transformer parameters | 125B |
+| Activated per token | ~6B |
+| MoE experts per layer | 512 (10 routed + 1 shared active) |
+| Layers | 48 |
+| Total experts in the model | 48 × 512 = **24,576** |
+| Hidden size | 2,560 |
+
+Ten routed experts out of 512 means roughly 2% of the expert bank is touched
+for any given token. Expert weights are therefore large but cold — exactly the
+profile you want to push down the memory hierarchy. The per-token path that
+stays hot is small enough to sit on a 12 GB card.
+
+### 2. The model is bigger than "125B" and smaller in RAM than its file size
+
+This is the fact that explains the surprisingly modest 32 GB RAM floor, and
+it is almost always reported wrong.
+
+Qwen3.8-Flash-Next is **176.9B parameters** in total: a 125B transformer, a
+**51B n-gram embedding** table, and a 4B multi-token-prediction module. The
+n-gram table is a fixed lookup structure used for prompt lookup — it is not
+matrix-multiplied, so it does not need to be resident. Strata reads it
+unbuffered from SSD.
+
+Take ISTA-DASLab's Coder release as the worked example:
+
+| Component | File size | Resident in RAM? | Stored at |
+|---|---|---|---|
+| Transformer weights (256/512 experts kept) | 29.6 GB | **Yes** | 1.89 bpw effective over the original 125B |
+| N-gram table | 28.8 GB | **No** — read from SSD | fixed 4.5 bpw |
+| **Total on disk** | **58.4 GB** | **29.6 GB resident** | vs **354 GB** at BF16 |
+
+So a 58 GB download has a 29.6 GB memory budget. That is the whole reason a
+32 GB machine is on the compatibility list, and it is why putting this model
+on a mechanical drive is a configuration error rather than a slow choice —
+the table is on the hot path for every prompt.
+
+### 3. Only 12 of the 48 layers grow a KV cache
+
+Flash-Next is a hybrid-attention model. Three of every four layers use
+**Gated DeltaNet** (GDN), a linear-attention mechanism that compresses history
+into a *fixed-size* recurrent state. The remaining layer uses **Qwen Sparse
+Attention** (QSA) for precise retrieval across the full context. The split is
+36 GDN layers to 12 QSA layers.
+
+The consequence is the one local-inference guides keep missing: on a
+conventional 48-layer transformer, context cost scales with all 48 layers. Here
+it scales with 12. That — not quantization — is why a 262,144-token native
+window (extensible to 1M) is affordable on consumer hardware, and why Strata
+can offer a `--kv-resident` flag that keeps the context cache in RAM with only
+attention's working set in VRAM.
+
+## The memory map
+
+| Tier | What lives there |
+|---|---|
+| **VRAM** | Attention and DeltaNet mixers, routers, shared experts, output head, MTP draft layer, part of the KV cache above 64K — then an **expert cache** that fills whatever VRAM remains with the most-used experts |
+| **RAM** | All 24,576 experts, pinned. The CPU computes non-cached experts in place with AVX-512/AVX2 kernels, concurrently with GPU work |
+| **SSD** | The 28.8 GB n-gram table, read unbuffered (`--ple-io direct`; use `--ple-io ram` on a rotational disk) |
+
+Two mechanisms make the expert cache work better than a static split. The
+shipped **expert profile** ranks all 24,576 experts by how often they fired on
+training data, so the cache starts warm. And from 0.1.31 there is **router
+lookahead**: while the CPU works on one layer, a background thread runs the
+*next* layer's router to predict which experts are about to be needed and
+prewarms the OS file-cache pages for them, overlapping I/O with compute. An
+adaptive tier system (`--adapt-every`) then reshapes the cache around your
+actual conversation.
+
+## Reading the benchmark table honestly
+
+These are the project's own measurements. Note what the quantization column
+does to them.
+
+**RTX 5070 (12 GB), Ryzen 5 7600, 64 GB RAM**
+
+| Quantization | Decode (tok/s) | Prefill (tok/s) |
+|---|---|---|
+| Q2_0 | **94** | 2,650 |
+| IQ2_XS | 79 | 2,090 |
+| IQ3_XXS | 62 | 1,750 |
+| IQ3_S | 53 | 1,620 |
+| Coder (pruned) | 55 | 2,180 |
+
+**RX 9070 XT (16 GB), Ryzen 9 3900X, 47 GB RAM**
+
+| Quantization | Decode (tok/s) | Prefill (tok/s) |
+|---|---|---|
+| Q2_0 | 60 | 1,160 |
+| IQ2_XS | 52 | 1,110 |
+| Coder (pruned) | 44 | 1,420 |
+
+The headline "94 tok/s" is **Q2_0** — the bottom rung. IQ3_S, which the project
+labels highest quality, runs at 53 tok/s: you surrender 43% of the advertised
+speed to climb the ladder. Community reports fill in the rest of the spread,
+and they are wide: 124 tok/s on a 4090 with 128 GB of DDR5 and a 7950X3D; about
+30 tok/s on a 3080 (10 GB) with a 3600X; 33 tok/s on an RTX 2060 at Q2_0 but 21
+at IQ3_XXS; around 25 tok/s on an M1 Max at 3-bit; and 7 tok/s decode with 60
+tok/s prefill on a GPU-less 8845HS laptop with 96 GB.
+
+Read that list as a rule rather than a leaderboard: **decode speed tracks RAM
+bandwidth and quantization level, not GPU class.** The 2060 beating the 3080
+at Q2_0 is not a measurement error. The card holds the hot path; the system
+memory streams the experts.
+
+## The quality bill
+
+Here is what the headline numbers leave out. There are two separate
+compressions in play, and they fail in different ways.
+
+### GSQ — the quantizer
+
+**Gumbel-Softmax Quantization** is post-training scalar quantization that
+learns grid assignments and group scales *jointly*, which narrows the usual gap
+to vector quantization at low bit-widths while keeping files loadable as
+standard GGUF. Retained experts land at 3.5 bits per weight.
+
+### RCO — the pruner
+
+**Riemannian Constraint Optimization** chooses which experts to delete. It
+treats the feasible set as a smooth manifold so per-layer budgets are enforced
+*exactly*, with no penalty coefficient to tune, and supports a different budget
+per layer simultaneously. The Coder release keeps **256 of each layer's 512
+experts** — still 10 active per token — calibrated on code, agentic and vision
+data.
+
+### What the pruning costs, measured
+
+| Benchmark | BF16 base | GSQ-RCO Coder | Retention |
+|---|---|---|---|
+| SWE-bench Verified | 82.80 | 75.60 | **91.3%** |
+| LiveCodeBench v6 | 87.43 | 86.28 | **98.7%** |
+
+Do not read those as "roughly the same." The gap between them is the single
+most useful number on this page.
+
+LiveCodeBench is short-horizon: read a problem, emit a solution. It barely
+notices that half the expert bank is gone — 1.3% off. SWE-bench Verified runs
+long agentic trajectories against real repositories, and there the same model
+drops **7.2 points**. Same weights, same quantization, six times the relative
+damage.
+
+**Expert pruning costs you horizon, not knowledge.** The model still knows how
+to write the function. What degrades is holding a plan across forty tool calls
+— exactly the capability an agentic coding loop is made of. One commenter's
+word for it was "lobotomizes," and the benchmark pair is the receipt.
+
+The authors are explicit about the matching scope limit: calibration covered
+code, agentic and vision data, and *"degradation outside this set is an accepted
+cost."* If you point the Coder variant at prose, translation, or non-code
+reasoning, you are off-distribution by design, with no published number for
+how far.
+
+## Four gotchas the headline does not carry
+
+<Callout type="warning" items={["The speed mode called ESP is documented by the project as removing refusal directions. That is a safety-behaviour change shipped inside a performance feature — treat it as a different model, not a faster one."]} />
+
+**1. ESP trades alignment and output distribution for speed.** The project's own
+documentation records that its speed-projection path degrades safety by
+removing refusal directions, raises perplexity on code by 15%, and drops
+top-1 token agreement with the stock model to about 93%. A 7% disagreement rate
+on next-token choice compounds hard across a long generation. If you enable it,
+you are no longer running the model you benchmarked.
+
+**2. 4-bit KV passes needle tests while losing long-document accuracy.** The
+shipped default is 8-bit KV. `--kv q4_0` applies a Hadamard rotation before
+quantizing, halves cache memory and is about 4% faster at 128K — at the cost of
+**8–12% higher perplexity on long documents**. The documentation notes needle
+tests still pass. That is the trap: needle-in-haystack retrieval surviving is
+not evidence that long-context *reasoning* survived. The installer offers you
+4-bit above 4K context, so this is a decision you will be asked to make before
+you have any reason to understand it. There is also a `--kv k8v4` hybrid —
+8-bit keys, rotated 4-bit values — for 23% less KV memory with measurably
+slower prompts.
+
+**3. Identical weights, different engine, different answers.** One HN commenter
+ran a 50-image coordinate-localization benchmark through both engines using
+*the same GGUF and the same vision adapter*: Strata produced a median error of
+154.8 pixels (mean 168.8); llama.cpp produced 46.5 (mean 81.4). Their
+assessment was that the gap "is as large as the jump from a 9B model to a 35B
+model." The project's documentation supplies a plausible mechanism in the same
+family of problems — its IQ-pack multi-token kernels round differently from the
+single-token CPU paths, with an opt-in reproducibility flag
+(`STRATA_IQ_MT_MIN=1`) added in 0.1.30. The lesson generalises past this
+project: when a new engine claims a large speedup on weights you already have,
+**run your own eval on your own task before you trust the output**, because
+"same file" does not mean "same answers."
+
+**4. Past 262K you are in untested territory.** Beyond the native window, yarn
+RoPE scaling applies, and the documentation describes it as experimental with
+quality measured on a single machine. Community reports of tool-calling
+failures and spelling errors at 150K+ are consistent with that caveat.
+
+## Getting a first token
+
+<Steps items={[
+  {
+    title: "Check the floor before you download 58 GB",
+    body: "Minimum is 12 GB VRAM on an NVIDIA RTX 20/30/40/50 series or a supported AMD Radeon (RX 7700 XT and up, RX 9060 XT, RX 9070/9070 XT, Radeon AI PRO R9700, RX 6800/6900), 32 GB system RAM, and about 80 GB of free space. Make the storage an SSD: the 28.8 GB n-gram table is read on every prompt, so a rotational disk is not a slow configuration but a broken one."
+  },
+  {
+    title: "Run the installer and let it pick the variant",
+    body: "Windows: START-HERE.bat. Linux: ./setup.sh. It detects your hardware and recommends a model size from your available RAM. Expect roughly an hour end to end on a first run — most of it download — and about 15 minutes for model load on subsequent starts."
+  },
+  {
+    title: "Decline 4-bit KV on the first run",
+    body: "Above 4K context the installer offers 4-bit KV. Say no the first time. Establish what the model does for you on the 8-bit default, then decide whether 8-12% higher perplexity on long documents is a trade you want for ~4% speed. You cannot evaluate a degradation you never measured a baseline for."
+  },
+  {
+    title: "Point your existing tooling at localhost",
+    body: "The server exposes an OpenAI-compatible surface at http://127.0.0.1:8080/v1, the OpenAI Responses API at /v1/responses, and an Anthropic-shaped endpoint at /v1/messages. Anything already written against those shapes — including Claude Code via its base-URL override — connects without code changes."
+  },
+  {
+    title: "Run your own eval before you trust it",
+    body: "Twenty to fifty tasks from your actual work, scored the same way twice: once through Strata, once through stock llama.cpp with the ggml-org GGUF. The vision regression above was found exactly this way by one person in an afternoon. This step is not optional diligence on a ten-day-old project with 265 open issues."
+  }
+]} />
+
+<PromptCard title="Expose the server on your LAN with an API key">{`START-HERE.bat --setup --host 0.0.0.0 --api-key <your-secret>`}</PromptCard>
+
+<PromptCard title="The flags worth knowing, and what each one trades">{`--ple-io direct      # unbuffered n-gram table reads (use 'ram' on a rotational disk)
+--kv-resident 32768  # keep the context cache in RAM, only attention's working set in VRAM
+--prefill auto       # chunk prompts up to 8,192 tokens for GPU streaming
+--pcie-frac N        # share of missing experts fetched over PCIe vs computed on CPU
+--pool-workers N     # CPU threads computing non-cached experts
+--adapt-every N      # how often the expert cache re-ranks around your conversation
+--kv q4_0            # halve KV memory: ~4% faster at 128K, 8-12% worse perplexity on long docs
+--kv k8v4            # 8-bit keys, rotated 4-bit values: 23% less KV memory, slower prompts
+--spec-min-p         # draft-acceptance confidence threshold for speculative decoding`}</PromptCard>
+
+<Callout type="note" items={["Settings are split between CLI arguments, the per-model strata-<model>.json args block, and STRATA_* environment variables, and the documentation does not consistently say which lives where. Useful env vars include STRATA_PF_FUSED (fused prompt kernels), STRATA_DECODE_TIMING=1 (profile decode windows), STRATA_RESIDENT_PIN=0 (disable page-locking in low-RAM resident mode) and STRATA_IQ_MT_MIN=1 (single-token-path rounding for reproducibility)."]} />
+
+## Which rung do you actually want
+
+| Your job | Pick | Why |
+|---|---|---|
+| Agentic coding, long tool-call trajectories | Full model at IQ3_S or Unsloth UD-IQ4_XS (~80 GB RAM) | SWE-bench is where pruning costs 7.2 points. Do not pay that on your main workload |
+| One-shot code generation, snippets, review | Coder (pruned, 32 GB RAM) | 98.7% of LiveCodeBench for half the expert bank. This is the rung the pruning was designed for |
+| Vision and coordinate work | Stock llama.cpp with `ggml-org/Qwen3.8-Flash-Next-GGUF` | The one head-to-head measurement on identical weights favours llama.cpp by 3x on localization error |
+| Maximum tok/s for throwaway drafting | Q2_0 | 94 tok/s, and roughly 80% of the model's "memories" at 2 bits by one commenter's information-theoretic estimate. Fine for drafts, not for facts |
+| Long documents, 128K+ context | Full model, 8-bit KV, stay inside 262K | 4-bit KV and yarn scaling are both documented as lossy or experimental |
+| Reliability over speed | Stock llama.cpp with `--n-cpu-moe` | Slower on the same hardware, but it is the reference implementation your eval should be measured against |
+| Anything where being wrong is expensive | A hosted API | The HN consensus from people who own this hardware: they still default to cloud for demanding work |
+
+## The honest baseline: llama.cpp with --n-cpu-moe
+
+Strata is not a from-scratch engine. It is built on **llama.cpp / ggml** (MIT),
+transcribes i-quant GPU kernels from upstream, uses llama.cpp's quantized MMQ
+dot-product kernels, and takes its vision encoder from llama.cpp's `mtmd`
+library. The packaging and the Flash-Next-specific scheduling are the
+contribution. That matters practically: the baseline is one flag away.
+
+`--n-cpu-moe N` moves the MoE feed-forward weights of the first N layers to
+CPU. The reasoning is the same sparsity argument this page opened with: expert
+stacks are large and rarely touched, so they buy the most VRAM for the least
+speed penalty, while attention, embeddings and the KV cache are small and
+touched every token and belong on the GPU. More VRAM means a lower N and a
+higher ceiling before the CPU side becomes the bottleneck. If the model already
+fits in VRAM, raising N degrades throughput steadily — the flag is a way to fit,
+not a way to go faster.
+
+Reported community numbers put llama.cpp around 21 tok/s where Strata reaches
+100+ on comparable hardware. That is a real and large gap. It is also the gap
+you are buying with a ten-day-old codebase, 265 open issues, documented
+kernel-rounding divergence, and no accuracy column. Decide deliberately rather
+than by headline.
+
+<Callout type="note" items={["The GGUF ecosystem for this model is unusually crowded: ISTA-DASLab's GSQ-RCO releases (1.89M and 351k downloads), unsloth (1.4M), the official ggml-org build, bartowski, and several abliterated and 'uncensored' community variants. Download count is popularity, not quality. The two with published benchmark tables are ISTA-DASLab's; the reference build for comparison is ggml-org's."]} />
+
+## What this run of the hype cycle is actually teaching
+
+Strip out the specific project and three durable lessons remain, and they will
+apply to the next engine that trends too:
+
+1. **Sparsity, not compression, is what makes big models local.** A 125B MoE
+   with 6B active can be more comfortable on consumer hardware than a 32B dense
+   model, because the constraint it puts you under is RAM capacity and bandwidth
+   rather than VRAM capacity. Check the active-parameter count before the total.
+2. **Compression has a shape, not a magnitude.** "91% retained" and "99%
+   retained" came from the same artifact on the same day. Which number you get
+   depends entirely on whether your task is short-horizon or long-horizon. Ask
+   which benchmark the retention figure was measured on.
+3. **An engine is part of the model.** Identical weights produced a 3x
+   difference in localization error between two engines. Kernels round, caches
+   quantize, speed modes project. Your eval has to cover the engine, not just
+   the checkpoint.
+
+<Quiz questions={[
+  {
+    q: "Why can a 125B-parameter model run on a 12 GB GPU here, when a 32B dense model would struggle?",
+    options: [
+      "The weights are compressed to 1 bit",
+      "Only ~6B of the 125B parameters activate per token, so the hot per-token path fits in VRAM while the 24,576 cold experts are pinned in system RAM",
+      "The GPU is not actually used",
+      "The model is downloaded layer by layer as needed"
+    ],
+    answer: 1,
+    explain: "Ten routed experts out of 512 means roughly 2% of the expert bank is touched per token. Expert weights are big but cold, so they push down the hierarchy into RAM; attention, routers, the shared expert and the output head stay hot and small enough for a 12 GB card."
+  },
+  {
+    q: "The Coder variant retains 98.7% of LiveCodeBench v6 but only 91.3% of SWE-bench Verified. What does that gap tell you?",
+    options: [
+      "SWE-bench is a broken benchmark",
+      "The quantization is unstable and results are noise",
+      "Expert pruning mainly damages long-horizon agentic capability, not short-answer coding knowledge",
+      "The model was trained on LiveCodeBench"
+    ],
+    answer: 2,
+    explain: "LiveCodeBench is read-problem-emit-solution and loses 1.3%. SWE-bench Verified runs long trajectories over real repositories and loses 7.2 points — six times the relative damage from the same weights. Pruning costs horizon, not knowledge."
+  },
+  {
+    q: "You enable 4-bit KV cache and your needle-in-haystack test still passes at 128K. What have you established?",
+    options: [
+      "Long-context quality is unaffected",
+      "Almost nothing — needle retrieval surviving is compatible with the documented 8-12% perplexity increase on long documents",
+      "That the cache is lossless",
+      "That you should also enable ESP"
+    ],
+    answer: 1,
+    explain: "Needle tests probe retrieval of a planted fact, which is a far easier target than reasoning over the whole document. The project documents 8-12% higher perplexity on long documents with needle tests still passing — so a passing needle test is not a long-context quality check."
+  },
+  {
+    q: "A 58.4 GB download is listed as needing only 32 GB of system RAM. Why is that not a contradiction?",
+    options: [
+      "The file is compressed on disk and expands in RAM",
+      "28.8 GB of it is the n-gram lookup table, which is read unbuffered from SSD and never becomes resident — leaving a 29.6 GB resident footprint",
+      "Half the file is documentation",
+      "It swaps to disk under memory pressure"
+    ],
+    answer: 1,
+    explain: "Qwen3.8-Flash-Next is 125B transformer plus a 51B n-gram embedding plus a 4B MTP module. The n-gram table is a lookup structure, not a matrix multiplied per token, so it stays on SSD. This is also why a rotational disk is a broken configuration rather than merely a slow one."
+  },
+  {
+    q: "The same GGUF and vision adapter gave a median localization error of 154.8 px on one engine and 46.5 px on another. What is the right conclusion?",
+    options: [
+      "The GGUF file is corrupt",
+      "Vision adapters are unreliable in general",
+      "The engine is part of the model — kernel rounding, cache quantization and speed modes all change outputs, so your eval must cover the engine and not just the checkpoint",
+      "The slower engine is always more accurate"
+    ],
+    answer: 2,
+    explain: "The project's own documentation notes that its IQ-pack multi-token kernels round differently from the single-token CPU paths, with STRATA_IQ_MT_MIN=1 added as an opt-in reproducibility flag. 'Same weights' does not imply 'same answers'."
+  },
+  {
+    q: "What does llama.cpp's --n-cpu-moe flag do, and when does raising it hurt?",
+    options: [
+      "It adds CPU cores to inference; raising it always helps",
+      "It moves the MoE feed-forward weights of the first N layers to CPU; if the model already fits in VRAM, raising N degrades throughput steadily",
+      "It enables mixture-of-experts routing",
+      "It quantizes the experts to 4 bits"
+    ],
+    answer: 1,
+    explain: "It is a way to fit, not a way to go faster. Experts are large and rarely touched, so offloading them frees the most VRAM for the least speed penalty — but once the model fits on the GPU, every extra offloaded layer is pure loss."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Qwen3.8-Flash-Next, in numbers", back: "125B transformer parameters with ~6B activated per token, plus a 51B n-gram embedding and a 4B MTP module — 176.9B total. 48 layers, hidden size 2,560, 512 experts per layer with 10 routed + 1 shared active, 24,576 experts in total. Native 262,144-token context, extensible to 1M. Multimodal (text, image, video). An experimental preview of the Qwen4 architecture." },
+  { front: "GDN and QSA — the hybrid attention split", back: "Gated DeltaNet is linear attention that compresses history into a fixed-size recurrent state; Qwen Sparse Attention does precise full-context retrieval. 36 of 48 layers are GDN, 12 are QSA. Only those 12 grow a KV cache — which is the real reason a 262K window is affordable locally, rather than any quantization trick." },
+  { front: "GSQ (Gumbel-Softmax Quantization)", back: "Post-training scalar quantization that learns grid assignments and group scales jointly, narrowing the usual gap to vector quantization at low bit-widths while keeping output loadable as standard GGUF. Retained experts in the ISTA-DASLab release sit at 3.5 bits per weight." },
+  { front: "RCO (Riemannian Constraint Optimization)", back: "The expert-pruning method. It treats the feasible set as a smooth manifold, so per-layer budgets are enforced exactly with no penalty coefficient to tune, and multiple simultaneous budgets (one per layer) are supported. The Coder release keeps 256 of each layer's 512 experts, still 10 active per token." },
+  { front: "The two retention numbers that matter", back: "GSQ-RCO Coder vs BF16 base: SWE-bench Verified 75.60 vs 82.80 (91.3%), LiveCodeBench v6 86.28 vs 87.43 (98.7%). The gap is the lesson — pruning costs long-horizon agentic capability roughly six times more, in relative terms, than short-answer coding knowledge." },
+  { front: "Expert cache and router lookahead", back: "The expert cache fills leftover VRAM with the most-used experts, seeded by a shipped profile that ranks all 24,576 experts by firing frequency on training data, then re-ranked around your conversation via --adapt-every. Router lookahead (0.1.31+) runs the next layer's router on a background thread while the CPU works on the current one, prewarming file-cache pages so I/O overlaps compute." },
+  { front: "The KV-cache options and their prices", back: "8-bit KV is the shipped default. --kv q4_0 applies a Hadamard rotation then quantizes: halves cache memory, ~4% faster at 128K, 8-12% higher perplexity on long documents while needle tests still pass. --kv k8v4 keeps 8-bit keys with rotated 4-bit values: 23% less KV memory, measurably slower prompts." },
+  { front: "ESP (speed projection) — why to leave it off", back: "Documented by the project as degrading safety by removing refusal directions, raising perplexity on code by 15%, and dropping top-1 token agreement with the stock model to about 93%. A 7% next-token disagreement rate compounds across a long generation. Enabling it means you are no longer running the model you benchmarked." },
+  { front: "Effective bits per weight, worked", back: "ISTA-DASLab Coder: 29.6 GB of transformer weights over the original 125B parameters is 1.89 bits per parameter (29.6 x 8 / 125). The n-gram table is 28.8 GB over 51B parameters, a fixed 4.5 bpw. Total 58.4 GB against 354 GB at BF16 (176.9B x 2 bytes)." },
+  { front: "What Strata is built on", back: "llama.cpp / ggml, MIT. It transcribes i-quant GPU kernels from upstream, uses llama.cpp's quantized MMQ dot-product kernels, and takes its vision encoder from llama.cpp's mtmd library. The contribution is packaging plus Flash-Next-specific placement and scheduling — which means plain llama.cpp with --n-cpu-moe is always available as your reference baseline." },
+  { front: "--n-cpu-moe, in one line", back: "Moves the MoE feed-forward weights of the first N layers to CPU. Experts are large and rarely touched, so they free the most VRAM for the least speed penalty, while attention, embeddings and KV are small and touched every token and stay on GPU. It is a way to fit, not a way to go faster: once the model fits, raising N only costs throughput." }
+]} />
+
+<VerifyNote lastVerified="2026-10-04" source="Niko1221/Strata README and docs/DETAILS.md; GitHub API (10,622 stars, 935 forks, 265 open issues, MIT, created 2026-09-24); ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF model card; Qwen/Qwen3.8-Flash-Next model card; Hacker News thread 49953495 (473 points, 245 comments). Benchmark tables are the respective projects' own measurements. This repository is ten days old and moving daily — flags, defaults and variant names will drift; re-read DETAILS.md before relying on any flag here." />
+
+## Sources & further reading
+
+- Niko1221/Strata — repository, README, hardware matrix and benchmark tables: https://github.com/Niko1221/Strata
+- Strata `docs/DETAILS.md` — memory tiers, expert cache, router lookahead, KV options, flags, env vars and the stated accuracy caveats: https://github.com/Niko1221/Strata/blob/main/docs/DETAILS.md
+- "Run Qwen 3.8 Flash Next (125B) on consumer hardware (RTX 4090) at 100T/s" — the Hacker News thread, including the vision-benchmark comparison and the hardware spread: https://news.ycombinator.com/item?id=49953495
+- Qwen/Qwen3.8-Flash-Next — official model card: architecture, GDN/QSA split, expert counts, context and recommended serving stacks: https://huggingface.co/Qwen/Qwen3.8-Flash-Next
+- ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF — the pruned release with the published SWE-bench and LiveCodeBench retention table: https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF
+- ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF — the unpruned GSQ release: https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
+- ggml-org/Qwen3.8-Flash-Next-GGUF — the reference llama.cpp build to measure against: https://huggingface.co/ggml-org/Qwen3.8-Flash-Next-GGUF
+- unsloth/Qwen3.8-Flash-Next-GGUF — the UD-IQ4_XS quant referenced for near-full-model quality at ~80 GB: https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF
+- "Performant local mixture-of-experts CPU inference with GPU acceleration in llama.cpp" — the baseline offload guide: https://huggingface.co/blog/Doctor-Shotgun/llamacpp-moe-offload-guide
+- "REAP the Experts: Why Pruning Prevails for One-Shot MoE Compression" — background on expert pruning as a compression strategy: https://arxiv.org/abs/2510.13999
+
+## Next
+
+- [Colibrì: run a 744B MoE from your SSD](/docs/models/colibri-stream-frontier-moe-from-ssd) — the other end of the same hierarchy: experts on disk, frontier-size models, batch speeds
+- [Ternary quantization in practice: Bonsai 2 27B in 5.95 GB](/docs/models/ternary-quantization-bonsai-2-27b) — what a retention percentage hides, and why a stock loader can emit confident garbage
+- [A private local AI stack](/docs/models/private-local-ai-stack) — where a fast-but-pruned local model belongs next to everything else you run
