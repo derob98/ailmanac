@@ -1,0 +1,457 @@
+---
+sidebar_position: 22.998
+title: "Strata: un MoE da 125B a 94 tok/s su una scheda da 12 GB — e il conto esatto"
+description: "Strata fa girare Qwen3.8-Flash-Next (125B, 6B attivi) su una GPU da gaming da 12 GB a velocità interattiva. Questa pagina spiega i tre fatti architetturali che lo rendono possibile, legge onestamente la tabella dei benchmark e mette un prezzo sulla qualità a cui rinunci: il 91,3% di SWE-bench Verified contro il 98,7% di LiveCodeBench, un'impostazione della cache KV che supera i test needle perdendo però l'8-12% di perplexity, una modalità veloce che rimuove le direzioni di rifiuto, e una regressione misurata sulla visione a pesi identici."
+keywords: [Strata, Strata inference, Qwen3.8-Flash-Next, run 125B locally, MoE on gaming GPU, GSQ quantization, RCO expert pruning, expert pruning MoE, ISTA-DASLab GSQ-RCO, Gated DeltaNet, Qwen Sparse Attention, n-cpu-moe, llama.cpp MoE offload, KV cache quantization, local coding agent, 12GB VRAM LLM, expert cache, router lookahead, bits per weight]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Capire i tre fatti architetturali che rendono interattivo un modello da 125B su una scheda da 12 GB — e perché nessuno di essi è «quantizzazione aggressiva»","Leggere onestamente la tabella dei benchmark di Strata: i 94 tok/s del titolo sono la quantizzazione *più bassa* della scala, e quella più alta costa il 43% di quella velocità","Mettere un prezzo preciso al conto della qualità: il 91,3% di SWE-bench Verified accanto al 98,7% di LiveCodeBench, e cosa dice quel divario su dove il pruning fa male davvero","Conoscere le quattro insidie che il titolo del README non porta con sé — compreso un default che supera il needle-in-haystack perdendo silenziosamente accuratezza sui documenti lunghi","Scegliere tra Strata, llama.cpp semplice con --n-cpu-moe e un'API hosted per il tuo lavoro specifico"]} />
+
+Il 24 settembre 2026 è comparso un repository chiamato **Strata** con un
+installer in un click e una promessa che sembra un errore di battitura: far
+girare un modello multimodale da 125 miliardi di parametri su un PC da gaming,
+a velocità con cui puoi sostenere una conversazione. Dieci giorni dopo ha
+10.622 stelle, 935 fork e 265 issue aperte, e il suo thread su Hacker News è a
+473 punti con 245 commenti. Il riassunto del momento secondo un commentatore:
+*«I thread sugli LLM in tutto il mondo sono inondati di link a Strata.»*
+
+La promessa è vera. La parte interessante è quanto costa, perché quasi nessuno
+sta mettendo per scritto quella parte — i numeri di punta del progetto non
+contengono alcuna colonna sull'accuratezza. Questa pagina la fornisce.
+
+## La versione in una frase
+
+Qwen3.8-Flash-Next attiva solo circa 6B dei suoi 125B parametri per token,
+quindi Strata tiene in VRAM il percorso per token (attenzione, router, expert
+condiviso, testa di output), fissa tutti i 24.576 expert nella RAM di sistema
+e fa streaming di una tabella di lookup da 28,8 GB dall'SSD — comprando
+velocità interattiva invece delle velocità batch a cui si accontentano gli
+engine di expert streaming.
+
+Se hai già incontrato [Colibrì](/docs/models/colibri-stream-frontier-moe-from-ssd),
+questo è l'estremo opposto della stessa gerarchia. Colibrì mette gli *expert*
+su disco per raggiungere modelli da 744B parametri a 0,05–6,8 tok/s. Strata
+mette gli expert in RAM per raggiungere 44–94 tok/s su un modello un quinto
+della dimensione. Fascia diversa, caso d'uso diverso: uno serve per il batch
+notturno, questo per un agente di coding che stai davvero ad aspettare.
+
+## Tre fatti architetturali, nessuno dei quali è «quantizzazione»
+
+Si dà per scontato che il trucco sia una compressione brutale. La compressione
+c'entra, ma tre proprietà del modello fanno la maggior parte del lavoro, e
+conoscerle ti permette di prevedere il comportamento sulla tua macchina.
+
+### 1. Il rapporto di sparsità è circa 20 a 1
+
+| Grandezza | Valore |
+|---|---|
+| Parametri totali del transformer | 125B |
+| Attivati per token | ~6B |
+| Expert MoE per layer | 512 (10 instradati + 1 condiviso attivi) |
+| Layer | 48 |
+| Expert totali nel modello | 48 × 512 = **24.576** |
+| Hidden size | 2.560 |
+
+Dieci expert instradati su 512 significa che circa il 2% del banco di expert
+viene toccato per un dato token. I pesi degli expert sono quindi grandi ma
+freddi — esattamente il profilo che vuoi spingere giù nella gerarchia di
+memoria. Il percorso per token che resta caldo è abbastanza piccolo da stare su
+una scheda da 12 GB.
+
+### 2. Il modello è più grande di «125B» e in RAM più piccolo della sua dimensione su disco
+
+Questo è il fatto che spiega il sorprendentemente modesto minimo di 32 GB di
+RAM, e viene riportato sbagliato quasi sempre.
+
+Qwen3.8-Flash-Next è in totale **176,9B parametri**: un transformer da 125B,
+una tabella di **embedding n-gram da 51B** e un modulo di multi-token
+prediction da 4B. La tabella n-gram è una struttura di lookup fissa usata per
+il prompt lookup — non viene moltiplicata come matrice, quindi non deve essere
+residente. Strata la legge dall'SSD senza buffer.
+
+Prendiamo la release Coder di ISTA-DASLab come esempio concreto:
+
+| Componente | Dimensione file | Residente in RAM? | Memorizzato a |
+|---|---|---|---|
+| Pesi del transformer (256/512 expert mantenuti) | 29,6 GB | **Sì** | 1,89 bpw effettivi sui 125B originali |
+| Tabella n-gram | 28,8 GB | **No** — letta dall'SSD | 4,5 bpw fissi |
+| **Totale su disco** | **58,4 GB** | **29,6 GB residenti** | contro **354 GB** a BF16 |
+
+Quindi un download da 58 GB ha un budget di memoria di 29,6 GB. È l'intera
+ragione per cui una macchina da 32 GB è nella lista di compatibilità, ed è
+anche il motivo per cui mettere questo modello su un disco meccanico è un
+errore di configurazione più che una scelta lenta — la tabella è sul percorso
+caldo di ogni prompt.
+
+### 3. Solo 12 dei 48 layer fanno crescere una cache KV
+
+Flash-Next è un modello ad attenzione ibrida. Tre layer su quattro usano
+**Gated DeltaNet** (GDN), un meccanismo di attenzione lineare che comprime la
+storia in uno stato ricorrente di *dimensione fissa*. Il layer restante usa
+**Qwen Sparse Attention** (QSA) per il recupero preciso su tutto il contesto.
+La divisione è 36 layer GDN contro 12 layer QSA.
+
+La conseguenza è quella che le guide all'inferenza locale continuano a
+mancare: su un transformer convenzionale da 48 layer il costo del contesto
+scala con tutti i 48 layer. Qui scala con 12. È quello — non la quantizzazione
+— il motivo per cui una finestra nativa da 262.144 token (estendibile a 1M) è
+sostenibile su hardware consumer, e il motivo per cui Strata può offrire un
+flag `--kv-resident` che tiene la cache del contesto in RAM con in VRAM solo il
+working set dell'attenzione.
+
+## La mappa della memoria
+
+| Livello | Cosa ci vive |
+|---|---|
+| **VRAM** | Mixer di attenzione e DeltaNet, router, expert condivisi, testa di output, layer di draft MTP, parte della cache KV oltre i 64K — poi una **expert cache** che riempie tutta la VRAM rimanente con gli expert più usati |
+| **RAM** | Tutti i 24.576 expert, fissati. La CPU calcola in loco gli expert non in cache con kernel AVX-512/AVX2, in parallelo al lavoro della GPU |
+| **SSD** | La tabella n-gram da 28,8 GB, letta senza buffer (`--ple-io direct`; usa `--ple-io ram` su un disco rotativo) |
+
+Due meccanismi fanno funzionare la expert cache meglio di una divisione
+statica. Il **profilo degli expert** incluso nel pacchetto ordina tutti i
+24.576 expert in base a quanto spesso si sono attivati sui dati di training,
+così la cache parte già calda. E dalla 0.1.31 c'è il **router lookahead**:
+mentre la CPU lavora su un layer, un thread in background esegue il router del
+layer *successivo* per prevedere quali expert serviranno a breve e preriscalda
+per loro le pagine della file-cache del sistema operativo, sovrapponendo I/O e
+calcolo. Un sistema di livelli adattivo (`--adapt-every`) rimodella poi la
+cache attorno alla tua conversazione reale.
+
+## Leggere onestamente la tabella dei benchmark
+
+Queste sono le misurazioni del progetto stesso. Nota cosa fa loro la colonna
+della quantizzazione.
+
+**RTX 5070 (12 GB), Ryzen 5 7600, 64 GB di RAM**
+
+| Quantizzazione | Decode (tok/s) | Prefill (tok/s) |
+|---|---|---|
+| Q2_0 | **94** | 2.650 |
+| IQ2_XS | 79 | 2.090 |
+| IQ3_XXS | 62 | 1.750 |
+| IQ3_S | 53 | 1.620 |
+| Coder (pruned) | 55 | 2.180 |
+
+**RX 9070 XT (16 GB), Ryzen 9 3900X, 47 GB di RAM**
+
+| Quantizzazione | Decode (tok/s) | Prefill (tok/s) |
+|---|---|---|
+| Q2_0 | 60 | 1.160 |
+| IQ2_XS | 52 | 1.110 |
+| Coder (pruned) | 44 | 1.420 |
+
+I «94 tok/s» del titolo sono **Q2_0** — il gradino più basso. IQ3_S, che il
+progetto etichetta come qualità massima, gira a 53 tok/s: rinunci al 43% della
+velocità pubblicizzata per salire la scala. I report della community riempiono
+il resto dello spettro, e sono ampi: 124 tok/s su una 4090 con 128 GB di DDR5 e
+un 7950X3D; circa 30 tok/s su una 3080 (10 GB) con un 3600X; 33 tok/s su una
+RTX 2060 a Q2_0 ma 21 a IQ3_XXS; intorno ai 25 tok/s su un M1 Max a 3 bit; e 7
+tok/s di decode con 60 tok/s di prefill su un laptop 8845HS senza GPU con 96
+GB.
+
+Leggi quella lista come una regola, non come una classifica: **la velocità di
+decode segue la banda della RAM e il livello di quantizzazione, non la classe
+della GPU.** La 2060 che batte la 3080 a Q2_0 non è un errore di misura. La
+scheda tiene il percorso caldo; la memoria di sistema fa streaming degli
+expert.
+
+## Il conto della qualità
+
+Ecco cosa i numeri di punta tralasciano. Ci sono due compressioni distinte in
+gioco, e falliscono in modi diversi.
+
+### GSQ — il quantizzatore
+
+La **Gumbel-Softmax Quantization** è una quantizzazione scalare
+post-addestramento che apprende *congiuntamente* le assegnazioni di griglia e
+le scale di gruppo, riducendo il solito divario rispetto alla quantizzazione
+vettoriale a bit-width bassi e mantenendo al tempo stesso i file caricabili
+come GGUF standard. Gli expert mantenuti si attestano a 3,5 bit per peso.
+
+### RCO — il potatore
+
+La **Riemannian Constraint Optimization** sceglie quali expert eliminare.
+Tratta l'insieme ammissibile come una varietà liscia, così i budget per layer
+vengono rispettati *esattamente*, senza coefficiente di penalità da tarare, e
+supporta simultaneamente un budget diverso per ogni layer. La release Coder
+mantiene **256 dei 512 expert di ogni layer** — sempre 10 attivi per token —
+calibrati su dati di codice, agentici e di visione.
+
+### Quanto costa il pruning, misurato
+
+| Benchmark | Base BF16 | GSQ-RCO Coder | Ritenzione |
+|---|---|---|---|
+| SWE-bench Verified | 82,80 | 75,60 | **91,3%** |
+| LiveCodeBench v6 | 87,43 | 86,28 | **98,7%** |
+
+Non leggerli come «più o meno uguali». Il divario tra i due è il numero più
+utile di questa pagina.
+
+LiveCodeBench è a orizzonte breve: leggi un problema, emetti una soluzione. Si
+accorge a fatica che metà del banco di expert è sparita — 1,3% in meno.
+SWE-bench Verified esegue lunghe traiettorie agentiche su repository reali, e
+lì lo stesso modello perde **7,2 punti**. Stessi pesi, stessa quantizzazione,
+sei volte il danno relativo.
+
+**Il pruning degli expert ti costa orizzonte, non conoscenza.** Il modello sa
+ancora come scrivere la funzione. Ciò che degrada è tenere un piano lungo
+quaranta chiamate a tool — esattamente la capacità di cui è fatto un loop di
+coding agentico. La parola usata da un commentatore è stata
+«lobotomizza» (*lobotomizes*), e la coppia di benchmark è la ricevuta.
+
+Gli autori sono espliciti sul corrispondente limite di ambito: la calibrazione
+ha coperto dati di codice, agentici e di visione, e *«il degrado fuori da
+questo insieme è un costo accettato»*. Se punti la variante Coder su prosa,
+traduzione o ragionamento non legato al codice, sei fuori distribuzione per
+progetto, senza nessun numero pubblicato su quanto.
+
+## Quattro insidie che il titolo non porta con sé
+
+<Callout type="warning" items={["La modalità veloce chiamata ESP è documentata dal progetto come rimozione delle direzioni di rifiuto. È una modifica al comportamento di sicurezza spedita dentro una funzionalità di prestazioni — trattala come un modello diverso, non come uno più veloce."]} />
+
+**1. ESP scambia allineamento e distribuzione di output per velocità.** La
+documentazione del progetto stesso riporta che il suo percorso di proiezione
+veloce degrada la sicurezza rimuovendo le direzioni di rifiuto, alza del 15% la
+perplexity sul codice e porta l'accordo sul token top-1 con il modello
+originale a circa il 93%. Un tasso di disaccordo del 7% sulla scelta del token
+successivo si accumula pesantemente lungo una generazione lunga. Se la
+abiliti, non stai più eseguendo il modello che hai misurato.
+
+**2. La KV a 4 bit supera i test needle perdendo accuratezza sui documenti
+lunghi.** Il default incluso è la KV a 8 bit. `--kv q4_0` applica una
+rotazione di Hadamard prima di quantizzare, dimezza la memoria della cache ed è
+circa il 4% più veloce a 128K — al prezzo di una **perplexity più alta dell'8–12%
+sui documenti lunghi**. La documentazione nota che i test needle passano
+comunque. È proprio questa la trappola: il fatto che il recupero
+needle-in-haystack sopravviva non è una prova che sia sopravvissuto il
+*ragionamento* su contesti lunghi. L'installer ti propone i 4 bit sopra i 4K di
+contesto, quindi è una decisione che ti verrà chiesta prima che tu abbia
+qualsiasi motivo per capirla. Esiste anche un ibrido `--kv k8v4` — chiavi a 8
+bit, valori a 4 bit ruotati — per il 23% in meno di memoria KV con prompt
+misurabilmente più lenti.
+
+**3. Pesi identici, engine diverso, risposte diverse.** Un commentatore su HN
+ha fatto girare un benchmark di localizzazione di coordinate su 50 immagini
+attraverso entrambi gli engine usando *lo stesso GGUF e lo stesso adattatore di
+visione*: Strata ha prodotto un errore mediano di 154,8 pixel (media 168,8);
+llama.cpp ha prodotto 46,5 (media 81,4). La loro valutazione è stata che il
+divario «è grande come il salto da un modello da 9B a uno da 35B». La
+documentazione del progetto fornisce un meccanismo plausibile nella stessa
+famiglia di problemi — i suoi kernel multi-token IQ-pack arrotondano in modo
+diverso rispetto ai percorsi CPU a token singolo, con un flag opzionale di
+riproducibilità (`STRATA_IQ_MT_MIN=1`) aggiunto nella 0.1.30. La lezione va
+oltre questo progetto: quando un nuovo engine dichiara un grande guadagno di
+velocità su pesi che già possiedi, **fai la tua valutazione sul tuo compito
+prima di fidarti dell'output**, perché «stesso file» non significa «stesse
+risposte».
+
+**4. Oltre i 262K sei in territorio non testato.** Oltre la finestra nativa si
+applica lo scaling RoPE yarn, e la documentazione lo descrive come
+sperimentale con qualità misurata su una sola macchina. I report della
+community su fallimenti nelle chiamate a tool ed errori di ortografia oltre i
+150K sono coerenti con quell'avvertenza.
+
+## Ottenere il primo token
+
+<Steps items={[
+  {
+    title: "Verifica i requisiti minimi prima di scaricare 58 GB",
+    body: "Il minimo è 12 GB di VRAM su una NVIDIA RTX serie 20/30/40/50 o una AMD Radeon supportata (RX 7700 XT e superiori, RX 9060 XT, RX 9070/9070 XT, Radeon AI PRO R9700, RX 6800/6900), 32 GB di RAM di sistema e circa 80 GB di spazio libero. Lo storage deve essere un SSD: la tabella n-gram da 28,8 GB viene letta a ogni prompt, quindi un disco rotativo non è una configurazione lenta ma una configurazione rotta."
+  },
+  {
+    title: "Esegui l'installer e lascia che scelga la variante",
+    body: "Windows: START-HERE.bat. Linux: ./setup.sh. Rileva il tuo hardware e raccomanda una dimensione di modello in base alla RAM disponibile. Aspettati circa un'ora dall'inizio alla fine alla prima esecuzione — in gran parte download — e circa 15 minuti per il caricamento del modello agli avvii successivi."
+  },
+  {
+    title: "Rifiuta la KV a 4 bit alla prima esecuzione",
+    body: "Sopra i 4K di contesto l'installer propone la KV a 4 bit. Di' no la prima volta. Stabilisci cosa fa per te il modello con il default a 8 bit, poi decidi se una perplexity più alta dell'8-12% sui documenti lunghi è uno scambio che vuoi fare per circa il 4% di velocità. Non puoi valutare un degrado di cui non hai mai misurato la baseline."
+  },
+  {
+    title: "Punta i tuoi strumenti esistenti su localhost",
+    body: "Il server espone una superficie compatibile con OpenAI su http://127.0.0.1:8080/v1, la OpenAI Responses API su /v1/responses e un endpoint in forma Anthropic su /v1/messages. Qualsiasi cosa già scritta contro quelle forme — incluso Claude Code tramite l'override della base URL — si connette senza modifiche al codice."
+  },
+  {
+    title: "Fai la tua valutazione prima di fidarti",
+    body: "Da venti a cinquanta task del tuo lavoro reale, valutati allo stesso modo due volte: una volta attraverso Strata, una volta attraverso llama.cpp originale con il GGUF di ggml-org. La regressione sulla visione qui sopra è stata trovata esattamente così, da una persona in un pomeriggio. Questo passo non è diligenza opzionale su un progetto di dieci giorni con 265 issue aperte."
+  }
+]} />
+
+<PromptCard title="Esponi il server sulla tua LAN con una API key">{`START-HERE.bat --setup --host 0.0.0.0 --api-key <your-secret>`}</PromptCard>
+
+<PromptCard title="I flag che vale la pena conoscere, e cosa scambia ciascuno">{`--ple-io direct      # unbuffered n-gram table reads (use 'ram' on a rotational disk)
+--kv-resident 32768  # keep the context cache in RAM, only attention's working set in VRAM
+--prefill auto       # chunk prompts up to 8,192 tokens for GPU streaming
+--pcie-frac N        # share of missing experts fetched over PCIe vs computed on CPU
+--pool-workers N     # CPU threads computing non-cached experts
+--adapt-every N      # how often the expert cache re-ranks around your conversation
+--kv q4_0            # halve KV memory: ~4% faster at 128K, 8-12% worse perplexity on long docs
+--kv k8v4            # 8-bit keys, rotated 4-bit values: 23% less KV memory, slower prompts
+--spec-min-p         # draft-acceptance confidence threshold for speculative decoding`}</PromptCard>
+
+<Callout type="note" items={["Le impostazioni sono divise tra argomenti della CLI, il blocco args del file strata-<model>.json per singolo modello e variabili d'ambiente STRATA_*, e la documentazione non dice in modo coerente quale stia dove. Tra le variabili d'ambiente utili ci sono STRATA_PF_FUSED (kernel di prompt fusi), STRATA_DECODE_TIMING=1 (profila le finestre di decode), STRATA_RESIDENT_PIN=0 (disabilita il page-locking in modalità residente con poca RAM) e STRATA_IQ_MT_MIN=1 (arrotondamento sul percorso a token singolo per la riproducibilità)."]} />
+
+## Quale gradino vuoi davvero
+
+| Il tuo lavoro | Scegli | Perché |
+|---|---|---|
+| Coding agentico, lunghe traiettorie di chiamate a tool | Modello completo a IQ3_S o Unsloth UD-IQ4_XS (~80 GB di RAM) | SWE-bench è dove il pruning costa 7,2 punti. Non pagarli sul tuo carico di lavoro principale |
+| Generazione di codice one-shot, snippet, review | Coder (pruned, 32 GB di RAM) | Il 98,7% di LiveCodeBench con metà del banco di expert. Questo è il gradino per cui il pruning è stato progettato |
+| Visione e lavoro sulle coordinate | llama.cpp originale con `ggml-org/Qwen3.8-Flash-Next-GGUF` | L'unico confronto diretto su pesi identici favorisce llama.cpp di 3 volte sull'errore di localizzazione |
+| Massimi tok/s per bozze usa-e-getta | Q2_0 | 94 tok/s, e circa l'80% dei «ricordi» del modello a 2 bit secondo la stima teorico-informativa di un commentatore. Va bene per le bozze, non per i fatti |
+| Documenti lunghi, contesto 128K+ | Modello completo, KV a 8 bit, resta dentro i 262K | La KV a 4 bit e lo scaling yarn sono entrambi documentati come lossy o sperimentali |
+| Affidabilità prima della velocità | llama.cpp originale con `--n-cpu-moe` | Più lento sullo stesso hardware, ma è l'implementazione di riferimento contro cui misurare la tua valutazione |
+| Qualsiasi cosa in cui sbagliare costa caro | Un'API hosted | Il consenso su HN tra chi possiede questo hardware: per il lavoro impegnativo tornano comunque al cloud per default |
+
+## La baseline onesta: llama.cpp con --n-cpu-moe
+
+Strata non è un engine scritto da zero. È costruito su **llama.cpp / ggml**
+(MIT), trascrive i kernel GPU i-quant da upstream, usa i kernel di prodotto
+scalare MMQ quantizzati di llama.cpp e prende il suo encoder di visione dalla
+libreria `mtmd` di llama.cpp. Il contributo sono il packaging e lo scheduling
+specifico per Flash-Next. Questo conta in pratica: la baseline è a un flag di
+distanza.
+
+`--n-cpu-moe N` sposta su CPU i pesi feed-forward MoE dei primi N layer. Il
+ragionamento è lo stesso argomento di sparsità con cui si è aperta questa
+pagina: gli stack di expert sono grandi e toccati raramente, quindi liberano
+più VRAM a fronte della minore penalità in velocità, mentre attenzione,
+embedding e cache KV sono piccoli e toccati a ogni token e vanno sulla GPU. Più
+VRAM significa un N più basso e un tetto più alto prima che il lato CPU diventi
+il collo di bottiglia. Se il modello sta già in VRAM, alzare N degrada il
+throughput in modo costante — il flag è un modo per starci dentro, non un modo
+per andare più veloce.
+
+I numeri riportati dalla community collocano llama.cpp intorno ai 21 tok/s
+dove Strata raggiunge oltre 100 su hardware comparabile. È un divario reale e
+grande. È anche il divario che stai comprando con una codebase di dieci
+giorni, 265 issue aperte, una divergenza documentata nell'arrotondamento dei
+kernel e nessuna colonna sull'accuratezza. Decidi deliberatamente, non per
+titolo.
+
+<Callout type="note" items={["L'ecosistema GGUF per questo modello è insolitamente affollato: le release GSQ-RCO di ISTA-DASLab (1,89M e 351k download), unsloth (1,4M), la build ufficiale di ggml-org, bartowski e diverse varianti community abliterated e «uncensored». Il numero di download è popolarità, non qualità. Le due con tabelle di benchmark pubblicate sono quelle di ISTA-DASLab; la build di riferimento per il confronto è quella di ggml-org."]} />
+
+## Cosa sta insegnando davvero questo giro di hype
+
+Togli il progetto specifico e restano tre lezioni durevoli, e si
+applicheranno anche al prossimo engine che andrà di tendenza:
+
+1. **È la sparsità, non la compressione, a rendere locali i modelli grandi.**
+   Un MoE da 125B con 6B attivi può stare più comodo su hardware consumer di un
+   modello denso da 32B, perché il vincolo che ti impone è la capacità e la
+   banda della RAM più che la capacità della VRAM. Controlla il numero di
+   parametri attivi prima del totale.
+2. **La compressione ha una forma, non una magnitudine.** «91% mantenuto» e
+   «99% mantenuto» vengono dallo stesso artefatto nello stesso giorno. Quale
+   numero ottieni dipende interamente dal fatto che il tuo compito sia a
+   orizzonte breve o lungo. Chiedi su quale benchmark è stata misurata la cifra
+   di ritenzione.
+3. **L'engine è parte del modello.** Pesi identici hanno prodotto una
+   differenza di 3 volte nell'errore di localizzazione tra due engine. I kernel
+   arrotondano, le cache quantizzano, le modalità veloci proiettano. La tua
+   valutazione deve coprire l'engine, non solo il checkpoint.
+
+<Quiz questions={[
+  {
+    q: "Perché qui un modello da 125B parametri può girare su una GPU da 12 GB, mentre un modello denso da 32B farebbe fatica?",
+    options: [
+      "I pesi sono compressi a 1 bit",
+      "Solo ~6B dei 125B parametri si attivano per token, quindi il percorso caldo per token sta in VRAM mentre i 24.576 expert freddi sono fissati nella RAM di sistema",
+      "La GPU in realtà non viene usata",
+      "Il modello viene scaricato layer per layer quando serve"
+    ],
+    answer: 1,
+    explain: "Dieci expert instradati su 512 significa che circa il 2% del banco di expert viene toccato per token. I pesi degli expert sono grandi ma freddi, quindi scendono nella gerarchia verso la RAM; attenzione, router, expert condiviso e testa di output restano caldi e abbastanza piccoli per una scheda da 12 GB."
+  },
+  {
+    q: "La variante Coder mantiene il 98,7% di LiveCodeBench v6 ma solo il 91,3% di SWE-bench Verified. Cosa ti dice quel divario?",
+    options: [
+      "SWE-bench è un benchmark rotto",
+      "La quantizzazione è instabile e i risultati sono rumore",
+      "Il pruning degli expert danneggia principalmente la capacità agentica a orizzonte lungo, non la conoscenza di coding a risposta breve",
+      "Il modello è stato addestrato su LiveCodeBench"
+    ],
+    answer: 2,
+    explain: "LiveCodeBench è leggi-problema-emetti-soluzione e perde l'1,3%. SWE-bench Verified esegue lunghe traiettorie su repository reali e perde 7,2 punti — sei volte il danno relativo a partire dagli stessi pesi. Il pruning costa orizzonte, non conoscenza."
+  },
+  {
+    q: "Abiliti la cache KV a 4 bit e il tuo test needle-in-haystack passa ancora a 128K. Cosa hai stabilito?",
+    options: [
+      "Che la qualità su contesti lunghi non è intaccata",
+      "Quasi nulla — la sopravvivenza del recupero needle è compatibile con l'aumento documentato dell'8-12% di perplexity sui documenti lunghi",
+      "Che la cache è lossless",
+      "Che dovresti abilitare anche ESP"
+    ],
+    answer: 1,
+    explain: "I test needle sondano il recupero di un fatto piantato, un bersaglio molto più facile del ragionamento su tutto il documento. Il progetto documenta una perplexity più alta dell'8-12% sui documenti lunghi con i test needle che passano comunque — quindi un test needle superato non è un controllo di qualità sul contesto lungo."
+  },
+  {
+    q: "Un download da 58,4 GB viene indicato come bisognoso di soli 32 GB di RAM di sistema. Perché non è una contraddizione?",
+    options: [
+      "Il file è compresso su disco e si espande in RAM",
+      "28,8 GB sono la tabella di lookup n-gram, che viene letta senza buffer dall'SSD e non diventa mai residente — lasciando un ingombro residente di 29,6 GB",
+      "Metà del file è documentazione",
+      "Fa swap su disco quando la memoria è sotto pressione"
+    ],
+    answer: 1,
+    explain: "Qwen3.8-Flash-Next è un transformer da 125B più un embedding n-gram da 51B più un modulo MTP da 4B. La tabella n-gram è una struttura di lookup, non una matrice moltiplicata a ogni token, quindi resta sull'SSD. È anche il motivo per cui un disco rotativo è una configurazione rotta e non semplicemente lenta."
+  },
+  {
+    q: "Lo stesso GGUF e lo stesso adattatore di visione hanno dato un errore mediano di localizzazione di 154,8 px su un engine e 46,5 px su un altro. Qual è la conclusione giusta?",
+    options: [
+      "Il file GGUF è corrotto",
+      "Gli adattatori di visione sono inaffidabili in generale",
+      "L'engine è parte del modello — arrotondamento dei kernel, quantizzazione della cache e modalità veloci cambiano tutti gli output, quindi la tua valutazione deve coprire l'engine e non solo il checkpoint",
+      "L'engine più lento è sempre più accurato"
+    ],
+    answer: 2,
+    explain: "La documentazione del progetto stesso nota che i suoi kernel multi-token IQ-pack arrotondano in modo diverso rispetto ai percorsi CPU a token singolo, con STRATA_IQ_MT_MIN=1 aggiunto come flag opzionale di riproducibilità. «Stessi pesi» non implica «stesse risposte»."
+  },
+  {
+    q: "Cosa fa il flag --n-cpu-moe di llama.cpp, e quando alzarlo fa male?",
+    options: [
+      "Aggiunge core CPU all'inferenza; alzarlo aiuta sempre",
+      "Sposta su CPU i pesi feed-forward MoE dei primi N layer; se il modello sta già in VRAM, alzare N degrada il throughput in modo costante",
+      "Abilita l'instradamento mixture-of-experts",
+      "Quantizza gli expert a 4 bit"
+    ],
+    answer: 1,
+    explain: "È un modo per starci dentro, non un modo per andare più veloce. Gli expert sono grandi e toccati raramente, quindi spostarli libera più VRAM a fronte della minore penalità in velocità — ma una volta che il modello sta sulla GPU, ogni layer spostato in più è pura perdita."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Qwen3.8-Flash-Next, in numeri", back: "125B parametri di transformer con ~6B attivati per token, più un embedding n-gram da 51B e un modulo MTP da 4B — 176,9B in totale. 48 layer, hidden size 2.560, 512 expert per layer con 10 instradati + 1 condiviso attivi, 24.576 expert in totale. Contesto nativo di 262.144 token, estendibile a 1M. Multimodale (testo, immagini, video). Una preview sperimentale dell'architettura Qwen4." },
+  { front: "GDN e QSA — la divisione dell'attenzione ibrida", back: "Gated DeltaNet è attenzione lineare che comprime la storia in uno stato ricorrente di dimensione fissa; Qwen Sparse Attention fa recupero preciso su tutto il contesto. 36 dei 48 layer sono GDN, 12 sono QSA. Solo quei 12 fanno crescere una cache KV — che è il vero motivo per cui una finestra da 262K è sostenibile in locale, più di qualsiasi trucco di quantizzazione." },
+  { front: "GSQ (Gumbel-Softmax Quantization)", back: "Quantizzazione scalare post-addestramento che apprende congiuntamente le assegnazioni di griglia e le scale di gruppo, riducendo il solito divario rispetto alla quantizzazione vettoriale a bit-width bassi e mantenendo l'output caricabile come GGUF standard. Gli expert mantenuti nella release ISTA-DASLab stanno a 3,5 bit per peso." },
+  { front: "RCO (Riemannian Constraint Optimization)", back: "Il metodo di pruning degli expert. Tratta l'insieme ammissibile come una varietà liscia, così i budget per layer vengono rispettati esattamente senza coefficiente di penalità da tarare, e sono supportati più budget simultanei (uno per layer). La release Coder mantiene 256 dei 512 expert di ogni layer, sempre 10 attivi per token." },
+  { front: "I due numeri di ritenzione che contano", back: "GSQ-RCO Coder contro base BF16: SWE-bench Verified 75,60 contro 82,80 (91,3%), LiveCodeBench v6 86,28 contro 87,43 (98,7%). Il divario è la lezione — il pruning costa in termini relativi circa sei volte di più alla capacità agentica a orizzonte lungo che alla conoscenza di coding a risposta breve." },
+  { front: "Expert cache e router lookahead", back: "La expert cache riempie la VRAM rimanente con gli expert più usati, inizializzata da un profilo incluso che ordina tutti i 24.576 expert per frequenza di attivazione sui dati di training, poi riordinata attorno alla tua conversazione tramite --adapt-every. Il router lookahead (0.1.31+) esegue il router del layer successivo su un thread in background mentre la CPU lavora su quello corrente, preriscaldando le pagine della file-cache così l'I/O si sovrappone al calcolo." },
+  { front: "Le opzioni della cache KV e i loro prezzi", back: "La KV a 8 bit è il default incluso. --kv q4_0 applica una rotazione di Hadamard e poi quantizza: dimezza la memoria della cache, circa il 4% più veloce a 128K, perplexity più alta dell'8-12% sui documenti lunghi mentre i test needle passano comunque. --kv k8v4 tiene chiavi a 8 bit con valori a 4 bit ruotati: 23% in meno di memoria KV, prompt misurabilmente più lenti." },
+  { front: "ESP (proiezione di velocità) — perché lasciarlo spento", back: "Documentato dal progetto come degradante per la sicurezza perché rimuove le direzioni di rifiuto, alza del 15% la perplexity sul codice e porta l'accordo sul token top-1 con il modello originale a circa il 93%. Un tasso di disaccordo del 7% sul token successivo si accumula lungo una generazione lunga. Abilitarlo significa non eseguire più il modello che hai misurato." },
+  { front: "Bit per peso effettivi, calcolati", back: "ISTA-DASLab Coder: 29,6 GB di pesi del transformer sui 125B parametri originali fanno 1,89 bit per parametro (29,6 x 8 / 125). La tabella n-gram è 28,8 GB su 51B parametri, 4,5 bpw fissi. Totale 58,4 GB contro 354 GB a BF16 (176,9B x 2 byte)." },
+  { front: "Su cosa è costruito Strata", back: "llama.cpp / ggml, MIT. Trascrive i kernel GPU i-quant da upstream, usa i kernel di prodotto scalare MMQ quantizzati di llama.cpp e prende il suo encoder di visione dalla libreria mtmd di llama.cpp. Il contributo è il packaging più il posizionamento e lo scheduling specifici per Flash-Next — il che significa che llama.cpp semplice con --n-cpu-moe è sempre disponibile come baseline di riferimento." },
+  { front: "--n-cpu-moe, in una riga", back: "Sposta su CPU i pesi feed-forward MoE dei primi N layer. Gli expert sono grandi e toccati raramente, quindi liberano più VRAM a fronte della minore penalità in velocità, mentre attenzione, embedding e KV sono piccoli e toccati a ogni token e restano su GPU. È un modo per starci dentro, non un modo per andare più veloce: una volta che il modello ci sta, alzare N costa solo throughput." }
+]} />
+
+<VerifyNote lastVerified="2026-10-04" source="Niko1221/Strata README and docs/DETAILS.md; GitHub API (10,622 stars, 935 forks, 265 open issues, MIT, created 2026-09-24); ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF model card; Qwen/Qwen3.8-Flash-Next model card; Hacker News thread 49953495 (473 points, 245 comments). Benchmark tables are the respective projects' own measurements. This repository is ten days old and moving daily — flags, defaults and variant names will drift; re-read DETAILS.md before relying on any flag here." />
+
+## Fonti e approfondimenti
+
+- Niko1221/Strata — repository, README, matrice hardware e tabelle dei benchmark: https://github.com/Niko1221/Strata
+- Strata `docs/DETAILS.md` — livelli di memoria, expert cache, router lookahead, opzioni KV, flag, variabili d'ambiente e le avvertenze dichiarate sull'accuratezza: https://github.com/Niko1221/Strata/blob/main/docs/DETAILS.md
+- «Run Qwen 3.8 Flash Next (125B) on consumer hardware (RTX 4090) at 100T/s» — il thread su Hacker News, incluso il confronto sul benchmark di visione e lo spettro dell'hardware: https://news.ycombinator.com/item?id=49953495
+- Qwen/Qwen3.8-Flash-Next — model card ufficiale: architettura, divisione GDN/QSA, conteggi degli expert, contesto e stack di serving raccomandati: https://huggingface.co/Qwen/Qwen3.8-Flash-Next
+- ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF — la release pruned con la tabella pubblicata di ritenzione su SWE-bench e LiveCodeBench: https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF
+- ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF — la release GSQ non pruned: https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
+- ggml-org/Qwen3.8-Flash-Next-GGUF — la build llama.cpp di riferimento contro cui misurare: https://huggingface.co/ggml-org/Qwen3.8-Flash-Next-GGUF
+- unsloth/Qwen3.8-Flash-Next-GGUF — la quantizzazione UD-IQ4_XS citata per qualità vicina al modello completo con circa 80 GB: https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF
+- «Performant local mixture-of-experts CPU inference with GPU acceleration in llama.cpp» — la guida di riferimento all'offload: https://huggingface.co/blog/Doctor-Shotgun/llamacpp-moe-offload-guide
+- «REAP the Experts: Why Pruning Prevails for One-Shot MoE Compression» — contesto sul pruning degli expert come strategia di compressione: https://arxiv.org/abs/2510.13999
+
+## Avanti
+
+- [Colibrì: far girare un MoE da 744B dal tuo SSD](/docs/models/colibri-stream-frontier-moe-from-ssd) — l'altro estremo della stessa gerarchia: expert su disco, modelli di dimensione frontier, velocità batch
+- [La quantizzazione ternaria in pratica: Bonsai 2 27B in 5,95 GB](/docs/models/ternary-quantization-bonsai-2-27b) — cosa nasconde una percentuale di ritenzione, e perché un loader standard può emettere spazzatura convinta
+- [Uno stack AI locale e privato](/docs/models/private-local-ai-stack) — dove sta un modello locale veloce-ma-pruned accanto a tutto il resto che fai girare
