@@ -1,0 +1,341 @@
+---
+sidebar_position: 10.2
+title: "Hard Spend Caps: Which AI Providers Actually Stop the Bill"
+description: "A soft cap emails you. A hard cap blocks the request. This page maps which AI providers do which — and the trap nobody documents: the same event (you hit your cap) returns HTTP 429 with no retry-after on Anthropic's tier cap, HTTP 400 on the limit you set yourself, 429 on OpenAI, and 402 on OpenRouter. Plus why no cap can be exact, where the Custom tier loses its safety net, and how to build a pre-flight killswitch."
+keywords: [hard spend cap, AI budget cap, API spend limit, Anthropic spend limit, enforced_spend_limit_reached, OpenAI hard spend limit, OpenRouter credit limit, Google Cloud spend cap, AWS spend limit, LiteLLM max_budget, agent cost control, runaway agent cost, killswitch, Spend Limits API]
+---
+
+<LevelBadge level="intermediate" />
+
+On October 3, 2026, Simon Willison published a short argument that landed on the Hacker News front page with 615 points: usage-billed services need **hard** budget caps by default, with uncapped billing as the explicit opt-in. His framing is the one that matters — *"Nobody wants to wake up to an email sent at midnight warning about a budget limit and find that, while they slept, their rogue service had consumed several hundred (or several thousand) more dollars."*
+
+The reason this became a 2026 argument rather than a 2015 one is that agents changed the shape of the risk. A human misconfiguring a cron job is a slow leak. An agent that retries a failing tool call in a loop, or spawns subagents that spawn subagents, is a leak with a model behind it — and it runs at machine speed while you sleep.
+
+The good news: in the last four months, most of the stack quietly grew real caps. The bad news is what this page is actually about — **the caps exist, but they announce themselves with four different HTTP status codes, and at least two of them will be swallowed by the retry logic you already wrote.**
+
+<Callout type="objectives" items={[
+  "Tell a soft cap (an email) from a hard cap (a blocked request) — and know which one each provider gives you",
+  "Handle the four different error shapes a spend cap can return, including the one that arrives as a 400 your retry logic treats as a bug",
+  "Understand why no cap on the market can be exact, and why every vendor disclaims liability for the overage",
+  "Know where Anthropic's default safety net disappears, and what the Enterprise Spend Limits API replaces it with",
+  "Put a real ceiling under a new project in about twenty minutes, at the layer that actually blocks"
+]} />
+
+## Soft cap vs hard cap: the only distinction that matters
+
+Strip away the marketing and every spend control is one of two things.
+
+A **soft cap** observes. It watches a cost signal, compares it to your number, and notifies — email, webhook, dashboard badge. Traffic keeps flowing. AWS Budgets, Anthropic's usage dashboard, and every "billing alert" you have ever configured are soft caps. They are genuinely useful, and they are not protection: a soft cap's only effect is to tell a human to intervene, which means its latency is *your* response time, not the system's.
+
+A **hard cap** enforces. It blocks new requests at the limit. Your code finds out through an error, not an inbox.
+
+The practical test: *if every human on the team is asleep, does the spend stop?* If the answer is no, it is a soft cap no matter what the UI calls it.
+
+Everything below is about hard caps. Keep your soft caps too — a cap that fires is an incident, and you want the warning at 60% as well as the block at 100%.
+
+## Which providers actually block
+
+| Provider / layer | Hard cap? | Scope | What you get when it fires |
+| --- | --- | --- | --- |
+| **Anthropic — tier cap** | Yes, by default | Organization, monthly | HTTP 429, `rate_limit_error`, **no `retry-after`**, `details.error_code: enforced_spend_limit_reached` |
+| **Anthropic — limit you set** | Yes, opt-in | Organization or workspace | HTTP **400**, `invalid_request_error`, message begins "You have reached your specified API usage limits" |
+| **Anthropic — Claude Code workspace** | Yes | That workspace | Checked separately; can return a 429 that **does** carry `retry-after` |
+| **OpenAI — hard spend limit** | Yes, opt-in | Organization and/or project | HTTP 429 |
+| **OpenRouter — credits / key cap** | Yes, structurally | Account balance, per-key | HTTP **402**, with `error.metadata.limit_source` |
+| **Google Cloud — spend cap budget** | Yes, opt-in (Preview) | One project × one service | New usage for that service blocked until manually lifted |
+| **AWS — project spend limit** | Yes, new accounts | Per project | Project paused rather than accruing further charges |
+| **LiteLLM / self-hosted gateway** | Yes, pre-flight | Key, user, team, model | Auth-shaped error, raised *before* the provider is called |
+| **Claude Code telemetry** | No | — | Observability only; exports cost, enforces nothing |
+
+<VerifyNote lastVerified="2026-10-05" source="Anthropic rate limits & Spend Limits API docs; OpenAI API rate-limits guide; OpenRouter limits reference; Google Cloud Billing spend-cap docs & July 27 2026 release note; LiteLLM proxy docs; Help Net Security on the AWS launch" />
+
+## The trap: four status codes, one event
+
+This is the part that is documented in four separate places and assembled nowhere, and it is the thing most likely to bite you.
+
+Read the Anthropic behaviour carefully, because it is two different behaviours.
+
+When you cross your **tier's** monthly cap, the API returns HTTP 429 with error type `rate_limit_error` — the same type as an ordinary rate limit — but with **no `retry-after` header**. Anthropic's own documentation is blunt about the consequence: *"Retrying, including the SDK's automatic retries, fails until access resumes."* Access resumes at 00:00 UTC on the first of the next month unless you raise the limit. So a well-behaved client with exponential backoff will sit in a retry loop for up to 31 days, logging transient-looking errors. The distinguishing field is `error.details.error_code`, which is `enforced_spend_limit_reached`.
+
+When you cross a limit **you** configured — organization or workspace — the API returns HTTP **400** with type `invalid_request_error`. That inverts the usual assumption: a 400 means "your request was malformed, do not retry," so most clients log it as a bug and either crash or drop the work silently. It is not a bug; it is your own cap doing its job.
+
+And the Claude Code workspace is checked separately again: requests over that workspace's limit can receive a 429 that *does* carry `retry-after`.
+
+OpenRouter takes the third route. Because the model is prepaid credits, running out is a payment problem, so it returns HTTP **402 Payment Required**, with `error.metadata.limit_source` naming which of the three limits you hit — account balance, per-key cap, or the in-flight budget hold. One detail worth knowing: when the account balance goes negative, requests to **free** models fail too.
+
+OpenAI's documentation states that requests affected by a hard spend limit return a `429`. It does not state an enforcement latency, and it distinguishes two things that are easy to conflate: the approved monthly usage limit OpenAI sets for your organization, and the spend limits you configure yourself on an organization or a project. Both can apply to one request, so a project with headroom can still be blocked by the organization ceiling above it.
+
+Four shapes for one event. Which means the handler you want is not "retry on 429."
+
+<PromptCard title="Classify a cap error instead of retrying it">
+{`# The three signals that mean "stop, this is a budget wall" — not "wait and retry"
+#
+#   Anthropic tier cap   -> 429, type=rate_limit_error, NO retry-after,
+#                           error.details.error_code == "enforced_spend_limit_reached"
+#   Anthropic own limit  -> 400, type=invalid_request_error,
+#                           message startswith "You have reached your specified API usage limits"
+#   OpenRouter           -> 402, error.metadata.limit_source present
+#   OpenAI hard limit    -> 429  (no documented discriminator field)
+
+def is_budget_wall(status, body, headers):
+    err = (body or {}).get("error", {}) or {}
+    detail_code = (err.get("details") or {}).get("error_code")
+
+    if status == 429 and detail_code == "enforced_spend_limit_reached":
+        return True                      # month-long wall; do NOT back off
+    if status == 429 and "retry-after" not in {k.lower() for k in headers}:
+        return True                      # 429 with no retry-after is not a rate limit
+    if status == 400 and err.get("message", "").startswith(
+        "You have reached your specified API usage limits"
+    ):
+        return True                      # your own cap, wearing a 400
+    if status == 402 and (err.get("metadata") or {}).get("limit_source"):
+        return True                      # prepaid balance or key cap
+
+    return False
+
+# Page a human, mark the work as blocked, and stop the loop.
+# Retrying a budget wall just burns your own CPU until the first of the month.`}
+</PromptCard>
+
+The general rule that survives any provider's refactor: **a 429 without a `retry-after` header is not a rate limit.** Rate limits are temporary by construction and tell you how long to wait. A 429 that refuses to tell you how long is a different animal.
+
+## Why no cap can be exact — and why that is not laziness
+
+Every hard cap on the market fires on *estimated* cost, not billed cost. This looks like a shortcut and is in fact the only workable design: a billing pipeline that aggregates, rates, applies discounts and reconciles usage takes minutes to hours. A cap that waited for it would be useless against exactly the failure mode it exists to stop.
+
+Google Cloud states the trade-off plainly: *"For faster enforcement, spend caps use gross, estimated costs to trigger alerts and enforce the spend cap"* — and then, honestly, *"Due to latency in usage and cost reporting, spend cap enforcement isn't instantaneous. Consider setting your budget slightly below your absolute limit."* And the liability: *"any cost overages are billed as normal."* You remain responsible for what leaks through during the reporting lag.
+
+Three consequences you should design around:
+
+**Set the cap below your real ceiling.** If $500 is the number that genuinely hurts, cap at $400. The gap is your overshoot budget. How big it needs to be depends on your peak burn rate, not on the provider — an agent fleet that can spend $50/minute needs a wider margin than a chat app that spends $50/day.
+
+**In-flight requests complete.** A cap blocks *new* usage. Anything already in flight finishes and bills. With long-running agent turns this is not a rounding error.
+
+**Pre-flight beats post-hoc.** The only mechanism that structurally avoids overshoot is reserving the estimated cost *before* the call. LiteLLM's proxy does this by default: it estimates the maximum cost from the request body and the model's pricing, holds that amount against every applicable budget, rejects the request if the reservation would breach the budget, then swaps the reservation for the actual cost once the response lands. OpenRouter's in-flight budget hold is the same idea applied to a prepaid balance. Both are strictly stronger than measuring after the fact, and both are only approximate in the other direction — they over-reserve, which means they can refuse a request you could have afforded.
+
+## Anthropic's tiers, and where the net disappears
+
+Anthropic gives you a hard cap whether or not you ask for one. The Start, Build and Scale tiers each carry a monthly spend cap — the maximum your organization can spend on the API in a calendar month.
+
+| Usage tier | Monthly spend cap |
+| --- | --- |
+| Start | $500 |
+| Build | $1,000 |
+| Scale | $200,000 |
+| Custom | **None** — arranged with your account team |
+
+<VerifyNote lastVerified="2026-10-05" source="platform.claude.com/docs/en/api/rate-limits — Spend limits" />
+
+Read the last row again. The default safety net exists on every tier *except* the one occupied by the organizations spending the most. Graduating to Custom removes the automatic ceiling, which makes an explicitly configured limit mandatory rather than optional at exactly the point where people stop thinking about it.
+
+Two more things worth setting while you are in there:
+
+**Set your own limit below the tier cap.** The Billing page takes a number lower than your tier's cap. This is the control you actually want, because you choose it — and remember it surfaces as a 400, not a 429.
+
+**Use workspaces as blast-radius boundaries.** Workspaces take their own spend and rate limits, so an experimental agent and your production traffic do not share one pool. Organization-wide limits always apply on top, even if the workspace limits sum to more. One restriction: you cannot set limits on the default workspace — so do not put anything you care about there.
+
+## The Enterprise layer: per-member caps as an API
+
+Claude Enterprise organizations get something the Console does not expose: a **Spend Limits API**, which treats per-person budgets as a resource you can read and write programmatically. It is the piece of this story that is barely written about anywhere, so it is worth knowing what it does.
+
+Eight endpoints across two resources. The first answers "what cap applies to each member, where did it come from, and how close are they to it":
+
+<PromptCard title="Read every member's effective cap and month-to-date spend">
+{`curl "https://api.anthropic.com/v1/organizations/spend_limits/effective?limit=20" \\
+  --header "x-api-key: $ANTHROPIC_ADMIN_KEY" \\
+  --header "anthropic-version: 2023-06-01"
+
+# Each row carries:
+#   amount                -> the effective cap, in MINOR UNITS ("50000" = $500.00)
+#                            null = unlimited;  "0" = included plan usage only
+#   source.type           -> user | seat_tier | rbac_group | organization
+#   period_to_date_spend  -> spend since the period started, same minor-unit format
+#   spend_limit_id        -> the configured row this resolved from
+#
+# Requires an Admin API key with the read:spend_limits scope.`}
+</PromptCard>
+
+Four details in there that will cost you an afternoon if you miss them:
+
+- **Amounts are decimal strings in minor units** of the billing currency. `"50000"` is $500.00. Parse as a decimal and divide by 100 — the docs explicitly warn against binary floating point for large values.
+- **`null` and `"0"` are not the same.** On a member's effective row, `null` means *unlimited*; `"0"` means the member cannot use Claude beyond their plan's included usage. Treat `"0"` as already at-limit.
+- **`period_to_date_spend` can read `"0"` when the reading is simply unavailable.** The docs call it informational, not transactional — so do not build a gate that treats a zero reading as "no spend."
+- **A group limit is a per-member default, not a pooled budget.** Each member inheriting it is gated against their own spend.
+
+The second resource is a review queue. When a member clicks "Request more usage" in claude.ai, a spend-limit increase request appears; you can list pending ones, and each carries a live `spend_summary` with that member's current cap and period-to-date spend, so a policy engine can decide without a second lookup. Approving writes the new per-user cap in the same call. Two asymmetries to know: setting a limit directly with `POST /spend_limits` does **not** resolve a pending request (use the approve endpoint), and all eight endpoints share one 60-requests-per-minute budget per organization.
+
+You can only write **per-user overrides** through this API. Seat-tier, group and organization defaults are configured in claude.ai settings. And the API is Enterprise-only — it is not available to Claude Platform (Console) organizations.
+
+For reporting rather than enforcement, the Admin API's cost report is the companion: `GET /v1/organizations/cost_report` returns daily buckets (default `1d`, at most 31 per page) with amounts in minor units, groupable by `description` or `workspace_id` and broken out by `cost_type` — `tokens`, `web_search`, `code_execution`, `session_usage`. That last split is how you find out that your bill is not mostly inference.
+
+## Put a ceiling under a project
+
+<Steps items={[
+  {
+    "title": "Decide the number that would actually hurt — then cap below it",
+    "body": "Pick the figure at which you would want everything to stop, and set the cap 20-25% under it. That margin absorbs reporting lag and in-flight requests. Write the number down somewhere a future teammate will find it, because an unexplained cap gets raised during the first incident."
+  },
+  {
+    "title": "Set the provider-level cap first — it is the only one that cannot be bypassed",
+    "body": "On Anthropic: Settings > Billing > Spend limits > Adjust limit, below your tier cap. On OpenAI: configure a hard spend limit on the organization, and a tighter one on the project. On OpenRouter: the prepaid balance IS the cap, so top up small and set a per-key credit limit with a reset schedule. Gateway and application limits are defence in depth; this layer is the wall."
+  },
+  {
+    "title": "Give every risky workload its own key and its own workspace",
+    "body": "A cap you share with production is a cap you will raise under pressure. On Anthropic, create a workspace per workload with its own spend and rate limits (not the default workspace — it cannot take limits). Elsewhere, one API key per workload, each with its own ceiling."
+  },
+  {
+    "title": "Teach your client to recognise a budget wall",
+    "body": "Add the classifier from earlier on this page. Specifically: stop retrying on a 429 with no retry-after, and stop treating a 400 as a code bug when its message starts 'You have reached your specified API usage limits'. Log a distinct event type for budget walls so they show up as incidents rather than as noise in your 4xx rate."
+  },
+  {
+    "title": "Add a pre-flight budget at the gateway if agents are involved",
+    "body": "Put LiteLLM (or an equivalent) in front and set max_budget with a budget_duration per key, user and team. Budget reservation is on by default: it holds the estimated maximum cost before the provider is called and reconciles to actual afterwards, which is what stops a burst of concurrent agent calls from collectively blowing past a limit that each one individually respected."
+  },
+  {
+    "title": "Cap the infrastructure too, not just the model",
+    "body": "The model API is rarely the whole bill. On Google Cloud, create a spend cap budget for the specific project and service. On AWS, set the project spend limit if your account is eligible. Then check what is NOT covered — on GCP, persistent compute and storage keep accruing while a cap is enforced."
+  },
+  {
+    "title": "Keep the soft caps, and test the hard one",
+    "body": "Set alerts at 50/75/90% as well. Then verify the wall exists: set a throwaway key's cap to a few cents, run traffic through it, and read the actual status code, headers and body your stack receives. A cap you have never seen fire is a belief, not a control."
+  }
+]} />
+
+## The cloud layer, and what it does not cover
+
+Google Cloud shipped **spend cap budgets** in its July 27, 2026 billing release notes — in Preview, with notably little fanfare for a feature that topped billing feature requests for a decade. The mechanics are worth reading closely, because the scope is narrower than "a hard cap on Google Cloud":
+
+- **Eligible services are a short list** — as documented: Gemini API, Gemini Enterprise Agent Platform, Cloud Run, and Cloud Run functions. Check the current list before you rely on it; a cap on a service that is not eligible does not exist.
+- **One cap covers one project × one service.** Not an account-wide killswitch.
+- **Monthly periods only.**
+- **It does not auto-resume.** *"When a spend cap is enforced, the usage block is reversed only when you manually lift the spend cap"* — and services can take up to an hour to fully resume afterwards. For a production service, that is a deliberate outage you are choosing over a deliberate bill. Decide which one you want *before* you set the cap.
+- **Persistent resources keep charging.** Fixed usage tied to compute and storage stays active and keeps accruing. The cap stops new requests, not your running infrastructure.
+- **Subscription costs are excluded** — Gemini Enterprise licences, for example.
+
+AWS went the other way and attacked the problem at signup. Reported on September 17, 2026, new AWS accounts arrive structured as a *project*, start with $100 in Free Tier credits, and on moving to paid get a monthly spend limit per project starting at $20, with AWS suggesting a figure from prior usage. At the limit the project is paused rather than accruing charges, and it resumes when the owner raises the cap. Two caveats: the rollout is gradual and covers **new customers only**, and what a paused project does to a live public endpoint is not spelled out — which, for anything user-facing, is the question you need answered first.
+
+<VerifyNote lastVerified="2026-10-05" source="docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps and Cloud Billing release notes (2026-07-27); helpnetsecurity.com/2026/09/17/aws-spend-limit-agent-set-permissions/" />
+
+## What caps will not save you from
+
+A hard cap is a ceiling on *metered usage* at *one layer*. Four things routinely sit outside it:
+
+**Seats and subscriptions.** Per-seat licences and plan fees are not metered usage and are not capped by a usage cap.
+
+**Persistent infrastructure.** Idle GPU instances, provisioned databases and storage keep billing while your API cap is enforced. The agent stopped; the machine it was running on did not.
+
+**Coding agents on their own clock.** Claude Code exports cost telemetry — `claude_code.cost.usage` in USD and `claude_code.token.usage` in tokens, both incremented after each API request, attributed by model, query source (main / subagent / auxiliary), speed and effort. That is genuinely good observability, and it enforces nothing: the metrics are read-only exports emitted *after* each request completes. The enforcement has to live at the API or gateway layer underneath. Set a Claude Code workspace limit, and remember that workspace is checked separately from the rest of your organization.
+
+**The gap between layers.** A gateway budget does not help if a service can reach the provider directly. The provider-level cap is the only one that cannot be routed around — which is why it goes first.
+
+<Quiz questions={[
+  {
+    "q": "Your Anthropic client starts receiving HTTP 429 with error type rate_limit_error, but no retry-after header. What is the most likely cause, and what should the client do?",
+    "options": [
+      "An ordinary rate limit — back off exponentially and retry",
+      "The organization crossed its monthly tier spend cap — stop retrying and page a human",
+      "A transient capacity issue — switch to a smaller model and retry",
+      "A malformed request — fix the payload"
+    ],
+    "answer": 1,
+    "explain": "A 429 with no retry-after is Anthropic's tier spend cap. The docs state that retrying, including the SDK's automatic retries, fails until access resumes — which is 00:00 UTC on the first of the next month unless the limit is raised. Confirm with error.details.error_code == enforced_spend_limit_reached."
+  },
+  {
+    "q": "You set your own spend limit in the Anthropic Console, below your tier cap. What does the API return once you cross it?",
+    "options": [
+      "HTTP 429 with a retry-after header",
+      "HTTP 402 Payment Required",
+      "HTTP 400 with type invalid_request_error",
+      "HTTP 503 until the next billing period"
+    ],
+    "answer": 2,
+    "explain": "A limit you configure yourself returns HTTP 400 with invalid_request_error and a message beginning 'You have reached your specified API usage limits'. That is the opposite of most retry heuristics, which treat 4xx-other-than-429 as a permanent client bug — so your own cap can be swallowed silently unless you special-case the message."
+  },
+  {
+    "q": "Why do all the hard caps on the market fire on estimated rather than billed cost?",
+    "options": [
+      "To let vendors round in their own favour",
+      "Because billing pipelines lag minutes to hours, and a cap that waited for them could not stop a fast burn",
+      "Because token counts are not knowable until the invoice is cut",
+      "It is a Preview limitation that will be removed at GA"
+    ],
+    "answer": 1,
+    "explain": "Rating, discounting and reconciliation take time. Google Cloud says it uses 'gross, estimated costs' specifically 'for faster enforcement', and warns enforcement is not instantaneous and that overages are billed as normal. The practical response is to set the cap below your real ceiling."
+  },
+  {
+    "q": "Which Anthropic usage tier has no default monthly spend cap?",
+    "options": ["Start", "Build", "Scale", "Custom"],
+    "answer": 3,
+    "explain": "Start ($500), Build ($1,000) and Scale ($200,000) each carry a monthly cap. Custom-tier organizations have none — limits are arranged with their account team. The default net disappears exactly where the spend is largest, so an explicitly configured limit stops being optional."
+  },
+  {
+    "q": "What makes LiteLLM's budget reservation structurally stronger than measuring spend after each call?",
+    "options": [
+      "It queries the provider's billing API before every request",
+      "It estimates the maximum cost, holds it against the budget before the provider is called, then reconciles to actual",
+      "It caches responses so repeated calls are free",
+      "It blocks all concurrency so only one request is ever in flight"
+    ],
+    "answer": 1,
+    "explain": "Reservation is pre-flight: the estimated maximum is held against every applicable budget and the request is rejected if the reservation would breach it, with the actual cost swapped in afterwards. That is what prevents a burst of concurrent calls from collectively exceeding a limit each one individually respected. It errs the other way — it can refuse a request you could have afforded."
+  },
+  {
+    "q": "A Google Cloud spend cap is enforced on your project. Which of these keeps costing you money?",
+    "options": [
+      "New Gemini API requests to that project",
+      "Provisioned compute and storage already running",
+      "Nothing — the cap stops all project charges",
+      "Only requests that were already in flight"
+    ],
+    "answer": 1,
+    "explain": "A spend cap blocks new usage of the eligible service. Google's docs state that fixed usage associated with persistent resources such as compute and storage remains active and continues to accrue charges. In-flight requests also complete. Capping the model API is not the same as capping the bill."
+  }
+]} />
+
+<Flashcards cards={[
+  { "front": "Soft cap vs hard cap — the test", "back": "If every human on the team is asleep, does the spend stop? No = soft cap (it notifies; its latency is your response time). Yes = hard cap (it blocks new requests; your code finds out via an error)." },
+  { "front": "Anthropic tier spend cap — the error shape", "back": "HTTP 429, type rate_limit_error, NO retry-after header, error.details.error_code = enforced_spend_limit_reached. Access resumes 00:00 UTC on the 1st. The docs state retries — including the SDK's automatic ones — fail until then." },
+  { "front": "Anthropic self-set spend limit — the error shape", "back": "HTTP 400, type invalid_request_error, message begins 'You have reached your specified API usage limits' (or '...specified workspace API usage limits'). A 400, not a 429 — so default retry heuristics treat your own cap as a code bug." },
+  { "front": "The portable rule for 429s", "back": "A 429 without a retry-after header is not a rate limit. Rate limits are temporary by construction and tell you how long to wait; a 429 that refuses to say is a budget wall or a quota wall." },
+  { "front": "OpenRouter — three limits, one status", "back": "Account balance, per-key credit cap, and an in-flight spending hold. Breach any and you get HTTP 402 Payment Required with error.metadata.limit_source naming which. A negative balance also blocks free models." },
+  { "front": "Anthropic tier caps", "back": "Start $500/mo · Build $1,000/mo · Scale $200,000/mo · Custom = no cap (arranged with the account team). Set your own limit below the tier cap on the Billing page." },
+  { "front": "Spend Limits API — minor units", "back": "All amounts are decimal strings in minor units of the billing currency: \"50000\" = $500.00. Parse as decimal, divide by 100; the docs warn against binary floating point for large values." },
+  { "front": "Spend Limits API — null vs \"0\"", "back": "On a member's effective row, amount null = unlimited; \"0\" = cannot use Claude beyond the plan's included usage (treat as already at-limit). On a configured row, null only means no numeric limit is set — read the effective row to tell them apart." },
+  { "front": "Why every cap is approximate", "back": "Caps fire on gross estimated cost, because billing pipelines lag minutes to hours. Enforcement is not instantaneous, in-flight requests complete, and overages are billed as normal. Set the cap 20-25% below the number that would actually hurt." },
+  { "front": "Budget reservation (pre-flight budgeting)", "back": "Estimate the request's maximum cost from the body and model pricing, hold it against every applicable budget, reject if the reservation breaches, then swap in the actual cost. LiteLLM does this by default; it is the only mechanism that holds under concurrency." },
+  { "front": "Google Cloud spend caps — the four limits", "back": "Short eligible-service list (as documented: Gemini API, Gemini Enterprise Agent Platform, Cloud Run, Cloud Run functions) · one project x one service · monthly only · manual lift only, with up to an hour to resume. Persistent compute and storage keep charging." },
+  { "front": "Claude Code cost telemetry", "back": "claude_code.cost.usage (USD) and claude_code.token.usage (tokens), incremented after each API request, attributed by model, query source (main/subagent/auxiliary), speed and effort. Observability only — it enforces nothing. Enforcement lives at the API or gateway layer." }
+]} />
+
+<Callout type="takeaways" items={[
+  "A soft cap's latency is your response time. If nobody is awake, it is not a control.",
+  "One event, four status codes: 429-without-retry-after (Anthropic tier), 400 (your own Anthropic limit), 429 (OpenAI), 402 (OpenRouter). Generic retry logic mishandles at least two.",
+  "A 429 with no retry-after header is never a rate limit. That one heuristic catches the worst failure mode — a client retrying a month-long wall.",
+  "Every cap fires on estimated cost and every vendor disclaims the overage. Cap 20-25% below the number that would actually hurt.",
+  "Anthropic's Custom tier has no default monthly cap — the safety net vanishes where the spend is biggest.",
+  "Pre-flight reservation (LiteLLM, OpenRouter's in-flight hold) is the only design that holds under concurrent agent bursts. Post-hoc measurement always overshoots.",
+  "Cap the provider first — it is the only layer that cannot be routed around. Gateway and app limits are defence in depth.",
+  "A cap you have never watched fire is a belief. Set a throwaway key to a few cents and read the real status code your stack receives."
+]} />
+
+## Next
+
+- [Why AI agents burn tokens](/docs/models/why-agents-burn-tokens) — the mechanism behind the bill these caps are catching: why an agent costs 50-1000x a chat turn
+- [What AI actually costs across providers](/docs/models/what-ai-costs-across-providers) — the pricing archetypes and how to estimate a workload before you ship it
+- [AI gateways: LiteLLM, OpenRouter, Portkey](/docs/models/ai-gateways-litellm-openrouter-portkey) — where to put the pre-flight budget, and what else a gateway buys you
+
+## Sources & further reading
+
+- [We're going to need default hard budget caps on pretty much everything — Simon Willison](https://simonwillison.net/2026/Oct/3/default-hard-budget-caps/) — the October 3, 2026 argument that framed this: hard caps as the default, uncapped billing as the opt-in
+- [Rate limits — Anthropic](https://platform.claude.com/docs/en/api/rate-limits) — the tier spend caps, the 429-without-retry-after shape and `enforced_spend_limit_reached`, the 400 returned by a self-set limit, and per-workspace limits
+- [Spend Limits API — Anthropic](https://platform.claude.com/docs/en/manage-claude/spend-limits-api) — the eight Enterprise endpoints, the scope hierarchy and `source` field, minor-unit amounts, `null` vs `"0"`, and the increase-request lifecycle
+- [Get Cost Report — Anthropic Admin API](https://platform.claude.com/docs/en/api/beta/organization/cost_report/retrieve) — daily cost buckets, `cost_type` split (tokens / web_search / code_execution / session_usage), grouping by workspace
+- [Monitoring usage — Claude Code](https://code.claude.com/docs/en/monitoring-usage) — the `claude_code.cost.usage` and `claude_code.token.usage` OpenTelemetry metrics and their attributes
+- [Rate limits — OpenAI](https://developers.openai.com/api/docs/guides/rate-limits) — hard spend limits returning 429, and the distinction between the approved monthly usage limit and the spend limits you configure
+- [Limits — OpenRouter](https://openrouter.ai/docs/api-reference/limits) — account balance, per-key caps, the in-flight spending hold, the 402 response and `limit_source`
+- [How spend cap budgets work — Google Cloud Billing](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps) — eligible services, gross estimated costs, manual lift, resume latency, and what keeps accruing
+- [Cloud Billing release notes — Google Cloud](https://docs.cloud.google.com/billing/docs/release-notes) — the July 27, 2026 spend-cap-budget entry
+- [Budgets and spend tracking — LiteLLM](https://docs.litellm.ai/docs/proxy/users) — `max_budget` and `budget_duration` across key / user / team / model, and budget reservation as pre-flight enforcement
+- [AWS's new sign-up gives accounts spend caps — Help Net Security](https://www.helpnetsecurity.com/2026/09/17/aws-spend-limit-agent-set-permissions/) — the September 2026 AWS project spend limit: new customers only, from $20/month, paused rather than accruing
+- Related: [Task budgets](/docs/api/task-budgets) · [Managed Agents session budgets](/docs/api/managed-agents-session-budgets) · [Subagent fleet limits](/docs/claude-code/subagent-fleet-limits) · [Prompt caching economics](/docs/frontiers/prompt-caching-economics)
