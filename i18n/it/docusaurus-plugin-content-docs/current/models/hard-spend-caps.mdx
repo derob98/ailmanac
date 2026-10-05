@@ -1,0 +1,341 @@
+---
+sidebar_position: 10.2
+title: "Tetti di spesa rigidi: quali provider AI fermano davvero la bolletta"
+description: "Un tetto morbido ti manda un'email. Un tetto rigido blocca la richiesta. Questa pagina mappa quali provider AI fanno cosa — e la trappola che nessuno documenta: lo stesso evento (hai raggiunto il tuo tetto) restituisce HTTP 429 senza retry-after sul tetto di tier di Anthropic, HTTP 400 sul limite che imposti tu, 429 su OpenAI e 402 su OpenRouter. Più il perché nessun tetto può essere esatto, dove il tier Custom perde la sua rete di sicurezza, e come costruire un killswitch pre-flight."
+keywords: [hard spend cap, AI budget cap, API spend limit, Anthropic spend limit, enforced_spend_limit_reached, OpenAI hard spend limit, OpenRouter credit limit, Google Cloud spend cap, AWS spend limit, LiteLLM max_budget, agent cost control, runaway agent cost, killswitch, Spend Limits API]
+---
+
+<LevelBadge level="intermediate" />
+
+Il 3 ottobre 2026 Simon Willison ha pubblicato un breve argomento che è finito in prima pagina su Hacker News con 615 punti: i servizi fatturati a consumo hanno bisogno di tetti di budget **rigidi** per impostazione predefinita, con la fatturazione illimitata come opt-in esplicito. La sua formulazione è quella che conta — *"Nessuno vuole svegliarsi con un'email inviata a mezzanotte che avvisa di un limite di budget e scoprire che, mentre dormiva, il suo servizio impazzito ha consumato diverse centinaia (o diverse migliaia) di dollari in più."*
+
+Il motivo per cui questo è diventato un argomento del 2026 e non del 2015 è che gli agenti hanno cambiato la forma del rischio. Un umano che configura male un cron job è una perdita lenta. Un agente che riprova in loop una chiamata di tool che fallisce, o che genera subagenti che generano subagenti, è una perdita con un modello dietro — e gira a velocità macchina mentre tu dormi.
+
+La buona notizia: negli ultimi quattro mesi la maggior parte dello stack si è silenziosamente dotata di tetti veri. La cattiva notizia è l'argomento reale di questa pagina — **i tetti esistono, ma si annunciano con quattro codici di stato HTTP diversi, e almeno due di essi verranno ingoiati dalla logica di retry che hai già scritto.**
+
+<Callout type="objectives" items={[
+  "Distinguere un tetto morbido (un'email) da un tetto rigido (una richiesta bloccata) — e sapere quale dei due ti dà ciascun provider",
+  "Gestire le quattro diverse forme di errore che un tetto di spesa può restituire, inclusa quella che arriva come un 400 che la tua logica di retry tratta come un bug",
+  "Capire perché nessun tetto sul mercato può essere esatto, e perché ogni vendor declina ogni responsabilità sullo sforamento",
+  "Sapere dove scompare la rete di sicurezza predefinita di Anthropic, e con cosa la rimpiazza la Spend Limits API Enterprise",
+  "Mettere un tetto reale sotto un nuovo progetto in circa venti minuti, al livello che blocca davvero"
+]} />
+
+## Tetto morbido vs tetto rigido: l'unica distinzione che conta
+
+Togli il marketing e ogni controllo di spesa è una di due cose.
+
+Un **tetto morbido** osserva. Guarda un segnale di costo, lo confronta col tuo numero e notifica — email, webhook, badge nella dashboard. Il traffico continua a scorrere. AWS Budgets, la dashboard di utilizzo di Anthropic e ogni "avviso di fatturazione" che hai mai configurato sono tetti morbidi. Sono genuinamente utili, e non sono protezione: l'unico effetto di un tetto morbido è dire a un umano di intervenire, il che significa che la sua latenza è il *tuo* tempo di risposta, non quello del sistema.
+
+Un **tetto rigido** impone. Blocca le nuove richieste al limite. Il tuo codice lo scopre attraverso un errore, non attraverso la casella di posta.
+
+Il test pratico: *se ogni persona del team dorme, la spesa si ferma?* Se la risposta è no, è un tetto morbido, qualunque cosa dica l'interfaccia.
+
+Tutto quello che segue riguarda i tetti rigidi. Tieni comunque i tuoi tetti morbidi — un tetto che scatta è un incidente, e vuoi l'avviso al 60% oltre al blocco al 100%.
+
+## Quali provider bloccano davvero
+
+| Provider / livello | Tetto rigido? | Ambito | Cosa ottieni quando scatta |
+| --- | --- | --- | --- |
+| **Anthropic — tetto di tier** | Sì, per impostazione predefinita | Organizzazione, mensile | HTTP 429, `rate_limit_error`, **nessun `retry-after`**, `details.error_code: enforced_spend_limit_reached` |
+| **Anthropic — limite che imposti tu** | Sì, opt-in | Organizzazione o workspace | HTTP **400**, `invalid_request_error`, messaggio che inizia con "You have reached your specified API usage limits" |
+| **Anthropic — workspace Claude Code** | Sì | Quel workspace | Verificato separatamente; può restituire un 429 che **invece** porta `retry-after` |
+| **OpenAI — hard spend limit** | Sì, opt-in | Organizzazione e/o progetto | HTTP 429 |
+| **OpenRouter — crediti / tetto per chiave** | Sì, strutturalmente | Saldo dell'account, per chiave | HTTP **402**, con `error.metadata.limit_source` |
+| **Google Cloud — spend cap budget** | Sì, opt-in (Preview) | Un progetto × un servizio | Nuovo utilizzo per quel servizio bloccato fino a rimozione manuale |
+| **AWS — project spend limit** | Sì, nuovi account | Per progetto | Progetto messo in pausa invece di accumulare ulteriori addebiti |
+| **LiteLLM / gateway self-hosted** | Sì, pre-flight | Chiave, utente, team, modello | Errore in forma di auth, sollevato *prima* che il provider venga chiamato |
+| **Telemetria di Claude Code** | No | — | Solo osservabilità; esporta il costo, non impone nulla |
+
+<VerifyNote lastVerified="2026-10-05" source="Anthropic rate limits & Spend Limits API docs; OpenAI API rate-limits guide; OpenRouter limits reference; Google Cloud Billing spend-cap docs & July 27 2026 release note; LiteLLM proxy docs; Help Net Security on the AWS launch" />
+
+## La trappola: quattro codici di stato, un solo evento
+
+Questa è la parte documentata in quattro posti separati e assemblata in nessuno, ed è la cosa che più probabilmente ti morderà.
+
+Leggi con attenzione il comportamento di Anthropic, perché sono due comportamenti diversi.
+
+Quando superi il tetto mensile del tuo **tier**, l'API restituisce HTTP 429 con tipo di errore `rate_limit_error` — lo stesso tipo di un normale rate limit — ma **senza header `retry-after`**. La documentazione di Anthropic è esplicita sulle conseguenze: *"Riprovare, inclusi i retry automatici dell'SDK, fallisce finché l'accesso non riprende."* L'accesso riprende alle 00:00 UTC del primo giorno del mese successivo, a meno che non alzi il limite. Quindi un client ben educato con backoff esponenziale resterà in un loop di retry per un massimo di 31 giorni, loggando errori che sembrano transitori. Il campo distintivo è `error.details.error_code`, che vale `enforced_spend_limit_reached`.
+
+Quando superi un limite configurato da **te** — di organizzazione o di workspace — l'API restituisce HTTP **400** con tipo `invalid_request_error`. Questo ribalta l'assunzione abituale: un 400 significa "la tua richiesta era malformata, non riprovare", quindi la maggior parte dei client lo logga come bug e poi va in crash o scarta silenziosamente il lavoro. Non è un bug: è il tuo stesso tetto che fa il suo mestiere.
+
+E il workspace di Claude Code viene verificato ancora separatamente: le richieste oltre il limite di quel workspace possono ricevere un 429 che *invece* porta `retry-after`.
+
+OpenRouter prende la terza strada. Poiché il modello è a crediti prepagati, esaurirli è un problema di pagamento, quindi restituisce HTTP **402 Payment Required**, con `error.metadata.limit_source` che nomina quale dei tre limiti hai raggiunto — saldo dell'account, tetto per chiave o la riserva di budget in volo. Un dettaglio che vale conoscere: quando il saldo dell'account va in negativo, anche le richieste ai modelli **gratuiti** falliscono.
+
+La documentazione di OpenAI afferma che le richieste colpite da un hard spend limit restituiscono un `429`. Non indica una latenza di applicazione, e distingue due cose facili da confondere: il limite di utilizzo mensile approvato che OpenAI imposta per la tua organizzazione, e i limiti di spesa che configuri tu su un'organizzazione o su un progetto. Entrambi possono applicarsi a una singola richiesta, quindi un progetto con margine può comunque essere bloccato dal tetto dell'organizzazione sopra di lui.
+
+Quattro forme per un solo evento. Il che significa che l'handler che ti serve non è "riprova sul 429".
+
+<PromptCard title="Classifica un errore di tetto invece di riprovare">
+{`# The three signals that mean "stop, this is a budget wall" — not "wait and retry"
+#
+#   Anthropic tier cap   -> 429, type=rate_limit_error, NO retry-after,
+#                           error.details.error_code == "enforced_spend_limit_reached"
+#   Anthropic own limit  -> 400, type=invalid_request_error,
+#                           message startswith "You have reached your specified API usage limits"
+#   OpenRouter           -> 402, error.metadata.limit_source present
+#   OpenAI hard limit    -> 429  (no documented discriminator field)
+
+def is_budget_wall(status, body, headers):
+    err = (body or {}).get("error", {}) or {}
+    detail_code = (err.get("details") or {}).get("error_code")
+
+    if status == 429 and detail_code == "enforced_spend_limit_reached":
+        return True                      # month-long wall; do NOT back off
+    if status == 429 and "retry-after" not in {k.lower() for k in headers}:
+        return True                      # 429 with no retry-after is not a rate limit
+    if status == 400 and err.get("message", "").startswith(
+        "You have reached your specified API usage limits"
+    ):
+        return True                      # your own cap, wearing a 400
+    if status == 402 and (err.get("metadata") or {}).get("limit_source"):
+        return True                      # prepaid balance or key cap
+
+    return False
+
+# Page a human, mark the work as blocked, and stop the loop.
+# Retrying a budget wall just burns your own CPU until the first of the month.`}
+</PromptCard>
+
+La regola generale che sopravvive al refactor di qualunque provider: **un 429 senza header `retry-after` non è un rate limit.** I rate limit sono temporanei per costruzione e ti dicono quanto aspettare. Un 429 che si rifiuta di dirti quanto aspettare è un altro animale.
+
+## Perché nessun tetto può essere esatto — e perché non è pigrizia
+
+Ogni tetto rigido sul mercato scatta sul costo *stimato*, non su quello fatturato. Sembra una scorciatoia e in realtà è l'unico design praticabile: una pipeline di fatturazione che aggrega, tariffa, applica sconti e riconcilia l'utilizzo richiede da minuti a ore. Un tetto che la aspettasse sarebbe inutile proprio contro la modalità di fallimento per cui esiste.
+
+Google Cloud dichiara il compromesso senza giri di parole: *"Per un'applicazione più rapida, gli spend cap usano costi lordi e stimati per innescare gli avvisi e applicare il tetto di spesa"* — e poi, onestamente, *"A causa della latenza nella rendicontazione di utilizzo e costi, l'applicazione dello spend cap non è istantanea. Considera di impostare il tuo budget leggermente sotto il tuo limite assoluto."* E la responsabilità: *"eventuali sforamenti di costo vengono fatturati normalmente."* Resti responsabile di quello che sfugge durante il ritardo di rendicontazione.
+
+Tre conseguenze su cui dovresti progettare:
+
+**Imposta il tetto sotto il tuo tetto reale.** Se 500 $ è il numero che fa davvero male, metti il tetto a 400 $. Il divario è il tuo budget di sforamento. Quanto deve essere ampio dipende dal tuo picco di consumo, non dal provider — una flotta di agenti che può spendere 50 $/minuto ha bisogno di un margine più largo di un'app di chat che spende 50 $/giorno.
+
+**Le richieste in volo si completano.** Un tetto blocca il *nuovo* utilizzo. Tutto ciò che è già in volo finisce e viene fatturato. Con turni di agente di lunga durata questo non è un errore di arrotondamento.
+
+**Il pre-flight batte il post-hoc.** L'unico meccanismo che evita strutturalmente lo sforamento è riservare il costo stimato *prima* della chiamata. Il proxy di LiteLLM lo fa per impostazione predefinita: stima il costo massimo dal corpo della richiesta e dal prezzo del modello, trattiene quell'importo su ogni budget applicabile, rifiuta la richiesta se la riserva sfonderebbe il budget, poi scambia la riserva con il costo effettivo quando arriva la risposta. La riserva di budget in volo di OpenRouter è la stessa idea applicata a un saldo prepagato. Entrambe sono strettamente più forti del misurare a posteriori, ed entrambe sono approssimate nell'altra direzione — riservano in eccesso, il che significa che possono rifiutare una richiesta che potevi permetterti.
+
+## I tier di Anthropic, e dove la rete scompare
+
+Anthropic ti dà un tetto rigido tu lo chieda o no. I tier Start, Build e Scale portano ciascuno un tetto di spesa mensile — il massimo che la tua organizzazione può spendere sull'API in un mese di calendario.
+
+| Tier di utilizzo | Tetto di spesa mensile |
+| --- | --- |
+| Start | 500 $ |
+| Build | 1.000 $ |
+| Scale | 200.000 $ |
+| Custom | **Nessuno** — concordato con il tuo account team |
+
+<VerifyNote lastVerified="2026-10-05" source="platform.claude.com/docs/en/api/rate-limits — Spend limits" />
+
+Rileggi l'ultima riga. La rete di sicurezza predefinita esiste su ogni tier *tranne* quello occupato dalle organizzazioni che spendono di più. Passare a Custom rimuove il tetto automatico, il che rende un limite configurato esplicitamente obbligatorio anziché opzionale esattamente nel punto in cui le persone smettono di pensarci.
+
+Altre due cose che vale impostare mentre sei là dentro:
+
+**Imposta il tuo limite sotto il tetto di tier.** La pagina Billing accetta un numero più basso del tetto del tuo tier. È il controllo che vuoi davvero, perché lo scegli tu — e ricorda che si manifesta come un 400, non come un 429.
+
+**Usa i workspace come confini del raggio d'esplosione.** I workspace accettano i propri limiti di spesa e di rate, così un agente sperimentale e il tuo traffico di produzione non condividono un unico pool. I limiti a livello di organizzazione si applicano sempre al di sopra, anche se la somma dei limiti dei workspace è maggiore. Una restrizione: non puoi impostare limiti sul workspace predefinito — quindi non metterci nulla a cui tieni.
+
+## Il livello Enterprise: tetti per membro come API
+
+Le organizzazioni Claude Enterprise ottengono qualcosa che la Console non espone: una **Spend Limits API**, che tratta i budget per persona come una risorsa leggibile e scrivibile programmaticamente. È il pezzo di questa storia di cui si scrive a malapena da qualche parte, quindi vale sapere cosa fa.
+
+Otto endpoint su due risorse. La prima risponde a "quale tetto si applica a ciascun membro, da dove viene, e quanto ci è vicino":
+
+<PromptCard title="Leggi il tetto effettivo e la spesa del mese in corso di ogni membro">
+{`curl "https://api.anthropic.com/v1/organizations/spend_limits/effective?limit=20" \\
+  --header "x-api-key: $ANTHROPIC_ADMIN_KEY" \\
+  --header "anthropic-version: 2023-06-01"
+
+# Each row carries:
+#   amount                -> the effective cap, in MINOR UNITS ("50000" = $500.00)
+#                            null = unlimited;  "0" = included plan usage only
+#   source.type           -> user | seat_tier | rbac_group | organization
+#   period_to_date_spend  -> spend since the period started, same minor-unit format
+#   spend_limit_id        -> the configured row this resolved from
+#
+# Requires an Admin API key with the read:spend_limits scope.`}
+</PromptCard>
+
+Quattro dettagli lì dentro che ti costeranno un pomeriggio se li manchi:
+
+- **Gli importi sono stringhe decimali in unità minori** della valuta di fatturazione. `"50000"` è 500,00 $. Interpretali come decimale e dividi per 100 — la documentazione avverte esplicitamente contro la virgola mobile binaria per valori grandi.
+- **`null` e `"0"` non sono la stessa cosa.** Nella riga effettiva di un membro, `null` significa *illimitato*; `"0"` significa che il membro non può usare Claude oltre l'utilizzo incluso nel suo piano. Tratta `"0"` come già a limite.
+- **`period_to_date_spend` può valere `"0"` quando semplicemente la lettura non è disponibile.** La documentazione lo definisce informativo, non transazionale — quindi non costruire un gate che tratti una lettura a zero come "nessuna spesa".
+- **Un limite di gruppo è un valore predefinito per membro, non un budget condiviso.** Ogni membro che lo erediti viene valutato contro la propria spesa.
+
+La seconda risorsa è una coda di revisione. Quando un membro clicca "Request more usage" su claude.ai, compare una richiesta di aumento del limite di spesa; puoi elencare quelle in sospeso, e ciascuna porta uno `spend_summary` aggiornato con il tetto attuale di quel membro e la spesa del periodo in corso, così un motore di policy può decidere senza una seconda lettura. Approvare scrive il nuovo tetto per utente nella stessa chiamata. Due asimmetrie da conoscere: impostare un limite direttamente con `POST /spend_limits` **non** risolve una richiesta in sospeso (usa l'endpoint di approvazione), e tutti e otto gli endpoint condividono un unico budget di 60 richieste al minuto per organizzazione.
+
+Attraverso questa API puoi scrivere solo **override per utente**. I valori predefiniti per livello di postazione, per gruppo e per organizzazione si configurano nelle impostazioni di claude.ai. E l'API è solo Enterprise — non è disponibile per le organizzazioni Claude Platform (Console).
+
+Per la rendicontazione anziché per l'applicazione, il companion è il cost report dell'Admin API: `GET /v1/organizations/cost_report` restituisce bucket giornalieri (predefinito `1d`, al massimo 31 per pagina) con importi in unità minori, raggruppabili per `description` o `workspace_id` e suddivisi per `cost_type` — `tokens`, `web_search`, `code_execution`, `session_usage`. Quest'ultima suddivisione è il modo in cui scopri che la tua bolletta non è fatta soprattutto di inferenza.
+
+## Metti un tetto sotto un progetto
+
+<Steps items={[
+  {
+    "title": "Decidi il numero che farebbe davvero male — poi metti il tetto sotto",
+    "body": "Scegli la cifra alla quale vorresti che tutto si fermasse, e imposta il tetto il 20-25% sotto. Quel margine assorbe il ritardo di rendicontazione e le richieste in volo. Scrivi il numero da qualche parte dove un futuro collega lo troverà, perché un tetto inspiegato viene alzato al primo incidente."
+  },
+  {
+    "title": "Imposta prima il tetto a livello di provider — è l'unico che non si può scavalcare",
+    "body": "Su Anthropic: Settings > Billing > Spend limits > Adjust limit, sotto il tetto del tuo tier. Su OpenAI: configura un hard spend limit sull'organizzazione, e uno più stretto sul progetto. Su OpenRouter: il saldo prepagato È il tetto, quindi ricarica poco e imposta un limite di credito per chiave con una pianificazione di reset. I limiti di gateway e di applicazione sono difesa in profondità; questo livello è il muro."
+  },
+  {
+    "title": "Dai a ogni carico di lavoro rischioso la sua chiave e il suo workspace",
+    "body": "Un tetto che condividi con la produzione è un tetto che alzerai sotto pressione. Su Anthropic, crea un workspace per carico di lavoro con i suoi limiti di spesa e di rate (non il workspace predefinito — non accetta limiti). Altrove, una chiave API per carico di lavoro, ciascuna con il proprio tetto."
+  },
+  {
+    "title": "Insegna al tuo client a riconoscere un muro di budget",
+    "body": "Aggiungi il classificatore visto prima in questa pagina. In particolare: smetti di riprovare su un 429 senza retry-after, e smetti di trattare un 400 come un bug di codice quando il suo messaggio inizia con 'You have reached your specified API usage limits'. Logga un tipo di evento distinto per i muri di budget, così si presentano come incidenti e non come rumore nel tuo tasso di 4xx."
+  },
+  {
+    "title": "Aggiungi un budget pre-flight al gateway se ci sono agenti in gioco",
+    "body": "Metti LiteLLM (o un equivalente) davanti e imposta max_budget con un budget_duration per chiave, utente e team. La riserva di budget è attiva per impostazione predefinita: trattiene il costo massimo stimato prima che il provider venga chiamato e riconcilia con l'effettivo dopo, ed è questo che impedisce a una raffica di chiamate di agenti concorrenti di sfondare collettivamente un limite che ciascuna rispettava individualmente."
+  },
+  {
+    "title": "Metti un tetto anche all'infrastruttura, non solo al modello",
+    "body": "L'API del modello è raramente tutta la bolletta. Su Google Cloud, crea uno spend cap budget per il progetto e il servizio specifici. Su AWS, imposta il project spend limit se il tuo account è eleggibile. Poi controlla cosa NON è coperto — su GCP, calcolo e storage persistenti continuano ad accumulare mentre un tetto è applicato."
+  },
+  {
+    "title": "Tieni i tetti morbidi, e testa quello rigido",
+    "body": "Imposta avvisi anche al 50/75/90%. Poi verifica che il muro esista: imposta il tetto di una chiave usa-e-getta a pochi centesimi, fai passare traffico attraverso di essa e leggi il codice di stato, gli header e il corpo reali che il tuo stack riceve. Un tetto che non hai mai visto scattare è una credenza, non un controllo."
+  }
+]} />
+
+## Il livello cloud, e cosa non copre
+
+Google Cloud ha rilasciato gli **spend cap budget** nelle note di rilascio di fatturazione del 27 luglio 2026 — in Preview, con notevolmente poca fanfara per una funzionalità in testa alle richieste sulla fatturazione da un decennio. I meccanismi vanno letti con attenzione, perché l'ambito è più stretto di "un tetto rigido su Google Cloud":
+
+- **I servizi eleggibili sono un elenco breve** — come documentato: Gemini API, Gemini Enterprise Agent Platform, Cloud Run e le funzioni Cloud Run. Controlla l'elenco attuale prima di farci affidamento; un tetto su un servizio non eleggibile non esiste.
+- **Un tetto copre un progetto × un servizio.** Non è un killswitch per l'intero account.
+- **Solo periodi mensili.**
+- **Non riprende automaticamente.** *"Quando uno spend cap è applicato, il blocco dell'utilizzo viene revocato solo quando rimuovi manualmente lo spend cap"* — e i servizi possono richiedere fino a un'ora per riprendere completamente. Per un servizio di produzione, è un'interruzione deliberata che stai scegliendo al posto di una bolletta deliberata. Decidi quale dei due vuoi *prima* di impostare il tetto.
+- **Le risorse persistenti continuano ad addebitare.** L'utilizzo fisso legato a calcolo e storage resta attivo e continua ad accumulare. Il tetto ferma le nuove richieste, non la tua infrastruttura in esecuzione.
+- **I costi di abbonamento sono esclusi** — le licenze Gemini Enterprise, per esempio.
+
+AWS ha preso la direzione opposta e ha attaccato il problema all'iscrizione. Riportato il 17 settembre 2026: i nuovi account AWS nascono strutturati come un *progetto*, partono con 100 $ di crediti Free Tier e, passando al piano a pagamento, ottengono un limite di spesa mensile per progetto che parte da 20 $, con AWS che suggerisce una cifra basata sull'utilizzo precedente. Al limite il progetto viene messo in pausa invece di accumulare addebiti, e riprende quando il proprietario alza il tetto. Due avvertenze: il rollout è graduale e copre **solo i nuovi clienti**, e cosa faccia un progetto in pausa a un endpoint pubblico attivo non è specificato — che, per qualunque cosa esposta agli utenti, è la domanda a cui ti serve una risposta per prima.
+
+<VerifyNote lastVerified="2026-10-05" source="docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps and Cloud Billing release notes (2026-07-27); helpnetsecurity.com/2026/09/17/aws-spend-limit-agent-set-permissions/" />
+
+## Da cosa i tetti non ti salveranno
+
+Un tetto rigido è un limite sull'*utilizzo misurato* a *un livello*. Quattro cose si collocano regolarmente al di fuori:
+
+**Postazioni e abbonamenti.** Le licenze per postazione e i costi di piano non sono utilizzo misurato e non vengono limitati da un tetto di utilizzo.
+
+**Infrastruttura persistente.** Istanze GPU inattive, database provisionati e storage continuano a fatturare mentre il tuo tetto API è applicato. L'agente si è fermato; la macchina su cui girava no.
+
+**Gli agenti di coding sul loro orologio.** Claude Code esporta telemetria di costo — `claude_code.cost.usage` in USD e `claude_code.token.usage` in token, entrambi incrementati dopo ogni richiesta API, attribuiti per modello, origine della query (main / subagent / auxiliary), velocità e sforzo. È osservabilità genuinamente buona, e non impone nulla: le metriche sono export in sola lettura emessi *dopo* il completamento di ogni richiesta. L'applicazione deve vivere al livello API o gateway sottostante. Imposta un limite sul workspace Claude Code, e ricorda che quel workspace viene verificato separatamente dal resto della tua organizzazione.
+
+**Il divario tra i livelli.** Un budget di gateway non aiuta se un servizio può raggiungere il provider direttamente. Il tetto a livello di provider è l'unico che non si può aggirare — ed è per questo che viene prima.
+
+<Quiz questions={[
+  {
+    "q": "Il tuo client Anthropic inizia a ricevere HTTP 429 con tipo di errore rate_limit_error, ma senza header retry-after. Qual è la causa più probabile, e cosa dovrebbe fare il client?",
+    "options": [
+      "Un normale rate limit — fai backoff esponenziale e riprova",
+      "L'organizzazione ha superato il tetto di spesa mensile del suo tier — smetti di riprovare e allerta una persona",
+      "Un problema transitorio di capacità — passa a un modello più piccolo e riprova",
+      "Una richiesta malformata — correggi il payload"
+    ],
+    "answer": 1,
+    "explain": "Un 429 senza retry-after è il tetto di spesa di tier di Anthropic. La documentazione afferma che riprovare, inclusi i retry automatici dell'SDK, fallisce finché l'accesso non riprende — cioè alle 00:00 UTC del primo del mese successivo, a meno che il limite non venga alzato. Conferma con error.details.error_code == enforced_spend_limit_reached."
+  },
+  {
+    "q": "Imposti il tuo limite di spesa nella Console Anthropic, sotto il tetto del tuo tier. Cosa restituisce l'API quando lo superi?",
+    "options": [
+      "HTTP 429 con un header retry-after",
+      "HTTP 402 Payment Required",
+      "HTTP 400 con tipo invalid_request_error",
+      "HTTP 503 fino al prossimo periodo di fatturazione"
+    ],
+    "answer": 2,
+    "explain": "Un limite che configuri tu restituisce HTTP 400 con invalid_request_error e un messaggio che inizia con 'You have reached your specified API usage limits'. È l'opposto della maggior parte delle euristiche di retry, che trattano i 4xx diversi dal 429 come un bug permanente del client — quindi il tuo stesso tetto può essere ingoiato in silenzio se non gestisci il messaggio come caso speciale."
+  },
+  {
+    "q": "Perché tutti i tetti rigidi sul mercato scattano sul costo stimato anziché su quello fatturato?",
+    "options": [
+      "Per permettere ai vendor di arrotondare a proprio favore",
+      "Perché le pipeline di fatturazione hanno un ritardo da minuti a ore, e un tetto che le aspettasse non potrebbe fermare un consumo rapido",
+      "Perché i conteggi di token non sono conoscibili fino all'emissione della fattura",
+      "È una limitazione della Preview che verrà rimossa alla disponibilità generale"
+    ],
+    "answer": 1,
+    "explain": "Tariffazione, sconti e riconciliazione richiedono tempo. Google Cloud dichiara di usare 'costi lordi e stimati' specificamente 'per un'applicazione più rapida', e avverte che l'applicazione non è istantanea e che gli sforamenti vengono fatturati normalmente. La risposta pratica è impostare il tetto sotto il tuo tetto reale."
+  },
+  {
+    "q": "Quale tier di utilizzo Anthropic non ha un tetto di spesa mensile predefinito?",
+    "options": ["Start", "Build", "Scale", "Custom"],
+    "answer": 3,
+    "explain": "Start (500 $), Build (1.000 $) e Scale (200.000 $) portano ciascuno un tetto mensile. Le organizzazioni di tier Custom non ne hanno nessuno — i limiti si concordano con il loro account team. La rete predefinita scompare esattamente dove la spesa è più grande, quindi un limite configurato esplicitamente smette di essere opzionale."
+  },
+  {
+    "q": "Cosa rende la riserva di budget di LiteLLM strutturalmente più forte del misurare la spesa dopo ogni chiamata?",
+    "options": [
+      "Interroga l'API di fatturazione del provider prima di ogni richiesta",
+      "Stima il costo massimo, lo trattiene sul budget prima che il provider venga chiamato, poi riconcilia con l'effettivo",
+      "Mette in cache le risposte, così le chiamate ripetute sono gratuite",
+      "Blocca ogni concorrenza, così c'è sempre una sola richiesta in volo"
+    ],
+    "answer": 1,
+    "explain": "La riserva è pre-flight: il massimo stimato viene trattenuto su ogni budget applicabile e la richiesta viene rifiutata se la riserva lo sfonderebbe, con il costo effettivo sostituito dopo. È questo che impedisce a una raffica di chiamate concorrenti di superare collettivamente un limite che ciascuna rispettava individualmente. Sbaglia nell'altra direzione — può rifiutare una richiesta che potevi permetterti."
+  },
+  {
+    "q": "Uno spend cap di Google Cloud è applicato sul tuo progetto. Quale di queste cose continua a costarti soldi?",
+    "options": [
+      "Nuove richieste Gemini API verso quel progetto",
+      "Calcolo e storage provisionati già in esecuzione",
+      "Niente — il tetto ferma tutti gli addebiti del progetto",
+      "Solo le richieste che erano già in volo"
+    ],
+    "answer": 1,
+    "explain": "Uno spend cap blocca il nuovo utilizzo del servizio eleggibile. La documentazione di Google afferma che l'utilizzo fisso associato a risorse persistenti come calcolo e storage resta attivo e continua ad accumulare addebiti. Anche le richieste in volo si completano. Mettere un tetto all'API del modello non è la stessa cosa che metterlo alla bolletta."
+  }
+]} />
+
+<Flashcards cards={[
+  { "front": "Tetto morbido vs tetto rigido — il test", "back": "Se ogni persona del team dorme, la spesa si ferma? No = tetto morbido (notifica; la sua latenza è il tuo tempo di risposta). Sì = tetto rigido (blocca le nuove richieste; il tuo codice lo scopre via errore)." },
+  { "front": "Tetto di spesa di tier Anthropic — la forma dell'errore", "back": "HTTP 429, tipo rate_limit_error, NESSUN header retry-after, error.details.error_code = enforced_spend_limit_reached. L'accesso riprende alle 00:00 UTC del 1°. La documentazione afferma che i retry — inclusi quelli automatici dell'SDK — falliscono fino a quel momento." },
+  { "front": "Limite di spesa impostato da te su Anthropic — la forma dell'errore", "back": "HTTP 400, tipo invalid_request_error, messaggio che inizia con 'You have reached your specified API usage limits' (o '...specified workspace API usage limits'). Un 400, non un 429 — quindi le euristiche di retry predefinite trattano il tuo stesso tetto come un bug di codice." },
+  { "front": "La regola portabile per i 429", "back": "Un 429 senza header retry-after non è un rate limit. I rate limit sono temporanei per costruzione e ti dicono quanto aspettare; un 429 che si rifiuta di dirlo è un muro di budget o un muro di quota." },
+  { "front": "OpenRouter — tre limiti, uno stato", "back": "Saldo dell'account, tetto di credito per chiave e una riserva di spesa in volo. Sfonda uno qualunque e ottieni HTTP 402 Payment Required con error.metadata.limit_source che nomina quale. Un saldo negativo blocca anche i modelli gratuiti." },
+  { "front": "Tetti di tier Anthropic", "back": "Start 500 $/mese · Build 1.000 $/mese · Scale 200.000 $/mese · Custom = nessun tetto (concordato con l'account team). Imposta il tuo limite sotto il tetto di tier nella pagina Billing." },
+  { "front": "Spend Limits API — unità minori", "back": "Tutti gli importi sono stringhe decimali in unità minori della valuta di fatturazione: \"50000\" = 500,00 $. Interpreta come decimale, dividi per 100; la documentazione avverte contro la virgola mobile binaria per valori grandi." },
+  { "front": "Spend Limits API — null vs \"0\"", "back": "Nella riga effettiva di un membro, amount null = illimitato; \"0\" = non può usare Claude oltre l'utilizzo incluso nel piano (trattalo come già a limite). Su una riga configurata, null significa solo che non è impostato alcun limite numerico — leggi la riga effettiva per distinguerli." },
+  { "front": "Perché ogni tetto è approssimato", "back": "I tetti scattano sul costo lordo stimato, perché le pipeline di fatturazione hanno un ritardo da minuti a ore. L'applicazione non è istantanea, le richieste in volo si completano e gli sforamenti vengono fatturati normalmente. Imposta il tetto il 20-25% sotto il numero che farebbe davvero male." },
+  { "front": "Riserva di budget (budgeting pre-flight)", "back": "Stima il costo massimo della richiesta dal corpo e dal prezzo del modello, lo trattiene su ogni budget applicabile, rifiuta se la riserva sfonda, poi sostituisce con il costo effettivo. LiteLLM lo fa per impostazione predefinita; è l'unico meccanismo che tiene sotto concorrenza." },
+  { "front": "Spend cap di Google Cloud — i quattro limiti", "back": "Elenco breve di servizi eleggibili (come documentato: Gemini API, Gemini Enterprise Agent Platform, Cloud Run, funzioni Cloud Run) · un progetto x un servizio · solo mensile · rimozione solo manuale, con fino a un'ora per riprendere. Calcolo e storage persistenti continuano ad addebitare." },
+  { "front": "Telemetria di costo di Claude Code", "back": "claude_code.cost.usage (USD) e claude_code.token.usage (token), incrementati dopo ogni richiesta API, attribuiti per modello, origine della query (main/subagent/auxiliary), velocità e sforzo. Solo osservabilità — non impone nulla. L'applicazione vive al livello API o gateway." }
+]} />
+
+<Callout type="takeaways" items={[
+  "La latenza di un tetto morbido è il tuo tempo di risposta. Se nessuno è svegli, non è un controllo.",
+  "Un evento, quattro codici di stato: 429-senza-retry-after (tier Anthropic), 400 (il tuo limite Anthropic), 429 (OpenAI), 402 (OpenRouter). La logica di retry generica ne gestisce male almeno due.",
+  "Un 429 senza header retry-after non è mai un rate limit. Quell'unica euristica intercetta la peggiore modalità di fallimento — un client che riprova contro un muro che dura un mese.",
+  "Ogni tetto scatta sul costo stimato e ogni vendor declina la responsabilità sullo sforamento. Metti il tetto il 20-25% sotto il numero che farebbe davvero male.",
+  "Il tier Custom di Anthropic non ha un tetto mensile predefinito — la rete di sicurezza svanisce dove la spesa è più grande.",
+  "La riserva pre-flight (LiteLLM, la riserva in volo di OpenRouter) è l'unico design che tiene sotto raffiche di agenti concorrenti. La misurazione post-hoc sfora sempre.",
+  "Metti il tetto prima sul provider — è l'unico livello che non si può aggirare. I limiti di gateway e di applicazione sono difesa in profondità.",
+  "Un tetto che non hai mai visto scattare è una credenza. Imposta una chiave usa-e-getta a pochi centesimi e leggi il codice di stato reale che il tuo stack riceve."
+]} />
+
+## Avanti
+
+- [Perché gli agenti AI bruciano token](/docs/models/why-agents-burn-tokens) — il meccanismo dietro la bolletta che questi tetti stanno intercettando: perché un agente costa 50-1000 volte un turno di chat
+- [Quanto costa davvero l'AI tra i vari provider](/docs/models/what-ai-costs-across-providers) — gli archetipi di prezzo e come stimare un carico di lavoro prima di metterlo in produzione
+- [Gateway AI: LiteLLM, OpenRouter, Portkey](/docs/models/ai-gateways-litellm-openrouter-portkey) — dove mettere il budget pre-flight, e cosa ti compra altrimenti un gateway
+
+## Fonti e approfondimenti
+
+- [We're going to need default hard budget caps on pretty much everything — Simon Willison](https://simonwillison.net/2026/Oct/3/default-hard-budget-caps/) — l'argomento del 3 ottobre 2026 che ha inquadrato tutto questo: tetti rigidi come impostazione predefinita, fatturazione illimitata come opt-in
+- [Rate limits — Anthropic](https://platform.claude.com/docs/en/api/rate-limits) — i tetti di spesa per tier, la forma 429-senza-retry-after e `enforced_spend_limit_reached`, il 400 restituito da un limite impostato da te, e i limiti per workspace
+- [Spend Limits API — Anthropic](https://platform.claude.com/docs/en/manage-claude/spend-limits-api) — gli otto endpoint Enterprise, la gerarchia degli ambiti e il campo `source`, gli importi in unità minori, `null` vs `"0"`, e il ciclo di vita delle richieste di aumento
+- [Get Cost Report — Anthropic Admin API](https://platform.claude.com/docs/en/api/beta/organization/cost_report/retrieve) — bucket di costo giornalieri, suddivisione per `cost_type` (tokens / web_search / code_execution / session_usage), raggruppamento per workspace
+- [Monitoring usage — Claude Code](https://code.claude.com/docs/en/monitoring-usage) — le metriche OpenTelemetry `claude_code.cost.usage` e `claude_code.token.usage` e i loro attributi
+- [Rate limits — OpenAI](https://developers.openai.com/api/docs/guides/rate-limits) — gli hard spend limit che restituiscono 429, e la distinzione tra il limite di utilizzo mensile approvato e i limiti di spesa che configuri tu
+- [Limits — OpenRouter](https://openrouter.ai/docs/api-reference/limits) — saldo dell'account, tetti per chiave, la riserva di spesa in volo, la risposta 402 e `limit_source`
+- [How spend cap budgets work — Google Cloud Billing](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps) — servizi eleggibili, costi lordi stimati, rimozione manuale, latenza di ripresa, e cosa continua ad accumulare
+- [Cloud Billing release notes — Google Cloud](https://docs.cloud.google.com/billing/docs/release-notes) — la voce sugli spend cap budget del 27 luglio 2026
+- [Budgets and spend tracking — LiteLLM](https://docs.litellm.ai/docs/proxy/users) — `max_budget` e `budget_duration` su chiave / utente / team / modello, e la riserva di budget come applicazione pre-flight
+- [AWS's new sign-up gives accounts spend caps — Help Net Security](https://www.helpnetsecurity.com/2026/09/17/aws-spend-limit-agent-set-permissions/) — il project spend limit AWS di settembre 2026: solo nuovi clienti, da 20 $/mese, messo in pausa invece di accumulare
+- Correlati: [Budget per task](/docs/api/task-budgets) · [Budget di sessione dei Managed Agents](/docs/api/managed-agents-session-budgets) · [Limiti delle flotte di subagenti](/docs/claude-code/subagent-fleet-limits) · [Economia del prompt caching](/docs/frontiers/prompt-caching-economics)
