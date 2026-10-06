@@ -1,0 +1,228 @@
+---
+title: "Commerce agents blueprint (Anthropic reference)"
+description: "Anthropic's Sept 2026 open-source blueprint for shopping and merchant agents on Claude — the split-agent shape, the staged-write guardrail, and the patterns you can steal even if you're not building commerce."
+sidebar_position: 20
+---
+
+<LevelBadge level="intermediate" />
+
+# Commerce agents blueprint (Anthropic reference)
+
+<Callout
+  type="objectives"
+  items={[
+    "Understand the two-agent split (shopping vs merchant) and why Anthropic did NOT use an intent router or domain subagents",
+    "Learn the staged-write guardrail: how no model tool call ever moves money or mutates the store — every write ends at a human-approved surface",
+    "See the three runtime paths (Messages API, Agent SDK, Managed Agents) and how the SAME core code plugs into all three",
+    "Steal three transferable patterns for any agent that touches a real business system: server-issued IDs, fenced third-party text, and prompt-vs-skill split"
+  ]}
+/>
+
+On September 2, 2026 Anthropic published **`anthropics/commerce-agents`** — an Apache 2.0 reference blueprint for building shopping and merchant agents on Claude. It ships two working agents, four vertical examples (retail, travel, telecom, entertainment), and — crucially — a set of **guardrail patterns implemented in code, not in prompts**. Anthropic states the repo is a reference implementation they will *not* maintain as a product and does *not* accept outside contributions.
+
+The interesting thing is not that you can now build a shopping bot. The interesting thing is the **shape**: an unusually opinionated take on how an agent that touches real business systems should be structured. Everything below is transferable to any agent that has to write to a real backend — inventory, customer records, banking, ops tooling.
+
+## The split: two agents, not one
+
+Anthropic ships **one shopping agent** (customer-facing) and **one merchant agent** (staff-facing), each with its own backend interface (`StorefrontBackend` and `MerchantBackend`) and its own set of skills. They deliberately did **not** build:
+
+- an intent router that dispatches to sub-agents
+- per-domain subagents (a "cart agent" + "returns agent" + "search agent")
+- one monolithic agent that does both consumer and staff work
+
+Instead: **one unified agent per audience, in a standard agent loop, with skills and tools.** Their guidance in the [anatomy of effective commerce agents](https://claude.com/blog/the-anatomy-of-effective-commerce-agents) post: *"anything the agent needs on most turns generally goes in the system prompt"* — so for a shopping agent, catalog search lives in the prompt because it's on nearly every turn. *"The rest goes in skills."* Customer care, personalization, returns — skills.
+
+This is a strong opinion. Intent routers and domain subagents are the default architecture in a lot of tutorials, and Anthropic is telling you: for a single audience with tightly coupled sessions, don't.
+
+## The load-bearing guardrail: staged writes
+
+<Callout
+  type="tip"
+  items={[
+    "The single most important line in the blueprint: 'No model tool call moves money or changes the business.' Every mutation goes through a server-controlled approval step. If you take one thing from the repo, take this."
+  ]}
+/>
+
+The blueprint enforces safety in code, not prompts. The mechanism has three parts:
+
+<Steps
+  items={[
+    {
+      title: "1. Server issues every ID the model is allowed to reference",
+      body: "The server maintains a per-session record of every product ID, SKU, campaign ID, and price ID it has handed the model. Writes and renders will ONLY accept IDs from that record. If the model hallucinates a SKU, the harness refuses — no prompt engineering required."
+    },
+    {
+      title: "2. Every write is staged, never applied",
+      body: "Order placement, payments, refunds, price changes, and campaign launches all end in a server-generated draft with its own approval ID. The tool call returns the draft ID and a preview. Nothing is live yet."
+    },
+    {
+      title: "3. Approval happens on a real human surface",
+      body: "A staged change only succeeds when the approval ID is signed off through a real UI — a button in the operator's portal, a confirmation in the CLI. The agent cannot self-approve; the approval endpoint doesn't accept model-generated identity."
+    }
+  ]}
+/>
+
+The blueprint also handles two other classic footguns:
+
+- **Regulated content:** for fees, disclosures, and price-shown-to-consumer, the model chooses *which* product to disclose; the *words* come from server-supplied approved copy. The model never writes disclosure text.
+- **Third-party text sanitization:** any user-generated content (reviews, seller notes, messages) is wrapped in "fenced text" markers before it reaches the model, so it can't smuggle instructions into the prompt.
+
+## Payments: explicitly out of scope
+
+The blueprint **places no orders and charges no cards**. Checkout is rendered for the host application to complete. In Anthropic's words, this "keeps payment handling, fraud rules and credentials outside the agent." Visa, Mastercard, and Accenture are named partners on the announcement, but the payment step lives in your existing checkout or an agentic payments provider — never in the model's tool surface.
+
+This is another opinionated line: **if it can lose money in one shot, the model doesn't touch it.**
+
+## Three runtime paths, one core
+
+The repo splits every agent into a **core** package (types, backend interface, prompt, tool contracts) and separate **runtime** packages that adapt the core to different serving surfaces:
+
+<PromptCard title="Messages API — the reference loop">
+{`from shopping_agent import ShoppingAgentConfig
+from shopping_agent_runtime import ShoppingAgent
+
+agent = ShoppingAgent(
+  backend=your_backend,
+  skills_dir=Path("shopping-agent/skills"),
+  config=ShoppingAgentConfig(brand_name="Your Store"),
+)
+async for event in agent.stream_turn(messages, session, state):
+  # yields: text_delta | tool_call | ui | cart_update | turn_complete
+  ...
+await agent.update_memory(messages, session)`}
+</PromptCard>
+
+<PromptCard title="Agent SDK — with a local console">
+{`python shopping-agent/runtime-agent-sdk/main.py \\
+  --once "a two-person tent under $250"
+
+python merchant-agent/runtime-agent-sdk/main.py
+# prints staged changes and waits for y/n approval`}
+</PromptCard>
+
+<PromptCard title="Managed Agents (beta) — hosted">
+{`scripts/deploy_managed_agent.sh \\
+  shopping-agent/managed-agents/shopping-agent
+
+# The manifest declares tools + a storefront MCP server;
+# Anthropic hosts the loop.`}
+</PromptCard>
+
+The same `core/` code runs under all three, which is the actual portable pattern: **keep the agent's contract (tools, prompt, backend interface) separate from the serving harness.** If you swap Messages API for Managed Agents six months from now, only the runtime package changes.
+
+## Memory: not in context
+
+Long-term memory (preferences, past orders, service notes) is **persisted in your existing databases**, not in model context. Extraction happens *asynchronously after the conversation ends* — you don't pay latency to update memory on the hot path. On the next turn, the runtime hydrates relevant memory into the system prompt.
+
+This is worth internalizing even if you're not building commerce: shoving conversation summaries into context on every turn is a common performance mistake. The blueprint's shape — write async, read on turn-start — is the cheaper one.
+
+## The four verticals (and why they differ)
+
+`examples/` includes end-to-end demos for four verticals, each with a different structural wrinkle you can copy:
+
+- **Retail** — the base case. Standard catalog, cart, checkout.
+- **Travel** — date-bound inventory (a flight seat expires), itinerary presentation with multi-leg comparison.
+- **Telecom** — account context ("your current plan is X"), plan matrices, regulated fee disclosure.
+- **Entertainment** — timed holds on tickets, waitlists, venue seat maps.
+
+If your product isn't commerce but has any of these traits (expiring inventory, regulated disclosure, timed holds), the matching vertical is worth reading before you design your own agent.
+
+## Get it running in an afternoon
+
+<PromptCard title="Clone, install, run one vertical">
+{`git clone https://github.com/anthropics/commerce-agents.git
+cd commerce-agents
+
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env  # add ANTHROPIC_API_KEY
+
+(cd examples && npm ci)
+
+python scripts/run_demo.py retail
+# API on :8000, storefront on :3000`}
+</PromptCard>
+
+The repo verifies with `ruff check . && ruff format --check . && pytest && python scripts/check.py`, and there's a `python scripts/verify_all.py` for the comprehensive pass.
+
+## Terms worth knowing
+
+<Flashcards
+  cards={[
+    { front: "Staged write", back: "A mutation returned by the agent as a draft with a server-generated approval ID, applied only after a human signs off on a real UI. The core guardrail pattern of the blueprint." },
+    { front: "Server-issued ID", back: "Any product/SKU/campaign ID the write endpoint will accept must have been handed to the model by the server this session. Blocks hallucinated identifiers cold." },
+    { front: "Fenced text", back: "Wrapping user-generated third-party content with markers before it reaches the model, so untrusted text can't smuggle instructions into the prompt." },
+    { front: "Runtime split", back: "Anthropic's repo layout: a single 'core' package with prompt + tool contracts + backend interface, plus separate runtime packages (Messages API, Agent SDK, Managed Agents) that adapt the core to different serving surfaces." },
+    { front: "Prompt vs. skill", back: "Anthropic's rule: what the agent needs on most turns goes in the system prompt (e.g. catalog search for a shopping agent). Everything else goes in skills (e.g. returns, personalization)." }
+  ]}
+/>
+
+## Check yourself
+
+<Quiz
+  questions={[
+    {
+      q: "Why does the blueprint stage every write instead of relying on prompt instructions like 'never place an order without confirming'?",
+      options: [
+        "To make the model easier to test",
+        "Because prompt-level rules can be jailbroken; a server that only accepts approved IDs cannot be talked out of enforcement",
+        "To reduce API cost",
+        "Because Claude cannot be trusted to output structured JSON"
+      ],
+      answer: 1,
+      explain: "Guardrails in code hold under adversarial prompts. The server treats every mutation as a draft with a server-generated ID and only applies it after a human approves via a real surface — the model has no ability to self-approve regardless of what it's told."
+    },
+    {
+      q: "How does the merchant agent architecture differ from the common 'router + subagent' pattern many tutorials teach?",
+      options: [
+        "It uses more subagents, one per business function",
+        "It uses a single unified agent for the staff audience, with skills instead of subagents, and no intent router",
+        "It uses two models, one for reading and one for writing",
+        "It routes every request through GPT before Claude"
+      ],
+      answer: 1,
+      explain: "Anthropic explicitly recommends one agent per audience in a standard loop, with skills for less-frequent capabilities. They call out avoiding intent routers and domain-specific subagents for tightly coupled sessions."
+    },
+    {
+      q: "Where does long-term customer memory live in the blueprint?",
+      options: [
+        "Concatenated into the system prompt on every turn",
+        "Inside Claude's own memory tool",
+        "In your existing databases, extracted asynchronously after the conversation ends and hydrated on the next turn",
+        "In a vector store queried on every tool call"
+      ],
+      answer: 2,
+      explain: "The blueprint keeps memory in existing databases and extracts asynchronously post-conversation — no hot-path cost — then loads relevant memory into the next turn's system prompt."
+    },
+    {
+      q: "The blueprint 'places no orders and charges no cards.' Why?",
+      options: [
+        "Anthropic doesn't support tool use for payments",
+        "Because the checkout is rendered for the host application to complete — keeping payment handling, fraud rules, and credentials outside the agent",
+        "Because it's a demo that doesn't need real payments",
+        "Because Claude Managed Agents blocks money-moving actions"
+      ],
+      answer: 1,
+      explain: "The blueprint deliberately hands off checkout to the host app or an agentic payments provider — the model never has payment credentials or the ability to charge. Same principle as staged writes: if it can lose money in one shot, the model doesn't touch it."
+    }
+  ]}
+/>
+
+<VerifyNote
+  lastVerified="2026-09-08"
+  source="https://claude.com/blog/claude-for-commerce-agents · https://github.com/anthropics/commerce-agents"
+/>
+
+## Sources & further reading
+
+- [Building Commerce Agents with Claude](https://claude.com/blog/claude-for-commerce-agents) — Anthropic's Sept 2, 2026 launch post
+- [A guide to the anatomy of effective commerce agents](https://claude.com/blog/the-anatomy-of-effective-commerce-agents) — Anthropic's architectural writeup on the split, prompts vs. skills, and guardrails
+- [anthropics/commerce-agents](https://github.com/anthropics/commerce-agents) — the Apache 2.0 reference repo
+- [Anthropic's commerce agent blueprint: two reference agents you can run in an afternoon](https://www.aicodex.to/articles/claude-commerce-agents) — independent write-up
+- [Anthropic Debuts Commerce Agent Blueprint With Visa and Mastercard (PYMNTS)](https://www.pymnts.com/news/artificial-intelligence/2026/anthropic-built-the-shopping-brain-and-skipped-the-wallet/) — the payments-out-of-scope framing
+
+## Next
+
+- **Agents in general on Claude:** [Building agents](/docs/api/building-agents) — the underlying loop the blueprint runs on.
+- **The hosted path:** [Managed Agents & memory stores](/docs/api/managed-agents-memory-stores) — where `scripts/deploy_managed_agent.sh` sends the code.
+- **The open-source alternative:** [Open-source agent frameworks](/docs/models/open-source-agent-frameworks) — for comparison, if you'd rather roll your own harness.
