@@ -1,0 +1,228 @@
+---
+title: "Blueprint per agenti di commercio (riferimento Anthropic)"
+description: "Il blueprint open source di Anthropic (set 2026) per agenti di shopping e di merchant su Claude: la struttura a due agenti, il guardrail delle scritture in staging e i pattern che puoi rubare anche se non costruisci nel commercio."
+sidebar_position: 20
+---
+
+<LevelBadge level="intermediate" />
+
+# Blueprint per agenti di commercio (riferimento Anthropic)
+
+<Callout
+  type="objectives"
+  items={[
+    "Capire la divisione in due agenti (shopping vs merchant) e perché Anthropic NON ha usato un intent router né subagent per dominio",
+    "Imparare il guardrail delle scritture in staging: come nessuna chiamata a strumento del modello sposta denaro o modifica il negozio, e ogni scrittura termina su una superficie approvata da un umano",
+    "Vedere i tre percorsi di runtime (Messages API, Agent SDK, Managed Agents) e come LO STESSO codice core si innesta in tutti e tre",
+    "Rubare tre pattern trasferibili per qualsiasi agente che tocchi un sistema aziendale reale: ID emessi dal server, testo di terzi racchiuso in recinti e separazione prompt-vs-skill"
+  ]}
+/>
+
+Il 2 settembre 2026 Anthropic ha pubblicato **`anthropics/commerce-agents`**, un blueprint di riferimento Apache 2.0 per costruire agenti di shopping e di merchant su Claude. Include due agenti funzionanti, quattro esempi verticali (retail, viaggi, telecom, intrattenimento) e, soprattutto, una serie di **pattern di guardrail implementati nel codice, non nei prompt**. Anthropic dichiara che il repo è un'implementazione di riferimento che *non* manterrà come prodotto e che *non* accetta contributi esterni.
+
+La cosa interessante non è che ora puoi costruire un bot per lo shopping. La cosa interessante è la **forma**: una visione insolitamente netta di come dovrebbe essere strutturato un agente che tocca sistemi aziendali reali. Tutto ciò che segue è trasferibile a qualsiasi agente che debba scrivere su un backend reale: inventario, anagrafiche clienti, banking, strumenti operativi.
+
+## La divisione: due agenti, non uno
+
+Anthropic fornisce **un agente di shopping** (rivolto ai clienti) e **un agente merchant** (rivolto al personale), ciascuno con la propria interfaccia di backend (`StorefrontBackend` e `MerchantBackend`) e il proprio insieme di skill. Hanno deliberatamente **evitato** di costruire:
+
+- un intent router che smista verso sub-agent
+- subagent per dominio (un "agente carrello" + un "agente resi" + un "agente ricerca")
+- un unico agente monolitico che svolga sia il lavoro per i consumatori sia quello per il personale
+
+Invece: **un agente unificato per ciascun pubblico, in un ciclo di agente standard, con skill e strumenti.** La loro indicazione, nel post sull'[anatomia degli agenti di commercio efficaci](https://claude.com/blog/the-anatomy-of-effective-commerce-agents): *"tutto ciò di cui l'agente ha bisogno nella maggior parte dei turni va in genere nel system prompt"*, quindi per un agente di shopping la ricerca nel catalogo vive nel prompt perché serve in quasi ogni turno. *"Il resto va nelle skill."* Assistenza clienti, personalizzazione, resi: skill.
+
+È una posizione forte. Intent router e subagent per dominio sono l'architettura predefinita in molti tutorial, e Anthropic ti sta dicendo: per un singolo pubblico con sessioni strettamente accoppiate, non farlo.
+
+## Il guardrail portante: le scritture in staging
+
+<Callout
+  type="tip"
+  items={[
+    "La riga più importante del blueprint: 'Nessuna chiamata a strumento del modello sposta denaro o modifica l'attività.' Ogni mutazione passa da un passaggio di approvazione controllato dal server. Se prendi una sola cosa dal repo, prendi questa."
+  ]}
+/>
+
+Il blueprint impone la sicurezza nel codice, non nei prompt. Il meccanismo ha tre parti:
+
+<Steps
+  items={[
+    {
+      title: "1. Il server emette ogni ID che il modello può referenziare",
+      body: "Il server mantiene un registro per sessione di ogni ID di prodotto, SKU, ID di campagna e ID di prezzo che ha consegnato al modello. Scritture e rendering accetteranno SOLO ID presenti in quel registro. Se il modello inventa uno SKU, l'harness rifiuta, senza bisogno di prompt engineering."
+    },
+    {
+      title: "2. Ogni scrittura è in staging, mai applicata",
+      body: "Inserimento ordini, pagamenti, rimborsi, modifiche di prezzo e lancio di campagne terminano tutti in una bozza generata dal server con un proprio ID di approvazione. La chiamata allo strumento restituisce l'ID della bozza e un'anteprima. Nulla è ancora attivo."
+    },
+    {
+      title: "3. L'approvazione avviene su una vera superficie umana",
+      body: "Una modifica in staging va a buon fine solo quando l'ID di approvazione viene confermato tramite una vera interfaccia: un pulsante nel portale dell'operatore, una conferma nella CLI. L'agente non può auto-approvarsi; l'endpoint di approvazione non accetta identità generate dal modello."
+    }
+  ]}
+/>
+
+Il blueprint gestisce anche altre due classiche trappole:
+
+- **Contenuti regolamentati:** per commissioni, informative e prezzo mostrato al consumatore, il modello sceglie *quale* prodotto illustrare; le *parole* vengono da un testo approvato fornito dal server. Il modello non scrive mai il testo delle informative.
+- **Sanificazione del testo di terzi:** qualsiasi contenuto generato dagli utenti (recensioni, note dei venditori, messaggi) viene racchiuso in marcatori di "testo recintato" prima di raggiungere il modello, così non può infilare istruzioni nel prompt.
+
+## Pagamenti: esplicitamente fuori ambito
+
+Il blueprint **non effettua ordini e non addebita carte**. Il checkout viene reso perché sia l'applicazione host a completarlo. Nelle parole di Anthropic, questo "tiene la gestione dei pagamenti, le regole antifrode e le credenziali fuori dall'agente". Visa, Mastercard e Accenture sono partner citati nell'annuncio, ma il passaggio di pagamento vive nel tuo checkout esistente o in un fornitore di pagamenti agentici, mai nella superficie di strumenti del modello.
+
+È un'altra linea netta: **se può far perdere denaro in un colpo solo, il modello non la tocca.**
+
+## Tre percorsi di runtime, un solo core
+
+Il repo divide ogni agente in un pacchetto **core** (tipi, interfaccia di backend, prompt, contratti degli strumenti) e pacchetti **runtime** separati che adattano il core a diverse superfici di erogazione:
+
+<PromptCard title="Messages API — il ciclo di riferimento">
+{`from shopping_agent import ShoppingAgentConfig
+from shopping_agent_runtime import ShoppingAgent
+
+agent = ShoppingAgent(
+  backend=your_backend,
+  skills_dir=Path("shopping-agent/skills"),
+  config=ShoppingAgentConfig(brand_name="Your Store"),
+)
+async for event in agent.stream_turn(messages, session, state):
+  # yields: text_delta | tool_call | ui | cart_update | turn_complete
+  ...
+await agent.update_memory(messages, session)`}
+</PromptCard>
+
+<PromptCard title="Agent SDK — con una console locale">
+{`python shopping-agent/runtime-agent-sdk/main.py \\
+  --once "a two-person tent under $250"
+
+python merchant-agent/runtime-agent-sdk/main.py
+# prints staged changes and waits for y/n approval`}
+</PromptCard>
+
+<PromptCard title="Managed Agents (beta) — ospitato">
+{`scripts/deploy_managed_agent.sh \\
+  shopping-agent/managed-agents/shopping-agent
+
+# The manifest declares tools + a storefront MCP server;
+# Anthropic hosts the loop.`}
+</PromptCard>
+
+Lo stesso codice `core/` gira in tutti e tre, ed è questo il vero pattern portabile: **tieni il contratto dell'agente (strumenti, prompt, interfaccia di backend) separato dall'harness di erogazione.** Se fra sei mesi passi da Messages API a Managed Agents, cambia solo il pacchetto runtime.
+
+## Memoria: non nel contesto
+
+La memoria a lungo termine (preferenze, ordini passati, note di servizio) è **persistita nei tuoi database esistenti**, non nel contesto del modello. L'estrazione avviene *in modo asincrono dopo la fine della conversazione*, quindi non paghi latenza per aggiornare la memoria nel percorso caldo. Al turno successivo, il runtime idrata la memoria rilevante nel system prompt.
+
+Vale la pena interiorizzarlo anche se non costruisci nel commercio: infilare riassunti di conversazione nel contesto a ogni turno è un errore di prestazioni comune. La forma del blueprint, scrittura asincrona e lettura all'inizio del turno, è quella più economica.
+
+## I quattro verticali (e perché differiscono)
+
+`examples/` include demo end-to-end per quattro verticali, ciascuno con una sua particolarità strutturale che puoi copiare:
+
+- **Retail** — il caso di base. Catalogo standard, carrello, checkout.
+- **Viaggi** — inventario legato alle date (un posto in volo scade), presentazione dell'itinerario con confronto fra più tratte.
+- **Telecom** — contesto dell'account ("il tuo piano attuale è X"), matrici di piani, informativa regolamentata sulle commissioni.
+- **Intrattenimento** — blocchi a tempo sui biglietti, liste d'attesa, mappe dei posti della sede.
+
+Se il tuo prodotto non è commercio ma ha una qualsiasi di queste caratteristiche (inventario che scade, informativa regolamentata, blocchi a tempo), vale la pena leggere il verticale corrispondente prima di progettare il tuo agente.
+
+## Fallo girare in un pomeriggio
+
+<PromptCard title="Clona, installa, esegui un verticale">
+{`git clone https://github.com/anthropics/commerce-agents.git
+cd commerce-agents
+
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env  # add ANTHROPIC_API_KEY
+
+(cd examples && npm ci)
+
+python scripts/run_demo.py retail
+# API on :8000, storefront on :3000`}
+</PromptCard>
+
+Il repo si verifica con `ruff check . && ruff format --check . && pytest && python scripts/check.py`, e c'è un `python scripts/verify_all.py` per il controllo completo.
+
+## Termini da conoscere
+
+<Flashcards
+  cards={[
+    { front: "Scrittura in staging", back: "Una mutazione restituita dall'agente come bozza con un ID di approvazione generato dal server, applicata solo dopo il via libera di un umano su una vera interfaccia. Il pattern di guardrail centrale del blueprint." },
+    { front: "ID emesso dal server", back: "Ogni ID di prodotto/SKU/campagna che l'endpoint di scrittura accetta deve essere stato consegnato al modello dal server in quella sessione. Blocca sul nascere gli identificatori inventati." },
+    { front: "Testo recintato", back: "Racchiudere con marcatori i contenuti di terzi generati dagli utenti prima che raggiungano il modello, così il testo non attendibile non può infilare istruzioni nel prompt." },
+    { front: "Separazione del runtime", back: "La struttura del repo di Anthropic: un unico pacchetto 'core' con prompt + contratti degli strumenti + interfaccia di backend, più pacchetti runtime separati (Messages API, Agent SDK, Managed Agents) che adattano il core a diverse superfici di erogazione." },
+    { front: "Prompt vs. skill", back: "La regola di Anthropic: ciò di cui l'agente ha bisogno nella maggior parte dei turni va nel system prompt (es. la ricerca nel catalogo per un agente di shopping). Tutto il resto va nelle skill (es. resi, personalizzazione)." }
+  ]}
+/>
+
+## Verifica te stesso
+
+<Quiz
+  questions={[
+    {
+      q: "Perché il blueprint mette in staging ogni scrittura invece di affidarsi a istruzioni nel prompt come 'non effettuare mai un ordine senza conferma'?",
+      options: [
+        "Per rendere il modello più facile da testare",
+        "Perché le regole a livello di prompt possono essere aggirate con un jailbreak; un server che accetta solo ID approvati non può essere convinto a non farle rispettare",
+        "Per ridurre il costo dell'API",
+        "Perché non ci si può fidare che Claude produca JSON strutturato"
+      ],
+      answer: 1,
+      explain: "I guardrail nel codice reggono anche sotto prompt avversari. Il server tratta ogni mutazione come una bozza con un ID generato dal server e la applica solo dopo l'approvazione di un umano tramite una vera superficie: il modello non ha alcuna possibilità di auto-approvarsi, qualunque cosa gli si dica."
+    },
+    {
+      q: "In che cosa l'architettura dell'agente merchant differisce dal comune pattern 'router + subagent' insegnato da molti tutorial?",
+      options: [
+        "Usa più subagent, uno per funzione aziendale",
+        "Usa un singolo agente unificato per il pubblico del personale, con skill al posto dei subagent e nessun intent router",
+        "Usa due modelli, uno per leggere e uno per scrivere",
+        "Instrada ogni richiesta attraverso GPT prima di Claude"
+      ],
+      answer: 1,
+      explain: "Anthropic raccomanda esplicitamente un agente per pubblico in un ciclo standard, con skill per le capacità meno frequenti. Sconsigliano esplicitamente intent router e subagent specifici per dominio nelle sessioni strettamente accoppiate."
+    },
+    {
+      q: "Dove vive la memoria a lungo termine del cliente nel blueprint?",
+      options: [
+        "Concatenata nel system prompt a ogni turno",
+        "Dentro lo strumento di memoria di Claude",
+        "Nei tuoi database esistenti, estratta in modo asincrono dopo la fine della conversazione e idratata al turno successivo",
+        "In un vector store interrogato a ogni chiamata a strumento"
+      ],
+      answer: 2,
+      explain: "Il blueprint tiene la memoria nei database esistenti ed estrae in modo asincrono dopo la conversazione, senza costi nel percorso caldo, poi carica la memoria rilevante nel system prompt del turno successivo."
+    },
+    {
+      q: "Il blueprint 'non effettua ordini e non addebita carte.' Perché?",
+      options: [
+        "Perché Anthropic non supporta l'uso di strumenti per i pagamenti",
+        "Perché il checkout viene reso perché lo completi l'applicazione host, tenendo gestione dei pagamenti, regole antifrode e credenziali fuori dall'agente",
+        "Perché è una demo che non ha bisogno di pagamenti reali",
+        "Perché Claude Managed Agents blocca le azioni che muovono denaro"
+      ],
+      answer: 1,
+      explain: "Il blueprint passa deliberatamente il checkout all'app host o a un fornitore di pagamenti agentici: il modello non ha mai le credenziali di pagamento né la possibilità di addebitare. Stesso principio delle scritture in staging: se può far perdere denaro in un colpo solo, il modello non la tocca."
+    }
+  ]}
+/>
+
+<VerifyNote
+  lastVerified="2026-09-08"
+  source="https://claude.com/blog/claude-for-commerce-agents · https://github.com/anthropics/commerce-agents"
+/>
+
+## Fonti e letture di approfondimento
+
+- [Building Commerce Agents with Claude](https://claude.com/blog/claude-for-commerce-agents) — il post di lancio di Anthropic del 2 set 2026
+- [Guida all'anatomia degli agenti di commercio efficaci](https://claude.com/blog/the-anatomy-of-effective-commerce-agents) — l'approfondimento architetturale di Anthropic su divisione, prompt vs. skill e guardrail
+- [anthropics/commerce-agents](https://github.com/anthropics/commerce-agents) — il repo di riferimento Apache 2.0
+- [Il blueprint di Anthropic per gli agenti di commercio: due agenti di riferimento che puoi far girare in un pomeriggio](https://www.aicodex.to/articles/claude-commerce-agents) — resoconto indipendente
+- [Anthropic presenta il blueprint per agenti di commercio con Visa e Mastercard (PYMNTS)](https://www.pymnts.com/news/artificial-intelligence/2026/anthropic-built-the-shopping-brain-and-skipped-the-wallet/) — l'inquadramento dei pagamenti fuori ambito
+
+## Prossimi passi
+
+- **Gli agenti in generale su Claude:** [Costruire agenti sull'API](/docs/api/building-agents) — il ciclo di fondo su cui gira il blueprint.
+- **Il percorso ospitato:** [Memory Store per Managed Agents](/docs/api/managed-agents-memory-stores) — dove `scripts/deploy_managed_agent.sh` invia il codice.
+- **L'alternativa open source:** [Framework open-source per agenti AI](/docs/models/open-source-agent-frameworks) — per confronto, se preferisci costruire il tuo harness.

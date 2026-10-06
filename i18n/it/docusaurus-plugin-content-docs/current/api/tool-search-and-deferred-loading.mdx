@@ -1,0 +1,284 @@
+---
+sidebar_position: 16.5
+title: "Tool Search e Deferred Loading"
+description: "Scalare a migliaia di tool senza gonfiare il contesto: come funzionano davvero defer_loading e il tool di ricerca, i cinque errori 400 che producono e perché il corpo della richiesta non diventa più piccolo."
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={[
+  "Capire l'unica cosa che quasi tutti sbagliano su defer_loading: non rende la richiesta più piccola",
+  "Scegliere tra le varianti regex e BM25 della ricerca, conoscendo il limite di lunghezza della query di ciascuna",
+  "Leggere il trio di blocchi server_tool_use / tool_search_tool_result / tool_reference e sapere esattamente cosa rimandare indietro",
+  "Evitare le cinque forme di richiesta che restituiscono un 400, incluso il conflitto con cache_control",
+  "Integrare il deferred loading in un toolset del connettore MCP e sostituire la ricerca integrata con i tuoi embedding"
+]} />
+
+<VerifyNote lastVerified="2026-09-29" source="https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool">
+Le stringhe di versione dei tool (`tool_search_tool_regex_20251119`, `tool_search_tool_bm25_20251119`), la tabella dei modelli supportati e i limiti numerici qui sotto sono fatti datati. Il meccanismo — differire, cercare, espandere — è stabile dal lancio. Ricontrolla gli identificatori e l'elenco dei modelli prima di andare in produzione.
+</VerifyNote>
+
+## I due problemi, e perché solo uno riguarda i soldi
+
+Caricare in anticipo tutte le definizioni dei tool si rompe in due modi distinti man mano che il catalogo cresce.
+
+Il primo è quello ovvio. L'esempio di Anthropic: una configurazione MCP con cinque server — GitHub, Slack, Sentry, Grafana, Splunk — brucia circa **55k token in definizioni di tool prima che Claude faccia qualsiasi lavoro**. È una tassa che paghi a ogni turno della conversazione.
+
+Il secondo è quello che cambia davvero la tua architettura: **l'accuratezza nella scelta del tool peggiora oltre i 30–50 tool disponibili.** Oltre quella soglia, più tool non significa più capacità: significa un modello che sceglie da un menu affollato. Il deferred loading risolve il problema dei costi e quello dell'accuratezza con la stessa mossa, perché il modello vede sempre e solo i 3–5 tool rilevanti per la richiesta corrente. Anthropic riporta una riduzione del contesto di **oltre l'85 percento** su quella configurazione multiserver.
+
+Se vuoi l'economia e i delta di accuratezza pubblicati, AILmanac li tratta in [Costo in token di MCP](/docs/claude-code/mcp-token-cost). Questa pagina riguarda il cablaggio.
+
+## Il modello mentale che la gente sbaglia
+
+Ecco l'idea sbagliata da correggere prima di scrivere codice:
+
+> `defer_loading` **non** riduce ciò che invii. Continui a mettere la definizione completa di ogni tool — nomi, descrizioni, `input_schema` completo — nell'array `tools` a **ogni singola richiesta**, compresi i tool differiti.
+
+Il corpo della tua richiesta HTTP non si restringe. La banda di upload non cambia. L'API ha bisogno di quelle definizioni lato server per eseguire la ricerca ed espandere i riferimenti che trova.
+
+Ciò che cambia è cosa entra nella **finestra di contesto**, e quindi cosa ti viene fatturato. Le definizioni differite sono escluse dal prefisso del system prompt. Quando Claude ne scopre una, l'API aggiunge un blocco `tool_reference` in linea nella conversazione e lo espande nella definizione completa prima che il modello lo veda.
+
+Quel dettaglio dell'aggiunta in linea è la seconda cosa non ovvia: poiché l'espansione avviene *nella conversazione* e non nel prefisso, **il prefisso in cache non viene mai invalidato**. Deferred loading e prompt caching si combinano. Lo stesso vale per lo [strict tool use](/docs/api/tool-use): la grammatica che vincola l'output delle chiamate ai tool è costruita sull'intero toolset, quindi nulla viene ricompilato quando un tool arriva a metà conversazione.
+
+## Attivarlo
+
+<Steps items={[
+  {title: "Aggiungi un tool di ricerca all'array tools", body: "Scegli una variante: tool_search_tool_regex_20251119 oppure tool_search_tool_bm25_20251119. È un server tool: gira sull'infrastruttura di Anthropic e non richiede alcun header beta."},
+  {title: "Segna la gran parte del catalogo con defer_loading: true", body: "Per ogni definizione di tool, accanto a name / description / input_schema. È il flag che tiene una definizione fuori dal prefisso."},
+  {title: "Lascia non differiti i 3–5 tool più usati", body: "Tutto ciò che viene chiamato nella maggior parte delle richieste deve essere caricato subito. Pagare un round-trip di ricerca per raggiungere un tool che ti serve sempre è un cattivo affare. Almeno un tool DEVE restare non differito, di norma il tool di ricerca stesso."},
+  {title: "Invia comunque ogni definizione, a ogni richiesta", body: "Comprese quelle differite, e anche nei turni successivi dopo un tool_result. Ometterne una trasforma un tool_reference che la richiama in un 400."},
+  {title: "Rimanda indietro i blocchi di ricerca invariati", body: "Alla richiesta successiva, passa il contenuto dell'assistente senza modifiche, server_tool_use e tool_search_tool_result inclusi. L'API ri-espande i riferimenti su tutta la cronologia, quindi Claude riusa i tool scoperti nei turni successivi senza cercare di nuovo."}
+]} />
+
+<PromptCard title="Richiesta minima funzionante — un tool di ricerca, due tool differiti">
+{`curl https://api.anthropic.com/v1/messages \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "content-type: application/json" \\
+  -d '{
+    "model": "claude-opus-5-5",
+    "max_tokens": 2048,
+    "messages": [{"role": "user", "content": "What is the weather in San Francisco?"}],
+    "tools": [
+      {
+        "type": "tool_search_tool_regex_20251119",
+        "name": "tool_search_tool_regex"
+      },
+      {
+        "name": "get_weather",
+        "description": "Get the weather at a specific location",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "location": {"type": "string"},
+            "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+          },
+          "required": ["location"]
+        },
+        "defer_loading": true
+      },
+      {
+        "name": "search_files",
+        "description": "Search through files in the workspace",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "query": {"type": "string"},
+            "file_types": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["query"]
+        },
+        "defer_loading": true
+      }
+    ]
+  }'`}
+</PromptCard>
+
+Nota cosa ti costa il tool di ricerca nel prefisso: nient'altro che la sua voce. Le due definizioni differite sono nel corpo ma non nel contesto.
+
+## Regex o BM25
+
+Entrambe le varianti cercano negli stessi quattro campi — **nomi dei tool, descrizioni, nomi degli argomenti e descrizioni degli argomenti** — ed entrambe sono disponibili su ogni modello che supporta la funzione. Differiscono solo in ciò che Claude scrive nella query.
+
+| | `tool_search_tool_regex_20251119` | `tool_search_tool_bm25_20251119` |
+|---|---|---|
+| Claude scrive | pattern Python `re.search()` | query in linguaggio naturale |
+| Campo di input | `pattern` | `query` |
+| Lunghezza massima | 200 caratteri | 500 caratteri |
+| Corrispondenza | senza distinzione tra maiuscole e minuscole | ranking BM25 |
+| Va bene quando | i tuoi nomi hanno un namespace (`github_`, `slack_`) | le tue descrizioni si leggono come prosa |
+
+La variante regex è quella che la gente configura male, perché il nome fa pensare a una ricerca per parole chiave e non lo è. Claude scrive pattern veri: `"weather"`, `"get_.*_data"`, `"database.*query|query.*database"`. Se il modello non trova un tool che ti aspetti, prova tu stesso il pattern prima di dare la colpa al modello:
+
+<PromptCard title="Riprodurre in locale una corrispondenza regex fallita">
+{`import re
+# Claude writes broad patterns, e.g. ".*weather.*" — not exact names.
+# Search the same four fields the API searches.
+haystacks = ["get_weather", "Get the weather at a specific location", "location", "unit"]
+print(any(re.search(r"weather", h, re.IGNORECASE) for h in haystacks))`}
+</PromptCard>
+
+Il rimedio pratico a una corrispondenza mancata non è quasi mai un pattern più furbo: sono le **parole chiave nella descrizione**. Scrivi le parole che userebbero i tuoi utenti. Dai ai nomi dei tool un namespace per servizio, così un solo pattern ne spazza via un intero gruppo.
+
+## Leggere la risposta
+
+Una ricerca riuscita produce tre nuovi tipi di blocco nel turno dell'assistente, in quest'ordine:
+
+```json
+{
+  "role": "assistant",
+  "content": [
+    { "type": "text", "text": "I'll search for tools to help with the weather information." },
+    {
+      "type": "server_tool_use",
+      "id": "srvtoolu_01ABC123",
+      "name": "tool_search_tool_regex",
+      "input": { "pattern": "weather", "limit": 10 }
+    },
+    {
+      "type": "tool_search_tool_result",
+      "tool_use_id": "srvtoolu_01ABC123",
+      "content": {
+        "type": "tool_search_tool_search_result",
+        "tool_references": [{ "type": "tool_reference", "tool_name": "get_weather" }]
+      }
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_01XYZ789",
+      "name": "get_weather",
+      "input": { "location": "San Francisco", "unit": "fahrenheit" }
+    }
+  ],
+  "stop_reason": "tool_use"
+}
+```
+
+Tre regole per gestirla:
+
+1. **Non restituire mai un `tool_result` per l'ID `srvtoolu_...`.** La ricerca è già stata eseguita sui server di Anthropic. Se rispondi, l'API rifiuta la richiesta. Il tuo `tool_result` va solo all'ID `toolu_...`: da lì in poi è il normale uso dei tool.
+2. **Non espandere mai tu i blocchi `tool_reference`.** Lo fa l'API, purché la definizione corrispondente sia presente in `tools`.
+3. **Lascia `tool_search_tool_result` nella cronologia così com'è.** È il modo in cui i turni successivi sanno quali tool sono già stati scoperti.
+
+Una ricerca senza risultati **non** è un errore: ricevi un `tool_search_tool_search_result` con un array `tool_references` vuoto, e Claude decide cosa fare dopo.
+
+Un dettaglio sottile su `limit`: il valore predefinito è **5** risultati, ma Claude può impostare qualsiasi valore da 1 a 10.000 nel proprio input di ricerca. Non lo controlli direttamente. Se ti serve un tetto rigido al numero di definizioni che possono arrivare in massa, è un argomento a favore dell'implementazione personalizzata qui sotto.
+
+## I cinque 400
+
+Quattro sono errori di forma della richiesta che avvengono prima di qualsiasi inferenza, e uno è il conflitto che nessuno si aspetta.
+
+<Steps items={[
+  {title: "Tutti i tool differiti", body: "\"At least one tool must have defer_loading=false. All tools cannot be deferred.\" La causa tipica è un ciclo che applica defer_loading: true all'intero array, tool di ricerca incluso. Non differire mai il tool di ricerca."},
+  {title: "Un riferimento senza definizione", body: "\"Tool reference 'unknown_tool' not found in available tools.\" Causato dal tagliare le definizioni differite dalle richieste successive per risparmiare byte. Invia l'array completo a ogni turno."},
+  {title: "defer_loading insieme a cache_control sullo stesso tool", body: "Un tool differito non può avere un breakpoint di cache: l'API restituisce un 400. Metti il breakpoint su un tool non differito. È l'errore che morde i team che avevano già ottimizzato il caching."},
+  {title: "defer_loading a livello di voce del toolset", body: "I toolset computer use e browser use (computer_toolset_20260801, browser_toolset_20260801) accettano defer_loading per ogni tool membro, dentro l'oggetto configs della voce. Impostarlo sulla voce stessa viene rifiutato."},
+  {title: "Membri dello stesso toolset in disaccordo", body: "Poiché un toolset viene differito ed espanso come unità, defer_loading deve risolversi allo stesso valore su ogni membro abilitato. Scopri il toolset e tutti i membri abilitati si caricano insieme: non esiste espansione parziale."}
+]} />
+
+I fallimenti della ricerca *durante* l'esecuzione sono diversi: tornano con HTTP **200** e l'errore dentro un oggetto `tool_search_tool_result_error`.
+
+| `error_code` | Cosa è successo |
+|---|---|
+| `invalid_tool_input` | Regex malformata, o pattern oltre il limite di 200 caratteri |
+| `unavailable` | La ricerca non è potuta partire: timeout o servizio non disponibile |
+| `too_many_requests` | Rate limit specifico sulle operazioni di tool search |
+| `execution_time_exceeded` | La ricerca ha superato il limite di tempo di esecuzione |
+
+Trattali come recuperabili: la conversazione è intatta, e la mossa onesta è di solito lasciare che Claude riprovi con un pattern diverso invece di far fallire l'intero turno. Per la politica di retry circostante vedi [Errori e rate limit](/docs/api/errors-and-rate-limits).
+
+## Prompt caching
+
+Il titolo è positivo: le definizioni differite vivono fuori dal prefisso in cache, quindi aggiungere e scoprire tool a metà conversazione non lo invalida. Vedi [Prompt caching](/docs/api/prompt-caching) per le regole sul prefisso, e [Diagnostica della cache](/docs/api/cache-diagnostics) se devi dimostrare un hit.
+
+La trappola è quella elencata sopra: `defer_loading: true` e `cache_control` si escludono a vicenda sullo stesso tool. Se il tuo breakpoint sta ora sull'ultimo tool di un array lungo e poi differisci quell'array, sei passato in silenzio da "in cache" a "400". Ancora il breakpoint a un tool che avresti comunque tenuto caricato.
+
+## Connettore MCP: impostalo sul toolset, non sul tool
+
+Con i tool che arrivano da server remoti tramite il [connettore MCP](/docs/api/mcp), non tocchi le singole definizioni: non sono tue. Lo configuri sulla voce `mcp_toolset`: una volta per l'intero server tramite `default_config`, oppure per singolo tool in `configs`.
+
+<PromptCard title="Differire un intero server MCP tranne l'unico tool che ti serve sempre">
+{`{
+  "type": "mcp_toolset",
+  "mcp_server_name": "observability",
+  "default_config": { "defer_loading": true },
+  "configs": {
+    "search_events": { "defer_loading": false }
+  }
+}`}
+</PromptCard>
+
+È la forma che ripaga più in fretta nella pratica: aggregare più server è esattamente la situazione da oltre 200 tool per cui la funzione esiste, e quasi sempre hai uno o due tool d'ingresso che vale la pena tenere caldi.
+
+## Sostituire la ricerca con la tua
+
+Entrambe le varianti integrate sono lessicali. Se i tuoi tool si trovano meglio per significato che per formulazione, implementa tu la ricerca: definisci un normale tool personalizzato e restituisci blocchi `tool_reference` in un `tool_result` ordinario.
+
+<PromptCard title="Un risultato di ricerca lato client che l'API espanderà">
+{`{
+  "type": "tool_result",
+  "tool_use_id": "toolu_your_tool_id",
+  "content": [
+    { "type": "tool_reference", "tool_name": "discovered_tool_name" }
+  ]
+}`}
+</PromptCard>
+
+Ogni nome che referenzi ha comunque bisogno della sua definizione completa nell'array `tools` di primo livello, di norma con `defer_loading: true`. Il percorso di espansione è identico: hai cambiato solo il recupero. Nota la differenza di formato: `tool_search_tool_result` è la forma *lato server*, interna alle varianti integrate. Il tuo tool personalizzato restituisce la forma standard `tool_result` mostrata sopra. Anthropic pubblica una [ricetta completa con gli embedding](https://platform.claude.com/cookbook/tool-use-tool-search-with-embeddings).
+
+È anche la tua via di fuga per il problema di `limit`: la tua ricerca decide quanti riferimenti tornano indietro.
+
+## Quando evitarlo
+
+Il deferred loading non ti dà nulla — e ti costa un round-trip di ricerca — quando la premessa non regge. Usalo quando **almeno una** di queste condizioni è vera:
+
+- 10 o più tool disponibili
+- definizioni dei tool sopra circa 10k token
+- accuratezza di selezione in calo visibile al crescere del catalogo
+- più server MCP aggregati (oltre 200 tool)
+- una libreria di tool che continua a crescere
+
+Resta sulle normali chiamate ai tool quando hai meno di 10 tool, o ogni tool viene usato a ogni richiesta, o l'intero catalogo sta sotto i 100 token circa. E nota la forma della fatturazione: **la tool search non è conteggiata come server tool separato.** Non esiste alcun campo tool-search in `usage.server_tool_use`. Gli unici token che costa sono le definizioni che porta nel contesto, tariffate come qualsiasi altra definizione di tool.
+
+I limiti rigidi, per la pianificazione della capacità: **10.000 tool differiti per richiesta**, pattern regex da 200 caratteri, query BM25 da 500 caratteri.
+
+## Avvertenze di piattaforma
+
+Due note di deployment in cui è facile perdere una giornata. Su **Amazon Bedrock**, la tool search lato server funziona solo tramite l'API InvokeModel, non tramite l'API Converse. Su **Claude Platform on AWS** si comporta esattamente come la Claude API, perché quel percorso usa direttamente la Messages API e non ha la divisione InvokeModel/Converse. Claude Opus 4.1 e precedenti non supportano affatto la funzione.
+
+<Flashcards title="Vocabolario della tool search" cards={[
+  {front: "defer_loading", back: "Booleano per singolo tool. Tiene una definizione fuori dal prefisso del system prompt finché Claude non la scopre tramite ricerca. NON cambia ciò che carichi: invii comunque ogni definizione a ogni richiesta."},
+  {front: "tool_reference", back: "Un puntatore leggero che l'API aggiunge in linea nella conversazione quando una ricerca ha una corrispondenza. L'API lo espande nella definizione completa prima che Claude la veda. Non lo espandi mai tu."},
+  {front: "server_tool_use", back: "La chiamata di Claude al tool di ricerca, con un ID srvtoolu_. È già stata eseguita sui server di Anthropic: restituire un tool_result per quell'ID fa rifiutare la richiesta dall'API."},
+  {front: "tool_search_tool_result", back: "Il blocco dei risultati di ricerca, che avvolge un oggetto tool_search_tool_search_result con un array tool_references. Rimandalo indietro invariato: è così che i turni successivi riusano i tool scoperti."},
+  {front: "Variante regex vs BM25", back: "regex_20251119: Claude scrive pattern Python re.search(), max 200 caratteri, senza distinzione maiuscole/minuscole. bm25_20251119: query in linguaggio naturale, max 500 caratteri. Entrambe cercano in nomi, descrizioni, nomi degli argomenti e descrizioni degli argomenti."},
+  {front: "Il conflitto con cache_control", back: "Un tool non può essere insieme defer_loading: true e avere cache_control: restituisce 400. Metti il breakpoint di cache su un tool che resta caricato."},
+  {front: "defer_loading sul toolset", back: "computer_toolset_20260801 / browser_toolset_20260801 accettano il flag per membro dentro configs, mai sulla voce. Deve essere identico tra i membri abilitati, e l'intero toolset si espande in blocco."},
+  {front: "limit", back: "Intero opzionale nell'input di ricerca di Claude, da 1 a 10.000, predefinito 5. Limita quanti tool corrispondenti restituisce una ricerca. Non lo imposti tu: lo imposta Claude."}
+]} />
+
+<Quiz title="Verifica la tua comprensione" questions={[
+  {q: "Imposti defer_loading: true su 400 dei tuoi 405 tool. Cosa succede alla dimensione del JSON che invii con POST?", options: ["Cala di circa il 99 percento: le definizioni differite vengono omesse", "Resta invariata: invii comunque ogni definizione completa, differita o no", "Cala solo nelle richieste successive dopo la prima ricerca"], answer: 1, explain: "defer_loading controlla ciò che entra nella finestra di contesto, non ciò che trasmetti. L'API ha bisogno di ogni definizione lato server per eseguire la ricerca ed espandere i riferimenti. I token di input fatturati calano; il corpo della richiesta no."},
+  {q: "Un ciclo applica defer_loading: true all'intero array tools. Cosa restituisce l'API?", options: ["200, con il tool di ricerca silenziosamente non differito al posto tuo", "Un 400: almeno un tool deve avere defer_loading=false", "200, ma Claude non riesce mai a trovare alcun tool"], answer: 1, explain: "\"At least one tool must have defer_loading=false. All tools cannot be deferred.\" Di norma il tool non differito è il tool di ricerca stesso: non differirlo mai."},
+  {q: "La tua risposta contiene un blocco server_tool_use con id srvtoolu_01ABC e un blocco tool_use con id toolu_01XYZ. Cosa rimandi indietro?", options: ["Un tool_result per ciascun ID", "Un tool_result solo per srvtoolu_01ABC", "Un tool_result solo per toolu_01XYZ, rimandando invariati i blocchi di ricerca"], answer: 2, explain: "La ricerca è già stata eseguita sull'infrastruttura di Anthropic. Restituire un tool_result per l'ID srvtoolu_ fa rifiutare la richiesta all'API. Rimanda indietro server_tool_use e tool_search_tool_result testualmente e rispondi solo alla vera chiamata al tool."},
+  {q: "Avevi già un breakpoint di cache sull'ultimo tool del tuo array. Ora differisci quell'array. Cosa si rompe?", options: ["Niente: i tool differiti vengono messi in cache separatamente", "Un 400: defer_loading e cache_control non possono coesistere sullo stesso tool", "La cache smette silenziosamente di avere hit"], answer: 1, explain: "Un tool differito non può avere cache_control; l'API restituisce un 400. Sposta il breakpoint su un tool che resta non differito. Le definizioni differite stanno comunque fuori dal prefisso in cache, ed è questo che preserva la tua cache tra una scoperta e l'altra."},
+  {q: "Claude non riesce a trovare i tuoi tool Grafana con la variante regex. Qual è la prima mossa migliore?", options: ["Passare a un pattern a corrispondenza esatta", "Aggiungere alle descrizioni dei tool le parole chiave che gli utenti usano davvero e dare ai nomi un prefisso grafana_", "Alzare il limit oltre 5"], answer: 1, explain: "La ricerca copre nomi, descrizioni, nomi degli argomenti e descrizioni degli argomenti, e Claude scrive pattern ampi come \".*grafana.*\", non corrispondenze esatte. La reperibilità è un problema di scrittura: metti il vocabolario dell'utente nella descrizione e dai ai nomi un namespace così che un solo pattern spazzi via il gruppo."},
+  {q: "Come viene fatturata la tool search?", options: ["Per ricerca, come la web search", "Non è conteggiata separatamente: paghi solo le definizioni che carica nel contesto", "Una tariffa mensile fissa per tool differito"], answer: 1, explain: "Non esiste alcun campo tool-search in usage.server_tool_use. L'unico costo sono le definizioni dei tool che la ricerca porta nel contesto, tariffate come qualsiasi altro token di input."}
+]} />
+
+## Fonti e letture di approfondimento
+
+- [Tool search tool — Claude Platform docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool) — le due varianti e le loro stringhe di versione, la semantica di `defer_loading`, la cifra di ~55k token del multiserver e la riduzione dell'85 percento, il crollo di accuratezza a 30–50 tool, le forme dei blocchi di risposta, tutti e cinque i 400, i quattro valori di `error_code`, il tetto dei 10.000 tool, l'avvertenza su Bedrock InvokeModel e la tabella dei modelli supportati.
+- [Tool use with prompt caching — Claude Platform docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching) — cosa invalida una cache di definizioni dei tool, e perché l'insieme differito sta fuori dal prefisso.
+- [MCP connector — Claude Platform docs](https://platform.claude.com/docs/en/agents-and-tools/mcp-connector) — la forma di `mcp_toolset`, `default_config` e `configs` per singolo tool.
+- [Tool reference — Claude Platform docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-reference) — i toolset lato client e il formato `configs` richiesto dai toolset computer/browser.
+- [Tool search with embeddings — Anthropic cookbook](https://platform.claude.com/cookbook/tool-use-tool-search-with-embeddings) — un'implementazione semantica personalizzata completa che restituisce blocchi `tool_reference`.
+- [Introducing advanced tool use on the Claude Developer Platform](https://www.anthropic.com/engineering/advanced-tool-use) — Anthropic Engineering, il post di lancio dietro i numeri pubblicati su token e accuratezza.
+- [Effective context engineering for AI agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) — il principio del recupero just-in-time di cui il deferred loading è un'istanza.
+- Correlati su AILmanac: [Tool Use / Function Calling](/docs/api/tool-use) · [Programmatic Tool Calling](/docs/api/programmatic-tool-calling) · [MCP](/docs/api/mcp) · [Costo in token di MCP](/docs/claude-code/mcp-token-cost) · [Prompt caching](/docs/api/prompt-caching) · [Diagnostica della cache](/docs/api/cache-diagnostics)
+
+## Prossimi passi
+
+- [Programmatic Tool Calling](/docs/api/programmatic-tool-calling) — l'altra metà dell'uso avanzato dei tool: la ricerca trova il tool giusto, la chiamata programmatica lo esegue senza trascinare i risultati nel contesto.
+- [Costo in token di MCP](/docs/claude-code/mcp-token-cost) — l'economia e i delta di accuratezza pubblicati dietro questa funzione.
+- [Memoria ed editing del contesto](/docs/api/memory-and-context-editing) — cosa fare per i *risultati* che riempiono il contesto, una volta gestite le definizioni.

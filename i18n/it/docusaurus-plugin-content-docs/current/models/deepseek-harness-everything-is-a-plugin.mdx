@@ -1,0 +1,545 @@
+---
+sidebar_position: 22.998
+title: "DeepSeek Harness: l'agente in cui persino il loop dell'agente è un plugin"
+description: "DeepSeek Harness (dsh) ha superato le 242.000 stelle e il 1° ottobre 2026 ha rilasciato gli installer desktop. Il titolo è «tutto è un plugin» — e, a differenza di molte affermazioni simili, qui regge davvero: l'adattatore del modello, il registro degli strumenti, il log di sessione e il loop dell'agente sono tutti sostituibili da un file di patch YAML. Questa pagina copre i tre fatti che contano per chi usa Claude (esegue il tuo hooks.json di Claude Code, parla anthropic-messages, e run_code è codemode per impostazione predefinita), la sandbox a tre modalità e le primitive del kernel che la sostengono, l'invariante del session log append-only e l'override di configurazione che cancella in silenzio gli altri tuoi provider."
+keywords: [DeepSeek Harness, dsh, Cordis, agent harness, everything is a plugin, cordis.patch.yml, PTC mode, run_code, Claude Code hooks, hooks.json, ACP, sandbox modes, workspace-write, Seatbelt, Landlock, bwrap, MCP client plugin, session JSONL, open source agent, Claude Code alternative]
+---
+
+<LevelBadge level="advanced" />
+
+**DeepSeek Harness** — il comando è `dsh` — è l'harness per agenti open source di
+DeepSeek. È comparso su GitHub il 13 agosto 2026, a oggi conta 242.626 stelle e
+29.081 fork, è con licenza MIT ed è scritto in TypeScript. Il 1° ottobre 2026
+DeepSeek ha aggiunto installer desktop firmati, ed è ciò che lo ha riportato
+sulla prima pagina di Hacker News.
+
+Il suo slogan in una riga è la descrizione del repository: *"Everything is a
+Plugin."* Quella frase compare nel README di praticamente ogni framework per
+agenti mai pubblicato, e quasi sempre significa «abbiamo una cartella dei
+plugin». Qui significa qualcosa di molto più forte e più strano, enunciato senza
+mezzi termini in `docs/architecture.md`: l'adattatore del modello, il registro
+degli strumenti, il log di sessione **e il loop dell'agente stesso** sono
+plugin, «così ciascuno è sostituibile da configurazione». Puoi eliminare il loop
+dell'agente da un file YAML e inserire il tuo senza fare alcun fork.
+
+Questo design ha conseguenze — alcune eccellenti, altre costose. Questa pagina
+parla di quelle che non si leggono sulla landing page.
+
+<Callout type="objectives" items={["Capire che cosa ti dà qui 'tutto è un plugin' e che cosa garantisce davvero Cordis, il framework sottostante","Eseguire il tuo hooks.json di Claude Code dentro dsh, sapendo quale sottoinsieme sopravvive al bridge","Puntare dsh su Claude, GPT o un gateway aziendale, e capire perché un abbonamento OAuth non funzionerà","Usare la modalità PTC (run_code) in modo deliberato invece che per caso","Leggere le tre modalità di sandbox confrontandole con la primitiva del kernel che ciascuna usa davvero","Evitare le cinque trappole di configurazione che costano un'ora ciascuna"]} />
+
+<VerifyNote lastVerified="2026-10-03" source="https://github.com/deepseek-ai/deepseek-harness">
+Il numero di stelle, la versione npm e la matrice degli installer desktop sono
+dati deperibili. Il tag npm `latest` al momento punta a `0.2.0-rc.2` — una
+release candidate, non una versione stabile — e `SAFETY.md` descrive il progetto
+come «experimental developer-preview software» che «has not undergone a security
+audit». Il README avverte di modifiche che rompono la compatibilità. Considera
+ogni percorso di file, chiave di servizio e campo di configurazione qui sotto
+come vero per la linea 0.2 e ricontrolla la documentazione del repository prima
+di costruirci sopra. Le affermazioni su architettura e sicurezza provengono dalla
+documentazione del repository stesso, non da copertura di seconda mano.
+</VerifyNote>
+
+## La versione in 60 secondi
+
+<Steps items={[
+  { title: "Avvialo", body: "`npx @deepseek-ai/dsh web` avvia il profilo web, stampa un URL — `http://127.0.0.1:3080` — e apre il browser. Niente clone, niente build. La directory da cui lo lanci diventa la radice del workspace predefinita, ma una Web UI appena creata non ha alcun workspace selezionato finché non ne aggiungi uno, e il composer resta disabilitato fino ad allora." },
+  { title: "Dagli un modello", body: "Settings → Models. La scheda DeepSeek accetta una chiave API da platform.deepseek.com. Aggiungi un provider di terze parti e il catalogo incluso offre id di provider tra cui `anthropic`, `openai`, `moonshotai` (Kimi) e `zai` (GLM). Le modifiche al modello si applicano alla richiesta successiva — nessun riavvio." },
+  { title: "Capisci dove mette le cose", body: "Le chiavi finiscono in `$DSH_HOME/.credentials.yaml`, in sola scrittura: la pagina delle impostazioni riceve indietro un descrittore oscurato, mai il segreto, e le tue impostazioni memorizzano solo un riferimento alla credenziale. Tutto il resto che cambi nella UI viene scritto in `$DSH_HOME/profiles/web/cordis.patch.yml` — lo stesso file che puoi modificare a mano." },
+  { title: "Scegli una modalità di ingresso", body: "`dsh web` è uno dei cinque profili inclusi. `dsh --profile headless \"run the tests\"` esegue una singola sessione persistita, stampa la risposta finale ed esce — è il tuo punto di ingresso per la CI. `dsh --profile acp` serve i client di automazione via ACP stdio. `dsh --profile sdk` serve i client SDK via JSON-RPC stdio. Il nome `desktop` è riservato al profilo dell'app Electron e la CLI npm rifiuta di avviarlo." },
+  { title: "Installa i plugin come pacchetti npm", body: "`dsh plugin --profile web <pnpm args>` inoltra direttamente a pnpm dentro la directory del profilo. I plugin sono normali pacchetti nei `node_modules` del profilo. I plugin della community si trovano tramite il topic GitHub `dsh-plugin`." },
+]} />
+
+## «Tutto è un plugin» è un'affermazione portante
+
+Sotto `dsh` c'è **Cordis**, un framework di plugin incluso nel repository
+(`vendor/`) e descritto in un paper su arXiv che il progetto cita — *A
+Programming Paradigm for Spatiotemporal Composability*, arXiv:2608.25512,
+inviato il 26 agosto 2026, da autori della Peking University e di DeepSeek-AI.
+Le due idee del paper corrispondono direttamente al comportamento dell'harness a
+runtime:
+
+- **Componibilità temporale** — gli effetti collaterali di un componente possono
+  essere annullati *completamente* quando lo si rimuove. Nell'harness questo è
+  `ctx.effect()`: sezioni di prompt, schemi degli strumenti, adattatori di
+  modello, provider e listener sono tutti installati come effetti reversibili,
+  quindi scaricare un plugin ne annulla le registrazioni in ordine, senza
+  lasciare orfani.
+- **Componibilità spaziale** — le dipendenze si risolvono in modo reattivo. Un
+  plugin dichiara i servizi di cui ha bisogno tramite `inject`, e Cordis
+  semplicemente non lo avvia finché quei servizi non esistono. Non c'è una
+  sequenza di boot da mantenere; l'ordine di caricamento è una conseguenza dei
+  requisiti dichiarati.
+
+Un **servizio** rivendica una chiave stabile sul contesto condiviso. I nomi sono
+l'architettura:
+
+| Chiave del servizio | Chi la possiede |
+|---|---|
+| `ctx.llm` | il registro degli adattatori LLM — il punto di giunzione del modello |
+| `ctx.tools` | il registro degli strumenti e la sua pipeline di esecuzione con ambito |
+| `ctx.agentLoop` | il driver predefinito del loop dell'agente |
+| `ctx.agents` | il registro degli agenti attivi |
+| `ctx.sessions` | il log `SessionEvent` append-only |
+| `ctx.systemPrompt` | l'assemblaggio del prompt di sistema |
+| `ctx.fs` | l'accesso al filesystem |
+| `ctx.subprocess` | l'esecuzione dei sottoprocessi |
+| `ctx.sandbox` | il confinamento dei sottoprocessi |
+| `ctx.subagents` | la delega ai sottoagenti |
+| `ctx.ptcRuntime` | l'esecuzione dei programmi per `run_code` |
+| `ctx.credentials` | il punto di giunzione delle credenziali |
+
+Il repository le chiama **capability seam** (punti di giunzione delle
+capacità), e divide ciascuna in tre ruoli: il pacchetto che *dichiara* il
+servizio, i pacchetti che lo *implementano* e i pacchetti che lo *consumano*.
+`ctx.sandbox` è dichiarato da `packages/sandbox/sandbox`, implementato da
+`sandbox-local` e `sandbox-windows-acl`, consumato da `tool-bash` e dal runtime
+PTC. Sostituisci l'implementazione e ogni consumatore la segue, senza modificare
+i consumatori.
+
+La comunicazione tra plugin avviene tramite eventi tipizzati con **cinque
+modalità di dispatch dichiarate**, e la modalità fa parte del contratto pubblico
+di un evento:
+
+| Modalità | Attesa | Ordine | Restituisce un valore |
+|---|---|---|---|
+| `emit` | no | ordine di registrazione | no |
+| `waterfall` | no | ordine di registrazione | sì |
+| `parallel` | sì | tutti insieme | no |
+| `serial` | sì | ordine di registrazione | sì |
+| `bail` | no | ordine di registrazione, si ferma al primo bail | sì |
+
+`waterfall` è la più interessante: è un middleware «around». Un listener
+riceve `(...args, next)`, chiama `next()` per passare lungo la catena un
+risultato eventualmente avvolto, oppure ritorna senza chiamare `next()` per
+interrompere la catena. Per gli eventi a decisione singola — «questo strumento
+può essere eseguito?» — l'interruzione *è* il design: un listener di policy che
+possiede la decisione ritorna senza delegare, mentre un listener che si limita
+ad annotare deve delegare. Se hai scritto un hook di Claude Code che restituisce
+una decisione di blocco, conosci già questa forma; la differenza è che qui è il
+meccanismo di estensione nativo anziché una chiamata a una shell esterna.
+
+Il loop dell'agente esegue **turni** (zero o più passi) e **passi** (una
+richiesta al modello più le sue chiamate agli strumenti), e la sequenza di
+estensione pubblicata è `agent/pre-step → agent/request → llm/stream → tools/* →
+step/end`. Quelli sono i punti di aggancio. Non applichi patch al loop: lo
+ascolti.
+
+## Tre cose che contano se usi già Claude Code
+
+### 1. Eseguirà il tuo `hooks.json` esistente di Claude Code
+
+Questo è il fatto su `dsh` meno riportato in assoluto. `packages/hooks` include
+tre pacchetti: `hook-protocol` (il motore condiviso), **`hooks-claude-code`** e
+**`hooks-codex`**. Punta il bridge di Claude Code a un `hooks.json` esistente e
+i tuoi hook girano dentro `dsh` quando le sessioni iniziano, arrivano i prompt,
+gli strumenti vengono eseguiti e le esecuzioni terminano. Il README del gruppo è
+esplicito su ciò che possono fare: bloccare prompt o chiamate agli strumenti
+**con messaggi visibili al modello**, aggiungere contesto alla conversazione o
+richiedere che l'esecuzione prosegua.
+
+Il limite è altrettanto esplicito, ed è la cosa da controllare prima di
+pianificare una migrazione: *ogni integrazione supporta solo il sottoinsieme di
+hook di tipo command documentato dallo strumento di origine.* Quindi i tuoi hook
+di tipo `command` vengono portati. Tutto ciò che dipende da comportamenti di
+Claude Code al di fuori di quel sottoinsieme, no. Se hai un livello di hook di
+cui ti fidi — vedi [Hook di Claude Code](/docs/claude-code/hooks) — questa è una
+vera strada per «portarti dietro le tue protezioni», non una riscrittura.
+
+### 2. Puoi puntarlo su Claude — ma non con il tuo abbonamento
+
+L'elenco dei provider incluso nel catalogo installato comprende `anthropic` e
+`openai` per nome. Per tutto ciò che non è nel catalogo — un relay, un gateway
+aziendale, un server self-hosted — il modulo del provider personalizzato chiede
+un Provider ID, un URL di base, una credenziale e un **protocollo API**, e ne
+offre esattamente tre: OpenAI Chat Completions, OpenAI Responses e Anthropic
+Messages. In `cordis.patch.yml` sono memorizzati come `openai-completions`,
+`openai-responses` e `anthropic-messages`.
+
+Due conseguenze su cui si inciampa:
+
+- **Un provider parla un solo protocollo.** Un gateway che serve sia la forma
+  OpenAI sia quella Anthropic richiede *due* voci di provider, non una.
+- **L'accesso OAuth non è supportato.** La guida ai provider lo dice
+  direttamente, usando Codex come esempio: i provider che si autenticano con
+  OAuth «are not supported here yet». Significa fatturazione a chiave API, non un
+  posto che già paghi. Se speravi di far funzionare `dsh` con un abbonamento
+  esistente a un assistente, metti in conto token a consumo — i calcoli sono in
+  [quanto costa l'AI tra i vari provider](/docs/models/what-ai-costs-across-providers).
+
+C'è anche un pulsante di scoperta dei modelli che chiede al tuo endpoint quali
+modelli serve. Utile, con un'avvertenza da interiorizzare: un provider
+**integrato** viene sempre servito dal catalogo installato, anche quando il suo
+URL di base punta a un gateway. Quindi, se vuoi vedere che cosa serve davvero un
+gateway, devi aggiungerlo come provider *personalizzato*. Altrimenti stai
+rileggendo a te stesso l'elenco incluso da DeepSeek.
+
+### 3. `run_code` è codemode, ed è un runtime di prima classe
+
+`packages/ptc-runtime` è la famiglia di capacità dietro ciò che il registro
+degli strumenti presenta al modello come `run_code`. Il contratto: il modello
+scrive **un solo programma** che chiama funzioni fornite dall'host come normali
+chiamate async, e tornano indietro solo l'output stampato e il valore di
+ritorno del programma. Non i risultati intermedi degli strumenti. Non venti
+andate e ritorno.
+
+I dettagli:
+
+- Il backend TypeScript esegue ogni programma in un **nuovo processo Node
+  gestito**, sotto la policy di sandbox risolta.
+- **Ogni esecuzione parte senza stato dai programmi precedenti.** Non c'è una
+  sessione REPL implicita su cui contare; porta lo stato tramite file o valore
+  di ritorno.
+- I fallimenti tornano come *risultati*, non come eccezioni, così il chiamante
+  può diagnosticarli o passarli al modello.
+- Esiste un **backend Python** sperimentale, che gestisce un protocollo wire su
+  fd-3 tra l'host Node e un sottoprocesso CPython, per quando ti serve davvero
+  CPython.
+
+Se questo schema ti è nuovo, la spiegazione più chiara del *perché* fa risparmiare
+così tanto contesto è in [Pi 1.0 e il trucco del codemode](/docs/models/pi-1-0-minimal-agent-harness):
+i risultati degli strumenti che non entrano mai nella trascrizione non possono
+gonfiarla. La stessa logica vale qui. La differenza è che in `dsh` il runtime
+dei programmi è un punto di giunzione sostituibile (`ctx.ptcRuntime`) anziché una
+scelta di sandbox fissa.
+
+## La sandbox: tre modalità, tre primitive del kernel, un'avvertenza onesta
+
+Le tre modalità ti sembreranno familiari se hai configurato Codex:
+
+| Modalità | Che cosa può fare un sottoprocesso ai file |
+|---|---|
+| `read-only` | solo lettura |
+| `workspace-write` | scrittura solo sotto il workspace della sessione |
+| `danger-full-access` | senza restrizioni |
+
+Più interessante è la tabella dei backend, perché ti dice che cosa applica
+davvero la policy sulla tua macchina:
+
+- **Linux** — bwrap, poi Landlock come gradino di ripiego.
+- **macOS** — Seatbelt.
+- **Windows** — un token ristretto, con `sandbox-windows-acl` come backend di
+  restrizione delle scritture: i figli confinati possono scrivere solo nel
+  workspace e in una directory temporanea privata.
+
+Una chiamata negata può essere ritentata tramite una **escalation una tantum
+approvata dall'utente**, quindi la policy è un confine «chiedi e procedi» e non
+un muro invalicabile.
+
+E poi l'avvertenza, che il README del pacchetto enuncia da solo e che dovresti
+citare a chiunque ti dica che questo è «in sandbox»: **il confinamento è solo
+same-world.** Condivide il kernel dell'host e il filesystem dell'host. Un
+isolamento reale — container, microVM, esecutori remoti — qui non si registra
+affatto; sostituisce intere capacità.
+
+`SAFETY.md` è insolitamente schietto per un repository da 242k stelle, e vale la
+pena leggerlo prima della prima esecuzione anziché dopo. Dice che l'harness può
+eseguire codice generato dal modello, caricare plugin di terze parti,
+raggiungere la rete e toccare processi, credenziali e file; che **non c'è alcuna
+garanzia intrinseca** che sandbox, richieste di approvazione e controlli dei
+permessi impediscano danni a qualsiasi cosa raggiungibile; e che il software
+«must not be treated as secure or production-ready». Le sue raccomandazioni sono
+quelle noiose e giuste: VM o container usa e getta, backup di tutto ciò che sta
+dentro l'ambito del progetto e nessuna credenziale sensibile a meno che tu non
+accetti il rischio. Lo stesso ragionamento vale per qualsiasi harness che esegui
+in locale — vedi
+[proteggere gli agenti locali e ibridi](/docs/models/securing-local-and-hybrid-agents)
+e [sandbox e mascheramento delle credenziali](/docs/claude-code/sandbox-credential-masking).
+
+C'è anche un piccolo gruppo di **guard** da conoscere: `timeout-policy` e
+`repeat-tool-reminder` — quest'ultimo è un promemoria per la modalità di
+fallimento in cui un modello chiama lo stesso strumento in loop.
+
+## Il log di sessione è il prodotto
+
+`dsh` persiste le sessioni come file JSONL versionato —
+`session.vN.jsonl[.zstd]` — con catene di migrazione tra le versioni, tramite un
+punto di giunzione `ctx.sessionPersistence` la cui implementazione inclusa è
+`session-persistence-jsonl`. Gli eventi committati comprendono `turn/start`,
+`step/start`, `user/message`, `assistant/message`, `tool/result` e `turn/end`.
+
+L'invariante alla base è la parte da rubare anche se non userai mai `dsh`:
+**«model-visible means logged»** (ciò che il modello vede viene registrato).
+Ogni input che il modello ha visto deve essere ricostruibile dal log. Gli eventi
+live esistono separatamente, per pilotare la UI in tempo reale; non sono
+esplicitamente la fonte di verità.
+
+Questa singola regola è ciò che rende possibili i pacchetti circostanti:
+
+- `session-query-sqlite` — interrogare le sessioni da SQLite invece di fare grep
+  sul JSONL.
+- `dsh-session-projection` con `ctx.sessionProjections` — ripiegare lo stato
+  della sessione in modo incrementale invece di rigiocarlo da zero.
+- `llm-replay` più `token-meter` («replay token measurement») — rigiocare una
+  sessione registrata e *misurarne* il costo in token, che è il modo in cui
+  confronti due modifiche a prompt o modello su input identici anziché a
+  sensazione.
+- `compaction-tool-result-pruner` — descritto come potatura dei risultati degli
+  strumenti **senza modello**, cioè ridurre la trascrizione senza pagare un
+  modello per riassumerla. Confrontalo con l'approccio di Claude in
+  [compattazione del contesto](/docs/api/compaction).
+
+Se hai mai provato a fare debug di un'esecuzione di un agente scoprendo che i
+tuoi log registravano la *UI renderizzata* anziché i byte ricevuti dal modello,
+sai già perché questa invariante vale più della maggior parte delle funzionalità.
+
+## MCP qui è un plugin per server, non un registro globale
+
+`dsh` parla MCP sia su stdio sia su Streamable HTTP, usando l'SDK ufficiale per
+negoziazione, scoperta, validazione e cancellazione. Le scelte di design sono
+abbastanza insolite da elencarle:
+
+- **I server sono opt-in, una voce di plugin per server.** Configuri una voce
+  `@deepseek-ai/dsh-mcp-client` per server, nell'ambito Cordis in cui vuoi che
+  sia visibile. Deliberatamente **non esiste un servizio condiviso `ctx.mcp`**:
+  il client è un plugin di connessione e un *consumatore* del registro degli
+  strumenti.
+- **Nessun server configurato significa nessuna tassa MCP.** Un chiamante senza
+  alcun server configurato visibile non riceve né testo di prompt MCP né
+  strumenti MCP, in modalità nativa o PTC. Zero byte, non «una piccola
+  sezione». Conta più di quanto sembri — vedi
+  [il costo reale degli strumenti MCP](/docs/claude-code/mcp-token-cost).
+- **I nomi pubblici degli strumenti includono il nome del server**, quindi
+  strumenti con lo stesso nome di due server restano distinti. Un `serverName`
+  deve essere unico all'interno del suo ambito di registrazione, ma ambiti di
+  agente separati possono riusarlo.
+- **Le istruzioni del server entrano nel prompt di sistema registrato**, entro il
+  limite di `maxInstructionBytes` del client. Un server prolisso non può annettersi
+  di nascosto il tuo prompt — ma nota che questo è anche il canale attraverso cui
+  un server malevolo parla al tuo modello. È la superficie d'attacco descritta in
+  [tool poisoning e rug pull di MCP](/docs/security/mcp-tool-poisoning-and-rug-pulls).
+- **Un aggiornamento fallito dell'elenco degli strumenti mantiene la generazione
+  precedente** anziché far sparire i tuoi strumenti a metà sessione, e non esiste
+  alcuna impostazione di prodotto che forzi una revisione del protocollo — la
+  negoziazione segue le revisioni supportate dall'SDK.
+
+## Configurazione: cinque livelli, e l'override che si mangia i tuoi provider
+
+Una directory di profilo contiene un `package.json` — dipendenze di plugin
+esterni all'albero più un manifesto `dsh.profile` con un elenco ordinato
+`bundles` — e un `cordis.patch.yml`, il tuo livello di patch. L'albero composto
+viene costruito su una radice vuota in quest'ordine:
+
+<Steps items={[
+  { title: "La patch di ciascun bundle, nell'ordine di `dsh.profile.bundles`", body: "I bundle si risolvono prima dall'installazione di dsh — `@deepseek-ai/dsh-base`, `dsh-web-app`, `dsh-headless`, `dsh-sdk-app`, `dsh-sdk-minimal`, `dsh-acp-app` — poi dai `node_modules` del profilo, dove pnpm installa i plugin esterni all'albero. `dsh-base` è la base condivisa: adattatori di modello, strumenti, persistenza, policy di sandbox. Un bundle si dichiara tramite un campo `dsh` nel suo `package.json`." },
+  { title: "Poi il `cordis.patch.yml` del profilo", body: "`$DSH_HOME/profiles/<profile>/cordis.patch.yml`. Per un normale avvio `dsh web` il profilo è `web`. È il file che scrive la UI delle impostazioni; puoi modificarlo direttamente e gli adattatori lo rileggono alla richiesta successiva." },
+  { title: "Poi la patch della home", body: "`$DSH_HOME/cordis.patch.yml` — override tra profili." },
+  { title: "Poi gli overlay `--patch`", body: "Overlay da riga di comando, applicati per ultimi. `config/examples/` include overlay opt-in per webhook di revisione GitHub, server MCP di memoria e strumenti Cordis a runtime; non fanno mai parte di un profilo predefinito." },
+  { title: "Ispeziona prima di avviare", body: "`--dump-default-config` e `--dump-config` stampano l'albero composto senza avviare nulla — il modo più rapido per rispondere a \"quale livello ha impostato questo?\"" },
+]} />
+
+Con l'HMR abilitato nello YAML, `dsh-hmr` osserva il manifesto del profilo e
+entrambi i file di patch e ricompone ogni livello con un unico ricaricamento
+serializzato. Senza, le modifiche si applicano al riavvio.
+
+## Cinque trappole che ti costeranno un'ora
+
+1. **Un override di configurazione Cordis sostituisce l'intera configurazione
+   della voce.** La guida ai provider lo scrive chiaramente: quando modifichi un
+   override esistente, devi preservare tu stesso gli altri campi e gli altri
+   provider. Modifica un provider con disattenzione e hai cancellato tutti gli
+   altri. È l'errore singolo più costoso possibile in `cordis.patch.yml`.
+2. **Un Provider ID è permanente.** Richieste, sessioni salvate, modelli
+   predefiniti e riferimenti alle credenziali dipendono tutti da esso. Rinominarlo
+   significa aggiungere un nuovo provider ed eliminare il vecchio. Nome
+   visualizzato, URL di base, protocollo, credenziale ed elenco dei modelli
+   restano modificabili.
+3. **`--dump-config-schema` importa codice dei plugin.** A differenza degli altri
+   flag di dump, carica gli schemi dei plugin dichiarati dall'albero composto per
+   stampare JSON Schema — quindi puntarlo su plugin non fidati esegue il loro
+   codice in fase di import. La guida di riferimento della CLI ha una nota di
+   sicurezza dedicata. Trattalo come
+   [la revisione di codice di terze parti](/docs/security/reviewing-third-party-code),
+   non come `--help`.
+4. **La compatibilità delle versioni dei plugin è imposta, e la via di fuga è
+   esplicita.** L'installazione e l'avvio del profilo controllano gli intervalli
+   di peer DSH dichiarati rispetto alla versione del runtime di `dsh --version`;
+   un plugin incompatibile richiede un'esenzione riconosciuta a versione esatta
+   (`allow-version`, `revoke-version`). Buona igiene, sorprendente la prima volta
+   che un plugin si rifiuta di caricarsi.
+5. **Una sessione che ha già inviato una richiesta mantiene il modello registrato
+   nel proprio log.** Cambiare il modello predefinito non sposta retroattivamente
+   una sessione attiva, e se un default salvato nomina un provider eliminato il
+   composer blocca l'input finché non ne scegli un altro. Entrambi sono
+   comportamenti corretti; entrambi sembrano bug all'una di notte.
+
+## Eseguirlo
+
+<PromptCard title="Avvia la Web UI, poi un'esecuzione headless one-shot — niente clone, niente build">{`# Web UI on http://127.0.0.1:3080, workspace defaults to the invoking directory
+npx @deepseek-ai/dsh web
+
+# One persisted session, final answer to stdout, then exit — the CI shape
+npx @deepseek-ai/dsh --profile headless "summarize this repo and list its main packages"
+
+# Serve automation clients over ACP stdio (editor integrations)
+npx @deepseek-ai/dsh --profile acp
+
+# Inspect the composed config tree WITHOUT booting it
+npx @deepseek-ai/dsh --profile web --dump-config
+
+# Manage a profile's plugins (forwards to pnpm inside the profile directory)
+npx @deepseek-ai/dsh plugin --profile web add some-dsh-plugin`}</PromptCard>
+
+<PromptCard title="Punta dsh su un gateway che parla Anthropic Messages — in $DSH_HOME/profiles/web/cordis.patch.yml">{`# WARNING: a Cordis config override replaces the ENTIRE entry config.
+# Include every provider you want to keep, not just the new one.
+- id: llm-pi-ai
+  config:
+    providers:
+      my-anthropic-gateway:
+        apiKeyEnv: GATEWAY_API_KEY
+        api: anthropic-messages      # or openai-completions / openai-responses
+        baseURL: https://gateway.example/v1
+        models:
+          - id: some-text-model
+          - id: some-vision-model
+            input: [text, image]     # omit to inherit the catalog's input types`}</PromptCard>
+
+<PromptCard title="Porta con te le protezioni di Claude Code">{`# The Claude Code hook bridge runs your existing command hooks inside dsh.
+# Only the command-hook subset documented by Claude Code is supported.
+# Hooks can: block a prompt or a tool call with a MODEL-VISIBLE message,
+# add conversation context, or require the run to continue.
+#
+# Check the bridge's own README for the current config field names before
+# wiring this up — the 0.2 line is a developer preview and they can move:
+#   packages/hooks/hooks-claude-code/README.md
+#
+# Verify enforcement the same way you would in Claude Code: a hook that is
+# configured but never fires is worse than no hook, because you trust it.`}</PromptCard>
+
+## Dove si colloca
+
+Se stai scegliendo un harness anziché studiarne uno, il riassunto onesto è:
+`dsh` è l'harness open source più interessante dal punto di vista
+*architetturale* oggi in circolazione e il meno pronto a diventare portante. Lo
+dice il suo stesso file di sicurezza. Il modello a plugin è davvero più forte di
+quello dei concorrenti — avere `ctx.agentLoop` sostituibile non è una cosa che
+si può fare nella maggior parte degli harness a nessun prezzo — e i bridge degli
+hook fanno sì che adottarlo non sia una scommessa tutto o niente.
+
+Dall'altra parte: un tag `latest` che è una release candidate, nessun audit di
+sicurezza, modifiche incompatibili annunciate e una storia dei provider che
+presuppone chiavi API. Per un confronto sull'intero panorama, vedi
+[CLI di coding agent a confronto](/docs/models/coding-agent-clis-compared) e
+[coding agent locali](/docs/models/local-coding-agents). Per i modelli con cui lo
+piloteresti più plausibilmente, vedi
+[DeepSeek-V4.1-Flash](/docs/models/deepseek-v4-1-flash-open-weight-1m).
+
+<Flashcards cards={[
+  { front: "DeepSeek Harness, in una riga", back: "`dsh` — l'harness per agenti open source di DeepSeek. MIT, TypeScript, pubblicato per la prima volta il 13 agosto 2026, 242.626 stelle / 29.081 fork al 2026-10-03. Si avvia con `npx @deepseek-ai/dsh web`." },
+  { front: "Cordis", back: "Il framework di plugin incluso sotto dsh. I servizi rivendicano nomi stabili `ctx.<key>`, le dipendenze si dichiarano con `inject` e le registrazioni sono effetti reversibili installati tramite `ctx.effect()`. Paper: arXiv:2608.25512, 26 agosto 2026." },
+  { front: "Capability seam", back: "Un servizio sostituibile diviso in tre ruoli: il pacchetto che lo dichiara, i pacchetti che lo implementano e i pacchetti che lo consumano. Esempi: `ctx.fs`, `ctx.subprocess`, `ctx.sandbox`, `ctx.subagents`, `ctx.llm`, `ctx.ptcRuntime`." },
+  { front: "Le cinque modalità di dispatch di Cordis", back: "`emit` (osserva, nessun ritorno), `waterfall` (middleware around, restituisce), `parallel` (atteso, concorrente), `serial` (atteso, ordinato, restituisce), `bail` (si ferma al primo valore di bail). La modalità fa parte del contratto pubblico di un evento." },
+  { front: "Profili", back: "Pile ordinate di livelli di patch di bundle di plugin sotto `$DSH_HOME/profiles/<name>`. Inclusi: `web`, `headless`, `sdk`, `sdk-minimal`, `acp`. `desktop` è riservato all'app Electron e la CLI npm rifiuta di avviarlo." },
+  { front: "L'ordine dei livelli di configurazione", back: "Patch dei bundle nell'ordine di `dsh.profile.bundles` → il `cordis.patch.yml` del profilo → `$DSH_HOME/cordis.patch.yml` → overlay `--patch`. Ispeziona il risultato con `--dump-config` prima dell'avvio." },
+  { front: "La trappola dell'override", back: "Un override di configurazione Cordis sostituisce l'INTERA configurazione della voce. Modificare un provider dentro `llm-pi-ai` senza rielencare gli altri li cancella." },
+  { front: "Bridge degli hook di Claude Code", back: "`hooks-claude-code` (e `hooks-codex`) eseguono i tuoi hook command del `hooks.json` esistente dentro dsh — bloccando prompt o chiamate agli strumenti con messaggi visibili al modello, oppure aggiungendo contesto. È supportato solo il sottoinsieme di hook command dello strumento di origine." },
+  { front: "Protocolli di modello supportati", back: "Tre: `openai-completions`, `openai-responses`, `anthropic-messages`. Un provider parla un solo protocollo, quindi un gateway a doppio protocollo richiede due provider. I provider con accesso OAuth non sono supportati — solo chiavi API." },
+  { front: "Modalità PTC / run_code", back: "Il modello scrive un solo programma che chiama funzioni dell'host come normali chiamate async; tornano indietro solo l'output stampato e il valore di ritorno. Un nuovo processo Node per ogni esecuzione sotto la policy di sandbox, nessuno stato portato tra le esecuzioni, fallimenti restituiti come risultati. Backend CPython sperimentale su protocollo fd-3." },
+  { front: "Le tre modalità di sandbox", back: "`read-only`, `workspace-write` (scritture confinate al workspace della sessione), `danger-full-access`. Backend: bwrap poi Landlock su Linux, Seatbelt su macOS, un token ristretto più restrizione di scrittura ACL su Windows. Una chiamata negata può essere ritentata tramite escalation una tantum approvata dall'utente." },
+  { front: "\"Same-world only\"", back: "La descrizione che il gruppo sandbox dà del proprio confinamento: condivide il kernel e il filesystem dell'host. Container, microVM ed esecutori remoti non sono backend qui — sostituiscono intere capacità." },
+  { front: "\"Model-visible means logged\"", back: "L'invariante del log di sessione: ogni input visto dal modello deve essere ricostruibile dal log append-only `session.vN.jsonl[.zstd]`. Gli eventi live pilotano solo la UI e non sono la fonte di verità." },
+  { front: "Replay + token-meter", back: "`llm-replay` rigioca una sessione registrata e `token-meter` ne misura il costo in token — il modo per confrontare due modifiche a prompt o modello su input identici. Reso possibile dall'invariante di logging." },
+  { front: "MCP in dsh", back: "Opt-in, una voce di plugin `@deepseek-ai/dsh-mcp-client` per server, stdio o Streamable HTTP, nessun servizio condiviso `ctx.mcp`. Nessun server configurato significa zero testo di prompt MCP e zero strumenti MCP. I nomi degli strumenti hanno come prefisso `serverName`; le istruzioni del server sono limitate da `maxInstructionBytes`." },
+]} />
+
+<Quiz questions={[
+  {
+    q: "In DeepSeek Harness, quale di questi elementi NON è sostituibile da configurazione?",
+    options: [
+      "L'adattatore del modello",
+      "Il loop dell'agente",
+      "Il log di sessione",
+      "Nessuno di essi — architecture.md afferma che tutti e tre sono plugin"
+    ],
+    answer: 3,
+    explain: "docs/architecture.md: 'Every part of the product is a plugin, including the model adapter, the tool registry, the session log, and the agent loop itself, so each is replaceable from configuration.' È la parte insolita del design — nella maggior parte degli harness il loop è l'unica cosa fissa."
+  },
+  {
+    q: "Vuoi pilotare dsh con Claude usando l'abbonamento che già paghi. Che cosa succede?",
+    options: [
+      "Funziona — scegli il provider `anthropic` e accedi",
+      "Non funziona: i provider con accesso OAuth non sono supportati, quindi serve una chiave API",
+      "Funziona solo nel profilo `acp`",
+      "Funziona ma richiede di impostare manualmente il protocollo Anthropic Messages"
+    ],
+    answer: 1,
+    explain: "La guida ai provider dice che i provider che si autenticano con OAuth — fa l'esempio di Codex — 'are not supported here yet.' Il catalogo incluso contiene un id di provider `anthropic`, ma richiede una chiave API. Pianifica token a consumo, non un abbonamento."
+  },
+  {
+    q: "Modifichi `llm-pi-ai` in cordis.patch.yml per aggiungere un nuovo gateway, elencando sotto `providers` solo quel gateway. Qual è il risultato?",
+    options: [
+      "Il nuovo gateway viene unito ai provider esistenti",
+      "La modifica viene rifiutata perché la configurazione è incompleta",
+      "Gli altri provider scompaiono — un override Cordis sostituisce l'intera configurazione della voce",
+      "Il nuovo gateway viene ignorato finché non riavvii dsh"
+    ],
+    answer: 2,
+    explain: "La documentazione lo dice chiaramente: 'A Cordis config override replaces the complete entry config; preserve other providers and fields when editing an existing override.' È l'errore singolo più costoso possibile in quel file — e dato che le modifiche al modello si applicano senza riavvio, te ne accorgerai alla richiesta successiva, non all'avvio."
+  },
+  {
+    q: "Su che cosa si basa davvero `workspace-write` su macOS?",
+    options: [
+      "Un runtime di container",
+      "Seatbelt",
+      "Landlock",
+      "Un token di accesso ristretto"
+    ],
+    answer: 1,
+    explain: "I backend di sandbox-local sono bwrap poi Landlock su Linux, Seatbelt su macOS e un token ristretto su Windows (con sandbox-windows-acl che limita le scritture al workspace e a una directory temporanea privata). Il tutto è 'same-world only' — kernel e filesystem dell'host condivisi, non isolamento."
+  },
+  {
+    q: "Perché dsh può rigiocare una sessione e misurarne il costo in token?",
+    options: [
+      "Perché mette in cache ogni risposta del modello",
+      "Perché il log di sessione garantisce che tutto ciò che è visibile al modello sia registrato",
+      "Perché l'API di DeepSeek restituisce output deterministici",
+      "Perché token-meter ritokenizza la trascrizione della UI renderizzata"
+    ],
+    answer: 1,
+    explain: "L'invariante è 'model-visible means logged': ogni input del modello deve essere ricostruibile dal log JSONL append-only, con gli eventi della UI live tenuti esplicitamente separati. È ciò che rende `llm-replay` più `token-meter` una misura reale e non un'approssimazione."
+  },
+  {
+    q: "Non configuri alcun server MCP. Che cosa vede il modello?",
+    options: [
+      "Una breve sezione MCP che spiega che nessun server è connesso",
+      "Gli strumenti di risorse condivise, con un elenco di server vuoto",
+      "Niente di relativo a MCP — né testo di prompt né strumenti, in modalità nativa o PTC",
+      "Dipende dal profilo"
+    ],
+    answer: 2,
+    explain: "La documentazione del sottosistema MCP: un chiamante senza alcun server configurato visibile 'receive[s] no MCP prompt text or tools in native or PTC mode.' I server sono opt-in per voce di plugin, e il primo provider in un ambito è ciò che abilita gli strumenti di risorse condivise."
+  },
+  {
+    q: "Quale flag di dump NON dovresti puntare su plugin non fidati?",
+    options: [
+      "`--dump-config`",
+      "`--dump-default-config`",
+      "`--dump-config-schema`",
+      "Tutti e tre sono innocui"
+    ],
+    answer: 2,
+    explain: "`--dump-config-schema` importa gli schemi dei plugin dichiarati dall'albero composto per stampare JSON Schema, quindi esegue il codice dei plugin in fase di import. Gli altri due stampano la configurazione composta senza avviare nulla. La guida di riferimento della CLI riporta una nota di sicurezza dedicata proprio a questo."
+  }
+]} />
+
+## Fonti e approfondimenti
+
+- [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) — il repository: README, numero di stelle e fork, licenza MIT, topic `dsh-plugin`.
+- [docs/architecture.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md) — l'affermazione sui plugin, le chiavi dei servizi, profili e bundle, il loop turno/passo, l'invariante del log di sessione.
+- [docs/cordis-primer.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/cordis-primer.md) — Cordis in cinque idee, le cinque modalità di dispatch, la semantica waterfall, la configurazione del loader.
+- [docs/capability-seams.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/capability-seams.md) — il grafo dei servizi generato: ogni chiave `ctx.*`, il suo proprietario, le implementazioni e i consumatori.
+- [SAFETY.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md) — che cosa l'harness può fare alla tua macchina, e l'esplicita dichiarazione «not secure or production-ready».
+- [packages/sandbox/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sandbox/README.md) — le tre modalità, i backend per piattaforma, l'escalation e «same-world only».
+- [packages/hooks/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/hooks/README.md) — i bridge degli hook di Claude Code e Codex e il limite del sottoinsieme di hook command.
+- [packages/ptc-runtime/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/ptc-runtime/README.md) — il contratto di `run_code`, l'esecuzione in processo nuovo, il backend Python sperimentale.
+- [docs/subsystems/mcp.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/mcp.md) — plugin client per server, regole di ambito, prefisso dei nomi, `maxInstructionBytes`, negoziazione del protocollo.
+- [docs/user/guide/providers.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.md) — id dei provider, i tre protocolli API, il limite OAuth, l'archiviazione delle credenziali, l'avviso sull'override.
+- [apps/cli/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/README.md) — modalità di ingresso, ordine di composizione dei profili, nomi dei bundle, `dsh plugin`, i flag di dump, le esenzioni di versione.
+- [Pagina di prodotto DeepSeek Harness](https://deepseek.com/harness) — gli installer desktop (`.dmg` per macOS Apple Silicon, `.exe` per Windows a 64 bit) e lo stato di anteprima.
+- [arXiv:2608.25512](https://arxiv.org/abs/2608.25512) — *A Programming Paradigm for Spatiotemporal Composability*, il paper su Cordis citato dal progetto.
+- [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) — indice dei plugin della community per il topic `dsh-plugin`.
+
+## Prossimi passi
+
+- [Pi 1.0: l'harness minimale e il trucco del codemode](/docs/models/pi-1-0-minimal-agent-harness) — la spiegazione pubblicata più chiara del perché `run_code` fa risparmiare contesto, e delle modalità di esposizione MCP che lo accompagnano.
+- [CLI di coding agent a confronto](/docs/models/coding-agent-clis-compared) — dove si colloca `dsh` rispetto agli harness che potresti già usare.
+- [Proteggere gli agenti locali e ibridi](/docs/models/securing-local-and-hybrid-agents) — che cosa mettere intorno a qualsiasi harness il cui stesso file di sicurezza ti dice di non fidarti della sua sandbox.
