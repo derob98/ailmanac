@@ -1,0 +1,446 @@
+---
+sidebar_position: 22.9995
+title: "DwarfStar (ds4) e l'ascesa dei motori di inferenza overfit"
+description: "ds4 è un motore in puro C da 23,6k stelle, creato dall'autore di Redis, che esegue in locale DeepSeek V4 Flash, GLM 5.x e Qwen3.8-Flash-Next — e si rifiuta di eseguire qualsiasi altra cosa. Questa pagina spiega i tre meccanismi che un runtime generico non ti darà (quantizzazione asimmetrica degli expert instradati, streaming limitato degli expert da SSD, snapshot della KV che sopravvivono a un riavvio), legge con onestà i suoi stessi numeri — i 126 t/s del titolo sono un aggregato di otto GPU su 16 sessioni, non il tuo Mac — e quantifica il costo reale della scommessa overfit: un supporto ai modelli volutamente usa e getta, 761 issue aperte e un branch main che si è mosso l'ultima volta il 20 settembre 2026."
+keywords: [ds4, DwarfStar, antirez inference engine, overfit inference engine, narrow inference runtime, DeepSeek V4 Flash local, GLM 5.3 Flash local, Qwen3.8 Flash Next local, run 284B locally, routed expert quantization, IQ2_XXS, SSD expert streaming, KV snapshot session resume, ds4-server, ds4-agent, Claude Code local model, llama.cpp alternative, Strix Halo ROCm, DGX Spark inference, local coding agent]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Capire che cos'è un motore di inferenza \"overfit\", perché un runtime ristretto può quasi raddoppiare le prestazioni di uno generico a parità di hardware, e perché nel 2026 ha smesso di essere una scommessa costosa","Imparare i tre meccanismi che ds4 usa e che un runner GGUF generico non ti darà — quantizzazione asimmetrica degli expert instradati, una cache di expert limitata in streaming da SSD e snapshot della KV che sopravvivono a un riavvio","Leggere correttamente i numeri pubblicati da ds4: quale cifra è un singolo Mac, quale sono otto GPU che condividono 16 sessioni e quale è un modello da 178 GB su una macchina da 128 GB","Quantificare il costo reale della scommessa: un supporto ai modelli pensato per essere ritirato, un branch main di cui conviene controllare la data e una postura di sicurezza che presuppone che tu sappia leggere il C","Decidere quando uno strumento ristretto batte llama.cpp per il tuo lavoro — e i tre casi in cui chiaramente non lo fa"]} />
+
+Il 2 ottobre 2026 un link intitolato *"From the creator of Redis; run LLM locally
+with ds4"* è arrivato sulla prima pagina di Hacker News, fermandosi a 362 punti
+e 104 commenti. La parte sorprendente non è il progetto. È che il progetto aveva
+già cinque mesi — `antirez/ds4` è stato creato il 6 maggio 2026 — e aveva
+accumulato in silenzio 23.582 stelle, 2.268 fork e 761 issue aperte prima che il
+pubblico più ampio se ne accorgesse.
+
+Ciò per cui è stato notato conta più del motore in sé. ds4 è il membro più
+apprezzato di una categoria che un anno fa quasi non esisteva e che ora conta
+almeno sei voci: il **motore di inferenza overfit**. Un runtime costruito per un
+solo modello su una sola classe di hardware, che non eseguirà i tuoi altri
+modelli e il cui autore prevede che venga buttato via.
+
+Se hai letto qui [Colibrì](/docs/models/colibri-stream-frontier-moe-from-ssd)
+o [Strata](/docs/models/strata-qwen-flash-next-gaming-gpu), hai già incontrato
+due punti di questa mappa. Questa pagina riguarda il terzo punto e la mappa.
+
+## La versione in una frase
+
+ds4 sceglie un breve elenco di modelli mixture-of-experts, scrive kernel Metal,
+CUDA e ROCm per quelle architetture specifiche, comprime solo gli *expert
+instradati* a circa due bit mantenendo a precisione più alta il percorso
+per-token, e distribuisce attorno a essi una propria CLI, un proprio coding agent
+e un proprio server HTTP — ottenendo velocità e rifinitura su sei modelli al
+prezzo di non eseguire nient'altro.
+
+## Che cosa significa "overfit", con precisione
+
+Il nome della categoria nasce da un'analogia deliberata con l'overfitting di un
+modello: il runtime è tarato così strettamente su un unico bersaglio da
+generalizzare male di proposito. L'elenco pubblicato, a inizio ottobre 2026:
+
+| Motore | Hardware di destinazione | Modello di destinazione |
+|---|---|---|
+| **DwarfStar (ds4)** | Metal 96 GB+, CUDA (DGX Spark, Ada/L40S), ROCm (Strix Halo) | DeepSeek V4 / V4.1 Flash, V4 PRO, GLM 5.2/5.3, Qwen3.8-Flash-Next |
+| Strata | NVIDIA consumer, 12 GB+ | Qwen3.8-Flash-Next |
+| ninfer | RTX 5090 | checkpoint Qwen |
+| Splash | Apple Silicon M3+ | famiglia Qwen |
+| llamAmpere | RTX 3090 / 3090 Ti | Qwen3.8-27B |
+| gufo | AMD Strix Halo | un insieme selezionato |
+
+L'unica misurazione pubblica che confronta un motore ristretto con uno generico
+ben tarato, sulla stessa macchina, è quella di uno sviluppatore con una RTX 4070
+(12 GB, 64 GB DDR5) che esegue Qwen3.8-Flash-Next: **27 tok/s** su llama.cpp
+ottimizzato al meglio contro **53 tok/s** su Strata a 60K di contesto.
+Più o meno 2x.
+
+Prendi quel numero con l'avvertenza che il suo stesso autore allega: le
+quantizzazioni e le impostazioni erano diverse, quindi non è un esperimento
+controllato. È un delta reale, non un benchmark. Quella distinzione è proprio
+il genere di cosa che questa intera categoria è brava a non stampare, e vale la
+pena interiorizzarla prima di leggere il README di qualsiasi motore — la stessa
+disciplina che chiede [leggere un benchmark dell'AI](/docs/models/reading-ai-benchmarks).
+
+### Perché nel 2026 è diventato economico
+
+Tre argomenti, e il terzo è quello non ovvio:
+
+1. **La generalità costa throughput.** Supportare molti modelli e backend impone
+   rami difensivi e allocatori condivisi che limitano quanto aggressivamente si
+   possa schedulare un singolo percorso.
+2. **I coding agent hanno azzerato il costo di scrivere kernel.** Un singolo
+   programmatore di sistema competente, con un agente, può ora scrivere, misurare
+   e correggere kernel GPU a un ritmo che prima richiedeva un team. L'autore
+   stesso di ds4 ha descritto il progetto come costruito con un forte aiuto dei
+   modelli, con gli umani a guidare idee, test e debug.
+3. **L'ottimizzazione dell'inferenza ha una funzione obiettivo insolitamente
+   nitida.** Input fissi, un output di riferimento da eguagliare e un solo numero
+   da massimizzare. È un ciclo a cui si può puntare un agente e lasciarlo
+   girare — ed è *per questo* che l'argomento 2 morde qui e non ovunque.
+
+## Tre meccanismi che un runtime generico non ti darà
+
+### 1. Quantizzazione asimmetrica: schiaccia gli expert, conserva il percorso
+
+Il titolo che sembra impossibile — un modello da 284B parametri su un laptop —
+non è compressione uniforme. Un modello MoE tocca solo una piccola porzione dei
+suoi pesi per token, e quelle porzioni non sono ugualmente fragili. ds4 sfrutta
+quell'asimmetria per tipo di tensore.
+
+La configurazione Qwen3.8-Flash-Next è quella che il repository documenta in
+termini esatti, e vale la pena leggerla da vicino:
+
+| Componente | Trattamento | Dimensione |
+|---|---|---|
+| Pesi principali + MTP | expert gate/up **IQ2_XXS** con imatrix, proiezioni down **Q2_K con padding** | **41,73 GiB** |
+| N-gram BF16 originali | letti **direttamente da disco**, mai residenti | **95,37 GiB** |
+
+Due cose da ricavare da quella tabella. Primo, la quantizzazione è scelta *per
+ruolo del tensore* — le proiezioni gate e up ricevono uno schema diverso dalle
+proiezioni down, perché tollerano danni diversi. Secondo, l'artefatto più grande
+su disco non viene affatto moltiplicato per token: un embedding n-gram è una
+tabella di lookup, quindi resta sull'SSD e non compete mai per la RAM. Strata
+sfrutta la stessa proprietà sullo stesso modello; la dimensione del file e il
+requisito di memoria semplicemente non sono lo stesso numero.
+
+Il repository dichiara quali modelli sopravvivono a questo trattamento: DeepSeek
+V4 Flash e PRO, e GLM 5.2, *"tolerate aggressive routed-expert quantization."*
+È un'affermazione empirica per architettura, non una legge generale — ed è
+precisamente per questo che l'elenco dei modelli del motore è breve.
+
+### 2. Streaming da SSD che trasmette gli expert, non tutto
+
+Il flag è `--ssd-streaming`, e ciò che fa davvero è più ristretto di quanto la
+frase suggerisca. Dal `SSD_STREAMING.md` del progetto:
+
+> SSD streaming keeps a bounded cache of routed experts and reads missing
+> experts from the GGUF.
+
+Quindi: i pesi non instradati restano in RAM. Solo gli expert instradati entrano
+ed escono da una cache limitata. La documentazione è esplicita nel dire che
+questo **non** elimina la memoria necessaria per gli altri pesi, le attivazioni,
+lo scratch e il contesto — un'avvertenza da notare, perché la lettura naturale
+di «streaming» è che la RAM smetta di contare.
+
+Il risultato principale qui è il numero davvero sorprendente di questa pagina.
+Su un M5 Max con GLM 5.3 Flash Q4 — un **modello da 177,77 GiB su una macchina
+da 128 GB**:
+
+| Fase | Misurato |
+|---|---|
+| Prefill (iniziale / continuato) | 121 t/s / 104 t/s |
+| Generazione | **11,9–14,9 t/s** |
+
+Leggilo con l'avvertenza che la documentazione allega: *"Generation is usually
+more sensitive to cache misses than prefill. A large model that starts
+successfully can still be too slow for interactive work."* Dodici token al
+secondo vanno bene per un lavoro di riassunto in batch e sono penosi per un
+coding agent che guardi lavorare.
+
+C'è anche una trappola di tuning controintuitiva: rendere la cache di expert
+*più grande* può rendere la decodifica **più lenta**, perché una cache
+sovradimensionata scalza i pesi non instradati che vengono toccati a ogni singolo
+token. Più cache non è monotonicamente meglio.
+
+Per un trattamento più approfondito dello streaming degli expert come
+architettura — la banda NVMe come vero tetto, l'usura dell'SSD, `O_DIRECT` —
+vedi [Colibrì](/docs/models/colibri-stream-frontier-moe-from-ssd), costruito
+interamente attorno a quell'idea.
+
+### 3. Snapshot della KV: il dettaglio che rende economici i loop degli agenti
+
+È il meccanismo con più probabilità di cambiare come ti senti durante la
+giornata, e quello di cui quasi nessuno scrive. ds4 memorizza lo stato KV delle
+sessioni e la cronologia delle conversazioni in `~/.ds4/kvcache`, e la promessa
+documentata è che *"compatible local KV snapshots avoid rebuilding the prompt."*
+
+I comandi di sessione:
+
+| Comando | Effetto |
+|---|---|
+| `/save` | Salva la sessione corrente |
+| `/list` | Elenca le sessioni salvate |
+| `/switch <sha>` | Riprende una sessione specifica con il suo stato KV |
+| `/strip <sha>` | Elimina il payload KV, conserva il testo |
+| `/del <sha>` | Elimina la sessione |
+
+Perché conta: un agente di lunga durata rimanda a ogni turno un prefisso che
+cresce. Se il motore ricostruisce quel prefisso da zero ogni volta, il prefill
+domina il tempo reale proprio sul carico che ti interessa. I commentatori del
+thread di HN hanno messo in evidenza questo punto — cronologia dei messaggi
+append-only che preserva la riusabilità della KV — come il tipo di dettaglio che
+un runtime generico di solito lascia al chiamante. È l'analogo locale del
+[prompt caching tra provider](/docs/models/prompt-caching-across-providers):
+stessa economia, livello diverso.
+
+Un limite documentato: **le sessioni che contengono immagini non possono ancora
+essere salvate.**
+
+## È uno stack, non solo un runtime
+
+Vengono distribuiti quattro binari, e la divisione del lavoro è il punto:
+
+| Binario | A che cosa serve |
+|---|---|
+| `ds4` | CLI interattiva multi-turno con cronologia della conversazione |
+| `ds4-agent` | Un coding agent nativo che chiama direttamente l'inferenza — nessun salto HTTP |
+| `ds4-server` | Server HTTP su `http://127.0.0.1:8000`, per i client esterni |
+| `ds4-eval` | Test di regressione delle capacità integrati, eseguiti su un vero GGUF |
+
+`ds4-server` è la superficie di integrazione, e il repository nomina
+direttamente i client previsti: Pi, OpenCode, Codex CLI o **Claude Code**.
+Questo rende ds4 un backend locale plausibile per le configurazioni ibride
+descritte in [Claude più modelli locali](/docs/models/claude-plus-local-models)
+e [coding agent locali](/docs/models/local-coding-agents).
+
+Nota che cosa dice il repository su `ds4-eval`, perché è insolitamente onesto:
+sono *"DwarfStar integration checks, not official leaderboard scores."*
+Risponde a «questa build ha regredito?», non a «questo modello è buono?».
+
+## Dal clone al primo token
+
+<Steps items={[
+  {title: "Scegli il tuo target di build", body: "Metal su Apple Silicon è il percorso principale e predefinito. CUDA ha due target — uno ottimizzato per DGX Spark, uno generico per schede classe Ada/L40S. ROCm punta ai sistemi Strix Halo come il Framework Desktop. Stai scegliendo un target di compilazione, non un flag a runtime."},
+  {title: "Controlla il minimo di RAM prima di scaricare qualsiasi cosa", body: "Il percorso Metal vuole 96 GB e oltre per i modelli classe Flash; la variante PRO è una macchina da 256 GB o più. Lo streaming da SSD abbassa la soglia ma, come mostrano i numeri sopra, ti regala una velocità di generazione tra le singole cifre e il basso dieci sui modelli più grandi. Decidi prima da quale lato dell'\"interattivo\" ti serve stare."},
+  {title: "Compila", body: "Un semplice make per Metal; make cuda-spark, make cuda-generic o make strix-halo negli altri casi. C puro con kernel di piattaforma — il repository è circa 8,7 MB di C, 4,5 MB di CUDA, 2,3 MB di Objective-C e 1,4 MB di Metal, senza dipendenze runtime da un'altra libreria di inferenza."},
+  {title: "Scarica un modello per tag, non per URL", body: "Lo script di supporto accetta tag brevi come ds4f-q2, qwen38-q2, qwen38-q4k e qwen38-vision. Sono build GGUF specifiche del progetto — è il passaggio in cui 'non è un runner GGUF generico' diventa concreto. Un checkpoint che hai già su disco per Ollama o llama.cpp non è previsto che funzioni."},
+  {title: "Esegui prima la CLI, poi il server", body: "Verifica qualità e velocità in modo interattivo con ds4 prima di collegarci qualcosa. Poi avvia ds4-server e punta il tuo client alla porta 8000. Controlla le guide del server e dei client in docs/ per la forma attuale dell'API — il README rimanda a quelle, ed è la superficie che con più probabilità si è mossa da quando questa pagina è stata scritta."},
+  {title: "Salva una sessione quando hai un prompt che ti piace", body: "Esegui /save, poi /list. È il passaggio che trasforma un prefill lento in un costo una tantum, ed è l'abitudine a più alta leva su questo motore."}
+]} />
+
+<PromptCard title="Compila, scarica ed esegui — Apple Silicon">
+{`git clone https://github.com/antirez/ds4.git
+cd ds4
+make
+./download_model.sh ds4f-q2
+./ds4`}
+</PromptCard>
+
+<PromptCard title="Gli altri tre target di build">
+{`make cuda-spark     # DGX Spark
+make cuda-generic   # Ada Lovelace / L40S-class, multi-GPU
+make strix-halo     # ROCm on Strix Halo (e.g. Framework Desktop)`}
+</PromptCard>
+
+<PromptCard title="Servilo a Claude Code, Codex CLI, OpenCode o Pi">
+{`./ds4-server
+# listens on http://127.0.0.1:8000 by default
+# see docs/SERVER.md for the API surface and multi-session handling,
+# and docs/CLIENTS.md for per-client setup`}
+</PromptCard>
+
+<PromptCard title="Flag da conoscere dal primo giorno">
+{`--ctx 32768           # context window size
+--prefill-chunk 1024  # prefill batch size
+--ssd-streaming       # bounded routed-expert cache, rest read from GGUF
+--mtp                 # speculative decoding (GLM, Qwen)
+--nothink / --think   # reasoning off/on; V4.1 uses --think-level 1-100
+--temp 0              # greedy
+--vision FILE         # load a vision encoder
+--prefix-file FILE    # preload conversation pairs
+--power 100           # throughput/GPU-load trade (V4.1 and GLM require 100)`}
+</PromptCard>
+
+## Sei cose che il titolo non porta con sé
+
+### 1. I 126 t/s non sono il tuo Mac
+
+Il repository riporta *"about 126 t/s aggregate generation with 16 sessions"* su
+un deployment da otto L40S. È il **throughput aggregato su sedici sessioni
+concorrenti su otto GPU da datacenter** — circa 8 t/s per sessione se lo dividi.
+È un numero di capacità di servizio. Non dice nulla su quanto velocemente
+scorra una singola risposta sul tuo laptop, ed è la cifra con più probabilità di
+esserti citata fuori contesto. La versione generale di questa trappola è
+trattata in [inferenza veloce e velocità dei token](/docs/models/fast-inference-and-token-speed).
+
+### 2. Il supporto ai modelli è progettato per essere ritirato
+
+La filosofia dichiarata del repository: *"Model support is intentionally
+opportunistic."* I modelli vengono aggiunti e **rimossi** in base alla rilevanza
+per i laptop da 128 GB e le workstation da 256/512 GB. Il progetto si descrive
+come *"a working template for the biggest use cases"* anziché copertura
+universale, e incoraggia gli utenti a modificare il codice con i coding agent per
+il proprio hardware.
+
+Leggilo come un avviso sulle dipendenze. Se costruisci un flusso di lavoro su
+ds4 più DeepSeek V4 Flash, la combinazione supportata non è esplicitamente un
+impegno. Blocca un commit.
+
+### 3. Controlla tu la data dei commit — e sappi che cosa prevede la categoria
+
+Al 6 ottobre 2026, il commit più recente su `main` è datato **20 settembre
+2026**, circa due settimane prima, a fronte di **761 issue aperte**. I commit
+stessi sembrano lavoro di ingegneria accurato più che abbandono — guardie nella
+suite di test per ROCm e Metal, documentazione di preflight QA. Ma il cronista
+della categoria prevede che *entro aprile 2027 almeno quattro dei sei motori
+elencati sopra saranno rimasti 60 giorni senza un commit*, man mano che le
+architetture dei modelli si spostano sotto di loro.
+
+Quella è una previsione, non un fatto. Il motivo per cui sta in questa pagina è
+che è *verificabile*, e verificarla richiede dieci secondi prima di adottare
+qualsiasi motore di questa classe. La data dell'ultimo commit è la colonna di
+manutenzione che nessuno di questi README stampa.
+
+### 4. Una contraddizione da conoscere su ROCm
+
+Un commentatore del thread di Hacker News ha riportato che le build ROCm sono
+"absolutely untested". Il log dei commit del repository del 19 settembre 2026
+dice l'opposto in termini specifici — un messaggio di commit descrive la verifica
+di build dell'applicazione e dei test ROCm senza warning su Strix Halo, con test
+di placement, memoria, sessione, server e agente superati.
+
+Entrambe le versioni sono riportate qui anziché risolte, perché potrebbero essere
+entrambe vere per momenti diversi o configurazioni Strix Halo diverse. Se sei su
+AMD, tratta ROCm come il meno battuto dei tre backend e verifica sulla tua
+macchina prima di impegnarti.
+
+### 5. GGUF personalizzati, e un sito che il thread non ha apprezzato
+
+ds4 è *"deliberately narrow, not a general GGUF runner"* e richiede build GGUF
+proprie. A parte questo: il sito del progetto `dwarfstar.sh` è stato criticato
+nel thread di HN come troppo marketing — un commentatore l'ha definito "pure
+slop" — con la sostanza tecnica che vive invece nella directory `docs/` del
+repository. Leggi il repository, non la landing page.
+
+### 6. La postura di sicurezza presuppone che tu sappia leggere il C
+
+Questi sono progetti giovani, in gran parte con un solo maintainer, con accesso
+nativo alla GPU e pochi revisori esterni, e l'intera categoria condivide questa
+forma. Il consiglio standard di chi la segue: compila dai sorgenti, blocca i
+commit ed eseguili su hardware che non ti dispiacerebbe perdere. Se un motore
+locale starà dietro un agente con accesso a strumenti, il modello di minaccia in
+[proteggere gli agenti locali e ibridi](/docs/models/securing-local-and-hybrid-agents)
+si applica al runtime tanto quanto al modello.
+
+## Quando il ristretto batte davvero il generale
+
+**Scegli un motore overfit quando** il tuo modello è nel suo elenco e ci resterà
+per tutta la durata del progetto; il tuo hardware è nel suo elenco; il carico è
+di lunga durata con un prefisso riutilizzabile, così gli snapshot della KV si
+ripagano; e sai compilare dai sorgenti e leggere un diff.
+
+**Resta su llama.cpp o Ollama quando** cambi modello spesso, vuoi un unico
+runtime su macchine che non controlli, ti serve un modello per cui nessuno ha
+ancora fatto overfitting, o ciò che stai ottimizzando è il tuo tempo anziché i
+token al secondo. Il runtime generico è anche la tua baseline di riferimento:
+misuralo per primo, o non saprai mai che cosa ti ha comprato davvero il motore
+ristretto. [Esegui modelli in locale con Ollama](/docs/models/run-models-locally-ollama)
+è il punto di partenza giusto se non hai ancora fissato quella baseline.
+
+**Usa un'API ospitata quando** il lavoro richiede capacità di frontiera anziché
+località. È emerso direttamente nel thread di HN: un commentatore ha notato che
+i modelli cloud di frontiera restano più veloci per il vero lavoro di coding.
+L'inferenza locale compra privacy, controllo dei costi e operatività offline —
+non parità. [Agente locale o Claude?](/docs/models/local-or-claude-agent) percorre
+quella decisione per bene.
+
+Il consenso emergente nella community dell'AI locale è un **ecosistema a due
+livelli** anziché un vincitore: runtime generici per ampiezza e portabilità,
+runtime overfit usa e getta per le massime prestazioni sul modello che stai
+davvero eseguendo questo trimestre. Ci si aspetta che tu li abbia installati
+entrambi.
+
+<Quiz questions={[
+  {
+    q: "La documentazione di ds4 riporta circa 126 t/s di generazione aggregata con 16 sessioni. Che cosa ti dice sulla velocità a flusso singolo sul tuo Mac da 128 GB?",
+    options: [
+      "Dovresti aspettarti circa 126 t/s",
+      "In sostanza nulla — è il throughput aggregato su 16 sessioni concorrenti su otto GPU L40S, che equivale a circa 8 t/s per sessione",
+      "Dovresti aspettarti la metà, perché un Mac ha metà della banda di memoria",
+      "È la velocità di prefill, quindi la generazione sarà più veloce"
+    ],
+    answer: 1,
+    explain: "È una cifra di capacità di servizio di un deployment multi-GPU, non una cifra di latenza. Il throughput aggregato su sessioni concorrenti e la velocità a flusso singolo sono grandezze diverse, e confonderle è il modo più comune in cui i numeri sull'inferenza locale vengono citati male."
+  },
+  {
+    q: "Che cosa tiene esattamente su disco il flag --ssd-streaming di ds4?",
+    options: [
+      "L'intero modello, letto su richiesta",
+      "Solo la cache KV",
+      "Una cache limitata di expert instradati è tenuta in memoria e gli expert mancanti vengono letti dal GGUF; i pesi non instradati restano residenti in RAM",
+      "Il tokenizer e gli embedding"
+    ],
+    answer: 2,
+    explain: "La documentazione è specifica: mantiene una cache limitata di expert instradati e legge dal GGUF i mancanti. Esplicitamente non elimina la memoria necessaria per gli altri pesi, le attivazioni, lo scratch e il contesto — quindi la RAM conta ancora."
+  },
+  {
+    q: "Qwen3.8-Flash-Next su ds4 è elencato come 41,73 GiB di pesi principali e MTP più 95,37 GiB di n-gram BF16. Perché il numero più grande non determina il requisito di RAM?",
+    options: [
+      "Perché è compresso e si espande solo quando serve",
+      "Perché una tabella di n-gram è una struttura di lookup anziché una matrice moltiplicata per token, quindi viene letta direttamente da disco e non diventa mai residente",
+      "Perché BF16 usa metà della memoria di int8",
+      "Perché gli n-gram sono opzionali e possono essere eliminati"
+    ],
+    answer: 1,
+    explain: "La stessa proprietà è sfruttata da Strata sullo stesso modello. È il motivo per cui, per questa architettura, la dimensione del download e il requisito di memoria non sono lo stesso numero — e perché un SSD locale veloce è un requisito quasi di correttezza, non un semplice vantaggio."
+  },
+  {
+    q: "Ingrandisci la cache di expert instradati di ds4 per usare più RAM e la decodifica diventa più lenta. Qual è la causa probabile?",
+    options: [
+      "La cache è corrotta e va ricostruita",
+      "Le cache più grandi aggiungono sempre overhead di lookup",
+      "Una cache di expert sovradimensionata scalza i pesi non instradati che vengono toccati a ogni singolo token",
+      "Le cache di expert aiutano solo il prefill, mai la generazione"
+    ],
+    answer: 2,
+    explain: "La documentazione avverte proprio di questo. Gli expert instradati sono grandi e toccati di rado; i pesi non instradati sono piccoli e toccati a ogni token. Scalzare questi ultimi per mettere in cache più dei primi è una perdita netta, quindi la dimensione della cache non è monotonicamente meglio."
+  },
+  {
+    q: "Il repository dichiara che \"model support is intentionally opportunistic.\" Qual è la conseguenza pratica per un flusso di lavoro che costruisci su di esso?",
+    options: [
+      "I nuovi modelli verranno aggiunti più velocemente che nei runtime generici",
+      "Il supporto al modello esatto da cui dipendi può essere rimosso quando il maintainer lo giudica non più rilevante — quindi blocca un commit anziché seguire main",
+      "La licenza potrebbe cambiare",
+      "La qualità della quantizzazione peggiorerà nel tempo"
+    ],
+    answer: 1,
+    explain: "I modelli vengono aggiunti e rimossi in base alla rilevanza per l'hardware consumer attuale ad alta memoria, e il progetto si presenta come un template da modificare anziché una piattaforma stabile. L'usa e getta è una scelta di design in questa categoria, non un difetto — ma va messa in conto."
+  },
+  {
+    q: "A che cosa serve ds4-eval?",
+    options: [
+      "Produrre punteggi da classifica per confrontare i modelli",
+      "Eseguire test di regressione delle capacità integrati su un vero GGUF — il repository li definisce esplicitamente controlli di integrazione, non punteggi ufficiali da classifica",
+      "Valutare quale quantizzazione scaricare",
+      "Misurare il tuo SSD prima di abilitare lo streaming"
+    ],
+    answer: 1,
+    explain: "Risponde a \"questa build ha regredito?\", non a \"questo modello è buono?\". Trattare la suite di integrazione di un motore come un benchmark di qualità è un errore di categoria — e uno da cui il progetto stesso si premura di mettere in guardia."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Motore di inferenza overfit", back: "Un runtime costruito apposta per un modello specifico su hardware specifico, che scambia portabilità con velocità e progettato per essere usa e getta — sostituito quando il modello o l'hardware vanno avanti. Prende il nome per analogia con l'overfitting: generalizza male di proposito. L'elenco attuale comprende DwarfStar (ds4), Strata, ninfer, Splash, llamAmpere e gufo." },
+  { front: "ds4 / DwarfStar, in numeri", back: "antirez/ds4. Creato il 6 maggio 2026, MIT, C puro con kernel di piattaforma (~8,7 MB C, 4,5 MB CUDA, 2,3 MB Objective-C, 1,4 MB Metal). 23.582 stelle, 2.268 fork, 761 issue aperte al 6 ottobre 2026; ultimo commit su main il 20 settembre 2026. Prima pagina di Hacker News il 2 ottobre 2026 con 362 punti e 104 commenti." },
+  { front: "I modelli che ds4 esegue", back: "DeepSeek V4 Flash (incl. visione sperimentale), DeepSeek V4.1 Flash, DeepSeek V4 PRO, GLM 5.2 / 5.3 / 5.3 Flash, Qwen3.8-Flash-Next. Metal vuole 96 GB e oltre per i modelli classe Flash; PRO è una macchina da 256 GB o più. Servono GGUF personalizzati del progetto — non è un runner GGUF generico." },
+  { front: "Quantizzazione asimmetrica degli expert instradati", back: "Quantizzazione scelta per ruolo del tensore anziché in modo uniforme. Qwen3.8-Flash-Next su ds4: expert gate/up IQ2_XXS con imatrix e proiezioni down Q2_K con padding, 41,73 GiB di pesi principali e MTP, più 95,37 GiB di n-gram BF16 originali letti direttamente da disco. Il repository dichiara che DeepSeek V4 Flash e PRO e GLM 5.2 tollerano una quantizzazione aggressiva degli expert instradati — un'affermazione empirica per architettura, ed è per questo che l'elenco dei modelli è breve." },
+  { front: "--ssd-streaming, esattamente", back: "Mantiene in memoria una cache limitata di expert instradati e legge dal GGUF gli expert mancanti. I pesi non instradati restano residenti. NON elimina la memoria necessaria per gli altri pesi, le attivazioni, lo scratch e il contesto. Sovradimensionare la cache può rallentare la decodifica, perché scalza i pesi toccati a ogni token." },
+  { front: "Il risultato 178 GB su 128 GB", back: "GLM 5.3 Flash Q4, un modello da 177,77 GiB, su un M5 Max con 128 GB: prefill 121 t/s che scende a 104 t/s in continuazione, generazione 11,9–14,9 t/s. La documentazione avverte che la generazione è più sensibile ai cache miss del prefill, quindi un modello che parte con successo può comunque essere troppo lento per il lavoro interattivo." },
+  { front: "Snapshot KV e comandi di sessione", back: "Stato KV e cronologia delle sessioni vivono in ~/.ds4/kvcache; gli snapshot KV locali compatibili evitano di ricostruire il prompt. /save, /list, /switch <sha>, /strip <sha> (elimina la KV, conserva il testo), /del <sha>. È ciò che rende economici in locale i loop lunghi degli agenti. Limite: le sessioni che contengono immagini non possono ancora essere salvate." },
+  { front: "I quattro binari di ds4", back: "ds4 (CLI interattiva multi-turno), ds4-agent (coding agent nativo, inferenza diretta senza salto HTTP), ds4-server (HTTP su 127.0.0.1:8000 per Pi, OpenCode, Codex CLI o Claude Code), ds4-eval (test di regressione delle capacità integrati su un vero GGUF — controlli di integrazione, esplicitamente non punteggi da classifica)." },
+  { front: "L'unica misurazione pubblica ristretto contro generale", back: "Qwen3.8-Flash-Next su una RTX 4070 (12 GB, 64 GB DDR5): 27 tok/s su llama.cpp ottimizzato al meglio contro 53 tok/s su Strata a 60K di contesto, circa 2x. Il suo autore nota che quantizzazioni e impostazioni erano diverse, quindi è un delta reale e non un esperimento controllato." },
+  { front: "Perché i motori ristretti sono diventati convenienti nel 2026", back: "La generalità costa throughput (rami difensivi, allocatori condivisi); i coding agent hanno azzerato il costo di scrivere e fare debug di kernel GPU; e l'ottimizzazione dell'inferenza ha un obiettivo insolitamente nitido — input fissi, un output di riferimento, un solo numero da massimizzare — che è un ciclo che un agente può essere lasciato a eseguire." },
+  { front: "L'ecosistema a due livelli", back: "Il consenso emergente della community non è un vincitore ma una divisione: runtime generici (llama.cpp, Ollama, vLLM) per ampiezza, portabilità e come tua baseline di misura; runtime overfit usa e getta per le massime prestazioni sul modello che stai davvero eseguendo questo trimestre. Ci si aspetta che tu li abbia entrambi." },
+  { front: "Checklist di adozione per qualsiasi motore di questa classe", back: "Controlla la data dell'ultimo commit su main. Blocca un commit anziché seguire HEAD, perché il supporto ai modelli è esplicitamente ritirabile. Compila dai sorgenti e isolalo su hardware che non ti dispiacerebbe perdere — sono progetti giovani, con un solo maintainer, con accesso nativo alla GPU e pochi revisori. Misura prima il runtime generico, così sai che cosa hai comprato." }
+]} />
+
+<VerifyNote lastVerified="2026-10-06" source="antirez/ds4 README and docs/SSD_STREAMING.md; GitHub API for antirez/ds4 (23,582 stars, 2,268 forks, 761 open issues, MIT, created 2026-05-06, latest main commit 2026-09-20) and its languages endpoint; Hacker News item 49936575 via the HN API (362 points, 104 comments, posted 2026-10-02) and its comment thread; carteakey.dev, 'The Rise of Overfit Inference Engines', for the category roster and the RTX 4070 comparison. All performance figures are the respective projects' own measurements, not independent benchmarks. This repository describes itself as beta and fast-changing: flags, model tags, RAM floors and the supported-model list will drift — re-read the README and docs/ before relying on any flag or model name here." />
+
+## Fonti e approfondimenti
+
+- antirez/ds4 — repository, README, tabella dei modelli supportati, target di build, binari e flag: https://github.com/antirez/ds4
+- ds4 `docs/SSD_STREAMING.md` — che cosa viene davvero trasmesso in streaming, le misurazioni di GLM 5.3 Flash Q4 e l'avvertenza sul dimensionamento della cache di expert: https://github.com/antirez/ds4/blob/main/docs/SSD_STREAMING.md
+- ds4 `docs/SERVER.md` — la superficie dell'API del server HTTP e la gestione multi-sessione: https://github.com/antirez/ds4/blob/main/docs/SERVER.md
+- ds4 `docs/CLIENTS.md` — configurazione per client di Pi, OpenCode, Codex CLI e Claude Code: https://github.com/antirez/ds4/blob/main/docs/CLIENTS.md
+- "From the creator of Redis; run LLM locally with ds4" — il thread di Hacker News, con la varietà di hardware, l'ecosistema di fork e le critiche: https://news.ycombinator.com/item?id=49936575
+- "The Rise of Overfit Inference Engines" — l'inquadramento della categoria, l'elenco dei sei motori, la misurazione RTX 4070 llama.cpp contro Strata e la previsione di abbandono: https://carteakey.dev/blog/local-inference/the-rise-of-overfit-inference-engines/
+- Sito del progetto DwarfStar — la landing page criticata dal thread di HN; la sostanza è nella `docs/` del repository: https://dwarfstar.sh/
+- ggml-org/llama.cpp — il runtime generico con cui misurarsi prima di adottare qualsiasi cosa di questa categoria: https://github.com/ggml-org/llama.cpp
+
+## Prossimi passi
+
+- [Strata: un MoE da 125B a 94 tok/s su una scheda da 12 GB](/docs/models/strata-qwen-flash-next-gaming-gpu) — la stessa categoria su una GPU consumer, con il conto della qualità fatto per intero
+- [Colibrì: esegui un MoE da 744B dal tuo SSD](/docs/models/colibri-stream-frontier-moe-from-ssd) — lo streaming degli expert portato al limite, e quanto costa in tok/s
+- [Uno stack AI locale privato](/docs/models/private-local-ai-stack) — dove si colloca un motore ristretto e veloce accanto a tutto il resto di ciò che esegui
