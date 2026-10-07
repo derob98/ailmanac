@@ -1,0 +1,181 @@
+---
+sidebar_position: 1.5
+title: "The claude CLI: Flags That Change Outcomes"
+description: "An opinionated tour of the Claude Code command line — the five-flag contract for unattended runs, the recorded-system-prompt trap, and how --bare, --safe-mode and --restricted differ."
+---
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-10-07" source="https://code.claude.com/docs/en/cli-reference">
+Every command, flag, default and version floor below is from the official [CLI reference](https://code.claude.com/docs/en/cli-reference), read on 2026-10-07. Flags appear and change between releases, and the reference states plainly that `claude --help` **does not list every flag** — so a flag missing from `--help` is not necessarily missing from your build. Check the reference, not the help text, and check your version with `claude -v`.
+</VerifyNote>
+
+Most people learn three things about the Claude Code command line — `claude`, `claude -c`, and `claude -p` — and stop. That is a fair place to stop if you only ever sit in front of it. The moment you put Claude Code in a script, a CI job, a background queue, or a teammate's hands, the flags stop being conveniences and start being the difference between a run that costs a dollar and a run that hangs for an hour.
+
+This page is not a second copy of the reference table. It is the **order to learn the surface in**, the flags that materially change what happens, and the four traps that cost people real time.
+
+<Callout type="objectives" items={["The six kinds of session you can start, and which flag picks each one","The five-flag contract that makes an unattended run bounded, answerable, and parseable","Why editing --append-system-prompt and re-running --continue appears to do nothing — the recorded-prompt rule","How --bare, --safe-mode and --restricted differ, and which one to reach for when","Driving background sessions from the shell: agents, attach, logs, respawn, rm, daemon","The flag pairs people confuse: --tools vs --allowedTools vs --disallowedTools"]} />
+
+## Start with the question: what kind of session is this?
+
+Every other decision follows from this one. Claude Code can start six materially different things, and the flag that picks one is usually the first thing you type.
+
+| You want | Flag | It gives you |
+| --- | --- | --- |
+| A conversation you watch | *(none)* | Interactive session in this terminal |
+| One answer, then exit | `-p` / `--print` | Non-interactive run, output to stdout |
+| Work that outlives this terminal | `--bg` / `--background` | A background session; prints its ID and how to manage it |
+| An isolated branch to experiment on | `-w` / `--worktree` | A git worktree under `<repo>/.claude/worktrees/<name>` |
+| Work on Anthropic's machines | `--cloud` | A cloud session, or a follow-up queued into an existing one |
+| To drive this session from your phone | `--rc` / `--remote-control` | An interactive session also controllable from claude.ai or the Claude app |
+
+Two of these can't be combined: `--bg` and `-p` are mutually exclusive, because one returns immediately and the other waits for an answer. If you want a shell command rather than a Claude session in the background, pair `--bg` with `--exec`:
+
+<PromptCard title="Run the test suite as a background job, not a Claude session">
+{`claude --bg --exec 'pytest -x'`}
+</PromptCard>
+
+And `--bg` checks workspace trust for the directory before it starts — so a background session in an untrusted repo fails up front rather than halfway through.
+
+## The five-flag contract for unattended runs
+
+This is the highest-value thing on this page. An unattended `claude -p` run has three ways to go wrong that an interactive session simply doesn't have: it can **hang** waiting for an approval nobody will give, it can **loop** far longer than you expected, and it can **emit prose** when your script needed data. Five flags close all three.
+
+<Steps items={[
+  {title: "Run non-interactively — -p", body: "`claude -p \"query\"` prints the answer and exits. Everything below is print-mode only, so this flag is the gate for the rest."},
+  {title: "Decide who answers permission prompts — --permission-prompts", body: "The default is `host`, which sends prompts to the Agent SDK host or to a `--permission-prompt-tool`. In a cron job or CI step there is no host, so pass `--permission-prompts none` and Claude Code denies them instead of waiting. Requires v2.1.259 or later. Pair it with narrow `--allowedTools` rules so the denials are rare rather than constant."},
+  {title: "Bound the loop — --max-turns", body: "There is no turn limit by default. `--max-turns 3` exits with an error when the limit is reached. Use it as a tripwire for runaway agentic loops, not as a budget."},
+  {title: "Bound the spend — --max-budget-usd", body: "`--max-budget-usd 5.00` stops once the client-side cost estimate reaches the cap. Subagent spend counts toward it; once reached, spawning another subagent fails with `Budget limit reached` and running background subagents are stopped. Cap enforcement requires v2.1.217 or later."},
+  {title: "Make the output parseable — --output-format or --json-schema", body: "`--output-format json` gives you a structured envelope. `--json-schema '<schema>'` goes further: Claude Code validates the final answer against your JSON Schema and errors on an invalid schema up front, so your script never has to regex prose."}
+]} />
+
+<PromptCard title="A CI step that cannot hang, cannot loop forever, and cannot overspend">
+{`claude -p "Review the staged diff and list bugs" \\
+  --permission-prompts none \\
+  --allowedTools "Read" "Bash(git diff *)" \\
+  --max-turns 6 \\
+  --max-budget-usd 2.00 \\
+  --output-format json`}
+</PromptCard>
+
+<Callout type="warning" title="--max-budget-usd is an estimate, not your invoice" items={["Claude Code checks the cap against its own client-side cost estimate, which can differ from what you are billed.","When you return to a conversation with --continue or --resume, totals restored from earlier runs do not count toward the cap — so three resumed runs under a $2 cap can spend more than $2 in total.","Treat it as a circuit breaker for one run. For a real ceiling on a whole account or project, see Hard Spend Caps."]} />
+
+For the full posture around letting a run proceed without a human — what to allow, what to mask, what to log — see [Hardening Autonomous Runs](/docs/security/hardening-autonomous-runs) and [Headless Mode & the Agent SDK](/docs/claude-code/headless-and-agent-sdk). For provider-level ceilings, [Hard Spend Caps](/docs/models/hard-spend-caps).
+
+## The system-prompt family, and the trap in it
+
+Five flags shape the system prompt. Four set its text; the fifth decides whether the conversation keeps the text it started with.
+
+| Flag | What it does |
+| --- | --- |
+| `--system-prompt` | Replaces the entire default prompt with your text |
+| `--system-prompt-file` | Replaces it with a file's contents |
+| `--append-system-prompt` | Appends your text to the default prompt |
+| `--append-system-prompt-file` | Appends a file's contents to the default prompt |
+| `--system-prompt-snapshot` | `off` rebuilds the prompt on every request; `on` (the default) reuses the recorded one |
+
+The choice between *append* and *replace* is a choice about identity. Appending keeps Claude Code's default tool guidance, safety instructions, and coding conventions, and layers your rules on top — right for per-run instructions, output formatting, or project context. Replacing drops **all** of that, including the tool guidance, which makes it right only when the surface genuinely isn't a coding assistant: a non-coding agent in a pipeline nobody watches. If you replace, you own whatever the task still needs.
+
+You can combine them. Passing an append flag together with a replace flag replaces the default and then appends your text. From v2.1.283 you can also pass a flag together with its own file form — `--append-system-prompt` *and* `--append-system-prompt-file` — and Claude Code uses both, with the file's contents first regardless of the order you typed them.
+
+<Callout type="warning" title="The trap: a resumed conversation reuses the prompt it was born with" items={["Claude Code builds the system prompt once, on a conversation's first request, and records it in the session.","Until the conversation is compacted, every later request uses that recorded prompt — including after --resume or --continue.","So you edit your --append-system-prompt text, re-run claude --continue, and nothing changes. The flag is not broken; the conversation is still using the recording.","New text takes effect once the conversation compacts, or in a brand-new conversation.","To iterate on wording across --continue runs, pass --system-prompt-snapshot off and the prompt is rebuilt every request. Requires v2.1.257 or later."]} />
+
+There is one more trick worth knowing in a replacement prompt that mixes stable instructions with per-run context. Put a line containing only `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` between them: Claude Code splits at the first such line and removes it, so the part above stays cached while the part below changes. Requires v2.1.275 or later. Why that matters for your bill is the subject of [Prompt Caching](/docs/api/prompt-caching).
+
+And for multi-user scripted workloads, `--exclude-dynamic-system-prompt-sections` moves per-user context, such as the auto-memory location, out of the system prompt and into the first user message — so the same task on different machines shares one cached prefix. It applies only to the default prompt and is ignored when you set `--system-prompt` or `--system-prompt-file`.
+
+## Three flags that turn things off, and they are not the same
+
+People reach for these interchangeably and then wonder why the symptom didn't move. They solve three different problems.
+
+| | `--bare` | `--safe-mode` | `--restricted` |
+| --- | --- | --- | --- |
+| The problem it solves | Startup is too slow for a scripted call | My configuration is broken and I don't know which part | An eval harness must not touch this shared machine |
+| CLAUDE.md, skills, commands, subagents, plugins, MCP, auto memory | Not discovered | Not loaded | Only managed settings and `--settings` load |
+| Built-in tools | Bash, file read, file edit | Work normally | Command/code-running tools and WebFetch **removed** unless named individually in `--tools` |
+| File access | Normal | Normal | Confined to the working directories |
+| `bypassPermissions` | Allowed | Allowed | **Refused** |
+| Managed policy | Applies | Still applies, including policy hooks and status line | Applies |
+| Side effect | Sets `CLAUDE_CODE_SIMPLE` | Sets `CLAUDE_CODE_SAFE_MODE` | Refuses to create cloud sessions |
+
+Read the table as a progression of intent: `--bare` is about **speed**, `--safe-mode` is about **diagnosis**, `--restricted` is about **containment**. One useful detail: skills in a directory you pass with `--add-dir` still load under `--bare`, which is how you keep exactly one capability in an otherwise-stripped run.
+
+`--safe-mode` is the one to reach for first when something is misbehaving and you can't tell whether it's Claude Code or your own configuration — including when you're trying to work out whether a customization is what's triggering automatic model fallback. Pair it with `claude doctor`, which prints read-only installation and settings diagnostics without starting a session at all. (The in-session `/doctor` command is a different thing: it can also apply fixes.) More symptom-first debugging in [Troubleshooting Claude Code](/docs/claude-code/troubleshooting). `--restricted` requires v2.1.248 or later.
+
+## Driving background sessions from the shell
+
+Once you start sessions with `--bg`, the terminal becomes a control plane. The whole lifecycle has a command, and none of it requires opening the interactive UI.
+
+<Steps items={[
+  {title: "See what is running — claude agents", body: "Opens the agent view to monitor and dispatch parallel background sessions. For scripting, `--json` prints active sessions as a JSON array, and `--json --all` includes completed ones. `--cwd <path>` narrows to sessions started under that directory. Opening the view itself needs an interactive terminal; the JSON form does not."},
+  {title: "Look inside one — claude logs", body: "`claude logs <id|name>` prints recent output from a background session. From v2.1.290 you can pass part of a running session's name instead of its ID — so `claude logs auth` is usually enough."},
+  {title: "Take it over — claude attach", body: "`claude attach <id|name>` brings a background session into this terminal. Partial-name matching also requires v2.1.290 or later."},
+  {title: "Restart it — claude respawn", body: "`claude respawn <id>` restarts a session, running or stopped, with its conversation intact. `--all` restarts every running session — the move after upgrading the Claude Code binary."},
+  {title: "Stop and clean up — claude stop, claude rm", body: "`claude stop <id>` (also `claude kill`) halts a session. `claude rm <id>` removes it from the list; the transcript stays on your machine and is still reachable through `claude --resume`. If removal is refused over the session's worktree, the refusal prints the exact flag to pass next — `--discard-unpushed` (v2.1.260+) or `--force-remove-worktree` (v2.1.268+)."},
+  {title: "When the whole thing is wedged — claude daemon", body: "Background sessions are hosted by a supervisor process. `claude daemon status` prints its state, version, socket directory and worker count, and exits 1 if it isn't running. `claude daemon logs` follows `~/.claude/daemon.log`. `claude daemon stop --any --keep-workers` restarts the supervisor while leaving the sessions alive for the next one to reconnect to."}
+]} />
+
+The counterpart to this from inside a session — how work gets backgrounded, and what carries over when it does — is [Background Tasks, /loop & Scheduling](/docs/claude-code/background-tasks).
+
+## The flag pairs people get wrong
+
+<Callout type="warning" title="Six confusions worth pre-empting" items={["--tools restricts which built-in tools exist. --allowedTools says which calls skip the permission prompt. --disallowedTools denies calls. They are three different jobs, and passing the wrong one is the most common cause of \"why is it still asking me\".","--tools does not affect MCP tools at all. To remove those too, add --disallowedTools \"mcp__*\".","A bare name in --disallowedTools removes the tool from Claude's context; a scoped rule like Bash(rm *) leaves the tool available and denies only matching calls.","--dangerously-skip-permissions starts in bypassPermissions. --allow-dangerously-skip-permissions only adds that mode to the Shift+Tab cycle, so you can start in plan mode and switch later. The second is almost always what you actually wanted.","--add-dir grants file access, but Claude Code does not discover most .claude/ configuration from those directories. Adding a directory is not the same as adopting its config.","--desktop takes no prompt and no other flags except --verbose and the --debug flags, because the Desktop app starts the session itself. Requires v2.1.285 or later."]} />
+
+One small quality-of-life detail: mistype a subcommand and Claude Code suggests the closest match and exits without starting a session — `claude udpate` prints `Did you mean claude update?` rather than opening a conversation you didn't want.
+
+## Check yourself
+
+<Quiz questions={[
+  {
+    q: "Your nightly CI job running `claude -p` sometimes hangs for the full timeout instead of finishing. Which flag is most likely missing?",
+    options: [
+      "--max-turns, because the agent is looping",
+      "--permission-prompts none, because nobody is there to answer a permission prompt",
+      "--output-format json, because the parser is blocking",
+      "--bare, because startup is slow"
+    ],
+    answer: 1,
+    explain: "In print mode, permission prompts go to the host by default. With no host, the run waits. `--permission-prompts none` makes Claude Code deny them instead, so the job finishes rather than hanging. `--max-turns` bounds a loop, which is a different symptom."
+  },
+  {
+    q: "You tweak your --append-system-prompt text, re-run `claude --continue`, and the behavior is unchanged. Why?",
+    options: [
+      "Append flags only work with -p",
+      "The conversation reuses the system prompt recorded on its first request until it compacts",
+      "--continue silently drops all system-prompt flags",
+      "The text is appended but placed after the user message"
+    ],
+    answer: 1,
+    explain: "Claude Code builds the prompt once, on the conversation's first request, and records it. Later requests — including after --continue or --resume — reuse the recording until the conversation compacts. Pass --system-prompt-snapshot off to rebuild on every request while you iterate."
+  },
+  {
+    q: "A customization is breaking your session and you don't know which one. Which flag isolates it while keeping your tools and permissions working normally?",
+    options: [
+      "--bare",
+      "--restricted",
+      "--safe-mode",
+      "--disable-slash-commands"
+    ],
+    answer: 2,
+    explain: "--safe-mode disables customizations — CLAUDE.md, skills, plugins, hooks, MCP servers, commands, agents, output styles, status line, auto memory — while authentication, model selection, built-in tools and permissions keep working. --bare is for startup speed and --restricted is for containment on a shared machine."
+  }
+]} />
+
+<Flashcards cards={[
+  {front: "--bg vs -p", back: "Mutually exclusive. --bg returns immediately with a session ID; -p waits and prints the answer. Pair --bg with --exec to background a shell command instead of a Claude session."},
+  {front: "--max-budget-usd", back: "Print-mode cap checked against Claude Code's client-side cost estimate, not your bill. Subagent spend counts; totals restored by --continue/--resume do not. v2.1.217+."},
+  {front: "--system-prompt-snapshot off", back: "Rebuild the system prompt on every request instead of reusing the one recorded on the conversation's first request. v2.1.257+."},
+  {front: "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__", back: "A line containing only this marker splits a replacement system prompt so the part above stays cached and the part below changes per run. v2.1.275+."},
+  {front: "--tools vs --allowedTools", back: "--tools decides which built-in tools exist at all. --allowedTools decides which calls run without a permission prompt. Neither affects MCP tools."},
+  {front: "claude doctor vs /doctor", back: "`claude doctor` prints read-only install and settings diagnostics without starting a session. The in-session `/doctor` command can also apply fixes."},
+  {front: "claude respawn --all", back: "Restarts every running background session with conversations intact — the move after upgrading the Claude Code binary."},
+  {front: "--add-dir", back: "Grants file read/edit access to another directory. It does not make Claude Code discover most .claude/ configuration from there."}
+]} />
+
+<Callout type="takeaways" items={["Pick the session kind first — the flag that does that constrains every other flag you can pass.","An unattended run needs five flags, not one: -p, --permission-prompts none, --max-turns, --max-budget-usd, and a structured output format.","Treat --max-budget-usd as a circuit breaker for one run, not as a bill ceiling. It is a client-side estimate and resumed totals escape it.","Conversations record their system prompt on the first request. If a prompt edit seems ignored, that is why — use --system-prompt-snapshot off while iterating.","--bare is speed, --safe-mode is diagnosis, --restricted is containment. Reaching for the wrong one wastes an afternoon.","--help is incomplete by design. The CLI reference is the source of truth, and version floors matter — check claude -v before blaming a flag."]} />
+
+## Next
+
+- [Headless Mode & the Agent SDK](/docs/claude-code/headless-and-agent-sdk) — what to build once a one-shot `-p` call isn't enough
+- [settings.json: The Config System](/docs/claude-code/settings) — the persistent home for the flags you keep retyping
+- [Troubleshooting Claude Code](/docs/claude-code/troubleshooting) — symptom-first debugging, starting with `--safe-mode`
