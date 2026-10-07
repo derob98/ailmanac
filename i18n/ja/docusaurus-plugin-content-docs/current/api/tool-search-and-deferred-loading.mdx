@@ -1,0 +1,284 @@
+---
+sidebar_position: 16.5
+title: "ツール検索と遅延読み込み"
+description: "コンテキストを肥大化させずに数千のツールへスケールする方法。defer_loading とツール検索ツールの実際の動作、それが引き起こす5種類の 400 エラー、そしてリクエストボディが小さくならない理由を解説します。"
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={[
+  "defer_loading についてほぼ全員が誤解している点、つまりリクエストが小さくなるわけではないことを理解する",
+  "regex 版と BM25 版の検索バリアントを使い分け、それぞれのクエリ長の上限を把握する",
+  "server_tool_use / tool_search_tool_result / tool_reference という3つのブロックの組を読み取り、何をそのまま返送すべきかを正確に把握する",
+  "cache_control の競合を含め、400 を返す5種類のリクエスト形式を避ける",
+  "遅延読み込みを MCP コネクタのツールセットに組み込み、組み込みの検索を独自のエンベディングに置き換える"
+]} />
+
+<VerifyNote lastVerified="2026-09-29" source="https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool">
+ツールのバージョン文字列(`tool_search_tool_regex_20251119`、`tool_search_tool_bm25_20251119`)、モデル対応表、以下の数値上限は、日付に依存する事実です。メカニズム(遅延、検索、展開)はリリース以来安定しています。本番投入の前に、識別子とモデル一覧を再確認してください。
+</VerifyNote>
+
+## 2つの問題、そしてお金に関係するのはそのうち1つだけである理由
+
+すべてのツール定義を最初にまとめて読み込むと、カタログが大きくなるにつれて2通りの形で行き詰まります。
+
+1つ目は分かりやすいものです。Anthropic 自身の例を挙げると、5つのサーバー(GitHub、Slack、Sentry、Grafana、Splunk)を使う MCP 構成では、**Claude が何も作業を始める前にツール定義だけで約5万5千トークン**を消費します。これは会話のターンごとに毎回支払う税金のようなものです。
+
+2つ目こそ、アーキテクチャを実際に変えるものです。**利用可能なツールが30〜50個を超えると、ツール選択の精度が低下します。** その先ではツールが増えても能力は増えず、モデルが混雑したメニューから選ぶことになるだけです。遅延読み込みは、モデルが現在のリクエストに関連する3〜5個のツールしか目にしないため、コストの問題と精度の問題を同じ一手で解決します。Anthropic は、そのマルチサーバー構成でコンテキストが **85パーセント以上**削減されたと報告しています。
+
+経済性や公表されている精度の差分を知りたい場合は、AILmanac の [MCP のトークンコスト](/docs/claude-code/mcp-token-cost)で扱っています。このページは配線(実装)の話です。
+
+## 誰もが誤解しているメンタルモデル
+
+コードを書く前に、正しておくべき誤解があります。
+
+> `defer_loading` は送信する内容を減らす**わけではありません**。遅延対象のツールも含め、すべてのツールの完全な定義(名前、説明、完全な `input_schema`)を、**リクエストのたびに毎回** `tools` 配列に入れる必要があります。
+
+HTTP リクエストボディは小さくなりません。アップロード帯域も変わりません。API は検索を実行して見つかった参照を展開するために、サーバー側でそれらの定義を必要とするからです。
+
+変わるのは**コンテキストウィンドウ**に入る内容であり、したがって課金対象となる内容です。遅延対象の定義はシステムプロンプトのプレフィックスから除外されます。Claude がその1つを発見すると、API は会話の中に `tool_reference` ブロックをインラインで追加し、モデルが目にする前に完全な定義へ展開します。
+
+このインライン追加という詳細が、2つ目の分かりにくい点です。展開はプレフィックスではなく*会話の中で*行われるため、**キャッシュされたプレフィックスが無効化されることはありません**。遅延読み込みとプロンプトキャッシュは両立します。[strict ツール使用](/docs/api/tool-use)も同様です。ツール呼び出しの出力を制約する文法は完全なツールセットから構築されるので、会話の途中でツールが追加されても再コンパイルは発生しません。
+
+## 有効化する
+
+<Steps items={[
+  {title: "tools 配列に検索ツールを追加する", body: "バリアントを1つ選びます。tool_search_tool_regex_20251119 か tool_search_tool_bm25_20251119 です。これはサーバーツールで、Anthropic のインフラ上で動作し、ベータヘッダーは不要です。"},
+  {title: "カタログの大部分に defer_loading: true を付ける", body: "name / description / input_schema と並べて、ツール定義ごとに指定します。このフラグが、定義をプレフィックスの外に置くものです。"},
+  {title: "最も頻繁に使う3〜5個のツールは遅延させない", body: "ほとんどのリクエストで呼ばれるものは最初から読み込んでおきます。常に必要なツールに到達するために検索の往復を払うのは割に合いません。少なくとも1つのツールは遅延させてはいけません(通常は検索ツール自身です)。"},
+  {title: "毎回のリクエストですべての定義を送る", body: "遅延対象のものも含め、tool_result の後の後続ターンでも同様です。1つでも省くと、それを指す tool_reference が 400 になります。"},
+  {title: "検索ブロックをそのまま返送する", body: "次のリクエストでは、アシスタントの content を変更せずに渡します。server_tool_use と tool_search_tool_result も含めます。API は履歴全体で参照を再展開するため、Claude は後続のターンで再検索せずに発見済みのツールを再利用できます。"}
+]} />
+
+<PromptCard title="最小限の動作するリクエスト:検索ツール1つ、遅延ツール2つ">
+{`curl https://api.anthropic.com/v1/messages \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "content-type: application/json" \\
+  -d '{
+    "model": "claude-opus-5-5",
+    "max_tokens": 2048,
+    "messages": [{"role": "user", "content": "What is the weather in San Francisco?"}],
+    "tools": [
+      {
+        "type": "tool_search_tool_regex_20251119",
+        "name": "tool_search_tool_regex"
+      },
+      {
+        "name": "get_weather",
+        "description": "Get the weather at a specific location",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "location": {"type": "string"},
+            "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+          },
+          "required": ["location"]
+        },
+        "defer_loading": true
+      },
+      {
+        "name": "search_files",
+        "description": "Search through files in the workspace",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "query": {"type": "string"},
+            "file_types": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["query"]
+        },
+        "defer_loading": true
+      }
+    ]
+  }'`}
+</PromptCard>
+
+検索ツールがプレフィックスに負担させるコストに注目してください。自身のエントリ分だけです。2つの遅延定義はボディには含まれていますが、コンテキストには入りません。
+
+## regex か BM25 か
+
+どちらのバリアントも同じ4つのフィールド、つまり**ツール名、説明、引数名、引数の説明**を検索し、この機能をサポートするすべてのモデルで利用できます。違いは、Claude がクエリに何を書くかだけです。
+
+| | `tool_search_tool_regex_20251119` | `tool_search_tool_bm25_20251119` |
+|---|---|---|
+| Claude が書くもの | Python の `re.search()` パターン | 自然言語クエリ |
+| 入力フィールド | `pattern` | `query` |
+| 最大長 | 200文字 | 500文字 |
+| マッチング | 大文字小文字を区別しない | BM25 ランキング |
+| 向いている場合 | 名前に名前空間がある(`github_`、`slack_`) | 説明が文章のように書かれている |
+
+regex 版は設定を誤りやすいバリアントです。名前からキーワード検索のように思えますが、そうではないからです。Claude は本物のパターンを書きます。`"weather"`、`"get_.*_data"`、`"database.*query|query.*database"` といった具合です。期待するツールがモデルに見つけられない場合は、モデルのせいにする前に、自分でパターンを試してください。
+
+<PromptCard title="失敗した regex マッチをローカルで再現する">
+{`import re
+# Claude writes broad patterns, e.g. ".*weather.*" — not exact names.
+# Search the same four fields the API searches.
+haystacks = ["get_weather", "Get the weather at a specific location", "location", "unit"]
+print(any(re.search(r"weather", h, re.IGNORECASE) for h in haystacks))`}
+</PromptCard>
+
+マッチ漏れへの実践的な対処は、より巧妙なパターンではほぼありません。**説明文にキーワードを入れる**ことです。ユーザーが実際に使う言葉を書いてください。ツール名はサービスごとに名前空間を付け、1つのパターンでグループ全体を拾えるようにします。
+
+## レスポンスを読む
+
+検索が成功すると、アシスタントのターンに3種類の新しいブロックが次の順で現れます。
+
+```json
+{
+  "role": "assistant",
+  "content": [
+    { "type": "text", "text": "I'll search for tools to help with the weather information." },
+    {
+      "type": "server_tool_use",
+      "id": "srvtoolu_01ABC123",
+      "name": "tool_search_tool_regex",
+      "input": { "pattern": "weather", "limit": 10 }
+    },
+    {
+      "type": "tool_search_tool_result",
+      "tool_use_id": "srvtoolu_01ABC123",
+      "content": {
+        "type": "tool_search_tool_search_result",
+        "tool_references": [{ "type": "tool_reference", "tool_name": "get_weather" }]
+      }
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_01XYZ789",
+      "name": "get_weather",
+      "input": { "location": "San Francisco", "unit": "fahrenheit" }
+    }
+  ],
+  "stop_reason": "tool_use"
+}
+```
+
+扱いのルールは3つです。
+
+1. **`srvtoolu_...` の ID に対して `tool_result` を返してはいけません。** 検索はすでに Anthropic のサーバー上で実行済みです。それに応答すると API はリクエストを拒否します。`tool_result` を返すのは `toolu_...` の ID に対してだけで、そこからは通常のツール使用になります。
+2. **`tool_reference` ブロックを自分で展開してはいけません。** 対応する定義が `tools` にある限り、API が展開します。
+3. **`tool_search_tool_result` は履歴にそのまま残してください。** 後続のターンが、どのツールがすでに発見済みかを知る手がかりになります。
+
+何にもマッチしなかった検索はエラー**ではありません**。`tool_references` 配列が空の `tool_search_tool_search_result` が返り、次にどうするかは Claude が判断します。
+
+`limit` についてもう1つ見落としやすい点があります。デフォルトは **5** 件ですが、Claude は自身の検索入力で 1 から 10,000 までの任意の値を設定できます。あなたが直接制御することはできません。大量の定義が流れ込む数に厳格な上限が必要なら、それは後述のカスタム実装を選ぶ理由になります。
+
+## 5つの 400
+
+このうち4つは推論の前に起こるリクエスト形式のエラーで、1つは誰も予期しない競合です。
+
+<Steps items={[
+  {title: "すべてのツールが遅延されている", body: "\"At least one tool must have defer_loading=false. All tools cannot be deferred.\" よくある原因は、検索ツールを含む配列全体に defer_loading: true を一括で付けてしまうループです。検索ツールは決して遅延させないでください。"},
+  {title: "定義のない参照", body: "\"Tool reference 'unknown_tool' not found in available tools.\" バイト数を節約しようとして、後続のリクエストから遅延定義を削ったことが原因です。毎ターン、配列全体を送ってください。"},
+  {title: "同じツールでの defer_loading と cache_control の併用", body: "遅延されたツールにキャッシュブレークポイントを付けることはできず、API は 400 を返します。ブレークポイントは遅延されていないツールに置いてください。すでにキャッシュを調整済みのチームが引っかかるのがこれです。"},
+  {title: "ツールセットのエントリ単位での defer_loading", body: "コンピュータ使用とブラウザ使用のツールセット(computer_toolset_20260801、browser_toolset_20260801)は、defer_loading をエントリの configs オブジェクト内にある各メンバーツールごとに指定します。エントリ自体に設定すると拒否されます。"},
+  {title: "1つのツールセットのメンバー間での不一致", body: "ツールセットは1つの単位として遅延・展開されるため、defer_loading は有効なすべてのメンバーで同じ値に解決される必要があります。ツールセットを発見すると、有効なメンバーがすべて一度に読み込まれます。部分的な展開はありません。"}
+]} />
+
+実行*中*の検索失敗は異なります。HTTP **200** で返り、エラーは `tool_search_tool_result_error` オブジェクトの中に入ります。
+
+| `error_code` | 何が起きたか |
+|---|---|
+| `invalid_tool_input` | 不正な正規表現、または200文字の制限を超えたパターン |
+| `unavailable` | 検索を実行できなかった(タイムアウトまたはサービス利用不可) |
+| `too_many_requests` | ツール検索操作に特化したレート制限 |
+| `execution_time_exceeded` | 検索が実行時間の上限を超えた |
+
+これらは回復可能なものとして扱ってください。会話は損なわれておらず、ターン全体を失敗させるよりも、Claude に別のパターンで再試行させるのが誠実な対応であることがほとんどです。周辺のリトライ方針は[エラーとレート制限](/docs/api/errors-and-rate-limits)を参照してください。
+
+## プロンプトキャッシュ
+
+結論は良好です。遅延定義はキャッシュされたプレフィックスの外にあるため、会話の途中でツールを追加・発見してもキャッシュは無効化されません。プレフィックスのルールは[プロンプトキャッシュ](/docs/api/prompt-caching)を、ヒットを実証する必要がある場合は[キャッシュ診断](/docs/api/cache-diagnostics)を参照してください。
+
+落とし穴は上に挙げたものです。`defer_loading: true` と `cache_control` は1つのツールに対して相互排他です。現在ブレークポイントが長い配列の最後のツールにあり、その配列を遅延させると、気づかないうちに「キャッシュあり」から「400」へ移ってしまいます。ブレークポイントは、常に読み込んでおくつもりのツールに固定してください。
+
+## MCP コネクタ:ツールではなくツールセットに設定する
+
+[MCP コネクタ](/docs/api/mcp)を通じてリモートサーバーからツールが届く場合、個々の定義には触れません。定義はあなたのものではないからです。`mcp_toolset` エントリで設定します。サーバー全体には `default_config` で一度に、ツールごとには `configs` で指定します。
+
+<PromptCard title="常に必要な1つのツールを除いて、MCP サーバー全体を遅延させる">
+{`{
+  "type": "mcp_toolset",
+  "mcp_server_name": "observability",
+  "default_config": { "defer_loading": true },
+  "configs": {
+    "search_events": { "defer_loading": false }
+  }
+}`}
+</PromptCard>
+
+これは実際に最も早く効果が出る形です。複数のサーバーを集約すると、まさにこの機能が想定する200個以上のツールという状況になり、常に使える状態にしておく価値のある入口ツールが1つか2つはほぼ確実にあります。
+
+## 検索を独自のものに置き換える
+
+組み込みのバリアントはどちらも字句ベースです。ツールが表現ではなく意味で見つけやすい場合は、検索を自分で実装してください。通常のカスタムツールを定義し、通常の `tool_result` の中で `tool_reference` ブロックを返します。
+
+<PromptCard title="API が展開してくれるクライアント側の検索結果">
+{`{
+  "type": "tool_result",
+  "tool_use_id": "toolu_your_tool_id",
+  "content": [
+    { "type": "tool_reference", "tool_name": "discovered_tool_name" }
+  ]
+}`}
+</PromptCard>
+
+参照する名前はすべて、トップレベルの `tools` 配列に完全な定義が必要で、通常は `defer_loading: true` を付けます。展開の経路は同一で、入れ替えるのは検索(取得)の部分だけです。形式の違いに注意してください。`tool_search_tool_result` は*サーバー側*の形式で、組み込みバリアントの内部用です。カスタムツールは、上に示した標準の `tool_result` 形式を返します。Anthropic は[エンベディングを使った実践的なレシピ](https://platform.claude.com/cookbook/tool-use-tool-search-with-embeddings)を公開しています。
+
+これは `limit` の問題からの逃げ道でもあります。いくつの参照を返すかは、自前の検索が決めます。
+
+## 使わないほうがよい場合
+
+前提が成り立たないとき、遅延読み込みは何も得をもたらさず、検索の往復分のコストだけがかかります。次の**いずれか**に当てはまる場合に使ってください。
+
+- 利用可能なツールが10個以上
+- ツール定義が合計でおよそ1万トークンを超える
+- カタログの拡大に伴い、選択精度が目に見えて低下している
+- 複数の MCP サーバーを集約している(200個以上のツール)
+- ツールライブラリが増え続けている
+
+ツールが10個未満の場合、すべてのツールが毎回のリクエストで使われる場合、またはカタログ全体が約100トークン未満の場合は、通常のツール呼び出しのままにしてください。課金の形にも注意してください。**ツール検索は独立したサーバーツールとしては計測されません。** `usage.server_tool_use` にツール検索用のフィールドはありません。かかるトークンは、コンテキストに取り込まれる定義の分だけで、他のツール定義と同じ価格です。
+
+キャパシティプランニング用のハードな上限は次のとおりです。**1リクエストあたり遅延ツール10,000個**、regex パターン200文字、BM25 クエリ500文字。
+
+## プラットフォーム上の注意点
+
+1日を無駄にしやすい、デプロイ面での補足が2つあります。**Amazon Bedrock** では、サーバー側のツール検索は InvokeModel API でのみ動作し、Converse API では動作しません。**Claude Platform on AWS** では、Messages API を直接使い、InvokeModel/Converse の区別がないため、Claude API とまったく同じように動作します。Claude Opus 4.1 以前は、この機能をまったくサポートしていません。
+
+<Flashcards title="ツール検索の用語" cards={[
+  {front: "defer_loading", back: "ツールごとの真偽値。Claude が検索で発見するまで、定義をシステムプロンプトのプレフィックスの外に置きます。アップロードする内容は変わりません。リクエストのたびに、すべての定義を送る必要があります。"},
+  {front: "tool_reference", back: "検索がマッチしたときに API が会話の中にインラインで追加する軽量なポインタ。Claude が目にする前に、API が完全な定義へ展開します。自分で展開することはありません。"},
+  {front: "server_tool_use", back: "Claude による検索ツールの呼び出しで、srvtoolu_ の ID を持ちます。すでに Anthropic のサーバー上で実行済みです。その ID に tool_result を返すと、API がリクエストを拒否します。"},
+  {front: "tool_search_tool_result", back: "tool_references 配列を持つ tool_search_tool_search_result オブジェクトを包む、検索結果のブロック。変更せずに返送してください。後続のターンが発見済みのツールを再利用する手がかりになります。"},
+  {front: "regex 版と BM25 版の違い", back: "regex_20251119:Claude が Python の re.search() パターンを書き、最大200文字、大文字小文字を区別しません。bm25_20251119:自然言語クエリで、最大500文字。どちらも名前、説明、引数名、引数の説明を検索します。"},
+  {front: "cache_control の競合", back: "ツールは defer_loading: true と cache_control を両方持つことはできず、400 になります。キャッシュブレークポイントは、読み込まれたままのツールに置いてください。"},
+  {front: "ツールセットの defer_loading", back: "computer_toolset_20260801 / browser_toolset_20260801 では、フラグをエントリではなく configs 内のメンバーごとに指定します。有効なメンバー間で同一である必要があり、ツールセット全体が一度に展開されます。"},
+  {front: "limit", back: "Claude の検索入力にある任意の整数で、1〜10,000、デフォルトは5。1回の検索が返すマッチ件数の上限です。設定するのはあなたではなく Claude です。"}
+]} />
+
+<Quiz title="理解度チェック" questions={[
+  {q: "405個のツールのうち400個に defer_loading: true を設定しました。POST する JSON のサイズはどうなりますか?", options: ["約99パーセント減る。遅延された定義は省かれる", "変わらない。遅延か否かにかかわらず、完全な定義をすべて送る", "最初の検索のあとの後続リクエストでのみ減る"], answer: 1, explain: "defer_loading が制御するのはコンテキストウィンドウに入る内容であり、送信する内容ではありません。API は検索の実行と参照の展開のために、すべての定義をサーバー側で必要とします。課金される入力トークンは減りますが、リクエストボディは減りません。"},
+  {q: "ループが tools 配列全体に defer_loading: true を付けてしまいました。API は何を返しますか?", options: ["200。検索ツールは暗黙のうちに遅延解除される", "400:少なくとも1つのツールは defer_loading=false でなければならない", "200。ただし Claude はどのツールも見つけられない"], answer: 1, explain: "\"At least one tool must have defer_loading=false. All tools cannot be deferred.\" 通常、遅延されないのは検索ツール自身です。それは決して遅延させないでください。"},
+  {q: "レスポンスに、id が srvtoolu_01ABC の server_tool_use ブロックと、id が toolu_01XYZ の tool_use ブロックが含まれています。何を返送しますか?", options: ["各 ID に対する tool_result", "srvtoolu_01ABC に対する tool_result だけ", "toolu_01XYZ に対する tool_result だけを返し、検索ブロックはそのまま返送する"], answer: 2, explain: "検索はすでに Anthropic のインフラ上で実行済みです。srvtoolu_ の ID に tool_result を返すと、API はリクエストを拒否します。server_tool_use と tool_search_tool_result は変更せずに返送し、実際のツール呼び出しにだけ応答してください。"},
+  {q: "配列の最後のツールにすでにキャッシュブレークポイントがありました。この配列を遅延させると、何が壊れますか?", options: ["何も。遅延ツールは別にキャッシュされる", "400:defer_loading と cache_control は1つのツールに共存できない", "キャッシュが静かにヒットしなくなる"], answer: 1, explain: "遅延されたツールは cache_control を持てず、API は 400 を返します。ブレークポイントは遅延されないツールに移してください。遅延定義はもともとキャッシュされたプレフィックスの外にあり、だからこそ発見が進んでもキャッシュが保たれます。"},
+  {q: "regex 版で、Claude が Grafana のツールをなかなか見つけられません。最初の一手として最善なのは?", options: ["完全一致のパターンに切り替える", "ユーザーが実際に使うキーワードをツールの説明に追加し、名前に grafana_ プレフィックスで名前空間を付ける", "limit を5より大きくする"], answer: 1, explain: "検索の対象は名前、説明、引数名、引数の説明で、Claude は完全一致ではなく \".*grafana.*\" のような広いパターンを書きます。見つけやすさは書き方の問題です。説明にユーザーの語彙を入れ、名前に名前空間を付けて、1つのパターンでグループ全体を拾えるようにしてください。"},
+  {q: "ツール検索はどのように課金されますか?", options: ["Web 検索のように、検索ごとに課金される", "別途は計測されない。コンテキストに読み込まれた定義の分だけを支払う", "遅延ツールごとの月額定額"], answer: 1, explain: "usage.server_tool_use にツール検索用のフィールドはありません。コストは検索がコンテキストに取り込むツール定義だけで、他の入力トークンと同じ価格です。"}
+]} />
+
+## 出典とさらなる読み物
+
+- [Tool search tool — Claude Platform docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool) — 2つのバリアントとそのバージョン文字列、`defer_loading` のセマンティクス、マルチサーバーで約5万5千トークンという数値と85パーセントの削減、30〜50ツールの精度の崖、レスポンスブロックの形式、5つの 400 すべて、4つの `error_code` の値、10,000ツールの上限、Bedrock の InvokeModel に関する注意点、モデル対応表。
+- [Tool use with prompt caching — Claude Platform docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching) — ツール定義のキャッシュを無効化するもの、そして遅延セットがプレフィックスの外にある理由。
+- [MCP connector — Claude Platform docs](https://platform.claude.com/docs/en/agents-and-tools/mcp-connector) — `mcp_toolset` の形式、`default_config` とツール単位の `configs`。
+- [Tool reference — Claude Platform docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-reference) — クライアントツールセットと、コンピュータ/ブラウザのツールセットが必要とする `configs` 形式。
+- [Tool search with embeddings — Anthropic cookbook](https://platform.claude.com/cookbook/tool-use-tool-search-with-embeddings) — `tool_reference` ブロックを返す、カスタムのセマンティックな完全実装。
+- [Introducing advanced tool use on the Claude Developer Platform](https://www.anthropic.com/engineering/advanced-tool-use) — Anthropic Engineering による、公表されたトークン数と精度の数値の元になったローンチ記事。
+- [Effective context engineering for AI agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) — 遅延読み込みがその一例である、ジャストインタイム取得の原則。
+- AILmanac の関連ページ:[ツール使用 / Function Calling](/docs/api/tool-use) · [プログラマティックなツール呼び出し](/docs/api/programmatic-tool-calling) · [MCP](/docs/api/mcp) · [MCP のトークンコスト](/docs/claude-code/mcp-token-cost) · [プロンプトキャッシュ](/docs/api/prompt-caching) · [キャッシュ診断](/docs/api/cache-diagnostics)
+
+## 次へ
+
+- [プログラマティックなツール呼び出し](/docs/api/programmatic-tool-calling) — 高度なツール使用のもう半分です。検索が適切なツールを見つけ、プログラマティックな呼び出しが、結果をコンテキストに引きずり込まずにそれを実行します。
+- [MCP のトークンコスト](/docs/claude-code/mcp-token-cost) — この機能の背景にある経済性と、公表されている精度の差分。
+- [メモリとコンテキスト編集](/docs/api/memory-and-context-editing) — 定義の問題が片付いたあと、コンテキストを埋めていく*結果*にどう対処するか。

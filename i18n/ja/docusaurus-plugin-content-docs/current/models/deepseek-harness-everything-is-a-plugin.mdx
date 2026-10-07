@@ -1,0 +1,349 @@
+---
+sidebar_position: 22.998
+title: "DeepSeek Harness:エージェントループそのものがプラグインであるエージェント"
+description: "DeepSeek Harness(dsh)はGitHubのスターが24万2千を超え、2026年10月1日にデスクトップ版インストーラーを公開しました。売り文句は「すべてがプラグイン」ですが、この手の主張の多くと違って、これは実際に設計を支える柱です。モデルアダプター、ツールレジストリ、セッションログ、エージェントループのすべてを、YAMLのパッチファイルで差し替えられます。このページでは、Claudeユーザーにとって重要な三つの事実(既存のClaude Codeのhooks.jsonを実行できること、anthropic-messagesプロトコルに対応していること、run_codeが標準でcodemodeであること)、三つのモードを持つサンドボックスとその裏にあるカーネルのプリミティブ、追記専用のセッションログという不変条件、そして他のプロバイダーを黙って消してしまう設定オーバーライドを取り上げます。"
+keywords: [DeepSeek Harness, dsh, Cordis, agent harness, everything is a plugin, cordis.patch.yml, PTC mode, run_code, Claude Code hooks, hooks.json, ACP, sandbox modes, workspace-write, Seatbelt, Landlock, bwrap, MCP client plugin, session JSONL, open source agent, Claude Code alternative]
+---
+
+<LevelBadge level="advanced" />
+
+**DeepSeek Harness**(コマンド名は `dsh`)は、DeepSeekが公開しているオープンソースのエージェントハーネスです。2026年8月13日にGitHubに登場し、本日時点でスターは242,626、フォークは29,081、ライセンスはMIT、実装言語はTypeScriptです。2026年10月1日に、DeepSeekが署名付きのデスクトップ版インストーラーを追加したことで、再びHacker Newsのトップページに載りました。
+
+キャッチコピーはリポジトリの説明文にある*「Everything is a Plugin.」*の一文です。このフレーズは、これまでに公開されたほぼすべてのエージェントフレームワークのREADMEに載っていて、たいていは「プラグイン用のフォルダがあります」という意味にすぎません。ここではもっと強力で、風変わりな意味を持ちます。`docs/architecture.md` ではっきり述べられているとおり、モデルアダプター、ツールレジストリ、セッションログ、そして**エージェントループそのもの**がプラグインであり、「そのためそれぞれを設定によって置き換えられる」のです。フォークすることなく、YAMLファイルからエージェントループを削除して、自作のものに差し替えられます。
+
+この設計には、優れた結果もあれば、高くつく結果もあります。このページでは、ランディングページを読むだけではわからない部分を扱います。
+
+<Callout type="objectives" items={["「すべてがプラグイン」から何が得られるのか、そしてその土台であるフレームワークCordisが実際に何を保証するのかを理解する","既存のClaude Codeのhooks.jsonをdsh内で実行し、ブリッジを通ってどのサブセットが動くのかを把握する","dshをClaude、GPT、社内ゲートウェイに接続する方法と、OAuthによるサブスクリプションが使えない理由を知る","PTCモード(run_code)を、うっかりではなく意図して使う","三つのサンドボックスモードを、それぞれが実際に使っているカーネルのプリミティブと照らして読む","一つにつき1時間を失う五つの設定の落とし穴を避ける"]} />
+
+<VerifyNote lastVerified="2026-10-03" source="https://github.com/deepseek-ai/deepseek-harness">
+スター数、npmのバージョン、デスクトップ版インストーラーの対応表は、すぐに古くなります。
+npmの `latest` タグは現在 `0.2.0-rc.2` を指しており、これは安定版ではなくリリース候補です。
+また `SAFETY.md` は、このプロジェクトを「実験的な開発者向けプレビューソフトウェア」で「セキュリティ監査を受けていない」と説明しています。
+READMEは互換性を損なう変更があると警告しています。
+以下に出てくるファイルパス、サービスキー、設定フィールドはすべて0.2系列について正しいものとして扱い、
+これを土台に作り込む前に、リポジトリのドキュメントで再確認してください。
+ここでのアーキテクチャと安全性に関する記述は、二次的な報道ではなく、リポジトリ自身のドキュメントに基づいています。
+</VerifyNote>
+
+## 60秒でわかる概要
+
+<Steps items={[
+  { title: "起動する", body: "`npx @deepseek-ai/dsh web` でwebプロファイルが起動し、URL(`http://127.0.0.1:3080`)が表示されてブラウザが開きます。クローンもビルドも不要です。実行したディレクトリが既定のワークスペースのルートになりますが、新規のWeb UIではワークスペースが選択されておらず、追加するまで入力欄は無効のままです。" },
+  { title: "モデルを設定する", body: "「Settings → Models」を開きます。DeepSeekのカードには、platform.deepseek.comで取得したAPIキーを入力します。サードパーティのプロバイダーを追加すると、同梱のカタログには `anthropic`、`openai`、`moonshotai`(Kimi)、`zai`(GLM)などのプロバイダーIDが表示されます。モデルの変更は次のリクエストから反映され、再起動は不要です。" },
+  { title: "設定の置き場所を把握する", body: "キーは `$DSH_HOME/.credentials.yaml` に保存され、書き込み専用です。設定ページに返ってくるのは秘匿化された記述子だけで、秘密情報そのものは返らず、設定ストアには認証情報への参照だけが保存されます。UIで変更したそれ以外の内容は `$DSH_HOME/profiles/web/cordis.patch.yml` に書き込まれます。これは手作業で編集できるファイルと同じものです。" },
+  { title: "起動モードを選ぶ", body: "`dsh web` は、同梱されている五つのプロファイルの一つです。`dsh --profile headless \"run the tests\"` は、永続化されるセッションを一つ実行し、最終回答を出力して終了します。これがCIの入口になります。`dsh --profile acp` は、ACPのstdioで自動化クライアントに接続します。`dsh --profile sdk` は、JSON-RPCのstdioでSDKクライアントに接続します。`desktop` という名前はElectronアプリ専用のプロファイルとして予約されており、npm版のCLIでは起動を拒否します。" },
+  { title: "プラグインをnpmパッケージのようにインストールする", body: "`dsh plugin --profile web <pnpm args>` は、プロファイルのディレクトリ内でそのままpnpmに引数を渡します。プラグインは、プロファイル専用の `node_modules` に入る通常のパッケージです。コミュニティ製のプラグインは、GitHubのトピック `dsh-plugin` で探せます。" },
+]} />
+
+## 「すべてがプラグイン」は設計を支える主張である
+
+`dsh` の下層にあるのは**Cordis**です。これはリポジトリ内(`vendor/`)に同梱されているプラグインフレームワークで、プロジェクトが引用しているarXiv論文*A Programming Paradigm for Spatiotemporal Composability*(arXiv:2608.25512、2026年8月26日投稿、北京大学とDeepSeek-AIの著者による)で解説されています。論文の二つの考え方は、ハーネスの実行時の挙動にそのまま対応しています。
+
+- **時間的な合成可能性** — コンポーネントを取り除いたとき、その副作用を*完全に*元へ戻せること。ハーネスでは `ctx.effect()` がこれにあたります。プロンプトのセクション、ツールのスキーマ、モデルアダプター、プロバイダー、リスナーは、すべて元に戻せる効果としてインストールされます。そのため、プラグインをアンロードすると、登録内容が順序どおりに巻き戻され、孤立したものが残りません。
+- **空間的な合成可能性** — 依存関係がリアクティブに解決されること。プラグインは `inject` で必要なサービスを宣言し、Cordisは、それらのサービスが揃うまでプラグインを起動しません。維持すべき起動シーケンスはなく、読み込み順は、宣言された要件から自然に決まります。
+
+**サービス**は、共有コンテキスト上の安定したキーを占有します。この名前がアーキテクチャそのものです。
+
+| サービスキー | 所有するもの |
+|---|---|
+| `ctx.llm` | LLMアダプターのレジストリ。モデルとの接合部 |
+| `ctx.tools` | ツールレジストリと、スコープ付きの実行パイプライン |
+| `ctx.agentLoop` | 既定のエージェントループドライバー |
+| `ctx.agents` | 稼働中のエージェントのレジストリ |
+| `ctx.sessions` | 追記専用の `SessionEvent` ログ |
+| `ctx.systemPrompt` | システムプロンプトの組み立て |
+| `ctx.fs` | ファイルシステムへのアクセス |
+| `ctx.subprocess` | サブプロセスの実行 |
+| `ctx.sandbox` | サブプロセスの閉じ込め |
+| `ctx.subagents` | サブエージェントへの委任 |
+| `ctx.ptcRuntime` | `run_code` のためのプログラム実行 |
+| `ctx.credentials` | 認証情報との接合部 |
+
+リポジトリはこれらを**ケイパビリティシーム**(capability seams)と呼び、それぞれを三つの役割に分けています。サービスを*宣言する*パッケージ、*実装する*パッケージ、*利用する*パッケージです。`ctx.sandbox` は `packages/sandbox/sandbox` が宣言し、`sandbox-local` と `sandbox-windows-acl` が実装し、`tool-bash` とPTCランタイムが利用します。実装を差し替えれば、利用側のコードを一切編集しなくても、すべての利用側が追従します。
+
+プラグイン間の通信は型付きイベントで行われ、**宣言された五つのディスパッチモード**があります。このモードは、イベントの公開契約の一部です。
+
+| モード | await するか | 順序 | 値を返すか |
+|---|---|---|---|
+| `emit` | しない | 登録順 | 返さない |
+| `waterfall` | しない | 登録順 | 返す |
+| `parallel` | する | 全部同時 | 返さない |
+| `serial` | する | 登録順 | 返す |
+| `bail` | しない | 登録順、最初のbailで停止 | 返す |
+
+`waterfall` が特に興味深いのは、これが周囲をラップするミドルウェアだからです。リスナーは `(...args, next)` を受け取り、`next()` を呼べば、ラップされたかもしれない結果を連鎖の次へ渡し、`next()` を呼ばずに返れば、そこで処理を打ち切ります。「このツールを実行してよいか?」のような、判断が一つに決まるイベントでは、打ち切ることこそが設計意図です。判断を握るポリシーのリスナーは、委譲せずに返します。一方、注釈を付けるだけのリスナーは、必ず委譲しなければなりません。denyの判定を返すClaude Codeのフックを書いたことがあるなら、この形はすでにご存じでしょう。違いは、ここではそれがシェルの呼び出しではなく、ネイティブの拡張機構であることです。
+
+エージェントループは**ターン**(ゼロ回以上のステップ)と**ステップ**(モデルへの1回のリクエストとそのツール呼び出し)で動き、公開されている拡張シーケンスは `agent/pre-step → agent/request → llm/stream → tools/* → step/end` です。これらがフックポイントです。ループにパッチを当てるのではなく、ループを購読して聴くのです。
+
+## すでにClaude Codeを使っている人にとって重要な三つのこと
+
+### 1. 既存のClaude Codeの `hooks.json` を実行できる
+
+これは `dsh` について最も報じられていない事実です。`packages/hooks` には三つのパッケージが入っています。共通のエンジンである `hook-protocol`、**`hooks-claude-code`**、**`hooks-codex`** です。Claude Codeのブリッジを既存の `hooks.json` に向けると、セッションの開始、プロンプトの到着、ツールの実行、実行の停止の各タイミングで、フックが `dsh` の中で動きます。グループのREADMEは、できることを明記しています。**モデルに見えるメッセージ付き**でプロンプトやツール呼び出しをブロックする、会話にコンテキストを追加する、実行の継続を要求する、の三つです。
+
+限界も同じくらい明記されており、移行を計画する前に確認すべき点です。*各統合は、元のツールが文書化しているコマンドフックのサブセットだけをサポートします。* つまり、`command` タイプのフックは移植できます。そのサブセットの外にあるClaude Codeの挙動に依存するものは移植できません。信頼しているフック層があるなら([Claude Codeのフック](/docs/claude-code/hooks)を参照)、これは書き直しではなく、「ガードレールを持ち込む」本当の道筋になります。
+
+### 2. Claudeに接続できる。ただしサブスクリプションでは使えない
+
+同梱のカタログに含まれるプロバイダー一覧には、`anthropic` と `openai` が名前で入っています。カタログにないもの(中継サーバー、社内ゲートウェイ、自前運用のサーバーなど)については、カスタムプロバイダーのフォームで、プロバイダーID、ベースURL、認証情報、そして**APIプロトコル**を入力します。選べるプロトコルは三つだけです。OpenAI Chat Completions、OpenAI Responses、Anthropic Messagesです。`cordis.patch.yml` では、それぞれ `openai-completions`、`openai-responses`、`anthropic-messages` として保存されます。
+
+つまずきやすい点が二つあります。
+
+- **一つのプロバイダーは一つのプロトコルしか話せません。** OpenAI形式とAnthropic形式の両方を提供するゲートウェイには、一つではなく*二つ*のプロバイダーエントリが必要です。
+- **OAuthでのサインインには対応していません。** プロバイダーのガイドが、Codexを例に直接述べています。OAuthでサインインするプロバイダーは「まだここではサポートされていません」。つまり課金はAPIキーによる従量制であり、すでに支払っている席(シート)は使えません。既存のアシスタントのサブスクリプションで `dsh` を動かせると期待していたなら、従量課金のトークン代を見込んでください。計算方法は[プロバイダー別のAIコスト](/docs/models/what-ai-costs-across-providers)にあります。
+
+モデル検出ボタンもあり、エンドポイントに、どのモデルを提供しているかを問い合わせます。便利ですが、心に留めておくべき注意点があります。**組み込み**のプロバイダーは、ベースURLがゲートウェイを指していても、常にインストール済みのカタログから応答されます。ゲートウェイが実際に何を提供しているかを見たければ、*カスタム*プロバイダーとして追加する必要があります。そうしないと、DeepSeekが同梱したリストを自分に読み返しているだけになります。
+
+### 3. `run_code` はcodemodeであり、第一級のランタイムである
+
+`packages/ptc-runtime` は、ツールレジストリがモデルに `run_code` として提示するものの裏にあるケイパビリティ群です。契約は次のとおりです。モデルは**一つのプログラム**を書き、そのプログラムがホストの提供する関数を通常の非同期呼び出しとして呼び出します。返ってくるのは、プログラムが出力した内容と戻り値だけです。途中のツール結果ではありません。20回の往復でもありません。
+
+詳細は次のとおりです。
+
+- TypeScriptバックエンドは、解決されたサンドボックスポリシーのもとで、各プログラムを**新しく管理されたNodeプロセス**で実行します。
+- **各実行は、以前のプログラムの状態を持たずに始まります。** 頼れる暗黙のREPLセッションはありません。状態は、ファイルか戻り値で引き継いでください。
+- 失敗は例外ではなく*結果*として返るため、呼び出し側は診断したり、モデルに渡したりできます。
+- 実験的な**Pythonバックエンド**もあります。NodeホストとCPythonのサブプロセスの間でfd-3のワイヤープロトコルを使い、本当にCPythonが必要なときのために用意されています。
+
+このパターンが初めてなら、なぜこれほどコンテキストを節約できるのかを最もわかりやすく解説しているのは、[Pi 1.0とcodemodeの技](/docs/models/pi-1-0-minimal-agent-harness)です。トランスクリプトに入らないツール結果は、トランスクリプトを膨らませようがありません。ここでも同じ理屈が当てはまります。違いは、`dsh` ではプログラムのランタイムが固定のサンドボックス選択ではなく、差し替え可能な接合部(`ctx.ptcRuntime`)になっていることです。
+
+## サンドボックス:三つのモード、三つのカーネルプリミティブ、そして率直な但し書き
+
+三つのモードは、Codexを設定したことがあるなら見覚えがあるでしょう。
+
+| モード | サブプロセスがファイルに対してできること |
+|---|---|
+| `read-only` | 読み取りのみ |
+| `workspace-write` | セッションのワークスペース配下にのみ書き込み可 |
+| `danger-full-access` | 無制限 |
+
+さらに興味深いのはバックエンドの表で、あなたのマシンで実際にポリシーを強制しているものが何かがわかります。
+
+- **Linux** — bwrap、次点のフォールバックとしてLandlock。
+- **macOS** — Seatbelt。
+- **Windows** — 制限付きトークン。書き込み制限のバックエンドとして `sandbox-windows-acl` を使います。閉じ込められた子プロセスは、ワークスペースと専用の一時ディレクトリにしか書き込めません。
+
+拒否された呼び出しは、**ユーザーが承認する一度限りのエスカレーション**を通じて再試行できます。つまりこのポリシーは、確認を挟んで先へ進む境界であり、越えられない壁ではありません。
+
+そして但し書きです。これはパッケージのREADME自身が述べていることで、「サンドボックスされている」と言う人には、そのまま引用して伝えるべきです。**閉じ込めは「同じ世界の中」だけです。** ホストのカーネルとホストのファイルシステムを共有します。コンテナ、マイクロVM、リモート実行環境のような本物の隔離は、ここには一切登録されません。代わりに、ケイパビリティ全体を置き換えます。
+
+`SAFETY.md` は、24万2千スターのリポジトリとしては珍しいほど率直で、初回の実行の後ではなく前に読む価値があります。そこには、ハーネスがモデルの生成したコードを実行し、サードパーティのプラグインを読み込み、ネットワークにアクセスし、プロセス、認証情報、ファイルに触れられること、サンドボックス、承認プロンプト、権限制御が、到達可能なものへの被害を防ぐという**固有の保証はない**こと、そしてこのソフトウェアは「安全または本番利用可能なものとして扱ってはならない」ことが書かれています。推奨事項は、地味ですが正しいものです。使い捨てのVMまたはコンテナを使う、プロジェクトの範囲内にあるものはバックアップを取る、リスクを受け入れる場合を除いて機微な認証情報を置かない、です。ローカルで実行するどのハーネスにも同じ考え方が当てはまります。[ローカルおよびハイブリッドエージェントの保護](/docs/models/securing-local-and-hybrid-agents)と[サンドボックスと認証情報のマスキング](/docs/claude-code/sandbox-credential-masking)を参照してください。
+
+知っておく価値のある小さな**ガード**のグループもあります。`timeout-policy` と `repeat-tool-reminder` です。後者は、モデルが同じツールをループで呼び続けるという失敗モードへの注意喚起です。
+
+## セッションログこそが製品である
+
+`dsh` は、セッションをバージョン付きのJSONLファイル(`session.vN.jsonl[.zstd]`)として永続化し、バージョン間にはマイグレーションの連鎖があります。これは `ctx.sessionPersistence` という接合部を通して行われ、同梱の実装は `session-persistence-jsonl` です。コミットされるイベントには、`turn/start`、`step/start`、`user/message`、`assistant/message`、`tool/result`、`turn/end` があります。
+
+その背後にある不変条件は、`dsh` を一度も使わない人でも真似する価値があります。**「モデルに見えたものは、ログに残る」**。モデルが見たすべての入力を、ログから再構成できなければなりません。ライブイベントはUIをリアルタイムで動かすために別に存在し、明示的に、真実の記録ではないとされています。
+
+この一つのルールが、周辺のパッケージを成り立たせています。
+
+- `session-query-sqlite` — JSONLをgrepする代わりに、SQLiteからセッションを照会できます。
+- `dsh-session-projection` と `ctx.sessionProjections` — ゼロから再生するのではなく、セッションの状態を差分で畳み込みます。
+- `llm-replay` と `token-meter`(「リプレイによるトークン計測」) — 記録されたセッションを再生してそのトークンコストを*計測*します。二つのプロンプトやモデルの変更を、雰囲気ではなく同一の入力で比較する方法です。
+- `compaction-tool-result-pruner` — **モデルを使わない**ツール結果の刈り込みと説明されています。つまり、モデルに要約させる費用を払わずに、トランスクリプトを縮めます。Claude自身のやり方とは、[コンテキストのコンパクション](/docs/api/compaction)で比較できます。
+
+エージェントの実行をデバッグしようとして、ログに記録されていたのがモデルが受け取ったバイト列ではなく*描画されたUI*だった、という経験があるなら、この不変条件が多くの機能より価値がある理由はすでにおわかりでしょう。
+
+## ここでのMCPは、グローバルなレジストリではなく、サーバーごとのプラグインである
+
+`dsh` は、stdioとStreamable HTTPの両方でMCPを話し、ネゴシエーション、ディスカバリー、検証、キャンセルには公式SDKを使います。設計上の選択は、一覧にする価値があるほど変わっています。
+
+- **サーバーはオプトインで、サーバー一つにつきプラグインのエントリが一つです。** サーバーを見せたいCordisのスコープごとに、`@deepseek-ai/dsh-mcp-client` のエントリを一つずつ設定します。意図的に**共有の `ctx.mcp` サービスはありません**。クライアントは接続プラグインであり、ツールレジストリの*利用者*です。
+- **サーバーを設定しなければ、MCPのコストもかかりません。** 設定済みのサーバーが一つも見えない呼び出し元には、ネイティブモードでもPTCモードでも、MCPのプロンプトテキストもMCPのツールも渡されません。「少しのセクション」ではなく、ゼロバイトです。これは思う以上に重要です。[MCPツールの本当のコスト](/docs/claude-code/mcp-token-cost)を参照してください。
+- **公開されるツール名にはサーバー名が含まれる**ので、二つのサーバーに同名のツールがあっても区別されます。`serverName` は、登録スコープ内で一意でなければなりませんが、別々のエージェントスコープなら再利用できます。
+- **サーバーの指示は、ログに残るシステムプロンプトに加わり**、クライアントの `maxInstructionBytes` で上限が決まります。冗長なサーバーがこっそりプロンプトを占有することはありません。ただし、これは悪意のあるサーバーがモデルに語りかけるチャネルでもあります。その攻撃面は[MCPツールポイズニングとラグプル](/docs/security/mcp-tool-poisoning-and-rug-pulls)で説明しています。
+- **ツール一覧の更新に失敗しても、前の世代のツールが保持される**ので、セッションの途中でツールが消えることはありません。また、プロトコルのリビジョンを強制する製品設定はなく、ネゴシエーションはSDKがサポートするリビジョンに従います。
+
+## 設定:五つのレイヤーと、プロバイダーを食べてしまうオーバーライド
+
+プロファイルのディレクトリには、`package.json` と `cordis.patch.yml` があります。`package.json` には、ツリー外のプラグインの依存関係と、順序付きの `bundles` リストを持つ `dsh.profile` マニフェストが入ります。`cordis.patch.yml` は自分用のパッチ層です。合成されたツリーは、空のルートの上に、次の順序で構築されます。
+
+<Steps items={[
+  { title: "`dsh.profile.bundles` の順に、各バンドルのパッチ", body: "バンドルは、まずdshのインストール先から解決されます(`@deepseek-ai/dsh-base`、`dsh-web-app`、`dsh-headless`、`dsh-sdk-app`、`dsh-sdk-minimal`、`dsh-acp-app`)。次に、pnpmがツリー外のプラグインをインストールするプロファイル自身の `node_modules` から解決されます。`dsh-base` は共通の土台で、モデルアダプター、ツール、永続化、サンドボックスポリシーが入っています。バンドルは、`package.json` の `dsh` フィールドで自分自身を宣言します。" },
+  { title: "次に、プロファイルの `cordis.patch.yml`", body: "`$DSH_HOME/profiles/<profile>/cordis.patch.yml` です。素の `dsh web` で起動した場合、プロファイルは `web` です。これは設定UIが書き込むファイルで、直接編集でき、アダプターは次のリクエストで再読み込みします。" },
+  { title: "次に、ホストのパッチ", body: "`$DSH_HOME/cordis.patch.yml` です。プロファイルをまたぐオーバーライドです。" },
+  { title: "次に、`--patch` のオーバーレイ", body: "コマンドラインのオーバーレイで、最後に適用されます。`config/examples/` には、GitHubレビューのWebhook、メモリMCPサーバー、ランタイムのCordisツール向けのオプトイン用オーバーレイが同梱されていますが、既定のプロファイルには含まれません。" },
+  { title: "起動する前に確認する", body: "`--dump-default-config` と `--dump-config` は、何も起動せずに合成されたツリーを出力します。「この値はどのレイヤーが設定したのか?」に答える最速の方法です。" },
+]} />
+
+YAMLでHMRを有効にしていれば、`dsh-hmr` がプロファイルのマニフェストと二つのパッチファイルを監視し、直列化された一度のリロードで全レイヤーを再合成します。有効でなければ、変更は再起動時に反映されます。
+
+## 1時間を失う五つの落とし穴
+
+1. **Cordisの設定オーバーライドは、エントリの設定全体を置き換えます。** プロバイダーのガイドが明記しています。既存のオーバーライドを編集するときは、他のフィールドと他のプロバイダーを自分で保持しなければなりません。一つのプロバイダーを不用意にパッチすると、残りを削除したことになります。`cordis.patch.yml` で起こせるミスのうち、最も高くつくものです。
+2. **プロバイダーIDは変更できません。** リクエスト、保存済みセッション、モデルの既定値、認証情報への参照が、すべてこれをキーにしています。名前を変えるには、新しいプロバイダーを追加して古いものを削除します。表示名、ベースURL、プロトコル、認証情報、モデル一覧は編集できます。
+3. **`--dump-config-schema` はプラグインのコードをインポートします。** 他のdumpフラグと違い、JSON Schemaを出力するために、合成されたツリーが宣言するプラグインのスキーマを読み込みます。そのため、信頼できないプラグインに向けて実行すると、そのインポート時のコードが実行されます。CLIリファレンスにも、この点に関する専用の安全上の注意書きがあります。`--help` のようにではなく、[サードパーティコードのレビュー](/docs/security/reviewing-third-party-code)と同じように扱ってください。
+4. **プラグインのバージョン互換性は強制され、回避手段は明示的です。** インストール時とプロファイルの起動時に、宣言されたDSHのピア範囲が、`dsh --version` が示すランタイムのバージョンと照合されます。互換性のないプラグインには、確認済みの厳密なバージョン例外(`allow-version`、`revoke-version`)が必要です。良い衛生管理ですが、プラグインの読み込みを初めて拒否されると驚きます。
+5. **すでにリクエストを送ったセッションは、自分のログに記録されたモデルを保持し続けます。** 既定のモデルを変更しても、稼働中のセッションが遡って切り替わることはありません。また、保存済みの既定値が削除されたプロバイダーを指していると、別のものを選ぶまで入力欄がブロックされます。どちらも正しい挙動ですが、午前1時にはバグに見えます。
+
+## 実行する
+
+<PromptCard title="Web UIを起動し、続けてヘッドレスの単発実行を行う。クローンもビルドも不要">{`# Web UI on http://127.0.0.1:3080, workspace defaults to the invoking directory
+npx @deepseek-ai/dsh web
+
+# One persisted session, final answer to stdout, then exit — the CI shape
+npx @deepseek-ai/dsh --profile headless "summarize this repo and list its main packages"
+
+# Serve automation clients over ACP stdio (editor integrations)
+npx @deepseek-ai/dsh --profile acp
+
+# Inspect the composed config tree WITHOUT booting it
+npx @deepseek-ai/dsh --profile web --dump-config
+
+# Manage a profile's plugins (forwards to pnpm inside the profile directory)
+npx @deepseek-ai/dsh plugin --profile web add some-dsh-plugin`}</PromptCard>
+
+<PromptCard title="dshをAnthropic Messagesを話すゲートウェイに接続する($DSH_HOME/profiles/web/cordis.patch.yml)">{`# WARNING: a Cordis config override replaces the ENTIRE entry config.
+# Include every provider you want to keep, not just the new one.
+- id: llm-pi-ai
+  config:
+    providers:
+      my-anthropic-gateway:
+        apiKeyEnv: GATEWAY_API_KEY
+        api: anthropic-messages      # or openai-completions / openai-responses
+        baseURL: https://gateway.example/v1
+        models:
+          - id: some-text-model
+          - id: some-vision-model
+            input: [text, image]     # omit to inherit the catalog's input types`}</PromptCard>
+
+<PromptCard title="Claude Codeのガードレールを持ち込む">{`# The Claude Code hook bridge runs your existing command hooks inside dsh.
+# Only the command-hook subset documented by Claude Code is supported.
+# Hooks can: block a prompt or a tool call with a MODEL-VISIBLE message,
+# add conversation context, or require the run to continue.
+#
+# Check the bridge's own README for the current config field names before
+# wiring this up — the 0.2 line is a developer preview and they can move:
+#   packages/hooks/hooks-claude-code/README.md
+#
+# Verify enforcement the same way you would in Claude Code: a hook that is
+# configured but never fires is worse than no hook, because you trust it.`}</PromptCard>
+
+## 位置づけ
+
+ハーネスを研究するのではなく選ぶのであれば、率直な要約はこうです。`dsh` は、現在公開されているオープンなハーネスの中で、*アーキテクチャ*の面で最も興味深く、そして、いざというときに頼れる土台としては最も準備が整っていません。これは同プロジェクト自身の安全性ファイルが述べていることです。プラグインモデルは、競合のものより確かに強力です。`ctx.agentLoop` を差し替えられることは、ほとんどのハーネスでは、いくら払ってもできません。そしてフックのブリッジがあるため、導入は一か八かの賭けにはなりません。
+
+一方で、`latest` タグはリリース候補、セキュリティ監査は未実施、互換性を損なう変更が予告されており、プロバイダーの仕組みはAPIキーを前提としています。分野全体の比較は、[コーディングエージェントCLIの比較](/docs/models/coding-agent-clis-compared)と[ローカルのコーディングエージェント](/docs/models/local-coding-agents)を参照してください。これを動かすモデルとして最も有力なものは、[DeepSeek-V4.1-Flash](/docs/models/deepseek-v4-1-flash-open-weight-1m)を参照してください。
+
+<Flashcards cards={[
+  { front: "DeepSeek Harnessを一言で", back: "`dsh` — DeepSeekのオープンソースのエージェントハーネス。MIT、TypeScript、2026年8月13日に初公開、2026-10-03時点でスター242,626 / フォーク29,081。`npx @deepseek-ai/dsh web` で起動。" },
+  { front: "Cordis", back: "dshの下層に同梱されているプラグインフレームワーク。サービスは安定した `ctx.<key>` の名前を占有し、依存関係は `inject` で宣言され、登録は `ctx.effect()` でインストールされる元に戻せる効果。論文:arXiv:2608.25512、2026年8月26日。" },
+  { front: "ケイパビリティシーム", back: "三つの役割に分けられた、差し替え可能なサービス。宣言するパッケージ、実装するパッケージ、利用するパッケージ。例:`ctx.fs`、`ctx.subprocess`、`ctx.sandbox`、`ctx.subagents`、`ctx.llm`、`ctx.ptcRuntime`。" },
+  { front: "Cordisの五つのディスパッチモード", back: "`emit`(観測のみ、戻り値なし)、`waterfall`(周囲をラップするミドルウェア、値を返す)、`parallel`(await、並行)、`serial`(await、順序あり、値を返す)、`bail`(最初のbail値で停止)。モードは、イベントの公開契約の一部。" },
+  { front: "プロファイル", back: "`$DSH_HOME/profiles/<name>` 配下の、プラグインバンドルのパッチ層を順に積んだもの。同梱:`web`、`headless`、`sdk`、`sdk-minimal`、`acp`。`desktop` はElectronアプリ用に予約されており、npm版のCLIでは起動を拒否する。" },
+  { front: "設定レイヤーの順序", back: "`dsh.profile.bundles` の順のバンドルパッチ → プロファイルの `cordis.patch.yml` → `$DSH_HOME/cordis.patch.yml` → `--patch` のオーバーレイ。起動前に `--dump-config` で結果を確認する。" },
+  { front: "オーバーライドの罠", back: "Cordisの設定オーバーライドは、エントリの設定「全体」を置き換える。`llm-pi-ai` の中の一つのプロバイダーを、他を書き直さずに編集すると、他のプロバイダーが削除される。" },
+  { front: "Claude Codeのフックブリッジ", back: "`hooks-claude-code`(と `hooks-codex`)は、既存の `hooks.json` のコマンドフックをdsh内で実行し、モデルに見えるメッセージ付きでプロンプトやツール呼び出しをブロックしたり、コンテキストを追加したりする。元のツールのコマンドフックのサブセットのみ対応。" },
+  { front: "対応するモデルプロトコル", back: "三つ:`openai-completions`、`openai-responses`、`anthropic-messages`。一つのプロバイダーは一つのプロトコルしか話せないので、両対応のゲートウェイには二つのプロバイダーが必要。OAuthでサインインするプロバイダーは非対応で、APIキーのみ。" },
+  { front: "PTCモード / run_code", back: "モデルが一つのプログラムを書き、ホストの関数を通常の非同期呼び出しとして呼ぶ。返ってくるのは、出力した内容と戻り値だけ。実行ごとにサンドボックスポリシーのもとで新しいNodeプロセスを使い、実行間で状態は引き継がれず、失敗は結果として返る。fd-3プロトコルによる実験的なCPythonバックエンドもある。" },
+  { front: "三つのサンドボックスモード", back: "`read-only`、`workspace-write`(書き込みはセッションのワークスペースに限定)、`danger-full-access`。バックエンドは、Linuxはbwrap、次点でLandlock、macOSはSeatbelt、Windowsは制限付きトークンとACLによる書き込み制限。拒否された呼び出しは、ユーザーが承認する一度限りのエスカレーションで再試行できる。" },
+  { front: "「同じ世界の中だけ」", back: "サンドボックスグループ自身による閉じ込めの説明。ホストのカーネルとファイルシステムを共有する。コンテナ、マイクロVM、リモート実行環境はここではバックエンドではなく、ケイパビリティ全体を置き換える。" },
+  { front: "「モデルに見えたものは、ログに残る」", back: "セッションログの不変条件。モデルが見たすべての入力は、追記専用の `session.vN.jsonl[.zstd]` ログから再構成できなければならない。ライブイベントはUIを動かすためだけのもので、真実の記録ではない。" },
+  { front: "リプレイ + token-meter", back: "`llm-replay` は記録されたセッションを再実行し、`token-meter` はそのトークンコストを計測する。二つのプロンプトやモデルの変更を同一の入力で比較する方法。ログの不変条件があって初めて可能になる。" },
+  { front: "dshでのMCP", back: "オプトインで、サーバー一つにつき `@deepseek-ai/dsh-mcp-client` のプラグインエントリが一つ。stdioまたはStreamable HTTP。共有の `ctx.mcp` サービスはない。サーバーを設定しなければ、MCPのプロンプトテキストもMCPツールもゼロ。ツール名は `serverName` で名前空間が分かれ、サーバーの指示は `maxInstructionBytes` で上限が決まる。" },
+]} />
+
+<Quiz questions={[
+  {
+    q: "DeepSeek Harnessで、設定によって置き換えられ「ない」ものはどれですか?",
+    options: [
+      "モデルアダプター",
+      "エージェントループ",
+      "セッションログ",
+      "どれもない。architecture.mdは、三つともプラグインだと述べている"
+    ],
+    answer: 3,
+    explain: "docs/architecture.md:「製品のあらゆる部分はプラグインであり、モデルアダプター、ツールレジストリ、セッションログ、エージェントループそのものも含まれる。そのため、それぞれを設定によって置き換えられる。」これが設計の珍しい点です。ほとんどのハーネスでは、ループが唯一の固定された部分です。"
+  },
+  {
+    q: "すでに支払っているサブスクリプションを使って、dshをClaudeで動かしたいと考えています。どうなりますか?",
+    options: [
+      "動く。`anthropic` プロバイダーを選んでサインインすればよい",
+      "動かない。OAuthでサインインするプロバイダーは非対応なので、APIキーが必要",
+      "`acp` プロファイルでのみ動く",
+      "動くが、Anthropic Messagesプロトコルを手動で設定する必要がある"
+    ],
+    answer: 1,
+    explain: "プロバイダーのガイドには、OAuthでサインインするプロバイダー(例としてCodexが挙げられています)は「まだここではサポートされていません」とあります。同梱のカタログには `anthropic` というプロバイダーIDがありますが、これが受け付けるのはAPIキーです。席(シート)ではなく、従量課金のトークンを前提に計画してください。"
+  },
+  {
+    q: "cordis.patch.ymlの `llm-pi-ai` を編集して、`providers` の下に新しいゲートウェイを一つだけ書いて追加しました。結果はどうなりますか?",
+    options: [
+      "新しいゲートウェイが、既存のプロバイダーと併せてマージされる",
+      "設定が不完全なので、編集は拒否される",
+      "他のプロバイダーが消える。Cordisのオーバーライドは、エントリの設定全体を置き換えるから",
+      "dshを再起動するまで、新しいゲートウェイは無視される"
+    ],
+    answer: 2,
+    explain: "ドキュメントははっきり述べています。「Cordisの設定オーバーライドは、エントリの設定全体を置き換える。既存のオーバーライドを編集するときは、他のプロバイダーとフィールドを保持すること。」これはそのファイルで起こせるミスの中で最も高くつくものです。しかもモデルの変更は再起動なしで反映されるため、気づくのは起動時ではなく、次のリクエストのときになります。"
+  },
+  {
+    q: "macOSでは、`workspace-write` は実際に何に頼っていますか?",
+    options: [
+      "コンテナランタイム",
+      "Seatbelt",
+      "Landlock",
+      "制限付きアクセストークン"
+    ],
+    answer: 1,
+    explain: "sandbox-localのバックエンドは、Linuxではbwrap、次点でLandlock、macOSではSeatbelt、Windowsでは制限付きトークン(sandbox-windows-aclが、書き込みをワークスペースと専用の一時ディレクトリに制限する)です。そのすべてが「同じ世界の中だけ」で、ホストのカーネルとファイルシステムを共有しており、隔離ではありません。"
+  },
+  {
+    q: "dshがセッションを再生してそのトークンコストを計測できるのはなぜですか?",
+    options: [
+      "モデルのすべての応答をキャッシュしているから",
+      "セッションログが、モデルに見えたものはすべて記録されることを保証しているから",
+      "DeepSeekのAPIが決定論的な出力を返すから",
+      "token-meterが、描画されたUIのトランスクリプトを再トークン化するから"
+    ],
+    answer: 1,
+    explain: "不変条件は「モデルに見えたものは、ログに残る」です。モデルへのすべての入力が、追記専用のJSONLログから再構成でき、ライブのUIイベントは明示的に切り離されています。だからこそ、`llm-replay` と `token-meter` は、近似ではなく本物の計測になります。"
+  },
+  {
+    q: "MCPサーバーを一つも設定しない場合、モデルには何が見えますか?",
+    options: [
+      "サーバーが接続されていないことを説明する、短いMCPセクション",
+      "空のサーバー一覧を伴う、共有リソースツール",
+      "MCPに関するものは何もない。ネイティブモードでもPTCモードでも、プロンプトテキストもツールもない",
+      "プロファイルによる"
+    ],
+    answer: 2,
+    explain: "MCPサブシステムのドキュメント:設定済みのサーバーが見えない呼び出し元は、「ネイティブモードでもPTCモードでも、MCPのプロンプトテキストもツールも受け取らない」。サーバーはプラグインのエントリごとのオプトインで、スコープ内の最初のプロバイダーが、共有リソースツールを有効にします。"
+  },
+  {
+    q: "信頼できないプラグインに対して実行「すべきでない」dumpフラグはどれですか?",
+    options: [
+      "`--dump-config`",
+      "`--dump-default-config`",
+      "`--dump-config-schema`",
+      "三つとも害はない"
+    ],
+    answer: 2,
+    explain: "`--dump-config-schema` は、JSON Schemaを出力するために、合成されたツリーが宣言するプラグインのスキーマをインポートするので、プラグインのインポート時のコードを実行します。他の二つは、起動せずに合成された設定を出力するだけです。CLIリファレンスには、まさにこの点についての専用の安全上の注意書きがあります。"
+  }
+]} />
+
+## 情報源とさらに読む
+
+- [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) — リポジトリ本体:README、スター数とフォーク数、MITライセンス、`dsh-plugin` トピック。
+- [docs/architecture.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md) — プラグインに関する主張、サービスキー、プロファイルとバンドル、ターン/ステップのループ、セッションログの不変条件。
+- [docs/cordis-primer.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/cordis-primer.md) — 五つの考え方で見るCordis、五つのディスパッチモード、waterfallのセマンティクス、ローダーの設定。
+- [docs/capability-seams.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/capability-seams.md) — 生成されたサービスグラフ:すべての `ctx.*` キーと、その所有者、実装、利用者。
+- [SAFETY.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md) — ハーネスがあなたのマシンに対して何をしうるか、そして「安全または本番利用可能ではない」という明示的な表明。
+- [packages/sandbox/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sandbox/README.md) — 三つのモード、プラットフォームごとのバックエンド、エスカレーション、「同じ世界の中だけ」。
+- [packages/hooks/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/hooks/README.md) — Claude CodeとCodexのフックブリッジ、およびコマンドフックのサブセットという制限。
+- [packages/ptc-runtime/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/ptc-runtime/README.md) — `run_code` の契約、新規プロセスでの実行、実験的なPythonバックエンド。
+- [docs/subsystems/mcp.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/mcp.md) — サーバーごとのクライアントプラグイン、スコープの規則、名前の名前空間化、`maxInstructionBytes`、プロトコルのネゴシエーション。
+- [docs/user/guide/providers.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.md) — プロバイダーID、三つのAPIプロトコル、OAuthの制限、認証情報の保存、オーバーライドの警告。
+- [apps/cli/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/README.md) — 起動モード、プロファイルの合成順序、バンドル名、`dsh plugin`、dumpフラグ、バージョン例外。
+- [DeepSeek Harnessの製品ページ](https://deepseek.com/harness) — デスクトップ版インストーラー(macOS Apple Silicon用 `.dmg`、Windows 64ビット用 `.exe`)とプレビューの位置づけ。
+- [arXiv:2608.25512](https://arxiv.org/abs/2608.25512) — *A Programming Paradigm for Spatiotemporal Composability*。プロジェクトが引用しているCordisの論文。
+- [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) — `dsh-plugin` トピック向けの、コミュニティ製プラグインの一覧。
+
+## 次に読む
+
+- [Pi 1.0:最小構成のハーネスとcodemodeの技](/docs/models/pi-1-0-minimal-agent-harness) — `run_code` がなぜコンテキストを節約できるのかを最もわかりやすく解説した公開資料。あわせて、MCPの公開モードも扱っています。
+- [コーディングエージェントCLIの比較](/docs/models/coding-agent-clis-compared) — すでに使っているかもしれないハーネスと比べて、`dsh` がどこに位置するか。
+- [ローカルおよびハイブリッドエージェントの保護](/docs/models/securing-local-and-hybrid-agents) — 自身の安全性ファイルがサンドボックスを信用するなと告げているハーネスを、どう囲って守るか。
