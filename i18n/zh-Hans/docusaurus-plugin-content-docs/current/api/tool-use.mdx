@@ -1,21 +1,24 @@
 ---
 sidebar_position: 5
 title: "工具使用 / 函数调用"
-description: "定义工具、运行智能体循环，并处理结果。"
+description: "定义工具、运行智能体循环并处理结果——包括会导致 400 的三条消息形态规则，以及为什么 tool_choice \"any\" 和 \"tool\" 现在在最新的 Claude 模型上会报错。"
+keywords: [Claude tool use, function calling, tool_choice, forced tool use, strict tool use, tool_result, is_error, input_examples, agentic loop, JSON Schema, prompt injection tool results]
 ---
-
-import Tabs from '@theme/Tabs';
-import TabItem from '@theme/TabItem';
 
 <LevelBadge level="intermediate" />
 
-<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview">
-工具使用的请求/响应形态稳定但仍在演进——请在官方工具使用文档中确认字段。
-</VerifyNote>
-
 **工具使用** 让 Claude 调用 *你* 定义的函数——搜索、计算器、你的数据库、任意 API——并使用其结果。它是每一个 [智能体](/docs/api/building-agents) 的基础。
 
-<Callout type="objectives" items={["四步智能体循环是如何工作的，从工具定义到最终答案","如何用 Python 定义一个工具，包含名称、描述和 JSON-Schema 输入","为什么工具描述充当提示词，塑造 Claude 何时以及如何调用它们","如何校验输入、将错误作为结果返回，并安全地使用服务端工具"]} />
+大多数工具使用教程讲完四步循环就结束了。循环是最容易的部分。真正让生产环境集成崩掉的东西范围更窄、也更少被讨论：会返回 `400` 的消息形态、能让 Claude 自我恢复而不是道歉的那个错误字段，以及**在最新的 Claude 模型上强制调用工具已经不再有效**这一事实。本页把这些全部讲清。
+
+<Callout type="objectives" items={["四步智能体循环是如何工作的，从工具定义到最终答案","如何写一个工具定义——以及如何写出真正能引导 Claude 何时调用它的描述","会返回 400 的三条消息形态规则，以及告诉你违反了哪一条的错误文本","为什么 tool_choice \"any\" 和 \"tool\" 现在在最新模型上会失败，以及两种替代方案","如何用 strict: true 保证工具输入符合 schema","为什么工具结果是提示词注入最可能触达你的智能体的地方"]} />
+
+<VerifyNote lastVerified="2026-09-29" source="https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools">
+工具定义字段、`tool_choice` 支持矩阵、`tool_result` 格式规则、`is_error` 行为以及 `strict: true`
+语义，已于 2026 年 9 月 29 日对照 Anthropic 的「Define tools」「Handle tool calls」和「Strict tool
+use」页面核实。对强制工具使用的模型支持会随每次发布而变化——在依赖它之前，请在 Define tools
+页面重新核对支持矩阵，并参见 [当前模型与定价](/docs/whats-new/models-and-pricing) 了解当前阵容。
+</VerifyNote>
 
 ## 循环
 
@@ -30,50 +33,198 @@ flowchart LR
   E -->|may call again| B
 ```
 
-<Steps items={[{title: "递上菜单", body: "你包含一个工具定义列表——每个都带有名称、描述和 JSON-Schema 输入。"}, {title: "Claude 挑选一个工具", body: "如果 Claude 决定使用某个工具，它会返回一个带参数的 tool_use 块并停止。"}, {title: "你执行", body: "你自己运行该工具，并把输出作为 tool_result 发回去。"}, {title: "Claude 继续", body: "Claude 继续进行，可能调用更多工具，直到给出答案。"}]} />
+<Steps items={[{title: "递上菜单", body: "你包含一个工具定义列表——每个都带有名称、描述和 JSON-Schema 输入。"}, {title: "Claude 挑选一个工具", body: "如果 Claude 决定使用某个工具，响应返回时会带有 stop_reason \"tool_use\" 以及一个或多个 tool_use 块，每个块都携带一个 id、一个 name 和一个 input 对象。"}, {title: "你执行", body: "你自己运行该工具，并把输出作为引用了该 tool_use id 的 tool_result 发回去。"}, {title: "Claude 继续", body: "Claude 继续进行，可能调用更多工具，直到它以一个普通的 stop_reason 给出答案。"}]} />
 
-## 定义一个工具（Python）
+注意第 2 步里的复数：Claude 可以**在一次响应中返回多个 `tool_use` 块**。请按每个块的 `type` 字段分发，而不要假设 `content[0]`——响应通常以一个 `text` 块开头，而在最新模型上它可能以 `thinking` 块开头。
 
-一个工具定义就是一个名称、一段通俗语言的描述，以及一份用于输入的 JSON-Schema。把它传入 `tools`，然后检查 `stop_reason` 来得知 Claude 何时想要行动。
+## 定义一个工具
 
-<PromptCard title="get_weather 工具 + 首次调用">{`tools = [{
+一个工具定义就是一个名称、一段通俗语言的描述，以及一份用于输入的 JSON Schema。
+
+| 字段 | 是否必需 | 说明 |
+| --- | --- | --- |
+| `name` | 是 | 必须匹配正则 `^[a-zA-Z0-9_-]{1,128}$` |
+| `description` | 是 | 它做什么、何时使用、何时*不*该使用。目标至少 3–4 句 |
+| `input_schema` | 是 | 一个描述参数的 JSON Schema 对象 |
+| `input_examples` | 否 | 一个示例输入对象的数组，每个都对该 schema 有效 |
+| `strict` | 否 | 设为 `true` 以强制输入符合 schema——见下文 |
+| `cache_control` | 否 | 跨回合缓存该定义（参见 [提示词缓存](/docs/api/prompt-caching)） |
+
+<PromptCard title="get_weather 工具 + 首次调用（Python）">{`tools = [{
     "name": "get_weather",
-    "description": "Get current weather for a city.",
+    "description": (
+        "Get the current weather for a city. Use this when the user asks about "
+        "present conditions or temperature in a named place. Returns temperature "
+        "in the requested unit plus a one-word sky condition. It does NOT return "
+        "forecasts — use get_forecast for anything in the future."
+    ),
     "input_schema": {
         "type": "object",
-        "properties": {"city": {"type": "string"}},
+        "properties": {
+            "city": {"type": "string", "description": "City and region, e.g. 'Rome, IT'"},
+            "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+        },
         "required": ["city"],
+        "additionalProperties": False,
     },
 }]
 
 msg = client.messages.create(
-    model="claude-sonnet-5", max_tokens=1024,
+    model="claude-opus-5-5", max_tokens=1024,
     tools=tools,
     messages=[{"role": "user", "content": "What's the weather in Rome?"}],
 )
-# If msg.stop_reason == "tool_use": run the tool, then send a tool_result back.`}</PromptCard>
 
-## 提示
+if msg.stop_reason == "tool_use":
+    for block in msg.content:            # iterate — never index content[0]
+        if block.type == "tool_use":
+            result = run_tool(block.name, block.input)
+            # send back a tool_result carrying block.id`}</PromptCard>
 
-在你如何定义和处理工具上的细微选择，会在可靠性上产生巨大的差别。
+### 描述就是提示词
 
-- **描述就是提示词。** 清晰的工具 `description` 和参数文档会极大地改善 Claude 何时/如何调用它。
-- 在执行之前 **校验你收到的输入**——切勿盲目信任。
-- **将错误作为结果返回。** 如果某个工具失败，发回一个描述该错误的 `tool_result`，让 Claude 能够恢复。
-- **服务端工具。** Anthropic 还提供内置工具（例如网页搜索、代码执行、计算机使用）——查阅文档了解当前可用清单。
+`description` 字段是对工具使用质量影响最大的杠杆——它是给模型读的，不是给你的同事读的。Anthropic 自己的指南对什么才算好描述毫不含糊：
 
-:::warning 工具 = 行动 = 风险
-能采取真实行动的工具继承了一套安全模型。请套用最小权限，并对高风险调用保持人在回路——参见 [保护智能体与工具安全](/docs/security/securing-agents)。
+- **说明何时*不*该用它。** 大多数选错工具的情况，都是某个工具被叫去做了相邻工具负责的活。
+- **合并而非增殖。** 与其提供 `create_pr`、`review_pr`、`merge_pr`，不如发布一个带 `action` 参数的工具。工具更少、更宽泛，就能减少选择上的歧义。
+- **跨服务加命名空间。** 一旦你的工具面变大，`github_list_prs` 和 `slack_send_message` 就胜过 `list_prs` 和 `send_message`。
+- **返回高信噪比的结果。** 稳定、语义化的标识符（slug、UUID），以及只包含 Claude 挑选下一步所需的字段。臃肿的工具输出会烧掉上下文，并把信号埋起来。
+- **对于难缠的输入，加上 `input_examples`。** 经过 schema 校验的示例，简单对象每个大约花费 20–50 个 token，复杂嵌套对象则是 100–200 个，而一个无效示例会返回 400。
+
+## 处理响应：会返回 400 的三条规则
+
+这里是正常运行的代码通常会崩掉的地方。`tool_result` 是一条普通的 `user` 消息，但 API 会强制执行三条位置规则。
+
+<Steps items={[{title: "结果必须紧跟在它们的 tool_use 之后", body: "在助手的 tool_use 消息和你的 tool_result 消息之间不能夹着任何消息。违反这一条，API 就会报告：tool_use ids were found without tool_result blocks immediately after。"}, {title: "tool_result 块在 content 数组中排在最前面", body: "你添加的任何文本都必须排在所有 tool_result 之后。放在 tool_result 之前的 text 块就是一个 400。"}, {title: "如果某个服务端工具调用仍未解决，就只发送 tool_result 块", body: "当同一个助手回合还调用了一个尚无结果的服务端工具时，在末尾添加文本会提前结束该回合，请求会以一个点名了那个未解决服务端工具的 400 失败。"}]} />
+
+```json
+// ❌ 400 — text before tool_result
+{"role": "user", "content": [
+  {"type": "text", "text": "Here are the results:"},
+  {"type": "tool_result", "tool_use_id": "toolu_01", "content": "15 degrees"}
+]}
+
+// ✅ correct — results first, text after (client tools only)
+{"role": "user", "content": [
+  {"type": "tool_result", "tool_use_id": "toolu_01", "content": "15 degrees"},
+  {"type": "text", "text": "What should I do next?"}
+]}
+```
+
+一个 `tool_result` 的 `content` 可以是一个纯字符串，也可以是一个由 `text`、`image`、`document` 或 `search_result` 块组成的列表。对于不返回任何内容的工具，它也可以整体省略。
+
+### 把失败作为结果返回，而不是作为异常
+
+当一个工具抛出异常时，不要中断循环——用 `is_error` 把失败交回去：
+
+```json
+{"role": "user", "content": [{
+  "type": "tool_result",
+  "tool_use_id": "toolu_01A09q90qw90lq917835lq9",
+  "content": "Rate limit exceeded. Retry after 60 seconds.",
+  "is_error": true
+}]}
+```
+
+为那个必须决定下一步做什么的读者来写这条消息。`"failed"` 什么也没告诉 Claude；`"Rate limit exceeded. Retry after 60 seconds."` 则告诉它应该等待，而不是立刻重试。当一次工具调用无效或缺少参数时，Claude 通常会带着修正重试两到三次，然后才放弃并向用户道歉——所以一条有指导性的错误，往往就是恢复与死路之间的差别。
+
+## 保证输入符合 schema：`strict: true`
+
+在一个工具定义上设置 `strict: true`，会把模型的 token 采样约束到符合 schema 的输出（语法约束采样）。此后每个 `tool_use` 块中的 `input` 都可被证明匹配你的 `input_schema`，而 `name` 永远是一个真实存在的工具——不会在你需要 `2` 的地方出现 `"2"`，不会缺少必填字段，也不需要一层校验并重试的逻辑。
+
+<PromptCard title="严格的工具定义">{`{
+  "name": "search_flights",
+  "description": "Search bookable flights for a route and date.",
+  "strict": true,
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "destination": {"type": "string"},
+      "departure_date": {"type": "string", "format": "date"},
+      "passengers": {"type": "integer", "enum": [1, 2, 3, 4, 5, 6]}
+    },
+    "required": ["destination", "departure_date"],
+    "additionalProperties": false
+  }
+}`}</PromptCard>
+
+在你到处打开它之前，有三条值得知道的注意事项：
+
+- schema 必须留在受支持的 JSON Schema 子集之内——和 [结构化输出](/docs/api/structured-output) 使用的是同一个子集。
+- 计算机使用和浏览器使用的**工具集**条目拒绝 `strict: true`；在任一者上设置它的请求都会被拒绝。
+- 编译后的 schema 与消息内容分开缓存，最长保留 24 小时。Anthropic 的指南很明确：**不要把受保护健康信息放进 schema**——不要放在属性名、`enum` 值、`const` 值或 `pattern` 正则里。PHI 属于消息内容，而消息内容带有缓存 schema 所不具备的 HIPAA 保护措施。
+
+## `tool_choice`——以及为什么现在强制调用工具会失败
+
+`tool_choice` 控制 Claude *可以*、*必须* 还是 *不可以* 调用工具。它接受四个值：
+
+| 值 | 含义 |
+| --- | --- |
+| `auto` | 由 Claude 决定。只要存在 `tools` 就是默认值 |
+| `any` | Claude 必须调用你的某个工具，但由它挑选哪一个 |
+| `tool` | Claude 必须调用指定名称的那个工具 |
+| `none` | Claude 不可以调用任何工具。没有 `tools` 时的默认值 |
+
+下面这部分是目前所有其他工具使用指南都漏掉的。**`any` 和 `tool` 并非被普遍支持，而在最新模型上它们会返回 400。**
+
+| 模型或设置 | 限制 | 改用 |
+| --- | --- | --- |
+| 手动扩展思考（`thinking` 类型为 `enabled`） | `any` 和 `tool` 报错 | `auto` 或 `none`。自适应思考本身*不会*阻止强制工具使用 |
+| Claude Opus 5.5、Sonnet 5.5、Fable 5.1、Mythos 5.1 | 无论思考设置如何，`any` 和 `tool` 都返回 400 | `auto` 加上 `strict: true`，或者 [结构化输出](/docs/api/structured-output)。`none` 仍然可用 |
+
+错误信息很明确：
+
+```text
+tool_choice: type "tool" and "any" are not supported for this model.
+```
+
+同样的校验也适用于 token 计数端点，所以一个通过了 token 计数的请求不会在之后给你意外。
+
+### 应该改用什么
+
+把两种动机拆开，迁移路径就很明显了，因为强制工具使用其实在干两件互不相关的活：
+
+- **「我需要符合 schema 的 JSON。」** 这其实从来就不是为了强制一次调用。把 `tool_choice` 保持为 `auto` 并设置 `strict: true`；或者如果你想要的是一个响应而不是一次调用，就把 schema 搬到 [结构化输出](/docs/api/structured-output)。
+- **「我需要它去调用工具，而不是跟我闲聊。」** 那就在提示词里说清楚。点明该工具适用的场合——「任何关于当前状况的问题都使用 `get_weather`」——仍然能引导 `auto` 挑选哪个工具。
+
+放弃强制工具使用还有一个额外好处：`any` 和 `tool` 的实现方式是预填充助手消息，这会压制 `tool_use` 块之前的任何自然语言前言。在 `auto` 之下，Claude 可以解释它接下来要做什么——而在面向用户的智能体里，这通常正是你想要的。
+
+:::tip 缓存的坑
+在对话中途更改 `tool_choice` 会**让已缓存的消息块失效**。工具定义和系统提示词仍然保持缓存，但消息内容必须重新处理。如果你之前是按回合切换 `tool_choice`，那它一直在悄悄让你多花钱——参见 [提示词缓存](/docs/api/prompt-caching)。
 :::
 
-<Flashcards title="工具使用词汇" cards={[{front: "tool_use 块", back: "Claude 决定调用某个工具时返回的内容——包含参数——之后它会停止并等待你。"}, {front: "tool_result", back: "你发回的消息，携带工具的输出（或一段错误描述，以便 Claude 能够恢复）。"}, {front: "input_schema", back: "描述工具输入的 JSON-Schema：类型、属性，以及哪些字段是必需的。"}, {front: "服务端工具", back: "Anthropic 提供的内置工具，例如网页搜索、代码执行、计算机使用——查阅文档了解当前可用清单。"}]} />
+## 客户端工具 vs. 服务端工具
 
-<Quiz title="自我检验" questions={[{q: "在 Claude 返回一个 tool_use 块之后，由谁来运行该工具？", options: ["Claude 在 Anthropic 的服务器上自动运行它", "你执行它，并把输出作为 tool_result 发回去", "由 JSON-Schema 来执行它"], answer: 1, explain: "Claude 返回一个 tool_use 块并停止；你执行该工具，并把结果作为 tool_result 发回去。"}, {q: "你定义的某个工具在运行时失败了。推荐的做法是什么？", options: ["默默重试直到成功", "发回一个描述该错误的 tool_result，让 Claude 能够恢复", "停止对话"], answer: 1, explain: "将错误作为结果返回——一个描述失败的 tool_result 能让 Claude 恢复。"}, {q: "为什么清晰的工具描述如此重要？", options: ["它仅用于文档，Claude 会忽略它", "描述就是提示词——它们塑造 Claude 何时以及如何调用该工具", "它会改变 JSON-Schema 的校验规则"], answer: 1, explain: "描述就是提示词：清晰的描述和参数文档会极大地改善 Claude 何时以及如何调用一个工具。"}]} />
+并不是每个工具都需要在你的代码库里有一个处理器。
 
-<Callout type="takeaways" items={["工具使用是一个循环：发送工具定义，Claude 返回一个 tool_use 块并停止，你执行并返回一个 tool_result，Claude 继续直到给出答案。","一个工具定义就是一个名称、一段描述和一份 JSON-Schema 输入——把它传入 tools 并检查 stop_reason == tool_use。","描述就是提示词；在执行之前校验输入；将失败作为 tool_result 错误返回，让 Claude 能够恢复。","Anthropic 还提供服务端工具，而任何采取真实行动的工具都需要最小权限外加人在回路。"]} />
+- **客户端工具**——你自己的。你定义 schema，你执行，你返回一个 `tool_result`。就是上面那个循环。
+- **Anthropic 预置 schema 的客户端工具**——bash、文本编辑器、记忆。schema 是预先定义好的，但仍然由*你的*应用来执行它们。
+- **服务端工具**——网页搜索、网页抓取、代码执行、工具搜索。它们在 Anthropic 的基础设施上运行，你这边不需要处理器代码，错误也会被透明地处理：你永远不要为服务端工具返回 `is_error`。
+- **客户端工具集**——计算机使用和浏览器使用是一个没有 `name` 的单一条目，它声明了一组固定的成员工具。它们的 `tool_use` 块会多带一个 `toolset_name` 字段（`"computer"` 或 `"browser"`），而 `name` 是被调用的那个成员，比如 `screenshot` 或 `navigate`。**要同时按这两个字段分发**，并在结果上把 `toolset_name` 回传——省略它的成员结果会被拒绝。
+
+## 常见错误
+
+- **索引 `content[0]`**，而不是遍历并按 `type` 分支。响应常常以一个 `text` 块开头，在最新模型上则以 `thinking` 块开头。
+- **每次响应只处理一个 `tool_use`。** Claude 可以在一个回合里调用多个工具；只回答第一个而丢掉其余的循环，会留下没有结果的 `tool_use` id，这在下一次请求时就是一个 400。
+- **把你的说明文字放在结果之前。** `tool_result` 块永远排在最前面。
+- **吞掉工具异常。** 你的处理器里抛出的异常会结束循环；一个 `is_error` 结果则让 Claude 得以适应。
+- **出于习惯去用 `tool_choice: "any"`。** 在当前的旗舰模型上这是一个 400——而 `strict: true` 本来就是更好的答案。
+- **把工具输出当作可信内容。** 见下文。
+
+:::warning 工具结果是你的智能体最大的注入面
+工具结果经常携带你无法控制的内容：网页、收到的邮件、用户上传的文件、第三方 API。任何能影响其中之一的攻击者，都可以嵌入针对你的模型的指令——这就是间接提示词注入。请把不可信内容**保持在 `tool_result` 块内部**，绝不要把它拼接进 `system` 提示词或一个普通的用户 `text` 块，并阅读 [提示词注入](/docs/security/prompt-injection) 和 [保护智能体与工具安全](/docs/security/securing-agents)。能采取真实行动的工具同样继承了一套安全模型：最小权限，以及对任何不可逆的操作保持人在回路。
+:::
+
+<Flashcards title="工具使用词汇" cards={[{front: "tool_use 块", back: "Claude 决定调用某个工具时返回的内容——携带 id、name 和 input——之后它会停止并等待你。一次响应可以包含多个。"}, {front: "tool_result", back: "一个用户消息块，携带某个工具的输出，并以那个 tool_use id 为键。它必须在 content 数组中排在最前面，紧跟在助手的 tool_use 消息之后。"}, {front: "is_error", back: "tool_result 上可选的布尔值，把该次调用标记为失败。Claude 会读取消息并作出调整——通常会重试两到三次然后才道歉。"}, {front: "strict: true", back: "工具定义上的语法约束采样：工具输入可被证明匹配你的 input_schema。需要 additionalProperties 为 false；在计算机/浏览器工具集条目上会被拒绝；不要把 PHI 放进 schema。"}, {front: "tool_choice", back: "auto | any | tool | none。存在 tools 时默认是 auto；不存在时默认是 none。any 和 tool 在 Opus 5.5、Sonnet 5.5、Fable 5.1 和 Mythos 5.1 上返回 400。"}, {front: "toolset_name", back: "计算机使用和浏览器使用成员块上的额外字段（\"computer\" 或 \"browser\"）。要连同 name 一起按它分发，并在结果上把它回传，否则结果会被拒绝。"}]} />
+
+<Quiz title="自我检测" questions={[{q: "你在 claude-opus-5-5 上把 tool_choice 设为 {\"type\": \"tool\", \"name\": \"get_weather\"}。会发生什么？", options: ["Claude 被强制调用 get_weather", "请求返回 400——该模型不支持强制工具使用", "Claude 忽略 tool_choice 并用文本作答"], answer: 1, explain: "在 Opus 5.5、Sonnet 5.5、Fable 5.1 和 Mythos 5.1 上，无论思考设置如何，tool_choice 类型 \"any\" 和 \"tool\" 都返回 400。请使用 auto 加 strict: true，或者结构化输出。"}, {q: "你的用户消息里包含一个解释结果的 text 块，后面跟着两个 tool_result 块。API 会怎么做？", options: ["接受它——顺序无关紧要", "返回 400：tool_result 块必须排在最前面，文本在后", "静默丢弃那个 text 块"], answer: 1, explain: "tool_result 块必须在 content 数组中排在最前面；任何文本都必须排在它们全部之后。"}, {q: "你定义的某个工具在运行时抛出了一个连接错误。推荐的做法是什么？", options: ["抛出异常并结束对话", "静默重试直到成功", "发送一个 is_error 为 true 的 tool_result，并附上有指导性的消息，比如 'Rate limit exceeded. Retry after 60 seconds.'"], answer: 2, explain: "把失败作为 is_error 为 true 的 tool_result 返回。一条有指导性的消息会告诉 Claude 下一步该做什么；一个泛泛的 'failed' 什么也没告诉它。"}, {q: "为什么不可信的网页内容应该留在 tool_result 块里，而不是被粘贴进系统提示词？", options: ["tool_result 块在 token 上更便宜", "它限制了间接提示词注入——tool_result 中的内容被框定为数据，而不是指令", "系统提示词有长度限制"], answer: 1, explain: "工具结果携带你无法控制的内容。把它保持在 tool_result 块里，而不是放进系统提示词或普通的用户文本，是 Anthropic 推荐的间接提示词注入隔离做法。"}]} />
+
+<Callout type="takeaways" items={["工具使用是一个循环：发送工具定义，Claude 返回一个或多个 tool_use 块并停止，你执行并返回 tool_result，Claude 继续。请按 type 遍历内容块——绝不要索引 content[0]。","三条位置规则造成了大多数 400：结果必须紧跟在它们的 tool_use 之后，tool_result 块在 content 数组中排在最前面，而一个未解决的服务端工具调用意味着只能发结果。","强制工具使用在最新模型上已经没了：tool_choice \"any\" 和 \"tool\" 在 Opus 5.5、Sonnet 5.5、Fable 5.1 和 Mythos 5.1 上返回 400。请使用 auto 加 strict: true，或者结构化输出，并从提示词里引导工具选择。","strict: true 通过语法约束采样保证输入符合 schema——但不要把 PHI 放进 schema，也不要在计算机/浏览器工具集条目上设置它。","把失败作为带 is_error 和有指导性消息的 tool_result 返回，让 Claude 能够调整而不是道歉。","工具结果是间接提示词注入触达你的智能体最可能的路径——把不可信内容保持在其中，套用最小权限，并对不可逆的操作加上人工把关。"]} />
 
 ## 下一步
 
-- [在 API 上构建智能体](/docs/api/building-agents)
-- [结构化输出](/docs/api/structured-output)
-- [MCP 与连接工具](/docs/api/mcp)
+- [编程式工具调用](/docs/api/programmatic-tool-calling) — 让 Claude 在沙箱里用 Python 调用这些同样的工具，减少往返，并把中间结果挡在上下文之外
+- [结构化输出](/docs/api/structured-output) — 当你想要的是一个 JSON 响应而不是一次调用时，这是强制工具使用替代方案的另一半
+- [在 API 上构建智能体](/docs/api/building-agents) — 把这个循环包装成一个真正的智能体
+- [Claude Opus 5.5：实战指南](/docs/models/opus-5-5-field-guide) — 强制工具使用被移除背后的完整迁移故事
+- [MCP 与连接工具](/docs/api/mcp) — 从服务器获取工具，而不是自己定义它们
