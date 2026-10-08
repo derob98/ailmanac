@@ -1,0 +1,341 @@
+---
+sidebar_position: 10.2
+title: "ハード支出上限:実際に請求を止めてくれる AI プロバイダはどこか"
+description: "ソフトキャップはメールを送るだけです。ハードキャップはリクエストをブロックします。このページでは、どの AI プロバイダがどちらを提供しているかを整理し、誰も文書化していない罠を取り上げます。同じ出来事(上限に達する)が、Anthropic のティア上限では retry-after なしの HTTP 429、自分で設定した上限では HTTP 400、OpenAI では 429、OpenRouter では 402 として返ります。加えて、なぜ上限は正確になりえないのか、Custom ティアでセーフティネットが失われる場所、そしてプリフライトのキルスイッチの作り方も扱います。"
+keywords: [hard spend cap, AI budget cap, API spend limit, Anthropic spend limit, enforced_spend_limit_reached, OpenAI hard spend limit, OpenRouter credit limit, Google Cloud spend cap, AWS spend limit, LiteLLM max_budget, agent cost control, runaway agent cost, killswitch, Spend Limits API]
+---
+
+<LevelBadge level="intermediate" />
+
+2026 年 10 月 3 日、Simon Willison は短い主張を公開し、615 ポイントで Hacker News のトップページに載りました。従量課金のサービスには、デフォルトで **ハード** な予算上限が必要であり、上限なしの課金は明示的なオプトインにすべきだ、というものです。重要なのは彼の言い方です。*「Nobody wants to wake up to an email sent at midnight warning about a budget limit and find that, while they slept, their rogue service had consumed several hundred (or several thousand) more dollars.」*
+
+これが 2015 年の議論ではなく 2026 年の議論になったのは、エージェントがリスクの形を変えたからです。人間が cron ジョブの設定を誤っても、ゆっくりした漏れにしかなりません。失敗するツール呼び出しをループでリトライするエージェントや、サブエージェントがさらにサブエージェントを生み出す構成は、モデルを背後に持つ漏れであり、あなたが寝ている間にマシンの速度で走ります。
+
+良いニュースは、この 4 か月で、スタックの大半が静かに本物の上限を備えたことです。悪いニュースが、このページの本題です。**上限は存在しますが、4 種類の異なる HTTP ステータスコードで通知され、そのうち少なくとも 2 つは、すでに書いてあるリトライロジックに飲み込まれてしまいます。**
+
+<Callout type="objectives" items={[
+  "ソフトキャップ(メール)とハードキャップ(ブロックされるリクエスト)を区別し、各プロバイダがどちらを提供しているかを把握する",
+  "支出上限が返しうる 4 種類のエラーの形を扱う。リトライロジックがバグとして扱う 400 として届くものも含む",
+  "なぜ市場のどの上限も正確になりえないのか、なぜすべてのベンダーが超過分の責任を負わないのかを理解する",
+  "Anthropic のデフォルトのセーフティネットが消える場所と、Enterprise の Spend Limits API が代わりに何を提供するかを知る",
+  "新しいプロジェクトの下に、実際にブロックする層で、約 20 分で本物の上限を設ける"
+]} />
+
+## ソフトキャップとハードキャップ:唯一重要な区別
+
+宣伝文句を取り除くと、あらゆる支出管理は 2 つのうちのどちらかです。
+
+**ソフトキャップ** は観察します。コストのシグナルを監視し、あなたの設定値と比較して、通知します。メール、Webhook、ダッシュボードのバッジなどです。トラフィックは流れ続けます。AWS Budgets、Anthropic の利用状況ダッシュボード、これまでに設定したあらゆる「課金アラート」はソフトキャップです。確かに役に立ちますが、保護ではありません。ソフトキャップの唯一の効果は人間に介入を促すことであり、そのレイテンシはシステムのものではなく *あなたの* 対応時間です。
+
+**ハードキャップ** は強制します。上限に達した時点で新しいリクエストをブロックします。コードがそれを知るのは、受信トレイではなくエラーを通じてです。
+
+実用的なテスト:*チームの全員が寝ているとき、支出は止まるか?* 答えが「いいえ」なら、UI がどう呼んでいようと、それはソフトキャップです。
+
+以下はすべてハードキャップについてです。ソフトキャップも残しておいてください。作動した上限はインシデントであり、100% でのブロックだけでなく 60% での警告も欲しいはずです。
+
+## 実際にブロックするプロバイダ
+
+| プロバイダ / 層 | ハードキャップ? | 範囲 | 作動したときに得られるもの |
+| --- | --- | --- | --- |
+| **Anthropic — ティア上限** | あり(デフォルト) | 組織、月次 | HTTP 429、`rate_limit_error`、**`retry-after` なし**、`details.error_code: enforced_spend_limit_reached` |
+| **Anthropic — 自分で設定する上限** | あり(オプトイン) | 組織またはワークスペース | HTTP **400**、`invalid_request_error`、メッセージは "You have reached your specified API usage limits" で始まる |
+| **Anthropic — Claude Code ワークスペース** | あり | そのワークスペース | 別途チェックされる。`retry-after` を **含む** 429 が返ることがある |
+| **OpenAI — ハード支出上限** | あり(オプトイン) | 組織および/またはプロジェクト | HTTP 429 |
+| **OpenRouter — クレジット / キー上限** | あり(構造的に) | アカウント残高、キー単位 | HTTP **402**、`error.metadata.limit_source` 付き |
+| **Google Cloud — spend cap budget** | あり(オプトイン、Preview) | 1 プロジェクト × 1 サービス | そのサービスの新規利用は、手動で解除するまでブロック |
+| **AWS — プロジェクト支出上限** | あり(新規アカウント) | プロジェクト単位 | それ以上課金が発生する代わりに、プロジェクトが一時停止される |
+| **LiteLLM / セルフホストのゲートウェイ** | あり(プリフライト) | キー、ユーザー、チーム、モデル | 認証系のエラー。プロバイダが呼ばれる *前に* 発生する |
+| **Claude Code テレメトリ** | なし | — | 可観測性のみ。コストをエクスポートするが、何も強制しない |
+
+<VerifyNote lastVerified="2026-10-05" source="Anthropic rate limits & Spend Limits API docs; OpenAI API rate-limits guide; OpenRouter limits reference; Google Cloud Billing spend-cap docs & July 27 2026 release note; LiteLLM proxy docs; Help Net Security on the AWS launch" />
+
+## 罠:1 つの出来事に 4 つのステータスコード
+
+ここは 4 か所に別々に文書化されていながら、どこにもまとまっていない部分で、最も噛みつきやすい点です。
+
+Anthropic の挙動は注意深く読んでください。実際には 2 つの異なる挙動だからです。
+
+**ティア** の月次上限を超えると、API は HTTP 429 を、エラータイプ `rate_limit_error` で返します。通常のレート制限と同じタイプですが、**`retry-after` ヘッダはありません**。Anthropic 自身のドキュメントは、その帰結をはっきり述べています。*「Retrying, including the SDK's automatic retries, fails until access resumes.」* アクセスは、上限を引き上げない限り、翌月 1 日の 00:00 UTC に再開します。つまり、指数バックオフを備えたお行儀の良いクライアントが、一時的に見えるエラーをログに出し続けながら、最大 31 日間リトライのループに居座ることになります。見分けるためのフィールドは `error.details.error_code` で、値は `enforced_spend_limit_reached` です。
+
+**あなた自身が** 設定した上限(組織またはワークスペース)を超えると、API は HTTP **400** を、タイプ `invalid_request_error` で返します。これは通常の想定を逆転させます。400 は「リクエストが不正なのでリトライするな」を意味するため、ほとんどのクライアントはこれをバグとしてログに記録し、クラッシュするか、黙って作業を捨ててしまいます。これはバグではありません。あなた自身の上限が、仕事をしているだけです。
+
+さらに Claude Code のワークスペースは、また別にチェックされます。そのワークスペースの上限を超えたリクエストには、`retry-after` を *含む* 429 が返ることがあります。
+
+OpenRouter は 3 つ目の道を取ります。プリペイドクレジットのモデルなので、残高切れは支払いの問題であり、HTTP **402 Payment Required** を返し、`error.metadata.limit_source` が、アカウント残高、キー単位の上限、実行中の予算ホールドの 3 つのうちどれに達したかを示します。知っておく価値のある細部として、アカウント残高がマイナスになると、**無料** モデルへのリクエストも失敗します。
+
+OpenAI のドキュメントは、ハード支出上限の影響を受けたリクエストは `429` を返すと述べています。強制の遅延については述べておらず、混同しやすい 2 つを区別しています。OpenAI があなたの組織に設定する承認済みの月次利用上限と、組織またはプロジェクトにあなた自身が設定する支出上限です。両方が 1 つのリクエストに適用されうるため、余裕のあるプロジェクトでも、その上にある組織の天井によってブロックされることがあります。
+
+1 つの出来事に 4 つの形。つまり、欲しいハンドラは「429 ならリトライ」ではありません。
+
+<PromptCard title="Classify a cap error instead of retrying it">
+{`# The three signals that mean "stop, this is a budget wall" — not "wait and retry"
+#
+#   Anthropic tier cap   -> 429, type=rate_limit_error, NO retry-after,
+#                           error.details.error_code == "enforced_spend_limit_reached"
+#   Anthropic own limit  -> 400, type=invalid_request_error,
+#                           message startswith "You have reached your specified API usage limits"
+#   OpenRouter           -> 402, error.metadata.limit_source present
+#   OpenAI hard limit    -> 429  (no documented discriminator field)
+
+def is_budget_wall(status, body, headers):
+    err = (body or {}).get("error", {}) or {}
+    detail_code = (err.get("details") or {}).get("error_code")
+
+    if status == 429 and detail_code == "enforced_spend_limit_reached":
+        return True                      # month-long wall; do NOT back off
+    if status == 429 and "retry-after" not in {k.lower() for k in headers}:
+        return True                      # 429 with no retry-after is not a rate limit
+    if status == 400 and err.get("message", "").startswith(
+        "You have reached your specified API usage limits"
+    ):
+        return True                      # your own cap, wearing a 400
+    if status == 402 and (err.get("metadata") or {}).get("limit_source"):
+        return True                      # prepaid balance or key cap
+
+    return False
+
+# Page a human, mark the work as blocked, and stop the loop.
+# Retrying a budget wall just burns your own CPU until the first of the month.`}
+</PromptCard>
+
+どのプロバイダがリファクタリングしても生き残る一般則は、**`retry-after` ヘッダのない 429 はレート制限ではない** ということです。レート制限は構造上一時的なもので、どれだけ待つべきかを教えてくれます。待ち時間を教えることを拒む 429 は、別の生き物です。
+
+## なぜ上限は正確になりえないのか、そしてそれは怠慢ではない
+
+市場のあらゆるハードキャップは、請求済みのコストではなく *推定* コストで作動します。近道のように見えますが、実際には唯一成り立つ設計です。使用量を集計し、料金を適用し、割引を反映し、突き合わせる課金パイプラインには、数分から数時間かかります。それを待つ上限は、まさに止めるべき障害モードに対して役に立ちません。
+
+Google Cloud はそのトレードオフを率直に述べています。*「For faster enforcement, spend caps use gross, estimated costs to trigger alerts and enforce the spend cap」*。そして正直に、*「Due to latency in usage and cost reporting, spend cap enforcement isn't instantaneous. Consider setting your budget slightly below your absolute limit.」* と続けます。さらに責任については、*「any cost overages are billed as normal」* です。レポートの遅延の間にすり抜けた分については、引き続きあなたに責任があります。
+
+設計時に織り込むべき帰結が 3 つあります。
+
+**上限は、本当の天井より低く設定する。** 本当に痛い金額が 500 ドルなら、400 ドルで上限を設定します。その差が超過分の予算です。どれだけ必要かは、プロバイダではなくピーク時の消費速度で決まります。毎分 50 ドル使えるエージェント群は、1 日 50 ドルを使うチャットアプリより広いマージンが必要です。
+
+**実行中のリクエストは完了する。** 上限がブロックするのは *新しい* 利用です。すでに実行中のものは終了まで走り、課金されます。長時間動くエージェントのターンでは、これは丸め誤差ではありません。
+
+**事後より、プリフライト。** 超過を構造的に避けられる唯一の仕組みは、呼び出しの *前に* 推定コストを確保しておくことです。LiteLLM のプロキシはこれをデフォルトで行います。リクエストボディとモデルの料金から最大コストを推定し、該当するすべての予算に対してその額を確保し、確保によって予算を超過するならリクエストを拒否し、レスポンスが返ったら確保分を実際のコストに置き換えます。OpenRouter の実行中の予算ホールドは、同じ考え方をプリペイド残高に適用したものです。どちらも事後に測定するよりはるかに強力ですが、逆方向には近似にすぎません。多めに確保するため、本来は払えたはずのリクエストを拒否することがありえます。
+
+## Anthropic のティアと、ネットが消える場所
+
+Anthropic は、求めなくてもハードキャップを提供します。Start、Build、Scale の各ティアには月次の支出上限があり、これは組織が暦月に API に使える最大額です。
+
+| 利用ティア | 月次支出上限 |
+| --- | --- |
+| Start | $500 |
+| Build | $1,000 |
+| Scale | $200,000 |
+| Custom | **なし** — アカウントチームと取り決める |
+
+<VerifyNote lastVerified="2026-10-05" source="platform.claude.com/docs/en/api/rate-limits — Spend limits" />
+
+最後の行をもう一度読んでください。デフォルトのセーフティネットは、最も多く支出する組織が属するティア *以外の* すべてのティアに存在します。Custom に移行すると自動の天井が失われるため、人々が気にしなくなるまさにその時点で、明示的に設定した上限が任意ではなく必須になります。
+
+設定画面にいる間に、さらに 2 つ設定しておく価値があります。
+
+**ティア上限より低い、自分用の上限を設定する。** Billing ページでは、ティアの上限より小さい数字を指定できます。自分で選べるので、実際に欲しいのはこの制御です。ただし、429 ではなく 400 として現れることを忘れないでください。
+
+**ワークスペースを被害範囲の境界として使う。** ワークスペースにはそれぞれ独自の支出上限とレート制限を設定できるので、実験的なエージェントと本番トラフィックが同じプールを共有しません。組織全体の上限は、ワークスペースの上限の合計がそれを上回っていても、常にその上に適用されます。1 つ制約があります。デフォルトのワークスペースには上限を設定できないため、大事なものはそこに置かないでください。
+
+## Enterprise 層:API としてのメンバー単位の上限
+
+Claude Enterprise の組織には、Console が公開していないものが提供されます。**Spend Limits API** で、個人ごとの予算を、プログラムから読み書きできるリソースとして扱います。この話の中で、ほとんどどこにも書かれていない部分なので、何をするものかを知っておく価値があります。
+
+2 つのリソースにまたがる 8 つのエンドポイントがあります。1 つ目は、「各メンバーにどの上限が適用され、それはどこから来ていて、どれだけ近づいているか」に答えます。
+
+<PromptCard title="Read every member's effective cap and month-to-date spend">
+{`curl "https://api.anthropic.com/v1/organizations/spend_limits/effective?limit=20" \\
+  --header "x-api-key: $ANTHROPIC_ADMIN_KEY" \\
+  --header "anthropic-version: 2023-06-01"
+
+# Each row carries:
+#   amount                -> the effective cap, in MINOR UNITS ("50000" = $500.00)
+#                            null = unlimited;  "0" = included plan usage only
+#   source.type           -> user | seat_tier | rbac_group | organization
+#   period_to_date_spend  -> spend since the period started, same minor-unit format
+#   spend_limit_id        -> the configured row this resolved from
+#
+# Requires an Admin API key with the read:spend_limits scope.`}
+</PromptCard>
+
+見落とすと午後が丸ごと潰れる細部が 4 つあります。
+
+- **金額は、請求通貨の最小単位による 10 進文字列です。** `"50000"` は $500.00 です。10 進数としてパースし、100 で割ってください。ドキュメントは、大きな値に対する 2 進浮動小数点の使用を明示的に警告しています。
+- **`null` と `"0"` は同じではありません。** メンバーの有効行(effective row)では、`null` は *無制限*、`"0"` はプランに含まれる利用分を超えて Claude を使えないことを意味します。`"0"` はすでに上限に達しているものとして扱ってください。
+- **`period_to_date_spend` は、単に値が取得できないだけのときも `"0"` と表示されることがあります。** ドキュメントはこれを取引用ではなく参考情報と呼んでいるため、ゼロの値を「支出なし」として扱うゲートを作ってはいけません。
+- **グループの上限は、メンバーごとのデフォルトであり、共有の予算プールではありません。** それを継承する各メンバーは、自分自身の支出に対してゲートされます。
+
+2 つ目のリソースはレビューキューです。メンバーが claude.ai で「Request more usage」をクリックすると、支出上限の引き上げリクエストが作成されます。保留中のものを一覧でき、各リクエストにはそのメンバーの現在の上限と期間内累計支出を示す最新の `spend_summary` が付いているので、ポリシーエンジンが追加の検索なしに判断できます。承認すると、同じ呼び出しで新しいユーザー単位の上限が書き込まれます。知っておくべき非対称性が 2 つあります。`POST /spend_limits` で上限を直接設定しても、保留中のリクエストは解決 **されません**(承認用のエンドポイントを使います)。また、8 つのエンドポイントはすべて、組織ごとに 1 分あたり 60 リクエストという 1 つの予算を共有します。
+
+この API で書き込めるのは **ユーザー単位のオーバーライド** だけです。シート階層、グループ、組織のデフォルトは claude.ai の設定で構成します。また、この API は Enterprise 専用で、Claude Platform(Console)の組織では利用できません。
+
+強制ではなくレポート用には、Admin API のコストレポートが相棒になります。`GET /v1/organizations/cost_report` は日次のバケット(デフォルトは `1d`、1 ページあたり最大 31)を最小単位の金額で返し、`description` または `workspace_id` でグループ化でき、`cost_type`(`tokens`、`web_search`、`code_execution`、`session_usage`)ごとに内訳が出ます。この最後の区分を見れば、請求の大半が推論ではないことに気づけます。
+
+## プロジェクトの下に天井を設ける
+
+<Steps items={[
+  {
+    "title": "本当に痛い金額を決め、その下に上限を設定する",
+    "body": "すべてを止めたい金額を選び、それより 20〜25% 低く上限を設定します。このマージンが、レポートの遅延と実行中のリクエストを吸収します。その数字は、将来のチームメイトが見つけられる場所に書き留めておいてください。説明のない上限は、最初のインシデントのときに引き上げられてしまうからです。"
+  },
+  {
+    "title": "まずプロバイダレベルの上限を設定する。迂回できない唯一の上限だから",
+    "body": "Anthropic の場合:Settings > Billing > Spend limits > Adjust limit で、ティア上限より低く設定します。OpenAI の場合:組織にハード支出上限を設定し、プロジェクトにはさらに厳しいものを設定します。OpenRouter の場合:プリペイド残高そのものが上限なので、少額でチャージし、リセットスケジュール付きのキー単位のクレジット上限を設定します。ゲートウェイとアプリケーションの上限は多層防御であり、この層が壁です。"
+  },
+  {
+    "title": "リスクのあるワークロードごとに専用のキーと専用のワークスペースを与える",
+    "body": "本番と共有している上限は、プレッシャーの下で引き上げてしまう上限です。Anthropic では、ワークロードごとに、独自の支出上限とレート制限を持つワークスペースを作成します(デフォルトのワークスペースは上限を設定できないので使わない)。ほかのプロバイダでは、ワークロードごとに API キーを 1 つ用意し、それぞれに独自の天井を設けます。"
+  },
+  {
+    "title": "クライアントに予算の壁を認識させる",
+    "body": "このページ前半の分類器を追加します。具体的には、retry-after のない 429 でのリトライをやめ、メッセージが 'You have reached your specified API usage limits' で始まる 400 をコードのバグとして扱うのもやめます。予算の壁には専用のイベントタイプでログを残し、4xx 率の中のノイズではなくインシデントとして現れるようにします。"
+  },
+  {
+    "title": "エージェントが関わるなら、ゲートウェイにプリフライト予算を追加する",
+    "body": "LiteLLM(または同等のもの)を前段に置き、キー、ユーザー、チームごとに budget_duration 付きの max_budget を設定します。予算の確保はデフォルトで有効です。プロバイダを呼ぶ前に推定の最大コストを確保し、後で実際の額に調整します。これが、個々には上限を守っていた並行エージェント呼び出しの集中が、全体として上限を突き破るのを防ぎます。"
+  },
+  {
+    "title": "モデルだけでなくインフラにも上限をかける",
+    "body": "請求の全体がモデル API だけであることはまれです。Google Cloud では、特定のプロジェクトとサービスに spend cap budget を作成します。AWS では、アカウントが対象なら、プロジェクト支出上限を設定します。そのうえで、何が対象外かを確認してください。GCP では、上限が適用されていても、永続的なコンピュートとストレージの課金は発生し続けます。"
+  },
+  {
+    "title": "ソフトキャップを残し、ハードキャップをテストする",
+    "body": "50/75/90% のアラートも設定します。そのうえで、壁が存在することを検証します。使い捨てのキーの上限を数セントに設定し、トラフィックを流して、実際にスタックが受け取るステータスコード、ヘッダ、ボディを読みます。作動するのを一度も見たことがない上限は、制御ではなく思い込みです。"
+  }
+]} />
+
+## クラウド層と、それがカバーしないもの
+
+Google Cloud は、2026 年 7 月 27 日の課金リリースノートで **spend cap budgets** を出荷しました。Preview としてで、10 年にわたって課金関連の機能要望のトップだった機能にしては、驚くほど静かな発表でした。仕組みはよく読む価値があります。範囲が「Google Cloud のハードキャップ」という言葉より狭いからです。
+
+- **対象サービスは短いリストです。** 文書化されているところでは、Gemini API、Gemini Enterprise Agent Platform、Cloud Run、Cloud Run functions。頼る前に最新のリストを確認してください。対象外のサービスに対する上限は存在しません。
+- **1 つの上限がカバーするのは 1 プロジェクト × 1 サービスです。** アカウント全体のキルスイッチではありません。
+- **月次の期間のみ。**
+- **自動では再開しません。** *「When a spend cap is enforced, the usage block is reversed only when you manually lift the spend cap」*。さらに、その後サービスが完全に再開するまで最大 1 時間かかることがあります。本番サービスにとっては、意図的な請求の代わりに、意図的な停止を選ぶことになります。上限を設定する *前に* どちらが欲しいかを決めておいてください。
+- **永続的なリソースは課金され続けます。** コンピュートとストレージに紐づく固定的な利用は有効なままで、課金も累積し続けます。上限が止めるのは新しいリクエストであり、稼働中のインフラではありません。
+- **サブスクリプションの費用は対象外です。** たとえば Gemini Enterprise のライセンスなどです。
+
+AWS は逆のアプローチを取り、サインアップ時点でこの問題に取り組みました。2026 年 9 月 17 日に報じられたところでは、新しい AWS アカウントは *プロジェクト* として構成され、$100 の無料利用枠クレジットから始まり、有料に移行するとプロジェクトごとの月次支出上限が $20 から設定され、AWS が過去の利用状況から金額を提案します。上限に達すると、プロジェクトは課金が累積する代わりに一時停止され、オーナーが上限を引き上げると再開します。注意点が 2 つあります。ロールアウトは段階的で、**新規顧客のみ** が対象であること。そして、一時停止されたプロジェクトが稼働中の公開エンドポイントにどう作用するかは明記されていないこと。ユーザー向けのものであれば、最初に答えを得るべき疑問です。
+
+<VerifyNote lastVerified="2026-10-05" source="docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps and Cloud Billing release notes (2026-07-27); helpnetsecurity.com/2026/09/17/aws-spend-limit-agent-set-permissions/" />
+
+## 上限が守ってくれないもの
+
+ハードキャップは、*1 つの層* における *従量計測された利用* の天井です。次の 4 つは、しばしばその外側にあります。
+
+**シートとサブスクリプション。** シート単位のライセンスやプラン料金は従量計測された利用ではないので、利用上限では制限されません。
+
+**永続的なインフラ。** アイドル状態の GPU インスタンス、プロビジョニング済みのデータベース、ストレージは、API の上限が適用されている間も課金され続けます。エージェントは止まっても、それが動いていたマシンは止まりません。
+
+**独自の時計で動くコーディングエージェント。** Claude Code はコストのテレメトリをエクスポートします。USD 建ての `claude_code.cost.usage` とトークン数の `claude_code.token.usage` で、どちらも各 API リクエストの後に加算され、モデル、クエリソース(main / subagent / auxiliary)、速度、effort ごとに属性が付きます。これは確かに優れた可観測性ですが、何も強制しません。メトリクスは、各リクエストの完了 *後に* 発行される読み取り専用のエクスポートだからです。強制は、その下にある API またはゲートウェイの層で行う必要があります。Claude Code のワークスペース上限を設定し、そのワークスペースが組織の他の部分とは別にチェックされることを忘れないでください。
+
+**層と層の間のすき間。** サービスがプロバイダに直接到達できるなら、ゲートウェイの予算は役に立ちません。プロバイダレベルの上限は、迂回できない唯一の上限であり、だからこそ最初に設定するのです。
+
+<Quiz questions={[
+  {
+    "q": "あなたの Anthropic クライアントが、エラータイプ rate_limit_error で retry-after ヘッダのない HTTP 429 を受け取り始めました。最も可能性の高い原因は何で、クライアントはどうすべきですか?",
+    "options": [
+      "通常のレート制限 — 指数バックオフでリトライする",
+      "組織が月次のティア支出上限を超えた — リトライをやめ、人間に通知する",
+      "一時的な容量の問題 — より小さいモデルに切り替えてリトライする",
+      "不正なリクエスト — ペイロードを修正する"
+    ],
+    "answer": 1,
+    "explain": "retry-after のない 429 は Anthropic のティア支出上限です。ドキュメントは、SDK の自動リトライを含め、リトライはアクセスが再開するまで失敗すると述べており、それは上限を引き上げない限り翌月 1 日の 00:00 UTC です。error.details.error_code == enforced_spend_limit_reached で確認できます。"
+  },
+  {
+    "q": "Anthropic Console で、ティア上限より低い自分用の支出上限を設定しました。それを超えると、API は何を返しますか?",
+    "options": [
+      "retry-after ヘッダ付きの HTTP 429",
+      "HTTP 402 Payment Required",
+      "タイプ invalid_request_error の HTTP 400",
+      "次の請求期間まで HTTP 503"
+    ],
+    "answer": 2,
+    "explain": "自分で設定した上限は、invalid_request_error タイプで、メッセージが 'You have reached your specified API usage limits' で始まる HTTP 400 を返します。これは、429 以外の 4xx を恒久的なクライアントのバグとして扱うほとんどのリトライのヒューリスティクスとは逆なので、メッセージを特別扱いしない限り、自分の上限が黙って飲み込まれる可能性があります。"
+  },
+  {
+    "q": "市場のハードキャップがすべて、請求済みではなく推定コストで作動するのはなぜですか?",
+    "options": [
+      "ベンダーが自分に有利に丸められるようにするため",
+      "課金パイプラインは数分から数時間遅れるため、それを待つ上限では速い消費を止められないから",
+      "トークン数は請求書が発行されるまで分からないから",
+      "Preview の制限であり、GA で解消されるから"
+    ],
+    "answer": 1,
+    "explain": "料金計算、割引、突き合わせには時間がかかります。Google Cloud は、まさに 'for faster enforcement' のために 'gross, estimated costs' を使うと述べ、強制は即時ではなく、超過分は通常どおり請求されると警告しています。実践的な対応は、上限を本当の天井より低く設定することです。"
+  },
+  {
+    "q": "デフォルトの月次支出上限がない Anthropic の利用ティアはどれですか?",
+    "options": ["Start", "Build", "Scale", "Custom"],
+    "answer": 3,
+    "explain": "Start($500)、Build($1,000)、Scale($200,000)にはそれぞれ月次上限があります。Custom ティアの組織にはなく、上限はアカウントチームと取り決めます。デフォルトのネットは、支出が最大の場所でちょうど消えるため、明示的に設定する上限は任意ではなくなります。"
+  },
+  {
+    "q": "LiteLLM の予算確保(budget reservation)が、各呼び出しの後に支出を測定するより構造的に強力なのはなぜですか?",
+    "options": [
+      "リクエストのたびに、プロバイダの課金 API に問い合わせる",
+      "最大コストを推定し、プロバイダを呼ぶ前に予算に対して確保し、その後実際の額に調整する",
+      "レスポンスをキャッシュして、繰り返しの呼び出しを無料にする",
+      "すべての並行処理をブロックし、常に 1 つのリクエストしか実行されないようにする"
+    ],
+    "answer": 1,
+    "explain": "確保はプリフライトです。推定の最大額が該当するすべての予算に対して確保され、確保によって上限を超えるならリクエストは拒否され、実際のコストは後から置き換えられます。これが、個々には上限を守っていた並行呼び出しの集中が、全体として上限を超えるのを防ぎます。誤差は逆方向に出ます。払えたはずのリクエストを拒否することがありえます。"
+  },
+  {
+    "q": "あなたのプロジェクトで Google Cloud の spend cap が適用されています。次のうち、引き続きお金がかかるのはどれですか?",
+    "options": [
+      "そのプロジェクトへの新しい Gemini API リクエスト",
+      "すでに稼働しているプロビジョニング済みのコンピュートとストレージ",
+      "なし — 上限がプロジェクトのすべての課金を止める",
+      "すでに実行中だったリクエストのみ"
+    ],
+    "answer": 1,
+    "explain": "spend cap は、対象サービスの新しい利用をブロックします。Google のドキュメントは、コンピュートやストレージなどの永続的なリソースに関連する固定的な利用は有効なままで、課金が累積し続けると述べています。実行中のリクエストも完了します。モデル API に上限をかけることは、請求額に上限をかけることと同じではありません。"
+  }
+]} />
+
+<Flashcards cards={[
+  { "front": "ソフトキャップとハードキャップ — 判定テスト", "back": "チームの全員が寝ているとき、支出は止まるか?止まらない = ソフトキャップ(通知するだけで、レイテンシはあなたの対応時間)。止まる = ハードキャップ(新しいリクエストをブロックし、コードはエラーで知る)。" },
+  { "front": "Anthropic のティア支出上限 — エラーの形", "back": "HTTP 429、タイプ rate_limit_error、retry-after ヘッダなし、error.details.error_code = enforced_spend_limit_reached。アクセスは 1 日の 00:00 UTC に再開する。ドキュメントによれば、SDK の自動リトライを含め、それまでリトライは失敗する。" },
+  { "front": "Anthropic の自己設定の支出上限 — エラーの形", "back": "HTTP 400、タイプ invalid_request_error、メッセージは 'You have reached your specified API usage limits'(または '...specified workspace API usage limits')で始まる。429 ではなく 400 なので、デフォルトのリトライのヒューリスティクスは、あなた自身の上限をコードのバグとして扱う。" },
+  { "front": "429 に関する移植可能なルール", "back": "retry-after ヘッダのない 429 はレート制限ではない。レート制限は構造上一時的で、どれだけ待つべきかを教えてくれる。言うことを拒む 429 は、予算の壁かクォータの壁である。" },
+  { "front": "OpenRouter — 3 つの上限、1 つのステータス", "back": "アカウント残高、キー単位のクレジット上限、実行中の支出ホールド。どれに達しても HTTP 402 Payment Required が返り、error.metadata.limit_source がどれかを示す。残高がマイナスになると、無料モデルもブロックされる。" },
+  { "front": "Anthropic のティア上限", "back": "Start 月 $500 · Build 月 $1,000 · Scale 月 $200,000 · Custom = 上限なし(アカウントチームと取り決め)。Billing ページで、ティア上限より低い自分用の上限を設定する。" },
+  { "front": "Spend Limits API — 最小単位", "back": "すべての金額は、請求通貨の最小単位による 10 進文字列:\"50000\" = $500.00。10 進数としてパースして 100 で割る。ドキュメントは、大きな値に対する 2 進浮動小数点の使用を警告している。" },
+  { "front": "Spend Limits API — null と \"0\"", "back": "メンバーの有効行では、amount の null = 無制限、\"0\" = プランに含まれる利用分を超えて Claude を使えない(すでに上限に達しているものとして扱う)。設定行では、null は数値の上限が設定されていないことを意味するだけ。両者を見分けるには有効行を読む。" },
+  { "front": "なぜどの上限も近似なのか", "back": "課金パイプラインが数分から数時間遅れるため、上限は総額の推定コストで作動する。強制は即時ではなく、実行中のリクエストは完了し、超過分は通常どおり請求される。実際に痛い金額より 20〜25% 低く上限を設定する。" },
+  { "front": "予算の確保(プリフライト予算管理)", "back": "ボディとモデルの料金からリクエストの最大コストを推定し、該当するすべての予算に対して確保し、確保が上限を超えるなら拒否し、その後実際のコストに置き換える。LiteLLM はこれをデフォルトで行う。並行処理の下でも成り立つ唯一の仕組み。" },
+  { "front": "Google Cloud の spend cap — 4 つの制約", "back": "対象サービスは短いリスト(文書化されているところでは Gemini API、Gemini Enterprise Agent Platform、Cloud Run、Cloud Run functions)· 1 プロジェクト x 1 サービス · 月次のみ · 手動解除のみで、再開まで最大 1 時間。永続的なコンピュートとストレージは課金され続ける。" },
+  { "front": "Claude Code のコストテレメトリ", "back": "claude_code.cost.usage(USD)と claude_code.token.usage(トークン)。各 API リクエストの後に加算され、モデル、クエリソース(main/subagent/auxiliary)、速度、effort ごとに属性が付く。可観測性のみで、何も強制しない。強制は API またはゲートウェイの層にある。" }
+]} />
+
+<Callout type="takeaways" items={[
+  "ソフトキャップのレイテンシは、あなたの対応時間である。誰も起きていなければ、それは制御ではない。",
+  "1 つの出来事に 4 つのステータスコード:retry-after なしの 429(Anthropic のティア)、400(Anthropic の自己設定の上限)、429(OpenAI)、402(OpenRouter)。汎用のリトライロジックは、少なくとも 2 つを誤って処理する。",
+  "retry-after ヘッダのない 429 は、決してレート制限ではない。このヒューリスティクス 1 つで、最悪の障害モード、つまり月単位の壁をリトライし続けるクライアントを捕まえられる。",
+  "あらゆる上限は推定コストで作動し、あらゆるベンダーが超過分の責任を負わない。実際に痛い金額より 20〜25% 低く上限を設定する。",
+  "Anthropic の Custom ティアにはデフォルトの月次上限がない。支出が最大の場所でセーフティネットが消える。",
+  "プリフライトの確保(LiteLLM、OpenRouter の実行中ホールド)は、エージェントの並行バーストの下でも成り立つ唯一の設計である。事後の測定は、常に超過する。",
+  "まずプロバイダに上限をかける。迂回できない唯一の層だからだ。ゲートウェイとアプリの上限は多層防御である。",
+  "作動するのを一度も見たことがない上限は、思い込みである。使い捨てのキーを数セントに設定し、スタックが実際に受け取るステータスコードを読むこと。"
+]} />
+
+## 次のステップ
+
+- [AI エージェントがトークンを燃やす理由](/docs/models/why-agents-burn-tokens) — これらの上限が捕まえる請求の背後にあるメカニズム:なぜエージェントはチャットの 1 ターンの 50〜1000 倍のコストがかかるのか
+- [プロバイダ別 AI の実コスト](/docs/models/what-ai-costs-across-providers) — 料金のアーキタイプと、出荷前にワークロードを見積もる方法
+- [AI ゲートウェイ:LiteLLM、OpenRouter、Portkey](/docs/models/ai-gateways-litellm-openrouter-portkey) — プリフライト予算をどこに置くか、そしてゲートウェイが他に何をもたらすか
+
+## 出典と参考文献
+
+- [We're going to need default hard budget caps on pretty much everything — Simon Willison](https://simonwillison.net/2026/Oct/3/default-hard-budget-caps/) — 議論の枠組みとなった 2026 年 10 月 3 日の主張:ハードキャップをデフォルトに、上限なしの課金をオプトインに
+- [Rate limits — Anthropic](https://platform.claude.com/docs/en/api/rate-limits) — ティアの支出上限、retry-after なしの 429 の形と `enforced_spend_limit_reached`、自己設定の上限が返す 400、ワークスペース単位の上限
+- [Spend Limits API — Anthropic](https://platform.claude.com/docs/en/manage-claude/spend-limits-api) — Enterprise の 8 つのエンドポイント、スコープの階層と `source` フィールド、最小単位の金額、`null` と `"0"`、引き上げリクエストのライフサイクル
+- [Get Cost Report — Anthropic Admin API](https://platform.claude.com/docs/en/api/beta/organization/cost_report/retrieve) — 日次のコストバケット、`cost_type` の区分(tokens / web_search / code_execution / session_usage)、ワークスペース別のグループ化
+- [Monitoring usage — Claude Code](https://code.claude.com/docs/en/monitoring-usage) — OpenTelemetry メトリクスの `claude_code.cost.usage` と `claude_code.token.usage`、およびその属性
+- [Rate limits — OpenAI](https://developers.openai.com/api/docs/guides/rate-limits) — 429 を返すハード支出上限、および承認済みの月次利用上限と自分で設定する支出上限の違い
+- [Limits — OpenRouter](https://openrouter.ai/docs/api-reference/limits) — アカウント残高、キー単位の上限、実行中の支出ホールド、402 レスポンスと `limit_source`
+- [How spend cap budgets work — Google Cloud Billing](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps) — 対象サービス、総額の推定コスト、手動解除、再開のレイテンシ、課金が累積し続けるもの
+- [Cloud Billing release notes — Google Cloud](https://docs.cloud.google.com/billing/docs/release-notes) — 2026 年 7 月 27 日の spend-cap-budget のエントリ
+- [Budgets and spend tracking — LiteLLM](https://docs.litellm.ai/docs/proxy/users) — キー / ユーザー / チーム / モデルにまたがる `max_budget` と `budget_duration`、およびプリフライト強制としての予算確保
+- [AWS's new sign-up gives accounts spend caps — Help Net Security](https://www.helpnetsecurity.com/2026/09/17/aws-spend-limit-agent-set-permissions/) — 2026 年 9 月の AWS プロジェクト支出上限:新規顧客のみ、月 $20 から、課金が累積する代わりに一時停止
+- 関連: [Task budgets](/docs/api/task-budgets) · [Managed Agents session budgets](/docs/api/managed-agents-session-budgets) · [Subagent fleet limits](/docs/claude-code/subagent-fleet-limits) · [Prompt caching economics](/docs/frontiers/prompt-caching-economics)
