@@ -260,9 +260,9 @@ export default function PromptDoctor(): ReactNode {
       <div className={styles.toolbar}>
         <span className={styles.kicker}>Paste a prompt — analyzed in your browser, nothing transmitted.</span>
         <span className={styles.samples}>
-          <button className={styles.ghost} onClick={() => setText(SAMPLE_WEAK)}>weak sample</button>
-          <button className={styles.ghost} onClick={() => setText(SAMPLE_STRONG)}>strong sample</button>
-          {text && <button className={styles.ghost} onClick={() => setText('')}>clear</button>}
+          <button type="button" className={styles.ghost} onClick={() => setText(SAMPLE_WEAK)}>weak sample</button>
+          <button type="button" className={styles.ghost} onClick={() => setText(SAMPLE_STRONG)}>strong sample</button>
+          {text && <button type="button" className={styles.ghost} onClick={() => setText('')}>clear</button>}
         </span>
       </div>
 
@@ -279,7 +279,16 @@ export default function PromptDoctor(): ReactNode {
         <>
           <div className={styles.readout}>
             <div className={styles.gauge}>
-              <svg viewBox="0 0 120 120" className={styles.ring}>
+              {/* The grade and score live inside the SVG as <text>, which a
+                  screen reader would otherwise read as two bare numbers. One
+                  role="img" + label turns the whole dial into a single
+                  sentence; it is derived from state, so it stays in step. */}
+              <svg
+                viewBox="0 0 120 120"
+                className={styles.ring}
+                role="img"
+                aria-label={`Prompt score ${score} out of 100 — grade ${grade}`}
+              >
                 <defs>
                   <linearGradient id="pd-grad" x1="0" y1="0" x2="1" y2="1">
                     <stop offset="0%" className={styles.gradA} />
@@ -309,7 +318,11 @@ export default function PromptDoctor(): ReactNode {
                 <text x="60" y="78" className={styles.pctTxt}>{score} / 100</text>
               </svg>
             </div>
-            <div className={styles.verdict}>
+            {/* Polite, not assertive, and deliberately scoped to the verdict:
+                this copy only changes when the score crosses a tier boundary,
+                so it announces the meaningful transition once instead of
+                chattering on every keystroke the way the dial would. */}
+            <div className={styles.verdict} aria-live="polite">
               <span className={styles.verdictTag}>
                 {tier === 'good' ? 'SIGNAL STRONG' : tier === 'mid' ? 'SIGNAL PARTIAL' : 'SIGNAL DEGRADED'}
               </span>
@@ -350,8 +363,10 @@ export default function PromptDoctor(): ReactNode {
 
           <div className={styles.scaffoldBox}>
             <div className={styles.scaffoldHead}>
-              <strong>⟢ reconstructed scaffold</strong>
-              <button className={styles.copy} onClick={copy}>
+              {/* The glyph is ornament; without aria-hidden a screen reader
+                  announces it as "right tack" before the actual heading. */}
+              <strong><span aria-hidden="true">⟢ </span>reconstructed scaffold</strong>
+              <button type="button" className={styles.copy} onClick={copy}>
                 {copied ? (
                   <>
                     copied
