@@ -22,7 +22,7 @@ see the [What's New](docs/whats-new/) section of the site.
 - **AI Models & Assistants** section: 94 pages on GPT, Gemini, Mistral,
   DeepSeek, Qwen, local models and agent frameworks, written for people who
   already use Claude.
-- 177 new pages overall (132 to 309), and interactive lessons on 259 of them
+- 178 new pages overall (132 to 310), and interactive lessons on 260 of them
   (up from 47).
 - `scripts/build-readme.mjs`, which recomputes the figures and the
   "Recently added" list quoted in the README.
