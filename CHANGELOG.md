@@ -9,6 +9,15 @@ see the [What's New](docs/whats-new/) section of the site.
 
 ## [Unreleased]
 
+### Added
+- **Copy as Markdown** on every docs page, and a Markdown copy of each page at
+  its address plus `.md`, opening with the title, the page URL and the
+  verified date.
+- A share row at the end of every page: X, LinkedIn, Reddit, Hacker News, copy
+  link, and the system share sheet on touch devices. No third-party scripts.
+- A preview image for every page, so a shared link shows that page's own title
+  instead of the generic card.
+
 ## [2.0.0] - 2026-10-13
 
 ### Added

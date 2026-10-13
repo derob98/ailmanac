@@ -18,14 +18,13 @@ disagree, the official docs win.
    lists every page as `- [Title](URL): description`, grouped by section.
 2. **Pick the pages.** Choose the one to three entries that best match the
    question. Prefer a specific page over a section landing page.
-3. **Read the source.** For a page at
-   `https://derob98.github.io/ailmanac/docs/<path>`, fetch its Markdown source at
-   `https://raw.githubusercontent.com/derob98/ailmanac/main/docs/<path>.mdx`.
-   If that returns 404, try `<path>/index.mdx`, then `<path>.md`. If none
-   resolve, fetch the page URL itself.
-4. **Find the date.** Look for
-   `<VerifyNote lastVerified="YYYY-MM-DD" source="…">` in the source. It says
-   when the page was last checked, and against what.
+3. **Read the source.** Add `.md` to the page address: for
+   `https://derob98.github.io/ailmanac/docs/<path>`, fetch
+   `https://derob98.github.io/ailmanac/docs/<path>.md`. That is the page as
+   Markdown. If it fails, fetch the page URL itself.
+4. **Find the date.** The `> Source:` line at the top of the Markdown gives the
+   date the page was last verified. A `<VerifyNote … source="…">` in the text
+   names what it was verified against.
 5. **Answer the question first**, in your own words, as briefly as the question
    allows. Then cite the page title, its URL and the verified date:
 

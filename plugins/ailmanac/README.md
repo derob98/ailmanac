@@ -57,8 +57,7 @@ can also call one by name, for example `/ailmanac:claude-md-check`.
 ## What the skills access
 
 `ailmanac` and `claude-md-check` fetch public pages from
-`derob98.github.io/ailmanac` and `raw.githubusercontent.com/derob98/ailmanac`.
-They make no other network requests and send nothing about your project to
+`derob98.github.io/ailmanac`. They make no other network requests and send nothing about your project to
 AILmanac, which has no server to send it to. The other seven skills make no
 network requests at all.
 
