@@ -81,8 +81,8 @@ The official docs, cookbooks and curated lists are excellent. AILmanac does not 
 
 ## What's inside
 
-<a href="https://derob98.github.io/ailmanac/docs/models/">
-  <img alt="A docs page on AILmanac, with level tags and a card-based index" src="static/img/screenshot-models.jpeg" width="840">
+<a href="https://derob98.github.io/ailmanac/docs/claude-code/plan-mode">
+  <img alt="A lesson on AILmanac: a level tag, what you will learn, and the date the page was last verified against its source" src="static/img/screenshot-lesson.jpeg" width="840">
 </a>
 
 - **[Start Here](https://derob98.github.io/ailmanac/docs/start-here/welcome)**: pick a track by level or role.
