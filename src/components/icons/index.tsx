@@ -388,3 +388,31 @@ export function ClipboardIcon({className}: IconProps): ReactNode {
     </svg>
   );
 }
+
+/* ── Page actions ────────────────────────────────────────────────────────── */
+
+/**
+ * Chain link — "copy the address of this page". Two interlocked links on the
+ * diagonal, so it stays legible at 16px.
+ */
+export function LinkIcon({className}: IconProps): ReactNode {
+  return (
+    <svg {...base} className={className}>
+      <path d="M10.2 13.6a4.4 4.4 0 0 0 6.2 0l3-3a4.4 4.4 0 0 0-6.2-6.2l-1.5 1.5" {...stroke} />
+      <path d="M13.8 10.4a4.4 4.4 0 0 0-6.2 0l-3 3a4.4 4.4 0 0 0 6.2 6.2l1.5-1.5" {...stroke} />
+    </svg>
+  );
+}
+
+/**
+ * Tray with an upward arrow — "hand this to the system share sheet". Not
+ * directional in the reading sense, so it needs no RTL mirroring.
+ */
+export function ShareIcon({className}: IconProps): ReactNode {
+  return (
+    <svg {...base} className={className}>
+      <path d="M5.2 12.4v6a1.8 1.8 0 0 0 1.8 1.8h10a1.8 1.8 0 0 0 1.8-1.8v-6" {...stroke} />
+      <path d="M12 15.2V3.4M7.9 7.4L12 3.4l4.1 4" {...stroke} />
+    </svg>
+  );
+}
