@@ -89,6 +89,8 @@ lines.push(
 lines.push('');
 lines.push(`Site: ${SITE}/  ·  Source: https://github.com/derob98/ailmanac`);
 lines.push('');
+lines.push('Every page is also available as Markdown: append `.md` to its URL.');
+lines.push('');
 
 for (const s of ordered) {
   lines.push(`## ${s.label}`);

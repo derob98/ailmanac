@@ -32,7 +32,7 @@ Poi, in qualsiasi sessione:
 - **Lancia `/ailmanac:claude-md-check`** in un progetto. Confronta il tuo `CLAUDE.md` con il repository che descrive e con il modo in cui i file di memoria vengono caricati, poi propone le correzioni.
 - **Sette pacchetti di skill per ruolo** si attivano quando servono: sviluppo, ricerca, analisi dati, scrittura, marketing, studio e produttività quotidiana.
 
-Le skill leggono solo pagine pubbliche di questo sito e di questo repository. Nulla del tuo progetto viene inviato ad AILmanac.
+Le skill leggono solo pagine pubbliche di questo sito. Nulla del tuo progetto viene inviato ad AILmanac.
 
 ## Il resto
 

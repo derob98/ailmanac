@@ -28,8 +28,9 @@ subdirectories load only when Claude works there.
 ## 2. Refresh the specifics
 
 Loading rules change between releases. Before judging, fetch
-`https://raw.githubusercontent.com/derob98/ailmanac/main/docs/claude-code/claude-md.mdx`
-and note the `lastVerified` date and the official source in its `VerifyNote`.
+`https://derob98.github.io/ailmanac/docs/claude-code/claude-md.md` and note
+the verified date on its `> Source:` line and the official source named in its
+`VerifyNote`.
 If the fetch fails, continue with the checks below and say that the specifics
 could not be refreshed.
 

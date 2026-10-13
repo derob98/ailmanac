@@ -32,7 +32,7 @@ Después, en cualquier sesión:
 - **Ejecuta `/ailmanac:claude-md-check`** en un proyecto. Compara tu `CLAUDE.md` con el repositorio que describe y con la forma en que se cargan los archivos de memoria, y propone las correcciones.
 - **Siete paquetes de skills por rol** se activan cuando hacen falta: desarrollo, investigación, análisis de datos, escritura, marketing, estudio y productividad diaria.
 
-Las skills solo leen páginas públicas de este sitio y de este repositorio. No se envía nada de tu proyecto a AILmanac.
+Las skills solo leen páginas públicas de este sitio. No se envía nada de tu proyecto a AILmanac.
 
 ## Lo demás
 

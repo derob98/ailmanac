@@ -50,7 +50,7 @@ Then, in any session:
 - **Run `/ailmanac:claude-md-check`** in a project. It compares your `CLAUDE.md` with the repository it describes (do those commands and paths exist?) and with how memory files load, then proposes exact fixes.
 - **Seven role-based skill packs** load when they are relevant: developer workflow, research, data analysis, writing, marketing, study and everyday productivity.
 
-The skills only read public pages from this site and this repository. Nothing about your project is sent to AILmanac. Details and a single-file install are in [`plugins/ailmanac`](./plugins/ailmanac).
+The skills only read public pages from this site. Nothing about your project is sent to AILmanac. Details and a single-file install are in [`plugins/ailmanac`](./plugins/ailmanac).
 
 ## The Claude Code cheat sheet
 
@@ -106,7 +106,7 @@ The official docs, cookbooks and curated lists are excellent. AILmanac does not 
 - **[Tools](https://derob98.github.io/ailmanac/docs/tools/cost-calculator)**: they run in your browser, with no sign-up.
 - **[Security](https://derob98.github.io/ailmanac/docs/security/prompt-injection)**, **[Power User](https://derob98.github.io/ailmanac/docs/power-user/token-economy)** and **[Frontiers](https://derob98.github.io/ailmanac/docs/frontiers/)**: for when the basics are behind you.
 
-For agents and crawlers, a machine-readable index of every page is at [`/llms.txt`](https://derob98.github.io/ailmanac/llms.txt), following the [llms.txt](https://llmstxt.org/) convention.
+For agents and crawlers, a machine-readable index of every page is at [`/llms.txt`](https://derob98.github.io/ailmanac/llms.txt), following the [llms.txt](https://llmstxt.org/) convention. Every page is also served as Markdown: add `.md` to its address, or use the **Copy as Markdown** button under the title to paste a page into a chat with its source and verified date attached.
 
 ## Read it in your language
 
