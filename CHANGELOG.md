@@ -9,6 +9,37 @@ see the [What's New](docs/whats-new/) section of the site.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-13
+
+### Added
+- **Claude Code plugin** (`plugins/ailmanac`), installable with
+  `claude plugin marketplace add derob98/ailmanac --sparse .claude-plugin plugins`.
+  Two new skills: `ailmanac`, which answers questions by looking them up in the
+  guide and citing the page with its verified date, and `claude-md-check`, which
+  audits a `CLAUDE.md` against the repository it describes.
+- **Claude Code cheat sheet**: one page, verified against the official docs, as
+  PDF and PNG and as an accessible page on the site.
+- **AI Models & Assistants** section: 94 pages on GPT, Gemini, Mistral,
+  DeepSeek, Qwen, local models and agent frameworks, written for people who
+  already use Claude.
+- 177 new pages overall (132 to 309), and interactive lessons on 259 of them
+  (up from 47).
+- `scripts/build-readme.mjs`, which recomputes the figures and the
+  "Recently added" list quoted in the README.
+
+### Changed
+- Navigation regrouped from sixteen flat sections into six areas, and every
+  page now ends with a "Next" block.
+- The seven skill packs moved from `skills/` to `plugins/ailmanac/skills/`.
+- README rewritten around the verified-date promise.
+- `static/llms.txt` regenerated; it had fallen to half of the pages.
+
+### Fixed
+- Plan Mode is described as the official docs now describe it: Claude can run
+  shell commands to explore while planning, so it is not strictly read-only.
+
+## [1.0.0] - 2026-06-27
+
 ### Added
 - Initial Docusaurus scaffold: brand, homepage level-picker, local search, Mermaid.
 - Custom MDX components: `LevelBadge`, `VerifyNote`, `ModelTable` (registered globally).
@@ -19,7 +50,9 @@ see the [What's New](docs/whats-new/) section of the site.
   Claude Code, API, Playbooks, Templates, Security, and Contribute.
 - Governance: dual license (CC BY 4.0 + MIT), trademark NOTICE, Code of Conduct,
   Contributing guide, issue/PR templates, CODEOWNERS, Dependabot.
-- CI: production build check (broken links fail), deploy to GitHub Pages,
-  scheduled link checking.
+- Fail-closed production build (broken links and anchors stop it) and a
+  `scripts/deploy.sh` that publishes to GitHub Pages.
 
-[Unreleased]: https://github.com/derob98/ailmanac/commits/main
+[Unreleased]: https://github.com/derob98/ailmanac/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/derob98/ailmanac/compare/v1.0.0...v2.0.0
+[1.0.0]: https://github.com/derob98/ailmanac/releases/tag/v1.0.0

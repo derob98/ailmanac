@@ -4,6 +4,8 @@
 
 ### The field guide to Claude and AI tools that tells you when each page was last checked.
 
+[English](./README.md) · [简体中文](./README.zh-CN.md) · [日本語](./README.ja.md) · [Español](./README.es.md) · [Italiano](./README.it.md)
+
 <!-- stats:start -->
 **309 pages** · **259 interactive lessons** · **12 languages** · **85 pages re-verified in the last 30 days**
 <!-- stats:end -->
