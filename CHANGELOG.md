@@ -9,6 +9,8 @@ see the [What's New](docs/whats-new/) section of the site.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-13
+
 ### Added
 - **Copy as Markdown** on every docs page, and a Markdown copy of each page at
   its address plus `.md`, opening with the title, the page URL and the
@@ -17,6 +19,10 @@ see the [What's New](docs/whats-new/) section of the site.
   link, and the system share sheet on touch devices. No third-party scripts.
 - A preview image for every page, so a shared link shows that page's own title
   instead of the generic card.
+
+### Changed
+- The plugin's skills (1.0.1) read pages from their Markdown copies on the
+  site.
 
 ## [2.0.0] - 2026-10-13
 
@@ -62,6 +68,7 @@ see the [What's New](docs/whats-new/) section of the site.
 - Fail-closed production build (broken links and anchors stop it) and a
   `scripts/deploy.sh` that publishes to GitHub Pages.
 
-[Unreleased]: https://github.com/derob98/ailmanac/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/derob98/ailmanac/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/derob98/ailmanac/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/derob98/ailmanac/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/derob98/ailmanac/releases/tag/v1.0.0
