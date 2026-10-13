@@ -7,7 +7,7 @@
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [日本語](./README.ja.md) · [Español](./README.es.md) · [Italiano](./README.it.md)
 
 <!-- stats:start -->
-**309 pages** · **259 interactive lessons** · **12 languages** · **85 pages re-verified in the last 30 days**
+**310 pages** · **260 interactive lessons** · **12 languages** · **86 pages re-verified in the last 30 days**
 <!-- stats:end -->
 
 <p>
@@ -20,7 +20,7 @@
   <img alt="License: CC BY 4.0 and MIT" src="https://img.shields.io/badge/license-CC%20BY%204.0%20%26%20MIT-blue">
 </p>
 
-**[Read the site](https://derob98.github.io/ailmanac/)** &nbsp;·&nbsp; **[Install it in Claude Code](#use-it-inside-claude-code)** &nbsp;·&nbsp; **[Start in 5 minutes](https://derob98.github.io/ailmanac/docs/start-here/your-first-5-minutes)** &nbsp;·&nbsp; **[Contribute](https://derob98.github.io/ailmanac/docs/contribute/contribute-in-10-minutes)**
+**[Read the site](https://derob98.github.io/ailmanac/)** &nbsp;·&nbsp; **[Install it in Claude Code](#use-it-inside-claude-code)** &nbsp;·&nbsp; **[Cheat sheet](#the-claude-code-cheat-sheet)** &nbsp;·&nbsp; **[Start in 5 minutes](https://derob98.github.io/ailmanac/docs/start-here/your-first-5-minutes)** &nbsp;·&nbsp; **[Contribute](https://derob98.github.io/ailmanac/docs/contribute/contribute-in-10-minutes)**
 
 <a href="https://derob98.github.io/ailmanac/">
   <img alt="The AILmanac homepage" src="static/img/screenshot-home.jpeg" width="840">
@@ -52,9 +52,23 @@ Then, in any session:
 
 The skills only read public pages from this site and this repository. Nothing about your project is sent to AILmanac. Details and a single-file install are in [`plugins/ailmanac`](./plugins/ailmanac).
 
+## The Claude Code cheat sheet
+
+One page of flags, commands, shortcuts, permission modes and file locations. Every line was checked against the official docs on the date stamped in the corner; anything that could not be confirmed that day was left out.
+
+<a href="https://derob98.github.io/ailmanac/docs/claude-code/cheat-sheet">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="static/cheatsheets/claude-code-cheat-sheet-dark.png">
+    <img alt="The Claude Code cheat sheet: one page in three columns covering sessions, headless use, settings files, commands, keyboard shortcuts, checkpoints, permission modes, plan mode, hooks and memory files" src="static/cheatsheets/claude-code-cheat-sheet.png" width="840">
+  </picture>
+</a>
+
+[PDF for printing](https://derob98.github.io/ailmanac/cheatsheets/claude-code-cheat-sheet.pdf) · [PNG, light](https://derob98.github.io/ailmanac/cheatsheets/claude-code-cheat-sheet.png) · [PNG, dark](https://derob98.github.io/ailmanac/cheatsheets/claude-code-cheat-sheet-dark.png) · [the same content as a searchable page](https://derob98.github.io/ailmanac/docs/claude-code/cheat-sheet)
+
 ## Recently added
 
 <!-- fresh:start -->
+- 2026-10-13 — [Claude Code Cheat Sheet](https://derob98.github.io/ailmanac/docs/claude-code/cheat-sheet)
 - 2026-10-09 — [Agent Observability: Tracing an Agent You Can't Reproduce](https://derob98.github.io/ailmanac/docs/api/agent-observability)
 - 2026-10-09 — [Whistle: Speech-to-Text in 16.9 MB — and the Benchmark Bars Nobody Labelled](https://derob98.github.io/ailmanac/docs/models/whistle-on-device-speech-to-text)
 - 2026-10-08 — [Claude Haiku 5.5: The 100K Price Cliff](https://derob98.github.io/ailmanac/docs/models/haiku-5-5-the-100k-price-cliff)
@@ -62,7 +76,6 @@ The skills only read public pages from this site and this repository. Nothing ab
 - 2026-10-07 — [The claude CLI: Flags That Change Outcomes](https://derob98.github.io/ailmanac/docs/claude-code/cli-flags)
 - 2026-10-06 — [Agentic Discovery: Inside the Harness That Found ART](https://derob98.github.io/ailmanac/docs/frontiers/agentic-discovery-art-harness)
 - 2026-10-06 — [Commerce agents blueprint (Anthropic reference)](https://derob98.github.io/ailmanac/docs/models/commerce-agents-blueprint)
-- 2026-10-06 — [DeepSeek Harness: the agent where the agent loop itself is a plugin](https://derob98.github.io/ailmanac/docs/models/deepseek-harness-everything-is-a-plugin)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).

@@ -140,9 +140,9 @@ const config: Config = {
   themeConfig: {
     image: 'img/og-default.png',
     announcementBar: {
-      id: 'star-us',
+      id: 'plugin-and-cheat-sheet',
       content:
-        '⭐ If AILmanac helps you, <a target="_blank" rel="noopener" href="https://github.com/derob98/ailmanac">star it on GitHub</a> and share it — help it become the go-to AI field guide.',
+        'New: <a href="/ailmanac/docs/templates/skills">install AILmanac in Claude Code</a> with two commands, and print the <a href="/ailmanac/docs/claude-code/cheat-sheet">Claude Code cheat sheet</a>.',
       backgroundColor: '#4f46e5',
       textColor: '#ffffff',
       isCloseable: true,
