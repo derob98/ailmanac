@@ -1,75 +1,109 @@
 <div align="center">
 
-# 📘 AILmanac
+# AILmanac
 
-### The always-current, community-built almanac for getting the most out of **Claude** — and every AI.
+### The field guide to Claude and AI tools that tells you when each page was last checked.
 
-From your first prompt to production agents. Level-tagged, plain-spoken, and kept honest about freshness.
+<!-- stats:start -->
+**309 pages** · **259 interactive lessons** · **12 languages** · **85 pages re-verified in the last 30 days**
+<!-- stats:end -->
 
 <p>
-  <a href="https://derob98.github.io/ailmanac/"><img alt="Live site" src="https://img.shields.io/badge/read%20it%20live-derob98.github.io%2Failmanac-4f46e5?style=for-the-badge"></a>
+  <a href="https://derob98.github.io/ailmanac/"><img alt="Read it live" src="https://img.shields.io/badge/read%20it%20live-derob98.github.io%2Failmanac-4f46e5?style=for-the-badge"></a>
 </p>
 
 <p>
-  <a href="https://github.com/derob98/ailmanac/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/derob98/ailmanac?style=social"></a>
+  <img alt="Last update" src="https://img.shields.io/github/last-commit/derob98/ailmanac?label=last%20update&color=4f46e5">
   <a href="./CONTRIBUTING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen"></a>
-  <img alt="License: CC BY 4.0 & MIT" src="https://img.shields.io/badge/license-CC%20BY%204.0%20%26%20MIT-blue">
-  <img alt="12 languages" src="https://img.shields.io/badge/i18n-12%20languages-orange">
-  <img alt="Built with Docusaurus" src="https://img.shields.io/badge/built%20with-Docusaurus-3ECC5F">
+  <img alt="License: CC BY 4.0 and MIT" src="https://img.shields.io/badge/license-CC%20BY%204.0%20%26%20MIT-blue">
 </p>
 
-**[Read the site →](https://derob98.github.io/ailmanac/)** &nbsp;·&nbsp; **[Start Here in 5 min →](https://derob98.github.io/ailmanac/docs/start-here/your-first-5-minutes)** &nbsp;·&nbsp; **[Contribute in 10 min →](https://derob98.github.io/ailmanac/docs/contribute/contribute-in-10-minutes)**
+**[Read the site](https://derob98.github.io/ailmanac/)** &nbsp;·&nbsp; **[Install it in Claude Code](#use-it-inside-claude-code)** &nbsp;·&nbsp; **[Start in 5 minutes](https://derob98.github.io/ailmanac/docs/start-here/your-first-5-minutes)** &nbsp;·&nbsp; **[Contribute](https://derob98.github.io/ailmanac/docs/contribute/contribute-in-10-minutes)**
 
 <a href="https://derob98.github.io/ailmanac/">
-  <img alt="AILmanac homepage — get genuinely great results from Claude and any AI" src="static/img/screenshot-home.jpeg" width="840">
+  <img alt="The AILmanac homepage" src="static/img/screenshot-home.jpeg" width="840">
 </a>
 
 </div>
 
 ---
 
-AILmanac is a free, open documentation site that teaches anyone — absolute beginner to power user — how to get great results from **Claude** (the chat apps, **Claude Code**, and the **API**) and from AI tools in general. Every page is **tagged by level**, written in plain language, and stamped with a **"last verified" date** so you always know how fresh it is.
+AI tools change every week, and most guides do not say when they were written. AILmanac is a free, open guide to **Claude** (the apps, **Claude Code** and the **API**) and to the other models and agents around it. Every page is tagged by level, written in plain language, and stamped with the date it was last checked against its source.
 
-> ⚠️ **Independent project.** AILmanac is **not affiliated with, sponsored by, or endorsed by Anthropic.** "Claude" and "Anthropic" are trademarks of Anthropic. When AILmanac and the [official docs](https://docs.anthropic.com) disagree, **the official docs win** — and we link to them throughout.
+> [!NOTE]
+> AILmanac is an independent project. It is not affiliated with, sponsored by, or endorsed by Anthropic. "Claude" and "Anthropic" are trademarks of Anthropic. When AILmanac and the [official docs](https://docs.anthropic.com) disagree, the official docs win, and the pages link to them throughout.
 
-> ⭐ **If a page here saves you time, please [star the repo](https://github.com/derob98/ailmanac).** Stars are how more people find it — and they fund nothing but motivation. &nbsp;**[Share it on X →](https://x.com/intent/post?text=AILmanac%20%E2%80%94%20a%20free%2C%20interactive%20field%20guide%20to%20getting%20the%20most%20out%20of%20Claude%20%26%20AI.%20Open-source%2C%2012%20languages%2C%20no%20sign-up.&url=https%3A%2F%2Fderob98.github.io%2Failmanac%2F&hashtags=ClaudeAI%2CAI)**
+## Use it inside Claude Code
 
-## Why AILmanac (and not just the official docs)?
+Two commands add the guide to Claude Code as a plugin:
 
-The official docs, cookbooks, and "awesome" lists are excellent — AILmanac doesn't replace them, it **connects and opinionates** them. It's built to be the one place you can send a colleague regardless of their level:
+```bash
+claude plugin marketplace add derob98/ailmanac --sparse .claude-plugin plugins
+claude plugin install ailmanac@ailmanac
+```
 
-| You want… | The usual options | What AILmanac adds |
+Then, in any session:
+
+- **Ask a question** about Claude, Claude Code, the API or MCP. The `ailmanac` skill looks the answer up in the guide and cites the page with its verified date, instead of answering from memory.
+- **Run `/ailmanac:claude-md-check`** in a project. It compares your `CLAUDE.md` with the repository it describes (do those commands and paths exist?) and with how memory files load, then proposes exact fixes.
+- **Seven role-based skill packs** load when they are relevant: developer workflow, research, data analysis, writing, marketing, study and everyday productivity.
+
+The skills only read public pages from this site and this repository. Nothing about your project is sent to AILmanac. Details and a single-file install are in [`plugins/ailmanac`](./plugins/ailmanac).
+
+## Recently added
+
+<!-- fresh:start -->
+- 2026-10-09 — [Agent Observability: Tracing an Agent You Can't Reproduce](https://derob98.github.io/ailmanac/docs/api/agent-observability)
+- 2026-10-09 — [Whistle: Speech-to-Text in 16.9 MB — and the Benchmark Bars Nobody Labelled](https://derob98.github.io/ailmanac/docs/models/whistle-on-device-speech-to-text)
+- 2026-10-08 — [Claude Haiku 5.5: The 100K Price Cliff](https://derob98.github.io/ailmanac/docs/models/haiku-5-5-the-100k-price-cliff)
+- 2026-10-07 — [Mistral Large 4 (Le Chonk): the 1.05T open weight you can't download yet](https://derob98.github.io/ailmanac/docs/models/mistral-large-4-le-chonk)
+- 2026-10-07 — [The claude CLI: Flags That Change Outcomes](https://derob98.github.io/ailmanac/docs/claude-code/cli-flags)
+- 2026-10-06 — [Agentic Discovery: Inside the Harness That Found ART](https://derob98.github.io/ailmanac/docs/frontiers/agentic-discovery-art-harness)
+- 2026-10-06 — [Commerce agents blueprint (Anthropic reference)](https://derob98.github.io/ailmanac/docs/models/commerce-agents-blueprint)
+- 2026-10-06 — [DeepSeek Harness: the agent where the agent loop itself is a plugin](https://derob98.github.io/ailmanac/docs/models/deepseek-harness-everything-is-a-plugin)
+<!-- fresh:end -->
+
+Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).
+
+## Why AILmanac, and not only the official docs?
+
+The official docs, cookbooks and curated lists are excellent. AILmanac does not replace them: it connects them and takes a position. It is meant to be the one link you can send a colleague, whatever their level.
+
+| You want | The usual options | What AILmanac adds |
 |---|---|---|
-| **To learn, in order** | Scattered tutorials | A **level-tagged path**: `beginner → intermediate → advanced`, with a guaranteed first win. |
-| **Up-to-date facts** | Docs that quietly go stale | **`lastVerified` stamps + a single source of truth** for volatile model/pricing facts. |
-| **To actually do something** | Prose you still have to translate into action | **Interactive tools** (cost calculator, CLAUDE.md & MCP config generators, prompt linter) and copy-paste **templates**. |
-| **One reference, any language** | English-only | **12 languages**, real translations (not machine stubs). |
-| **The "why", not just the "how"** | Cheat sheets | **Foundations & Frontiers** essays that explain the mental models. |
+| **To learn in order** | Scattered tutorials | A level-tagged path from beginner to advanced, with a first result in five minutes. |
+| **Facts that are still true** | Pages that go stale without saying so | A "last verified" date and source on every page, and one source of truth for model and pricing facts. |
+| **To get something done** | Prose you still have to turn into action | Six in-browser tools (cost calculator, token estimator, CLAUDE.md generator, MCP config builder, prompt builder, Prompt Doctor) and copy-paste templates. |
+| **The other models too** | One vendor's point of view | Field guides to GPT, Gemini, Mistral, DeepSeek, Qwen and local models, written for people who already use Claude. |
+| **Your own language** | English only | Twelve languages. A page not yet translated is shown in English. |
 
 ## What's inside
 
-A full funnel from "what's a token?" to "harden an autonomous agent." Browse on the **[live site](https://derob98.github.io/ailmanac/)**:
-
 <a href="https://derob98.github.io/ailmanac/docs/models/">
-  <img alt="AILmanac — structured, interactive docs with level tags and a card-based browse" src="static/img/screenshot-models.jpeg" width="840">
+  <img alt="A docs page on AILmanac, with level tags and a card-based index" src="static/img/screenshot-models.jpeg" width="840">
 </a>
 
+- **[Start Here](https://derob98.github.io/ailmanac/docs/start-here/welcome)**: pick a track by level or role.
+- **[AI Foundations](https://derob98.github.io/ailmanac/docs/foundations/what-is-an-llm)** and **[Prompting](https://derob98.github.io/ailmanac/docs/prompting/basics)**: tokens, sampling, RAG, evals, hallucinations, then the patterns that work.
+- **[Claude.ai & Apps](https://derob98.github.io/ailmanac/docs/claude-app/getting-started)**, **[Claude Code](https://derob98.github.io/ailmanac/docs/claude-code/what-is-claude-code)** and the **[Claude API](https://derob98.github.io/ailmanac/docs/api/first-call)**: the core of the guide.
+- **[AI Models & Assistants](https://derob98.github.io/ailmanac/docs/models/)**: the largest section, covering every major model family and agent framework.
+- **[Playbooks](https://derob98.github.io/ailmanac/docs/playbooks/coding)**, **[Walkthroughs](https://derob98.github.io/ailmanac/docs/walkthroughs/first-production-call)** and **[Templates](https://derob98.github.io/ailmanac/docs/templates/claude-md)**: outcome first, ready to copy.
+- **[Tools](https://derob98.github.io/ailmanac/docs/tools/cost-calculator)**: they run in your browser, with no sign-up.
+- **[Security](https://derob98.github.io/ailmanac/docs/security/prompt-injection)**, **[Power User](https://derob98.github.io/ailmanac/docs/power-user/token-economy)** and **[Frontiers](https://derob98.github.io/ailmanac/docs/frontiers/)**: for when the basics are behind you.
 
-- **[Start Here](https://derob98.github.io/ailmanac/docs/start-here/welcome)** — pick a track by level/role and get a guaranteed first win.
-- **[AI Foundations](https://derob98.github.io/ailmanac/docs/foundations/what-is-an-llm)** — provider-agnostic mental models: tokens, roles, sampling, RAG, embeddings, evals, hallucinations.
-- **[Prompting](https://derob98.github.io/ailmanac/docs/prompting/basics)** — universal patterns + Claude-specific techniques (XML tags, few-shot, a pattern library).
-- **[Claude.ai & Apps](https://derob98.github.io/ailmanac/docs/claude-app/getting-started)** · **[Claude Code](https://derob98.github.io/ailmanac/docs/claude-code/what-is-claude-code)** · **[Claude API](https://derob98.github.io/ailmanac/docs/api/first-call)** — the deep Claude core.
-- **[Playbooks](https://derob98.github.io/ailmanac/docs/playbooks/coding)** · **[Walkthroughs](https://derob98.github.io/ailmanac/docs/walkthroughs/first-production-call)** · **[Templates & Recipes](https://derob98.github.io/ailmanac/docs/templates/claude-md)** — outcome-first, copy-paste-ready.
-- **[Tools](https://derob98.github.io/ailmanac/docs/tools/cost-calculator)** — in-browser cost calculator, CLAUDE.md generator, MCP config builder, Prompt Doctor.
-- **[Security & Responsible Use](https://derob98.github.io/ailmanac/docs/security/prompt-injection)** · **[Frontiers](https://derob98.github.io/ailmanac/docs/frontiers/)** · **[What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing)** · **[Contribute](https://derob98.github.io/ailmanac/docs/contribute/contribute-in-10-minutes)**.
+For agents and crawlers, a machine-readable index of every page is at [`/llms.txt`](https://derob98.github.io/ailmanac/llms.txt), following the [llms.txt](https://llmstxt.org/) convention.
 
-> 🤖 **For AI agents & crawlers:** a machine-readable index of every page lives at **[`/llms.txt`](https://derob98.github.io/ailmanac/llms.txt)** (the [llms.txt](https://llmstxt.org/) convention).
+## Read it in your language
+
+[English](https://derob98.github.io/ailmanac/) · [Español](https://derob98.github.io/ailmanac/es/) · [简体中文](https://derob98.github.io/ailmanac/zh-Hans/) · [हिन्दी](https://derob98.github.io/ailmanac/hi/) · [العربية](https://derob98.github.io/ailmanac/ar/) · [Português (Brasil)](https://derob98.github.io/ailmanac/pt-BR/) · [Русский](https://derob98.github.io/ailmanac/ru/) · [日本語](https://derob98.github.io/ailmanac/ja/) · [Deutsch](https://derob98.github.io/ailmanac/de/) · [Français](https://derob98.github.io/ailmanac/fr/) · [Italiano](https://derob98.github.io/ailmanac/it/) · [한국어](https://derob98.github.io/ailmanac/ko/)
 
 ## Contributing
 
-AILmanac stays complete and fresh because people add to it — fixing a typo, adding a glossary term, sharing a template, or [translating a page](https://derob98.github.io/ailmanac/docs/contribute/translation-playbook) all count. Start with **[Contribute in 10 Minutes](https://derob98.github.io/ailmanac/docs/contribute/contribute-in-10-minutes)** (and [`CONTRIBUTING.md`](./CONTRIBUTING.md)). Be kind — we follow the [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md).
+The guide stays complete because people add to it. Fixing a typo, adding a glossary term, sharing a template and [translating a page](https://derob98.github.io/ailmanac/docs/contribute/translation-playbook) all count. Start with [Contribute in 10 Minutes](https://derob98.github.io/ailmanac/docs/contribute/contribute-in-10-minutes) and [`CONTRIBUTING.md`](./CONTRIBUTING.md). The project follows the [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md).
 
-Good first contributions: spot a stale `lastVerified` stamp, add a worked example to a thin page, or fill a coverage gap. Look for [`good first issue`](https://github.com/derob98/ailmanac/labels/good%20first%20issue).
+Good first contributions: report a page whose "last verified" date is old, add a worked example to a thin page, or pick a [`good first issue`](https://github.com/derob98/ailmanac/labels/good%20first%20issue).
+
+If a page here saved you time, a star helps other people find the project. So does sharing it: [X](https://x.com/intent/post?text=AILmanac%3A%20a%20free%20field%20guide%20to%20Claude%20and%20AI%20tools%20that%20tells%20you%20when%20each%20page%20was%20last%20checked.&url=https%3A%2F%2Fgithub.com%2Fderob98%2Failmanac) · [LinkedIn](https://www.linkedin.com/sharing/share-offsite/?url=https%3A%2F%2Fgithub.com%2Fderob98%2Failmanac) · [Reddit](https://www.reddit.com/submit?url=https%3A%2F%2Fgithub.com%2Fderob98%2Failmanac&title=AILmanac%3A%20a%20field%20guide%20to%20Claude%20and%20AI%20tools%20with%20a%20verified%20date%20on%20every%20page) · [Hacker News](https://news.ycombinator.com/submitlink?u=https%3A%2F%2Fgithub.com%2Fderob98%2Failmanac&t=AILmanac%3A%20a%20field%20guide%20to%20Claude%20and%20AI%20tools%20with%20a%20verified%20date%20on%20every%20page).
 
 ## Run it locally
 
@@ -78,46 +112,36 @@ Requires Node.js (see [`.nvmrc`](./.nvmrc)).
 ```bash
 npm install
 npm run start     # dev server with live reload at http://localhost:3000
-npm run build     # production build — FAILS on broken links (a feature)
-npm run serve     # preview the production build locally
+npm run build     # production build; fails on broken links, by design
+npm run serve     # preview the production build
 ```
 
-Regenerate the machine-readable index after adding pages:
+After adding pages, refresh the generated files:
 
 ```bash
 node scripts/build-llms-txt.mjs   # rebuilds static/llms.txt
+node scripts/build-readme.mjs     # refreshes the numbers and "Recently added" above
 ```
 
-## Deploy (GitHub Pages)
+## Deploy
 
-The site targets **https://derob98.github.io/ailmanac/** (`ORG` is set in `docusaurus.config.ts`).
+The site is served from the `gh-pages` branch at **https://derob98.github.io/ailmanac/**.
 
-1. **GitHub Actions:** `.github/workflows/deploy.yml` builds and publishes on every push to `main`. Enable it once via **Settings → Pages → Source = GitHub Actions**. (Pushing the workflow file needs a token with the `workflow` scope.)
-2. **`gh-pages` branch (no special scope):** run `npm run build`, then publish the `build/` folder to a `gh-pages` branch and set **Settings → Pages → Source = Deploy from a branch → `gh-pages`**.
+```bash
+bash scripts/deploy.sh   # builds every locale in a temp directory, then publishes build/ to gh-pages
+```
 
-Using a custom domain? Set `url` to it, `baseUrl` to `/`, and add `static/CNAME`.
+The build stops on a broken link or invalid page, so a failed build never reaches the live site. To use a custom domain, set `url` to it and `baseUrl` to `/` in `docusaurus.config.ts`, and add `static/CNAME`.
 
 ## Cite AILmanac
 
-Referencing AILmanac in a post, course, or paper? A citation file is included — see [`CITATION.cff`](./CITATION.cff). GitHub's **"Cite this repository"** button (top-right of the repo) generates APA/BibTeX for you.
+Referencing AILmanac in a post, course or paper? See [`CITATION.cff`](./CITATION.cff), or use GitHub's "Cite this repository" button for APA and BibTeX.
 
-## Star history
+## Author and license
 
-<a href="https://star-history.com/#derob98/ailmanac&Date">
-  <img alt="AILmanac star history" src="https://api.star-history.com/svg?repos=derob98/ailmanac&type=Date" width="600">
-</a>
+Created and maintained by **Gianluca De Robertis** ([@derob98](https://github.com/derob98)), with contributions from the community.
 
-A ⭐ is the single biggest thing that helps others discover AILmanac. If it's useful to you, it'd mean a lot.
-
-## Author & maintainer
-
-Created and maintained by **Gianluca De Robertis** ([@derob98](https://github.com/derob98)). Contributions from the community are very welcome — see [`CONTRIBUTING.md`](./CONTRIBUTING.md).
-
-## License
-
-Dual-licensed, so you can reuse both the words and the code:
-
-- **Prose / documentation:** [CC BY 4.0](./LICENSE-CONTENT) — reuse with attribution.
-- **Code, examples & config:** [MIT](./LICENSE-CODE).
+- **Prose and documentation:** [CC BY 4.0](./LICENSE-CONTENT). Reuse with attribution.
+- **Code, examples, skills and config:** [MIT](./LICENSE-CODE).
 
 See [`NOTICE`](./NOTICE) for details.
