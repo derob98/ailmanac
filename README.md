@@ -76,6 +76,7 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 ## Recently added
 
 <!-- fresh:start -->
+- 2026-10-15 — [Claude has never seen 68% of the Claude Code docs](https://derob98.github.io/ailmanac/docs/whats-new/unread-manual)
 - 2026-10-13 — [Claude Code Cheat Sheet](https://derob98.github.io/ailmanac/docs/claude-code/cheat-sheet)
 - 2026-10-09 — [Agent Observability: Tracing an Agent You Can't Reproduce](https://derob98.github.io/ailmanac/docs/api/agent-observability)
 - 2026-10-09 — [Whistle: Speech-to-Text in 16.9 MB — and the Benchmark Bars Nobody Labelled](https://derob98.github.io/ailmanac/docs/models/whistle-on-device-speech-to-text)
@@ -83,7 +84,6 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 - 2026-10-07 — [Mistral Large 4 (Le Chonk): the 1.05T open weight you can't download yet](https://derob98.github.io/ailmanac/docs/models/mistral-large-4-le-chonk)
 - 2026-10-07 — [The claude CLI: Flags That Change Outcomes](https://derob98.github.io/ailmanac/docs/claude-code/cli-flags)
 - 2026-10-06 — [Agentic Discovery: Inside the Harness That Found ART](https://derob98.github.io/ailmanac/docs/frontiers/agentic-discovery-art-harness)
-- 2026-10-06 — [Commerce agents blueprint (Anthropic reference)](https://derob98.github.io/ailmanac/docs/models/commerce-agents-blueprint)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).
