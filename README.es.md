@@ -12,6 +12,8 @@
 
 ---
 
+**Nueva investigación: [Claude nunca ha visto el 68% de la documentación de Claude Code](https://derob98.github.io/ailmanac/docs/whats-new/unread-manual)** (en inglés). Repasamos 15 meses de la documentación oficial, semana a semana: dos tercios de lo que dice hoy se escribió después de junio de 2026, la fecha de corte de entrenamiento de todos los modelos Claude actuales. El plugin [`since-cutoff`](./plugins/since-cutoff) le dice a Claude lo que se perdió, al inicio de cada sesión.
+
 Las herramientas de IA cambian cada semana, y casi ninguna guía dice cuándo se escribió. AILmanac es una guía libre y abierta sobre **Claude** (las apps, **Claude Code** y la **API**) y sobre los demás modelos y agentes que lo rodean. Cada página indica su nivel, está escrita en lenguaje sencillo y muestra la fecha en que se verificó con su fuente.
 
 > [!NOTE]

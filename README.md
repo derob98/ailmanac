@@ -7,7 +7,7 @@
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [日本語](./README.ja.md) · [Español](./README.es.md) · [Italiano](./README.it.md)
 
 <!-- stats:start -->
-**310 pages** · **260 interactive lessons** · **12 languages** · **86 pages re-verified in the last 30 days**
+**311 pages** · **260 interactive lessons** · **12 languages** · **73 pages re-verified in the last 30 days**
 <!-- stats:end -->
 
 <p>
@@ -30,6 +30,8 @@
 
 ---
 
+**New research: [Claude has never seen 68% of the Claude Code docs](https://derob98.github.io/ailmanac/docs/whats-new/unread-manual).** We replayed 15 months of the official docs, one week at a time. Two-thirds of what they say today was written after June 2026, the training cutoff of every current Claude model. The [`since-cutoff`](./plugins/since-cutoff) plugin tells Claude what it missed, at the start of every session.
+
 AI tools change every week, and most guides do not say when they were written. AILmanac is a free, open guide to **Claude** (the apps, **Claude Code** and the **API**) and to the other models and agents around it. Every page is tagged by level, written in plain language, and stamped with the date it was last checked against its source.
 
 > [!NOTE]
@@ -51,6 +53,12 @@ Then, in any session:
 - **Seven role-based skill packs** load when they are relevant: developer workflow, research, data analysis, writing, marketing, study and everyday productivity.
 
 The skills only read public pages from this site. Nothing about your project is sent to AILmanac. Details and a single-file install are in [`plugins/ailmanac`](./plugins/ailmanac).
+
+A second plugin, `since-cutoff`, adds a short note at the start of each session listing the Claude Code flags, commands and hook events documented after the running model's training cutoff. It is a few lines of shell with no network access; see [`plugins/since-cutoff`](./plugins/since-cutoff).
+
+```bash
+claude plugin install since-cutoff@ailmanac
+```
 
 ## The Claude Code cheat sheet
 

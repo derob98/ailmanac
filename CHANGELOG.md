@@ -9,6 +9,19 @@ see the [What's New](docs/whats-new/) section of the site.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-15
+
+### Added
+- **The unread manual** (`/docs/whats-new/unread-manual`): 15 months of the
+  official Claude Code docs replayed one week at a time. 68% of what they say
+  today was not in them at the end of June 2026, the training cutoff of every
+  current Claude model. Interactive charts per model, per week and per
+  sentence lifetime, with the data behind each chart.
+- `scripts/research/docs-decay.mjs` and its output,
+  `data/research/claude-code-docs-decay.json`, to reproduce the numbers.
+- The `since-cutoff` plugin: a SessionStart hook that tells Claude which
+  flags, commands and hook events were documented after its own cutoff.
+
 ## [2.1.0] - 2026-10-13
 
 ### Added

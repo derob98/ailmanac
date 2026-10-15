@@ -12,6 +12,8 @@
 
 ---
 
+**新研究：[Claude 从未见过 68% 的 Claude Code 文档](https://derob98.github.io/ailmanac/docs/whats-new/unread-manual)**（英文）。我们按周回放了官方文档 15 个月的历史：如今文档中三分之二的内容写于 2026 年 6 月之后，而那正是当前所有 Claude 模型的训练数据截止时间。[`since-cutoff`](./plugins/since-cutoff) 插件会在每次会话开始时告诉 Claude 它错过了什么。
+
 AI 工具每周都在变化，而大多数教程并不说明自己写于何时。AILmanac 是一份免费、开源的指南，内容涵盖 **Claude**（各个应用、**Claude Code** 与 **API**）以及与之相关的其他模型和智能体。每个页面都标注了难度等级，用平实的语言写成，并注明了依据来源核对的日期。
 
 > [!NOTE]
