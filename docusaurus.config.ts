@@ -143,9 +143,9 @@ const config: Config = {
   themeConfig: {
     image: 'img/og-default.png',
     announcementBar: {
-      id: 'plugin-and-cheat-sheet',
+      id: 'unread-manual',
       content:
-        'New: <a href="/ailmanac/docs/templates/skills">install AILmanac in Claude Code</a> with two commands, and print the <a href="/ailmanac/docs/claude-code/cheat-sheet">Claude Code cheat sheet</a>.',
+        'New research: <a href="/ailmanac/docs/whats-new/unread-manual">Claude has never seen 68% of the Claude Code docs</a>. A plugin tells it what it missed.',
       backgroundColor: '#4f46e5',
       textColor: '#ffffff',
       isCloseable: true,
