@@ -1,0 +1,204 @@
+# Ingénierie du contexte
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/frontiers/context-engineering · AILmanac (CC BY 4.0) · last verified 2026-06-29
+
+Le passage de l'ingénierie de prompt au traitement de la fenêtre de contexte du modèle comme un espace de travail rare et soigneusement organisé — et pourquoi ce que vous y mettez, où vous le placez et ce que vous laissez de côté comptent tous.
+
+<LevelBadge level="intermediate" />
+
+# Ingénierie du contexte
+
+L'ingénierie de prompt porte sur les mots que vous choisissez. L'ingénierie du contexte porte sur l'*espace de travail* que vous confiez au modèle — ce qu'il contient, dans quel ordre, et ce que vous avez délibérément laissé de côté.
+
+La distinction compte parce qu'une fenêtre de contexte n'est pas un bloc-notes. C'est une ressource attentionnelle limitée et coûteuse. La façon dont vous la remplissez change ce sur quoi le modèle se concentre, combien elle vous coûte, et si elle reste utile à mesure que les sessions s'allongent.
+
+<Callout
+  type="objectives"
+  items={[
+    "Distinguer l'ingénierie du contexte de l'ingénierie de prompt — et comprendre pourquoi le domaine a évolué",
+    "Traiter la fenêtre de contexte comme un budget d'attention, et non comme un espace de stockage",
+    "Repérer la dégradation du contexte et l'effet perdu au milieu avant qu'ils ne ruinent une longue session",
+    "Placer les instructions là où l'attention se porte réellement — en haut, à la fin, jamais enfouies au milieu",
+    "Appliquer les trois tactiques de fond : la compaction, la prise de notes et la récupération juste-à-temps"
+  ]}
+/>
+
+<VerifyNote lastVerified="2026-06-29" source="https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents">
+Anthropic définit l'ingénierie du contexte comme la sélection du "plus petit ensemble possible de tokens à fort signal qui maximisent la probabilité d'un résultat souhaité". Les tactiques et le cadrage ci-dessous suivent ces recommandations officielles — vérifiez-y les détails précis, car les recommandations relatives aux agents évoluent rapidement.
+</VerifyNote>
+
+## Le budget du contexte
+
+Chaque modèle a une taille de contexte maximale — un plafond strict mesuré en tokens. Considérez-le comme un budget. Vous le dépensez en :
+
+- Votre prompt système et vos instructions permanentes
+- Documents récupérés, extraits de base de code, définitions d'outils
+- Historique de la conversation
+- La sortie du modèle (qui compte elle aussi dans la fenêtre lors des sessions multi-tours)
+
+Lorsque vous êtes à court, quelque chose doit céder. Soit l'ancien contenu est supprimé, soit la session se heurte à un mur.
+
+La plupart des guides pour débutants traitent la fenêtre de contexte selon le principe « plus, c'est mieux ». L'ingénierie du contexte la traite comme une ressource à *allouer avec soin* : la dépenser pour ce dont le modèle a réellement besoin pour ce tour, et non pour tout ce qui pourrait être pertinent. Anthropic présente toute cette discipline comme une recherche du « plus petit ensemble possible de tokens à fort signal » — chaque token que vous ajoutez entre en compétition pour un **budget d'attention** fini, une conséquence directe de la manière dont un transformeur met chaque token en relation avec tous les autres.
+
+## La dégradation du contexte et l'effet perdu au milieu
+
+Il existe un phénomène bien documenté dans les LLM à long contexte : les modèles accordent une attention disproportionnée au contenu situé près du *début* et de la *fin* de leur contexte, tandis que leur rappel du contenu enfoui au *milieu* se dégrade. Les chercheurs qui ont étudié cet effet l'ont appelé « lost in the middle » (perdu au milieu).
+
+La conséquence pratique : si vous remplissez un contexte de 100 000 tokens avec des documents et enfouissez l'instruction la plus cruciale à la position 60 000, le modèle peut l'ignorer de fait — non pas parce qu'il est incapable de lire aussi loin, mais parce que l'attention n'est pas répartie uniformément sur la fenêtre.
+
+La « dégradation du contexte » (context rot) désigne le schéma plus large : à mesure qu'une session s'allonge, la qualité des réponses tend à dériver. Les premières instructions se diluent. Les allers-retours répétés évincent la tâche d'origine. Le modèle se met à tergiverser, à se répéter, ou à perdre le fil de ce que vous demandiez réellement.
+
+Ce ne sont pas des bugs que vous pouvez entièrement corriger avec un meilleur prompt. Ce sont des propriétés structurelles du fonctionnement de l'attention à grande échelle. La réponse de l'ingénierie consiste à garder le contexte *plus petit et plus net*, plutôt qu'à le remplir en espérant.
+
+## L'ordre compte
+
+L'endroit où vous placez le contenu est aussi important que ce que vous incluez. Bonnes pratiques établies :
+
+| Position | Quoi y mettre |
+|---|---|
+| Tout en haut (prompt système) | Instructions stables et durables. Persona, règles, exigences de format. |
+| Après le prompt système | La tâche en cours, en termes simples. |
+| Juste avant le dernier tour utilisateur | Le contexte le plus crucial et spécifique à cette requête précise. |
+| Milieu | Documents de support, fragments récupérés — ordonnés par pertinence, pas par chronologie. |
+| Historique de la conversation | Seulement ce qui est nécessaire à la continuité. Élaguez sans hésiter. |
+
+La règle générale : plus c'est proche du tour en cours, plus cela reçoit d'attention. Les instructions cruciales qui ne vivent qu'au milieu d'un long historique sont en danger.
+
+### La « bonne altitude » pour les instructions
+
+Un prompt système peut échouer de deux manières opposées. Trop bas, et vous codez en dur une logique fragile de type si-ceci-alors-cela qui se brise dès que la réalité diffère. Trop haut, et vous écrivez des consignes vagues qui supposent un contexte dont le modèle ne dispose pas. Anthropic appelle la cible la **« bonne altitude »** — la zone idéale qui est « assez spécifique pour guider efficacement le comportement, tout en restant assez flexible pour fournir de solides heuristiques ». Visez là : des règles et des exemples concrets, ni un arbre de décision, ni une impression vague.
+
+## La récupération plutôt que l'entassement
+
+La tentation est de tout y mettre : tous les documents, l'intégralité de la base de code, toute la conversation. Résistez-y.
+
+La meilleure approche est la *récupération sélective* : identifier ce dont le modèle a réellement besoin pour cette requête précise, et n'injecter que cela. Un fragment de 2 000 tokens bien récupéré du bon document surpasse un déversement de 40 000 tokens où la réponse se trouve quelque part au milieu.
+
+C'est pourquoi la génération augmentée par récupération (RAG) existe — non seulement pour dépasser les limites de contexte, mais pour améliorer la qualité en gardant le contexte *soigneusement organisé*. La version agentique est la **récupération juste-à-temps** : au lieu de précharger chaque document, l'agent conserve des identifiants légers (chemins de fichiers, ID, requêtes) et n'amène le contenu réel dans le contexte qu'au moment où il en a besoin.
+
+Pour les sessions interactives, la même logique s'applique : au lieu de tout accumuler, compactez ou videz périodiquement l'historique pour supprimer le contenu qui n'est plus pertinent pour la tâche en cours. Les commandes `/compact` et `/clear` de Claude Code sont des outils d'ingénierie du contexte, pas seulement de gestion de session. Sur l'API, le même schéma est automatisé par l'[édition de la mémoire et du contexte](/docs/api/memory-and-context-editing) — les anciens résultats d'outils sont élagués de la fenêtre tandis que ce qui compte est écrit dans un magasin de mémoire persistant.
+
+## Les trois tactiques de fond
+
+Pour le travail à long horizon, trois techniques font l'essentiel du gros œuvre. Elles se composent — la plupart des vrais agents utilisent les trois.
+
+<Steps
+  items={[
+    {title: "Compaction", body: "Lorsqu'une session approche de la limite de la fenêtre, résumez-la et réinitialisez avec la version distillée. Préservez les détails porteurs — décisions d'architecture, bugs non résolus, choix d'implémentation clés — et abandonnez le déroulé coup par coup. C'est ce que fait /compact dans Claude Code."},
+    {title: "Prise de notes structurée", body: "Faites en sorte que l'agent écrive des faits durables dans une mémoire externe (un fichier, un bloc-notes, un CLAUDE.md) et les relise plus tard. Cela offre une mémoire persistante avec une surcharge minimale dans la fenêtre — les notes vivent en dehors du budget jusqu'à ce qu'on en ait besoin."},
+    {title: "Récupération juste-à-temps", body: "Ne préchargez pas tous les documents. Conservez des références légères et chargez le contenu réel à l'exécution, seulement pour l'étape qui en a besoin. Une récupération ciblée de 2 000 tokens bat un déversement de 40 000 tokens."}
+  ]}
+/>
+
+## L'angle du coût
+
+Les tokens que vous envoyez sont des tokens que vous payez — à la fois en argent et en latence. Remplir le contexte de matériel vaguement pertinent gonfle les deux. L'ingénierie du contexte et l'efficacité des coûts sont le même problème.
+
+Plus concrètement :
+
+- Un prompt système surchargé que vous copiez-collez depuis un modèle est payé à chaque appel.
+- L'ancien historique de conversation que vous traînez parce qu'« il pourrait être utile » est payé à chaque appel.
+- Les documents que vous injectez « au cas où » sont payés à chaque appel.
+
+Élaguer ce qui n'a pas besoin d'être là est simultanément meilleur pour la qualité et moins coûteux à exécuter.
+
+## Tactiques pratiques pour les utilisateurs de Claude
+
+**Dans Claude.ai :**
+- Utilisez des conversations distinctes pour des tâches distinctes. Ne laissez pas un après-midi de digressions polluer le contexte d'un projet ciblé.
+- Résumez les longs fils avant de poser une question complexe qui en dépend. Un résumé explicite est souvent plus utile que l'historique brut.
+- Placez la chose précise que vous voulez à la *fin* d'un long message, et non enfouie au milieu.
+
+**Dans Claude Code :**
+- Gardez votre fichier `CLAUDE.md` léger. Chaque ligne qu'il contient est injectée dans chaque session. Voir [CLAUDE.md](/docs/claude-code/claude-md) et [Gestion du contexte](/docs/claude-code/context-management).
+- Utilisez `/clear` lorsque vous passez à une tâche réellement différente. Utilisez `/compact` lorsque vous voulez continuer mais que la session grossit.
+- Référencez les fichiers par leur chemin plutôt que de coller leur contenu quand le fichier complet n'est pas nécessaire pour l'étape en cours.
+
+**Au niveau de l'API :**
+- Concevez les prompts système pour ne contenir que ce dont chaque requête a véritablement besoin. Déplacez les instructions spécifiques à la tâche dans le tour utilisateur.
+- Pour les cas d'usage riches en documents, récupérez et injectez les fragments pertinents plutôt que de téléverser un corpus entier.
+- Structurez le prompt de sorte que le préfixe stable et réutilisable vienne en premier — cela active aussi la mise en cache de prompt, un compagnon naturel de l'ingénierie du contexte.
+
+Lorsque vous voulez confier un long document à Claude, la règle de placement bat le volume brut à tous les coups :
+
+<PromptCard title="Instruction en premier, redite en dernier">{`Tâche : Trouve chaque clause où ce contrat plafonne notre responsabilité, et cite-les toutes mot pour mot avec leur numéro de section.
+
+[... coller ici le contrat complet de 40 pages ...]
+
+Rappel de la tâche : liste toutes les clauses de plafonnement de responsabilité ci-dessus, citées exactement, avec les numéros de section. S'il n'y en a aucune, dis-le explicitement.`}</PromptCard>
+
+La même instruction figure en haut *et* en bas — les deux positions favorisées par l'attention — afin qu'elle survive même à un très long milieu.
+
+## Le changement de mentalité
+
+L'ingénierie de prompt demande : « Que devrais-je dire ? »
+L'ingénierie du contexte demande : « Que devrait *voir* le modèle, dans quel ordre, et que devrais-je délibérément exclure ? »
+
+La seconde question est plus difficile, mais c'est celle qui détermine réellement la qualité à grande échelle.
+
+<Quiz
+  questions={[
+    {
+      q: "Quelle est la différence fondamentale entre l'ingénierie de prompt et l'ingénierie du contexte ?",
+      options: [
+        "L'ingénierie de prompt est pour le chat, l'ingénierie du contexte est pour le code",
+        "L'ingénierie de prompt, ce sont les mots que vous choisissez ; l'ingénierie du contexte consiste à organiser l'ensemble des tokens que le modèle voit",
+        "L'ingénierie du contexte ne compte qu'au-delà d'un million de tokens",
+        "Ce sont deux noms pour la même chose"
+      ],
+      answer: 1,
+      explain: "L'ingénierie de prompt se concentre sur la formulation d'un prompt unique. L'ingénierie du contexte est le travail plus large d'organisation de ce qui remplit la fenêtre — prompt système, outils, historique, données récupérées — et de ce qu'il faut laisser de côté."
+    },
+    {
+      q: "Vous enfouissez l'unique instruction la plus importante au token 60 000 d'un contexte de 100 000 tokens. Quel est le résultat probable ?",
+      options: [
+        "Le modèle lui accorde le plus de poids parce qu'il l'a lue le plus récemment",
+        "Cela coûte moins cher car les tokens du milieu sont remisés",
+        "Le modèle peut l'ignorer de fait — l'attention est la plus faible au milieu",
+        "Rien ne change ; la position n'a aucun effet"
+      ],
+      answer: 2,
+      explain: "L'effet « perdu au milieu » : le rappel se dégrade pour le contenu enfoui au milieu d'un long contexte. Placez les instructions cruciales en haut ou juste avant le tour final — idéalement les deux."
+    },
+    {
+      q: "Un agent de codage est sur le point d'épuiser son contexte sur une longue tâche. Quelle tactique préserve le mieux la progression ?",
+      options: [
+        "Recoller tout l'historique pour le rafraîchir",
+        "La compaction : résumer en un état distillé qui conserve les décisions et les bugs ouverts, puis réinitialiser",
+        "Baisser la température",
+        "Passer à un modèle plus petit"
+      ],
+      answer: 1,
+      explain: "La compaction résume la session et réinitialise avec la version distillée — en préservant les décisions d'architecture et les bugs non résolus tout en se débarrassant du déroulé coup par coup, gourmand en tokens."
+    }
+  ]}
+/>
+
+<Flashcards
+  title="Ancrer le vocabulaire"
+  cards={[
+    {front: "Ingénierie du contexte", back: "Organiser le plus petit ensemble de tokens à fort signal que le modèle voit — prompt système, outils, historique, données récupérées — et laisser délibérément le reste de côté."},
+    {front: "Budget d'attention", back: "La capacité finie qu'a un transformeur à mettre les tokens en relation les uns avec les autres. Chaque token supplémentaire la dépense, ce qui explique pourquoi plus de contexte peut signifier de moins bonnes réponses."},
+    {front: "Perdu au milieu", back: "Les modèles rappellent bien mieux le contenu situé près du début et de la fin du contexte que celui enfoui au milieu. Détermine où placer les instructions cruciales."},
+    {front: "Dégradation du contexte", back: "La dérive progressive de la qualité d'une longue session à mesure que les premières instructions se diluent et que la tâche d'origine est évincée."},
+    {front: "Bonne altitude", back: "La zone idéale pour les instructions : assez spécifiques pour guider le comportement, assez flexibles pour servir de solides heuristiques — ni logique fragile codée en dur, ni vagues généralités."},
+    {front: "Récupération juste-à-temps", back: "Conserver des références légères (chemins, ID, requêtes) et ne charger le contenu réel dans le contexte qu'au moment où une étape en a besoin."}
+  ]}
+/>
+
+<Callout
+  type="takeaways"
+  items={[
+    "La fenêtre de contexte est un budget d'attention, pas un stockage — dépensez-la uniquement sur des tokens à fort signal.",
+    "La position bat le volume : les instructions cruciales vont en haut et juste avant le tour final, jamais enfouies au milieu.",
+    "La compaction, la prise de notes et la récupération juste-à-temps sont les trois tactiques qui gardent les agents longs cohérents.",
+    "Organiser le contexte, c'est le même levier que réduire les coûts — moins de tokens, de meilleures réponses, une facture plus basse."
+  ]}
+/>
+
+## Pour aller plus loin
+
+- [Gestion du contexte dans Claude Code](/docs/claude-code/context-management)
+- [Bases du prompting](/docs/prompting/basics)
+- [L'économie de la mise en cache de prompt](/docs/frontiers/prompt-caching-economics)
+- [Tokens et contexte](/docs/foundations/tokens-and-context)

@@ -1,0 +1,93 @@
+# Рецепты хуков и settings.json
+
+> Source: https://derob98.github.io/ailmanac/ru/docs/templates/hooks-settings · AILmanac (CC BY 4.0) · last verified 2026-08-03
+
+Готовые к копированию хуки для форматирования, контроля качества и защиты, плюс стартовые настройки.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-03" source="https://code.claude.com/docs/en/hooks">
+Ключи настроек и хуков меняются — сверяйтесь с актуальной схемой в официальной документации по настройкам и хукам Claude Code.
+</VerifyNote>
+
+Готовые рецепты для [`settings.json`](/docs/claude-code/settings), [разрешений](/docs/claude-code/permissions) и [хуков](/docs/claude-code/hooks). Адаптируйте команды под свой стек.
+
+## Стартовый `settings.json` проекта
+
+`.claude/settings.json` (закоммичен, общий для команды):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Bash(npm run test:*)",
+      "Bash(npm run lint)",
+      "Bash(git status)",
+      "Bash(git diff:*)"
+    ],
+    "ask": ["Bash(npm install:*)", "Write"],
+    "deny": ["Read(./.env)", "Read(./**/*.pem)", "Bash(git push --force:*)"]
+  }
+}
+```
+
+Персональные/машинно-специфичные переопределения помещайте в `.claude/settings.local.json` (исключён из git).
+
+## Автоформатирование после правок
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "f=$(jq -r '.tool_input.file_path'); npx prettier --write \"$f\" 2>/dev/null || true" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+## Контроль качества перед завершением
+
+Блокируйте «готово», пока тесты не пройдут (концептуально — привяжите к событию `Stop`/перед завершением согласно документации):
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "npm test --silent" } ] }
+    ]
+  }
+}
+```
+
+## Защитный ограничитель (блокировка правки защищённых путей)
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "f=$(jq -r '.tool_input.file_path'); case \"$f\" in *secrets*|*.env|*/vendor/*) echo 'blocked: protected path'; exit 1;; esac" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+:::tip Делайте хуки быстрыми и идемпотентными
+Они выполняются постоянно. Сделайте их быстрыми, безопасными для повторного запуска и шумными только при реальных проблемах.
+:::
+
+## Дальше
+
+- [Разрешения и режимы разрешений](/docs/claude-code/permissions)
+- [Хуки: детерминированная автоматизация](/docs/claude-code/hooks)
+- [Библиотека слэш-команд](/docs/templates/slash-commands)

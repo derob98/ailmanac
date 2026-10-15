@@ -1,0 +1,166 @@
+# 出力スタイル
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/claude-code/output-styles · AILmanac (CC BY 4.0) · last verified 2026-06-21
+
+Claude Code のトーン、冗長さ、教える振る舞いを変える。
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-06-21" source="https://code.claude.com/docs/en/output-styles">
+組み込みスタイル、正確な切り替えメカニズム、カスタムスタイルのファイル形式はリリース間で変わることがあります。公式ドキュメントで確認してください（Claude Code のドキュメントは `docs.anthropic.com` から `code.claude.com` に移動しました）。
+</VerifyNote>
+
+<Callout type="objectives" items={[
+  "出力スタイルとは何か——そして Claude が知っていることを変えるのとどう違うか",
+  "4 つの組み込みスタイル：Default、Proactive、Explanatory、Learning",
+  "/config でスタイルを切り替える方法——そしてなぜ変更には新しいセッションが必要か",
+  "独自のカスタムスタイルを Markdown ファイルとして作る方法",
+  "出力スタイル vs CLAUDE.md vs Claude.ai のカスタム指示——どれに手を伸ばすか"
+]} />
+
+**出力スタイル**は、システムプロンプトを直接変更することで、Claude Code が*どう*コミュニケーションするか——その役割、トーン、冗長さ、推論を説明するかどうか——を変えます。Claude が*どう*応答するかを変えるのであって、*何を*知っているかではありません。同じ声や形式を毎ターン再プロンプトし続けているなら、これに手を伸ばしましょう。
+
+## なぜ使うのか
+
+- **ワークフローに合わせる。** 速く動いているときは簡潔でアクション優先、学んでいるときは説明的。
+- **ティーチングモード。** 一部のスタイルは教育的な解説を加えます——コードベースやテクニックに慣れている間に最適です。
+- **一貫性。** 好みのスタイルを一度設定すれば、毎回のセッションが好きなように読めます。
+
+## 組み込みスタイル
+
+Claude Code には 4 つが付属します：
+
+| スタイル | 何をするか |
+|---|---|
+| **Default** | 標準的なソフトウェアエンジニアリングのシステムプロンプト——効率的でアクション優先。 |
+| **Proactive** | 即座に実行し、定型的な判断で一時停止せず妥当な仮定を立てる。auto モードより強い自律実行ガイダンスだが、ツール実行前の権限プロンプトは依然として表示される。 |
+| **Explanatory** | ステップの間に教育的な「Insights」を加え、実装の選択やコードベースのパターンを説明する。 |
+| **Learning** | 協働的で、やりながら学ぶ：Insights を共有し*かつ*小さな部分を自分で書くよう求め、コードに `[TODO(human)]` マーカーを残す。 |
+
+<Callout type="warning" items={[
+  "Explanatory と Learning は設計上より長い応答を生むため、Default より多くの出力トークンを消費します。"
+]} />
+
+<Flashcards cards={[
+  { front: "Default", back: "標準的なソフトウェアエンジニアリングのシステムプロンプト——効率的でアクション優先。" },
+  { front: "Proactive", back: "即座に実行し、定型的な判断で一時停止せず妥当な仮定を立てる。auto モードより強い自律ガイダンスだが、ツール実行前の権限プロンプトは依然として表示される。" },
+  { front: "Explanatory", back: "ステップの間に教育的な「Insights」を加え、実装の選択やコードベースのパターンを説明する。" },
+  { front: "Learning", back: "協働的で、やりながら学ぶ：Insights を共有しかつ小さな部分を自分で書くよう求め、コードに [TODO(human)] マーカーを残す。" }
+]} />
+
+## 切り替え方
+
+`/config` を実行し、**Output style** の下でスタイルを選びます。あなたの選択はプロジェクトレベルの `.claude/settings.local.json` に保存されます。メニューなしで設定するには、任意の設定ファイルの `outputStyle` フィールドを編集します。
+
+<Steps items={[
+  { title: "config メニューを開く", body: "セッションで /config を実行し、Output style オプションを見つけます。" },
+  { title: "スタイルを選ぶ", body: "Default、Proactive、Explanatory、Learning のいずれかを選びます。あなたの選択はプロジェクトレベルの .claude/settings.local.json に保存されます。" },
+  { title: "または直接設定する", body: "任意の設定ファイルの outputStyle フィールドを編集してメニューを飛ばします（下の JSON を参照）。" },
+  { title: "新しいセッションを開始する", body: "スタイルはシステムプロンプトの一部で、セッション開始時に一度読まれます——反映させるには /clear を実行するか新しいセッションを開きます。" }
+]} />
+
+```json
+{
+  "outputStyle": "Explanatory"
+}
+```
+
+:::warning 変更には新しいセッションが必要
+出力スタイルはシステムプロンプトの一部で、Claude Code は**セッション開始時に一度**読みます。変更は `/clear` または新しいセッションの後にのみ反映されます。（スタンドアロンの `/output-style` コマンドは v2.1.91 で削除されました——`/config` または上記の設定を使ってください。）
+:::
+
+## カスタムスタイルを作る
+
+カスタムスタイルは Markdown ファイルです：フロントマター、続いてシステムプロンプトに追加する指示。ユーザーレベル（`~/.claude/output-styles/`）またはプロジェクトレベル（`.claude/output-styles/`）に保存します。`name` を設定しない限り、ファイル名がスタイル名になります。
+
+<PromptCard title="カスタムスタイルの例——図優先">{`---
+name: Diagrams first
+description: Lead every explanation with a diagram
+keep-coding-instructions: true
+---
+
+When explaining code, architecture, or data flow, start with a Mermaid
+diagram showing the structure, then explain in prose.`}</PromptCard>
+
+<Callout type="tip" items={[
+  "Claude が*どう*コミュニケーションするかだけを変え、なお通常どおりコーディングしてほしいときは keep-coding-instructions: true を設定します。",
+  "Claude がソフトウェアエンジニアリングをまったくしないとき——たとえば純粋な執筆やデータ分析のアシスタント——は、組み込みのコーディング指示が落とされるよう、これを省略します（デフォルト）。"
+]} />
+
+## 出力スタイル vs CLAUDE.md vs その他のレバー
+
+- **出力スタイル** = 役割、トーン、形式のシステムプロンプトのプリセット——*すべての*応答に適用される。
+- **[CLAUDE.md](/docs/claude-code/claude-md)** = 永続的な*プロジェクト*の事実とルール（規約、ガードレール）。システムプロンプトの後のメッセージとして追加される。
+- **[カスタム指示／応答スタイル](/docs/claude-app/custom-instructions)** = Claude.ai コンシューマーアプリのいとこ。
+
+:::tip 正しいレバーを使う
+Claude に「終了前に必ずテストを実行」してほしい？ それはスタイルではなく **CLAUDE.md のガードレール**です。「各ステップを進めながら説明」してほしい？ それは**出力スタイル**です。振る舞いのルールは CLAUDE.md に、見せ方はスタイルに保ちましょう。
+:::
+
+<Quiz title="確認しよう" questions={[
+  {
+    q: "出力スタイルは実際に何を変えますか？",
+    options: [
+      "Claude がプロジェクトについて知っていること",
+      "Claude がどうコミュニケーションするか——役割、トーン、冗長さ——システムプロンプトを変更することで",
+      "Claude Code がどのモデルを実行するか",
+      "ツール実行前の権限プロンプト"
+    ],
+    answer: 1,
+    explain: "出力スタイルはシステムプロンプトを変更し、Claude が何を知っているかではなく、どう応答するかを変えます。"
+  },
+  {
+    q: "どの組み込みスタイルが [TODO(human)] マーカーを残し、小さな部分を自分で書くよう求めますか？",
+    options: ["Default", "Proactive", "Explanatory", "Learning"],
+    answer: 3,
+    explain: "Learning は協働的でやりながら学ぶスタイルです：Insights を共有し、小さな部分を書くよう求め、コードに [TODO(human)] マーカーを残します。"
+  },
+  {
+    q: "出力スタイルを変更した後、いつ反映されますか？",
+    options: [
+      "即座に、次のメッセージで",
+      "/clear または新しいセッションの後にのみ。システムプロンプトはセッション開始時に一度読まれるため",
+      "コンピューターを再起動した後",
+      "/output-style を実行した後"
+    ],
+    answer: 1,
+    explain: "スタイルはシステムプロンプトの一部で、Claude Code はセッション開始時に一度読みます——だから変更は /clear または新しいセッションの後にのみ適用されます。スタンドアロンの /output-style コマンドは v2.1.91 で削除されました。"
+  },
+  {
+    q: "Claude に「終了前に必ずテストを実行」してほしい。これはどのレバーですか？",
+    options: [
+      "出力スタイル",
+      "CLAUDE.md のガードレール",
+      "Claude.ai のカスタム指示",
+      "Proactive 組み込みスタイル"
+    ],
+    answer: 1,
+    explain: "振る舞いのルールは CLAUDE.md に、見せ方は出力スタイルに属します。「必ずテストを実行」はガードレールです。"
+  },
+  {
+    q: "カスタムスタイルで keep-coding-instructions: true をいつ設定すべきですか？",
+    options: [
+      "Claude がソフトウェアエンジニアリングをまったくしないとき",
+      "Claude がどうコミュニケーションするかだけを変え、なお通常どおりコーディングしてほしいとき",
+      "常に、すべてのカスタムスタイルで",
+      "プロジェクトレベルでのみ、ユーザーレベルでは決して"
+    ],
+    answer: 1,
+    explain: "見せ方だけを変えつつ組み込みのコーディング指示を保つために true にします。純粋な執筆やデータ分析のアシスタントでは省略します（デフォルト）。"
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "出力スタイルは Claude がどうコミュニケーションするか（役割、トーン、冗長さ）を変え、何を知っているかは変えない——システムプロンプトを編集する。",
+  "4 つの組み込み：Default（アクション優先）、Proactive（仮定を立てて実行）、Explanatory（Insights を加える）、Learning（Insights + [TODO(human)] マーカー）。",
+  "Explanatory と Learning は応答が設計上より長いため、より多くの出力トークンを消費する。",
+  "/config（.claude/settings.local.json に保存）または outputStyle 設定で切り替える——変更には /clear または新しいセッションが必要。",
+  "カスタムスタイルは ~/.claude/output-styles/ または .claude/output-styles/ の Markdown ファイル。コーディングの振る舞いを保つには keep-coding-instructions: true を使う。",
+  "振る舞いのルール／ガードレールには CLAUDE.md を、見せ方には出力スタイルを使う。"
+]} />
+
+## 次へ
+
+- [CLAUDE.md とメモリファイル](/docs/claude-code/claude-md)
+- [設定と構成](/docs/claude-code/settings)
+- [カスタム指示とスタイル（Claude.ai）](/docs/claude-app/custom-instructions)

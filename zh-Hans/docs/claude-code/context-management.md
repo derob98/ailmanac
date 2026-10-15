@@ -1,0 +1,59 @@
+# 上下文管理
+
+> Source: https://derob98.github.io/ailmanac/zh-Hans/docs/claude-code/context-management · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+/compact 与 /clear、自动压缩，以及随着会话增长保持高效。
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["区分 /clear 与 /compact，并瞬间选对那一个", "理解自动压缩，以及为什么主动清理仍然胜过它", "运用四种技巧让长会话保持敏锐", "识别上下文窗口已满的症状并迅速修复"]} />
+
+<VerifyNote lastVerified="2026-06-20" source="https://code.claude.com/docs/en">
+诸如 /compact 和 /clear 之类的命令名以及自动压缩行为可能变化——请以官方文档为准。
+</VerifyNote>
+
+## 核心思想
+
+每次会话都有一个有限的[上下文窗口](/docs/foundations/tokens-and-context)。随着它被填满，较旧的内容会被挤压，Claude 可能开始"漂移"。有意识地管理上下文，正是让长会话保持敏锐的关键。
+
+## 两个必备命令
+
+两个命令几乎覆盖所有情况。诀窍在于让命令与你的意图相匹配。
+
+<Flashcards cards={[{front: "/clear", back: "清空对话并从头开始。当你切换到一个不相关的任务时使用。这是重获干净、聚焦上下文的最省钱方式。"}, {front: "/compact", back: "把目前为止的对话总结为一个紧凑形式——在腾出空间的同时保留要点。当你想继续同一个任务但窗口快满了时使用。"}]} />
+
+用一个问题来决定：这是一个新任务还是同一个任务？
+
+```mermaid
+flowchart TD
+  A{New task or same task?} -->|New / unrelated| B[/clear]
+  A -->|Same task, context full| C[/compact]
+```
+
+## 自动压缩
+
+当上下文接近上限时，Claude Code 可以**自动压缩**，让工作得以继续而不硬性中断。它是一张安全网——但在任务之间主动 `/clear`，比依赖它能得到更好的结果。
+
+<Callout type="tip" items={["把自动压缩当作后备手段，而非策略。在不相关的任务之间清理上下文，比让窗口一直填满直到触发自动压缩，能保持上下文更干净。"]} />
+
+## 保持高效的技巧
+
+除了这两个命令，还有四个习惯能让你的上下文从一开始就保持精简。
+
+<Steps items={[{title: "一次会话一个任务", body: "别让一下午不相关的工作全堆进一个上下文。"}, {title: "把繁重的阅读委派给子智能体", body: "把大量阅读交给子智能体——它们消耗的是它们自己的上下文，只返回结论。见 /docs/claude-code/subagents。"}, {title: "引用，别粘贴", body: "用 @path 把 Claude 指向文件，而不是粘贴大块内容；并保持 CLAUDE.md 精简（见 /docs/claude-code/claude-md）。"}, {title: "盯着预算", body: "一个显示上下文用量的状态栏能告诉你何时该压缩。见 /docs/claude-code/statusline。"}]} />
+
+这些都对应着实时文档：[子智能体](/docs/claude-code/subagents)、[CLAUDE.md](/docs/claude-code/claude-md) 和[状态栏](/docs/claude-code/statusline)。
+
+:::tip 症状 → 处方
+如果 Claude 开始忘记早先的某条指令或自我重复，那窗口很可能满了。`/compact`（同一任务）或 `/clear`（新任务）通常能立刻解决。更多内容见[故障排查](/docs/contribute/troubleshooting)。
+:::
+
+<Callout type="takeaways" items={["/clear 清空对话以便重新开始——用于不相关的任务", "/compact 总结会话以腾出空间——当窗口填满而你想继续同一个任务时使用", "自动压缩是一张安全网；在任务之间主动 /clear 能得到更好的结果", "保持上下文精简：一次会话一个任务、把繁重的阅读委派给子智能体、引用文件而非粘贴、并通过状态栏盯住预算", "遗忘或重复意味着窗口已满——/compact（同一任务）或 /clear（新任务）即可修复"]} />
+
+<Quiz title="自我检测" questions={[{q: "你完成了一个任务，转去做一件完全不相关的事。该用哪个命令？", options: ["/compact——总结之前的工作", "/clear——清空对话并从头开始", "都不用——交给自动压缩处理"], answer: 1, explain: "/clear 清空对话并从头开始。当你切换到不相关的任务时，这是重获干净、聚焦上下文的最省钱方式。"}, {q: "你正做到任务一半，上下文窗口快满了，但你想在同一项工作上继续。该用哪个命令？", options: ["/clear——腾出最多空间", "/compact——总结对话同时保留要点", "打开一个新终端"], answer: 1, explain: "/compact 把目前为止的对话总结为一个紧凑形式，在腾出空间的同时保留要点——非常适合继续同一个任务。"}, {q: "看待自动压缩的正确方式是什么？", options: ["管理上下文的首要策略", "一张安全网——在任务之间主动 /clear 能得到更好的结果", "一个你应该禁用的 bug"], answer: 1, explain: "当上下文接近上限时，自动压缩让工作得以继续而不硬性中断，但在任务之间主动 /clear 比依赖它能得到更好的结果。"}, {q: "Claude 开始忘记早先的某条指令或自我重复。可能的原因和处方是什么？", options: ["网络问题——重启你的机器", "窗口很可能满了——/compact（同一任务）或 /clear（新任务）", "模型坏了——切换模型"], answer: 1, explain: "遗忘或重复通常意味着窗口已满。/compact（同一任务）或 /clear（新任务）一般能立刻解决。"}]} />
+
+## 下一步
+
+- [Token、上下文与记忆](/docs/foundations/tokens-and-context)
+- [子智能体与并行智能体](/docs/claude-code/subagents)
+- [状态栏定制](/docs/claude-code/statusline)

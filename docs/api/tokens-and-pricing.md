@@ -1,0 +1,89 @@
+# Tokens, Context & Pricing
+
+> Source: https://derob98.github.io/ailmanac/docs/api/tokens-and-pricing · AILmanac (CC BY 4.0) · last verified 2026-08-06
+
+Count tokens correctly, max_tokens vs context window, and estimating cost.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={["Count tokens correctly with Anthropic's own tooling (not another model's tokenizer)", "Tell max_tokens apart from the context window — and why the difference matters", "Estimate API cost from input + output tokens at per-model rates", "Cut cost without losing quality: right-size, cache, trim, batch"]} />
+
+<VerifyNote lastVerified="2026-08-06" source="https://platform.claude.com/docs/en/about-claude/pricing">
+Per-token prices and context limits change — always read current numbers on the official pricing/models pages. See the [models table](/docs/whats-new/models-and-pricing).
+</VerifyNote>
+
+Cost and limits on the API are all measured in **[tokens](/docs/foundations/tokens-and-context)** (~¾ of a word). Three things to get right.
+
+## 1. Count tokens correctly
+
+Don't guess, and **don't use another model's tokenizer** (e.g. `tiktoken`) — token counts differ per model family. Use Anthropic's **token counting** endpoint/SDK helper to measure a request *before* sending it.
+
+<Callout type="tip" items={["Rough planning rule: ~750 words ≈ ~1,000 tokens (a token is roughly ¾ of a word)."]} />
+
+## 2. `max_tokens` ≠ context window
+
+These two limits are easy to confuse, but they govern different things.
+
+| Limit | What it caps | When to change it |
+| --- | --- | --- |
+| **`max_tokens`** | The length of the *reply* (output only) | Raise it if output gets cut off |
+| **Context window** | Total budget for **input + output** | Big inputs leave less room for output |
+
+<Callout type="warning" items={["Set max_tokens to what the task needs. Too low truncates the reply. Needlessly high doesn't cost more — you pay only for tokens actually generated — but it can let replies ramble."]} />
+
+## 3. Estimate cost
+
+You're billed for **input tokens + output tokens**, at per-model rates (Opus > Sonnet > Haiku). A quick estimate:
+
+```
+cost ≈ (input_tokens × input_rate) + (output_tokens × output_rate)
+```
+
+Get the current rates from the [official pricing page](https://platform.claude.com/docs/en/about-claude/pricing) — we don't hard-code them here on purpose.
+
+## Cutting cost (without losing quality)
+
+<Steps items={[
+  {title: "Right-size the model", body: "Start with Sonnet; reserve Opus for the hard parts. See Choosing a Model (/docs/api/choosing-a-model)."},
+  {title: "Use prompt caching", body: "Reuse a stable prompt prefix across calls. See Prompt Caching (/docs/api/prompt-caching)."},
+  {title: "Trim inputs", body: "Send only the context that matters. This is also where RAG (/docs/foundations/rag) helps."},
+  {title: "Batch offline work", body: "Batch jobs where latency doesn't matter."}
+]} />
+
+More strategy in [Cost & Latency Tradeoffs](/docs/foundations/cost-and-latency).
+
+<Quiz title="Check yourself" questions={[
+  {
+    q: "You're planning a request and want to know its token count before sending. What should you use?",
+    options: ["A general-purpose tokenizer like tiktoken", "Anthropic's token counting endpoint/SDK helper", "Word count divided by 0.75 as the final number", "The context window size from the models table"],
+    answer: 1,
+    explain: "Token counts differ per model family, so don't reuse another model's tokenizer. Use Anthropic's token counting endpoint/SDK helper to measure before sending."
+  },
+  {
+    q: "Your reply keeps getting cut off mid-sentence. Which setting do you change?",
+    options: ["Lower max_tokens", "Raise max_tokens", "Shrink the context window", "Switch to a smaller model"],
+    answer: 1,
+    explain: "max_tokens caps the length of the reply. If output gets cut off, raise it."
+  },
+  {
+    q: "How are you billed on the API?",
+    options: ["Per request, flat rate", "Input tokens only", "Input tokens + output tokens, at per-model rates", "Per word of output"],
+    answer: 2,
+    explain: "cost ≈ (input_tokens × input_rate) + (output_tokens × output_rate), with rates that differ per model (Opus > Sonnet > Haiku)."
+  },
+  {
+    q: "Which is the best first move to cut cost without losing quality?",
+    options: ["Always use Opus for everything", "Start with Sonnet and reserve Opus for the hard parts", "Set max_tokens as high as possible", "Use another model's tokenizer to save calls"],
+    answer: 1,
+    explain: "Right-size the model: start with Sonnet, reserve Opus for hard parts. Then layer on prompt caching, trimming inputs, and batching."
+  }
+]} />
+
+<Callout type="takeaways" items={["Everything is measured in tokens (~¾ of a word); ~750 words ≈ ~1,000 tokens.", "Count tokens with Anthropic's own tooling — never another model's tokenizer.", "max_tokens caps the reply; the context window is the total input + output budget.", "Billing = input tokens + output tokens at per-model rates (Opus > Sonnet > Haiku).", "Cut cost by right-sizing the model, caching prefixes, trimming inputs, and batching."]} />
+
+## Next
+
+- [Choosing a Claude Model](/docs/api/choosing-a-model)
+- [Prompt Caching & Cost Optimization](/docs/api/prompt-caching)
+- [Message Batches — Async Jobs at 50% Off](/docs/api/message-batches)
+- [Streaming & Multi-Turn](/docs/api/streaming)

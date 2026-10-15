@@ -1,0 +1,76 @@
+# カスタムスラッシュコマンド
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/claude-code/slash-commands · AILmanac (CC BY 4.0) · last verified 2026-07-06
+
+繰り返し可能なワークフローを 1 語に変える。
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-07-06" source="https://code.claude.com/docs/en/skills">
+コマンドファイルの場所やフロントマターのオプションは変わることがあります。公式の skills ドキュメントで確認してください（カスタムコマンドは現在そこにあります）。
+</VerifyNote>
+
+カスタムスラッシュコマンドは、何度も打ち直しているプロンプトを単一の `/word` にパッケージ化します。一度定義すれば、永遠に再利用できます（そしてチームと共有できます）。
+
+<Callout type="info" items={["カスタムコマンドは Skills に統合されました。.claude/commands/deploy.md にあるファイルと .claude/skills/deploy/SKILL.md にあるスキルは、どちらも /deploy を作り、同じように動作します — 既存の .claude/commands/ ファイルは引き続き機能します。Skills はサポートファイル用のディレクトリ、呼び出し制御のフロントマター、関連時の自動読み込みを追加します。単一ファイルのプロンプトを超えるものには、Skill を選びましょう。"]} />
+
+<Callout type="objectives" items={["カスタムスラッシュコマンドとは何か、なぜプロンプトを打ち直すより優れているかを説明する", "適切なディレクトリに Markdown ファイルを置いてコマンドを作成する", "プロジェクトコマンドと個人コマンドを、その場所で見分ける", "構成要素を使う：$ARGUMENTS、埋め込まれた bash 出力、ファイル参照、フロントマター", "あるタスクに対し、スラッシュコマンド、スキル、サブエージェントのあいだで選ぶ"]} />
+
+## 仕組み
+
+コマンドは単なる Markdown ファイルです。commands ディレクトリに置くと、ファイル名がコマンドになります。ファイルの本文は、呼び出したときに Claude が実行するプロンプトです。
+
+ファイルの*場所*でスコープが決まります：
+
+<Steps items={[{title: "プロジェクトコマンド（共有可能）", body: ".claude/commands/changelog.md → /changelog として保存します。リポジトリに存在するため、チーム全員が使えます。"}, {title: "個人コマンド（すべてのプロジェクトで）", body: "~/.claude/commands/changelog.md → /changelog として保存します。あなたのマシン上のあらゆるプロジェクトで使えます。"}, {title: "呼び出す", body: "Claude Code で /word と入力します。ファイルの本文が Claude の実行するプロンプトになります。"}]} />
+
+<Callout type="tip" items={["フロントマターではなくファイル名がコマンド名になります。changelog.md は常に /changelog です。"]} />
+
+## 最小限の例
+
+以下は完全なコマンドファイルです。フロントマターには `description` が入り、それ以下がプロンプトです。
+
+<PromptCard title="commit.md — Conventional Commit をドラフトする">{`---
+description: Draft a Conventional Commit message from the staged diff
+---
+
+Look at the staged changes with \`git diff --cached\` and write a single
+Conventional Commit message (feat/fix/docs/refactor/chore). Output only the
+message, no preamble.`}</PromptCard>
+
+これを `commit.md` として保存すれば、`/commit` が毎回実行してくれます。（ファイル名を変えれば別のコマンドになります — 同じ本文を `changelog.md` として保存すれば `/changelog` になります。）
+
+## 便利な構成要素
+
+4 つの要素が、静的なプロンプトを柔軟なコマンドに変えます：
+
+| 構成要素 | 機能 |
+| --- | --- |
+| **`$ARGUMENTS`** | コマンドの後にユーザーが入力したものを注入します。`/review src/auth.ts` → パスがプロンプトに入ります。 |
+| **bash を実行して出力を埋め込む** | コマンドはシェル出力（例：現在の diff）を含めることができ、Claude はライブ状態で動作します。 |
+| **ファイル参照** | ファイルを指定して内容を含めます。 |
+| **フロントマター** | `description`（メニューに表示）とその他のオプション。 |
+
+引数、bash、ファイル参照の正確な構文は[公式ドキュメント](https://code.claude.com/docs/en/slash-commands)を参照してください。
+
+## 盗む価値のあるコマンド
+
+スタータセットは[スラッシュコマンドライブラリ](/docs/templates/slash-commands)にあります：コミットメッセージ、PR 説明、コードレビュー、changelog、コンポーネントのスキャフォールド。
+
+## コマンド対 スキル 対 サブエージェント
+
+作業をパッケージ化する 3 つの方法 — 違いは*誰がトリガーするか*と*どれだけ隔離して実行するか*：
+
+- **スラッシュコマンド** — *あなた*が既知のワークフローをオンデマンドでトリガーします。
+- **[スキル](/docs/claude-code/skills)** — Claude が関連時に*自動的に*専門知識を読み込みます。
+- **[サブエージェント](/docs/claude-code/subagents)** — 作業の一部を隔離されたエージェントに委任します。
+
+<Flashcards cards={[{front: "スラッシュコマンド", back: "/word と入力して既知のワークフローをオンデマンドで実行します。"}, {front: "スキル", back: "関連時に Claude が自動的に専門知識を読み込みます — あなたが呼び出す必要はありません。"}, {front: "サブエージェント", back: "作業の一部を隔離されたエージェントに委任します。"}, {front: ".claude/commands/x.md", back: "プロジェクトコマンド /x — リポジトリに存在し、チームで共有可能。"}, {front: "~/.claude/commands/x.md", back: "個人コマンド /x — すべてのプロジェクトで使えます。"}, {front: "$ARGUMENTS", back: "コマンドの後にユーザーが入力したものをプロンプトに注入します。"}]} />
+
+<Quiz title="自己チェック" questions={[{q: "チーム全員がリポジトリで使えるようにスラッシュコマンドを保存する場所は？", options: [".claude/commands/", "~/.claude/commands/", "リポジトリのルートの任意の場所"], answer: 0, explain: ".claude/commands/changelog.md → /changelog はプロジェクトコマンドで、リポジトリに存在し共有可能です。~/.claude/ パスは個人用で、すべてのプロジェクトで使えます。"}, {q: "スラッシュコマンドの名前を決めるのは何ですか？", options: ["フロントマターの description", "Markdown ファイルのファイル名", "本文の最初の見出し"], answer: 1, explain: "ファイル名がコマンドになります：changelog.md → /changelog。本文は Claude が実行するプロンプトです。"}, {q: "$ARGUMENTS はコマンドで何をしますか？", options: ["利用可能なすべてのコマンドを列挙する", "コマンドの後にユーザーが入力したものをプロンプトに注入する", "bash スクリプトを実行する"], answer: 1, explain: "$ARGUMENTS はコマンドの後にユーザーが入力したものを注入します — 例：/review src/auth.ts はパスをプロンプトに入れます。"}, {q: "あなたがトリガーするのではなく、関連時に Claude が自動的に読み込むパッケージング方法は？", options: ["スラッシュコマンド", "スキル", "サブエージェント"], answer: 1, explain: "スキルは関連時に自動的に専門知識を読み込みます。スラッシュコマンドはあなたがオンデマンドでトリガーし、サブエージェントは作業を隔離されたエージェントに委任します。"}]} />
+
+## 次
+
+- [Skills: オンデマンドの専門知識](/docs/claude-code/skills)
+- [Hooks: 決定論的自動化](/docs/claude-code/hooks)
+- [スラッシュコマンドライブラリ](/docs/templates/slash-commands)

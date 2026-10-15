@@ -1,0 +1,96 @@
+# Permissions & Permission Modes
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-code/permissions · AILmanac (CC BY 4.0) · last verified 2026-08-18
+
+allow/ask/deny rules and modes — cut prompts without losing safety.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-18" source="https://code.claude.com/docs/en/whats-new/2026-w32">
+Exact rule syntax and mode names evolve — confirm against the official Claude Code permissions and permission-modes docs. **Since v2.1.283:** `auto` is the built-in starting mode for interactive terminal and VS Code sessions on every plan and provider (see below).
+</VerifyNote>
+
+<Callout type="objectives" items={["What the three permission verdicts (allow / ask / deny) mean", "How permission rules match a tool plus a pattern", "The six permission modes and when to use each one", "Why auto mode is now the starting mode for interactive sessions — and how to opt out", "How auto mode replaces prompts with a safety classifier", "How to build a sane starting allowlist that cuts prompts without losing safety", "Where to store project vs. personal permission rules"]} />
+
+Permissions decide **what Claude Code can do without stopping to ask you**. Tune them well and you get flow without losing control; tune them badly and you either rubber-stamp everything or drown in prompts.
+
+## The three verdicts
+
+Every potential action resolves to one of:
+
+<Flashcards cards={[{front: "allow", back: "Do it, no prompt."}, {front: "ask", back: "Pause and ask you — the default for anything not explicitly allowed or denied."}, {front: "deny", back: "Never, not even if asked."}]} />
+
+Rules typically match a tool plus a pattern, e.g. allow `Bash(npm run test:*)` or deny `Read(./.env)`.
+
+<PromptCard title="Allow a tool + pattern">{`Bash(npm run test:*)`}</PromptCard>
+
+<PromptCard title="Deny a tool + pattern">{`Read(./.env)`}</PromptCard>
+
+## Permission modes
+
+A mode sets the overall posture for a session. There are six. Cycle the common ones with `Shift+Tab`, or set `permissions.defaultMode` in settings.
+
+| Mode | Runs without asking | Use when |
+|---|---|---|
+| **`default`** (shown as **Manual**) | Reads only | Day-to-day work, sensitive changes |
+| **`acceptEdits`** | Reads, file edits, common filesystem commands | A trusted, well-scoped editing session |
+| **`plan`** | Reads, plus classifier-approved commands when auto mode is available; never edits your source | Big/risky tasks — see [Plan Mode](/docs/claude-code/plan-mode) |
+| **`auto`** *(the starting mode for interactive sessions since v2.1.283)* | Everything, screened by a safety classifier | Long tasks where prompt fatigue is the real risk |
+| **`dontAsk`** | File reads in your working directories and pre-approved tools; anything that would prompt is denied | Locked-down CI and scripts |
+| **`bypassPermissions`** | Everything, no checks | Sandboxes/containers only — **never** on a machine with secrets |
+
+### Auto mode is now Claude Code's default
+
+Since Claude Code **v2.1.283**, `auto` is the built-in starting mode for interactive terminal and VS Code sessions on **every plan and provider**. On earlier versions it was the default for new sessions only on Pro, Max, and Team plans, from August 14, 2026. Anthropic's rationale (from their own testing of over 1,000 paid users): the classifier caught **89%** of harmful actions vs **13.6%** for manual review — because habituated users accepted about 97% of manual prompts without reading them.
+
+Two carve-outs preserve intent:
+
+- If **you** set `permissions.defaultMode` in your user settings, it stays put unless you accept a one-time in-app switch prompt.
+- If **your organization** manages the default (Team/Enterprise managed settings), nothing changes automatically.
+
+You can always cycle modes mid-session with `Shift+Tab`. Related change already in effect on those plans: the classifier calls auto mode makes **no longer count against your usage limits**.
+
+<PromptCard title="Opt in early (before Aug 14) — set auto as your default">{`~/.claude/settings.json
+{
+  "permissions": {
+    "defaultMode": "auto"
+  }
+}`}</PromptCard>
+
+<PromptCard title="Stick with the old prompting behavior after Aug 14">{`~/.claude/settings.json
+{
+  "permissions": {
+    "defaultMode": "default"
+  }
+}`}</PromptCard>
+
+### How auto mode actually works
+
+`auto` is the middle ground between prompting for everything and turning safety off. Instead of asking you, a separate **classifier model** reviews each action before it runs and blocks anything that escalates beyond what you asked for, touches infrastructure it doesn't recognise, or looks driven by hostile content Claude just read. Explicit `ask` rules still stop and ask you.
+
+It blocks things like `curl | bash`, force pushes, production deploys and migrations, `rm -rf` on unresolved variables, transcript tampering, destructive git commands that discard uncommitted work, and sending secrets to external endpoints — while letting routine work (local edits, installing declared dependencies, read-only HTTP, pushing to your own branch) run straight through. If it blocks the same action repeatedly, auto mode pauses and hands prompting back to you.
+
+Auto mode is not a safety guarantee — it reduces prompts, it doesn't remove the need to review sensitive operations. Availability depends on your plan, model, and (on Team/Enterprise) an admin toggle. If you run truly unattended (cron, cloud sessions, CI), pair it with [Hardening Autonomous Runs](/docs/security/hardening-autonomous-runs) — auto still isn't `bypassPermissions`.
+
+<Callout type="warning" items={["bypassPermissions belongs in a sandbox. Running with all prompts off on your real machine is how an agent ends up touching something it shouldn't. Reserve it for disposable environments — if what you actually want is fewer prompts, use auto mode instead. See Hardening Autonomous Runs at /docs/security/hardening-autonomous-runs."]} />
+
+## A sane starting allowlist
+
+The goal: pre-allow the safe, repetitive things; keep destructive things on **ask** or **deny**.
+
+<Steps items={[{title: "Allow the safe + repetitive", body: "Read files, run your test/lint/build commands, git status/diff."}, {title: "Ask before the medium-risk", body: "Installing dependencies, writing files outside the project, network calls."}, {title: "Deny the destructive", body: "Reading secret files (.env, key files), force-push, rm -rf."}]} />
+
+Store project rules in [`settings.json`](/docs/claude-code/settings) (shared) and personal overrides in `settings.local.json`.
+
+<Callout type="tip" items={["Let it learn from your prompts: approve the same safe command a few times and you'll know exactly what to add to your allowlist — turning repeated prompts into a one-time rule."]} />
+
+<Callout type="takeaways" items={["Three verdicts: allow (no prompt), ask (default — pause and confirm), deny (never).", "Rules match a tool plus a pattern, like Bash(npm run test:*) or Read(./.env).", "Six modes set session posture: default (Manual), acceptEdits, plan, auto, dontAsk, bypassPermissions.", "Since v2.1.283, auto is the starting mode for interactive terminal and VS Code sessions on every plan; a defaultMode you set yourself stays in place, and organization-managed defaults are untouched.", "auto mode screens every action through a safety classifier instead of prompting you — that's the tool for prompt fatigue, not bypassPermissions.", "Build an allowlist: allow safe + repetitive, ask for medium-risk, deny destructive.", "Shared rules go in settings.json; personal overrides in settings.local.json."]} />
+
+<Quiz title="Check yourself" questions={[{q: "What does the default 'ask' verdict do for an action that is not explicitly allowed or denied?", options: ["Runs it silently", "Pauses and asks you to confirm", "Blocks it permanently"], answer: 1, explain: "ask is the default for anything not explicitly allowed/denied — it pauses and asks you."}, {q: "Which permission mode is safe ONLY in sandboxes or containers, never on a machine with secrets?", options: ["plan", "acceptEdits", "bypassPermissions"], answer: 2, explain: "bypassPermissions skips prompts and safety checks entirely; reserve it for disposable environments — never on a machine with secrets."}, {q: "You want far fewer permission prompts on a long task, but you still want a safety net. Which mode?", options: ["bypassPermissions — it skips every prompt", "auto — a classifier screens each action and blocks risky ones", "dontAsk — it never interrupts you"], answer: 1, explain: "auto mode replaces prompts with a classifier that blocks escalations like curl | bash, force pushes, and production deploys. bypassPermissions removes the safety net; dontAsk simply denies anything not pre-approved."}, {q: "Where should you store shared project permission rules versus personal overrides?", options: ["Both in settings.local.json", "Project rules in settings.json; personal overrides in settings.local.json", "Project rules in settings.local.json; personal overrides in settings.json"], answer: 1, explain: "Project rules go in settings.json (shared); personal overrides go in settings.local.json."}, {q: "Which of these belongs on the 'deny' list in a sane starting allowlist?", options: ["git status / diff", "rm -rf and reading .env", "Running your test/lint/build commands"], answer: 1, explain: "Deny destructive things: reading secret files (.env, key files), force-push, and rm -rf."}, {q: "On Aug 14, 2026, what happens on a Pro plan if you had already set permissions.defaultMode to 'default' in your user settings?", options: ["It's overwritten to 'auto' automatically", "It stays 'default' unless you accept a one-time in-app switch prompt", "Auto mode is silently applied to every new session anyway"], answer: 1, explain: "A defaultMode you set yourself in user settings is preserved; Claude Code offers a one-time switch prompt but does not overwrite your choice. Organization-managed defaults are also untouched."}]} />
+
+## Next
+
+- [settings.json: The Config System](/docs/claude-code/settings)
+- [Hooks](/docs/claude-code/hooks) — enforce rules deterministically, beyond allow/deny
+- [Sandbox Credential Masking](/docs/claude-code/sandbox-credential-masking) — let `gh`, `npm`, and `aws` authenticate without the sandboxed command ever holding the real secret
+- [Security & Responsible Use](/docs/security/responsible-use)

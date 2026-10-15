@@ -1,0 +1,95 @@
+# Hooks & settings.json Recipes
+
+> Source: https://derob98.github.io/ailmanac/docs/templates/hooks-settings · AILmanac (CC BY 4.0) · last verified 2026-08-03
+
+Copy-paste formatter, quality-gate, and safety-guard hooks plus starter settings.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-03" source="https://code.claude.com/docs/en/hooks">
+Settings/hook keys evolve — confirm the current schema in the official Claude Code settings & hooks docs.
+</VerifyNote>
+
+Drop-in recipes for [`settings.json`](/docs/claude-code/settings), [permissions](/docs/claude-code/permissions), and [hooks](/docs/claude-code/hooks). Adapt commands to your stack.
+
+## Starter project `settings.json`
+
+`.claude/settings.json` (committed, team-wide):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Bash(npm run test:*)",
+      "Bash(npm run lint)",
+      "Bash(git status)",
+      "Bash(git diff:*)"
+    ],
+    "ask": ["Bash(npm install:*)", "Write"],
+    "deny": ["Read(./.env)", "Read(./**/*.pem)", "Bash(git push --force:*)"]
+  }
+}
+```
+
+Put personal/machine-specific overrides in `.claude/settings.local.json` (git-ignored).
+
+## Auto-format after edits
+
+Hooks receive tool input as JSON on **stdin** (not env vars). The file path lives at `.tool_input.file_path`.
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "f=$(jq -r '.tool_input.file_path'); npx prettier --write \"$f\" 2>/dev/null || true" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+## Quality gate before finishing
+
+Block "done" until tests pass (conceptual — wire to a `Stop`/pre-finish event per the docs):
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "npm test --silent" } ] }
+    ]
+  }
+}
+```
+
+## Safety guard (block editing protected paths)
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "f=$(jq -r '.tool_input.file_path'); case \"$f\" in *secrets*|*.env|*/vendor/*) echo 'blocked: protected path'; exit 1;; esac" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+:::tip Keep hooks fast and idempotent
+They run constantly. Make them quick, safe to re-run, and loud only on real problems.
+:::
+
+## Next
+
+- [Permissions & Permission Modes](/docs/claude-code/permissions)
+- [Hooks: Deterministic Automation](/docs/claude-code/hooks)
+- [Slash Command Library](/docs/templates/slash-commands)

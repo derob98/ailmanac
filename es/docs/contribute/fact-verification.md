@@ -1,0 +1,52 @@
+# Verificación de hechos y actualidad
+
+> Source: https://derob98.github.io/ailmanac/es/docs/contribute/fact-verification · AILmanac (CC BY 4.0) · last verified 2026-08-10
+
+Cómo fechar los datos volátiles y responder a las incidencias que necesitan verificación.
+
+<LevelBadge level="intermediate" />
+
+"Siempre actualizado" es una promesa que cumplimos con un sistema sencillo y honesto, no con magia. Así es como la sostienes cuando contribuyes.
+
+## Perennes frente a volátiles
+
+- **Perennes** — conceptos que no cambian (qué es un LLM, qué es RAG). **No necesitan fecha.**
+- **Volátiles** — todo lo que cambia de una versión a otra: nombres/IDs de modelos, precios, límites, etiquetas de la interfaz, disponibilidad de betas/funciones, flags exactos de la CLI. **Deben llevar una fecha + una fuente.**
+
+## Marca los hechos volátiles
+
+Usa el componente `<VerifyNote>` justo debajo de la insignia de nivel:
+
+```mdx
+<VerifyNote lastVerified="2026-08-10" source="https://platform.claude.com/docs/...">
+One line on what's volatile here and to confirm at the source.
+</VerifyNote>
+```
+
+- **`lastVerified`** = la fecha en la que *tú* realmente lo comprobaste contra la fuente.
+- **`source`** = la página oficial que es la autoridad.
+
+## Nunca codifiques datos de modelos a mano
+
+Los IDs/precios/contexto de los modelos viven **únicamente** en `data/models.json`, renderizados por `<ModelTable />` en la [página de modelos](/docs/whats-new/models-and-pricing). En la prosa, **enlaza allí** en lugar de escribir un ID de modelo o un precio. Actualizar modelos = una edición de una línea en ese JSON (un primer PR perfecto).
+
+## Responder a `needs-verification`
+
+La automatización (y los lectores) abren incidencias con la etiqueta `needs-verification` cuando un dato puede estar desactualizado. Para resolver una:
+
+1. Comprueba la afirmación contra la fuente oficial.
+2. Si es correcta → actualiza `lastVerified` a la fecha de hoy.
+3. Si ha cambiado → corrige el contenido **y** la fecha, y enlaza la fuente.
+4. Si es un dato de un modelo → actualiza `data/models.json`, no la prosa.
+
+## El principio de honestidad
+
+:::tip Una fecha antigua es una ventaja
+Una `lastVerified` de hace meses no significa que hayamos fallado: le dice al lector que vuelva a comprobar *ese* dato. Mejor una fecha antigua honesta que una incorrecta con seguridad. No actualices una fecha que no hayas vuelto a verificar de verdad.
+:::
+
+## Siguiente
+
+- [Cómo funcionan los niveles y la actualidad](/docs/start-here/levels-and-freshness)
+- [Cómo funciona nuestra automatización](/docs/contribute/automation)
+- [Guía de estilo de contenido](/docs/contribute/style-guide)

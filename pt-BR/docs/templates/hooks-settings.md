@@ -1,0 +1,93 @@
+# Receitas de Hooks e settings.json
+
+> Source: https://derob98.github.io/ailmanac/pt-BR/docs/templates/hooks-settings · AILmanac (CC BY 4.0) · last verified 2026-08-03
+
+Hooks de formatação, controle de qualidade e proteção de segurança prontos para copiar e colar, além de configurações iniciais.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-03" source="https://code.claude.com/docs/en/hooks">
+As chaves de configurações/hooks evoluem — confirme o schema atual na documentação oficial de configurações e hooks do Claude Code.
+</VerifyNote>
+
+Receitas prontas para uso em [`settings.json`](/docs/claude-code/settings), [permissões](/docs/claude-code/permissions) e [hooks](/docs/claude-code/hooks). Adapte os comandos ao seu stack.
+
+## `settings.json` inicial do projeto
+
+`.claude/settings.json` (versionado, para toda a equipe):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Bash(npm run test:*)",
+      "Bash(npm run lint)",
+      "Bash(git status)",
+      "Bash(git diff:*)"
+    ],
+    "ask": ["Bash(npm install:*)", "Write"],
+    "deny": ["Read(./.env)", "Read(./**/*.pem)", "Bash(git push --force:*)"]
+  }
+}
+```
+
+Coloque sobrescritas pessoais/específicas da máquina em `.claude/settings.local.json` (ignorado pelo git).
+
+## Formatação automática após edições
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "f=$(jq -r '.tool_input.file_path'); npx prettier --write \"$f\" 2>/dev/null || true" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+## Controle de qualidade antes de finalizar
+
+Bloqueia o "concluído" até que os testes passem (conceitual — conecte a um evento `Stop`/pré-finalização conforme a documentação):
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "npm test --silent" } ] }
+    ]
+  }
+}
+```
+
+## Proteção de segurança (bloqueia edição de caminhos protegidos)
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "f=$(jq -r '.tool_input.file_path'); case \"$f\" in *secrets*|*.env|*/vendor/*) echo 'blocked: protected path'; exit 1;; esac" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+:::tip Mantenha os hooks rápidos e idempotentes
+Eles rodam o tempo todo. Faça-os rápidos, seguros para reexecutar e ruidosos apenas em problemas reais.
+:::
+
+## A seguir
+
+- [Permissões e Modos de Permissão](/docs/claude-code/permissions)
+- [Hooks: Automação Determinística](/docs/claude-code/hooks)
+- [Biblioteca de Slash Commands](/docs/templates/slash-commands)

@@ -1,0 +1,140 @@
+# Dein erster API-Aufruf
+
+> Source: https://derob98.github.io/ailmanac/de/docs/api/first-call · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+Installiere das SDK, authentifiziere dich und führe einen echten Aufruf an Claude in Python, TypeScript oder cURL aus.
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/api/getting-started">
+Die unten gezeigte API-Struktur ist stabil, aber Modell-IDs und SDK-Versionen ändern sich. Siehe die [aktuelle Modelltabelle](/docs/whats-new/models-and-pricing).
+</VerifyNote>
+
+Die API ermöglicht es *deinem* Programm, mit Claude zu sprechen. Am Ende dieser Lektion hast du eine echte Anfrage ausgeführt und verstehst genau, was jeder Bestandteil davon tut.
+
+<Callout type="objectives" items={["Einen API-Schlüssel erstellen und sicher als Umgebungsvariable speichern", "Das offizielle SDK für Python oder TypeScript installieren (oder einfaches cURL verwenden)", "Deine erste messages-Anfrage senden und Claudes Antwort lesen", "Die vier Kernfelder verstehen: model, max_tokens, messages und system"]} />
+
+## Der gesamte Weg in drei Schritten
+
+Alles unten passt in eine einfache Abfolge. Behalte diese Karte im Kopf, während du vorgehst.
+
+<Steps items={[{title: "Einen API-Schlüssel besorgen", body: "Erstelle einen Schlüssel in der Anthropic Console und exportiere ihn als Umgebungsvariable, damit er niemals in deinem Code liegt."}, {title: "Das SDK installieren", body: "Füge das anthropic-Paket für Python oder @anthropic-ai/sdk für TypeScript hinzu. Bei cURL gibt es nichts zu installieren."}, {title: "Den Aufruf ausführen", body: "Sende eine Liste von Nachrichten an das Modell und gib den zurückgegebenen content aus."}]} />
+
+## 1. Einen API-Schlüssel besorgen
+
+Erstelle einen in der [Anthropic Console](https://console.anthropic.com). Setze ihn dann als Umgebungsvariable, damit er niemals in deinem Code liegt:
+
+<PromptCard title="Exportiere deinen API-Schlüssel">{`export ANTHROPIC_API_KEY="sk-ant-..."`}</PromptCard>
+
+<Callout type="warning" items={["Committe niemals deinen Schlüssel. Bewahre Schlüssel in Umgebungsvariablen oder einem Secrets-Manager auf, niemals in der Versionsverwaltung. Siehe die Sicherheitsseite (/docs/security)."]} />
+
+## 2. Das SDK installieren
+
+Wähle deine Sprache. Das SDK liest den Schlüssel automatisch aus der Umgebungsvariable, die du gerade gesetzt hast.
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+<PromptCard title="Installation (Python)">{`pip install anthropic`}</PromptCard>
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+<PromptCard title="Installation (TypeScript)">{`npm install @anthropic-ai/sdk`}</PromptCard>
+
+</TabItem>
+<TabItem value="curl" label="cURL">
+
+Nichts zu installieren — du brauchst nur `curl`.
+
+</TabItem>
+</Tabs>
+
+## 3. Den Aufruf ausführen
+
+Jede Anfrage ist eine Liste von `messages`. Das Modell antwortet mit `content`. Führe den Codeausschnitt für deine Sprache aus, und du wirst sehen, wie Claude die Frage beantwortet.
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+
+message = client.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=1024,
+    messages=[
+        {"role": "user", "content": "In one sentence, what is an API?"}
+    ],
+)
+
+print(message.content[0].text)
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic(); // reads ANTHROPIC_API_KEY from the environment
+
+const message = await client.messages.create({
+  model: "claude-sonnet-5",
+  max_tokens: 1024,
+  messages: [
+    { role: "user", content: "In one sentence, what is an API?" },
+  ],
+});
+
+console.log(message.content[0].text);
+```
+
+</TabItem>
+<TabItem value="curl" label="cURL">
+
+```bash
+curl https://api.anthropic.com/v1/messages \
+  --header "x-api-key: $ANTHROPIC_API_KEY" \
+  --header "anthropic-version: 2023-06-01" \
+  --header "content-type: application/json" \
+  --data '{
+    "model": "claude-sonnet-5",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "In one sentence, what is an API?"}
+    ]
+  }'
+```
+
+</TabItem>
+</Tabs>
+
+## Was gerade passiert ist
+
+Du hast vier Informationen gesendet. Hier ist, was jede davon steuert:
+
+- **`model`** — welches Claude verwendet werden soll. Verdrahte es nicht blind fest; siehe [Ein Modell auswählen](/docs/api/choosing-a-model).
+- **`max_tokens`** — eine Obergrenze für die Antwortlänge (in [Tokens](/docs/foundations)). Es legt *nicht* das Kontextfenster fest.
+- **`messages`** — die bisherige Konversation. Die API ist **zustandslos**: Um einen Chat fortzusetzen, sende jedes Mal den gesamten Verlauf zurück.
+- **`system`** (optional) — eine übergeordnete Anweisung, die Claudes Rolle für den Aufruf festlegt.
+
+<Flashcards title="Die vier Kernfelder" cards={[{front: "model", back: "Welches Claude verwendet werden soll. Wähle es bewusst, anstatt es blind fest zu verdrahten."}, {front: "max_tokens", back: "Eine Obergrenze für die Antwortlänge, in Tokens. Es legt NICHT das Kontextfenster fest."}, {front: "messages", back: "Die bisherige Konversation. Die API ist zustandslos, also sendest du in jeder Runde den gesamten Verlauf erneut."}, {front: "system", back: "Optionale übergeordnete Anweisung, die Claudes Rolle für den Aufruf festlegt."}]} />
+
+<Callout type="tip" items={["Da die API zustandslos ist, ist ein mehrstufiger Chat einfach ein wachsendes messages-Array: hänge jede Antwort an und sende beim nächsten Aufruf die vollständige Liste erneut."]} />
+
+<Quiz title="Überprüfe dich selbst" questions={[{q: "Was steuert max_tokens?", options: ["Die Größe des Kontextfensters", "Eine Obergrenze für die Länge von Claudes Antwort", "Wie viele Nachrichten du senden kannst"], answer: 1, explain: "max_tokens begrenzt die Antwortlänge in Tokens. Es legt nicht das Kontextfenster fest."}, {q: "Wie setzt du eine mehrstufige Konversation mit der API fort?", options: ["Der Server merkt sich deine vorherigen Nachrichten automatisch", "Du sendest jedes Mal den gesamten Nachrichtenverlauf erneut, weil die API zustandslos ist", "Du setzt einen Session-ID-Header"], answer: 1, explain: "Die Messages-API ist zustandslos: Um einen Chat fortzusetzen, sendest du bei jeder Anfrage den gesamten Konversationsverlauf zurück."}, {q: "Wo sollte dein API-Schlüssel liegen?", options: ["In einer Umgebungsvariable oder einem Secrets-Manager", "Fest verdrahtet in deiner Quelldatei", "Aus Bequemlichkeit in dein Repository committet"], answer: 0, explain: "Bewahre Schlüssel in Umgebungsvariablen oder einem Secrets-Manager auf, niemals in der Versionsverwaltung."}]} />
+
+<Callout type="takeaways" items={["Drei Schritte: einen Schlüssel besorgen, das SDK installieren, eine messages-Anfrage senden.", "Speichere den Schlüssel in ANTHROPIC_API_KEY, damit das SDK ihn automatisch liest und er niemals in deinen Code gelangt.", "Eine Anfrage ist eine Liste von Nachrichten; die Antwort kommt in content zurück.", "Die API ist zustandslos: sende den vollständigen Konversationsverlauf erneut, um einen Chat fortzusetzen.", "model, max_tokens, messages und system sind die Felder, zu denen du zuerst greifen wirst."]} />
+
+## Weiter
+
+- Das richtige Modell wählen & Kosten schätzen → [Ein Modell auswählen](/docs/api/choosing-a-model) · [Tokens & Preise](/docs/api)
+- Antworten streamen und eine Konversation führen → [Streaming & mehrstufige Konversationen](/docs/api)
+- Claude deine Funktionen aufrufen lassen → [Tool-Nutzung](/docs/api)
+- Produktionsreife Snippets → [API-Snippets](/docs/templates)

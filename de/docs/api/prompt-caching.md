@@ -1,0 +1,125 @@
+# Prompt-Caching & Kostenoptimierung
+
+> Source: https://derob98.github.io/ailmanac/de/docs/api/prompt-caching · AILmanac (CC BY 4.0) · last verified 2026-06-21
+
+Einen stabilen Prompt-Präfix wiederverwenden, um Kosten und Latenz zu senken — und die Falle, die es zunichtemacht.
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-06-21" source="https://platform.claude.com/docs/en/build-with-claude/prompt-caching">
+Cache-Mechanik, Eignung sowie die Preisgestaltung von gecachten gegenüber frischen Tokens ändern sich — prüfe dies in der offiziellen Prompt-Caching-Dokumentation.
+</VerifyNote>
+
+Wenn viele deiner Anfragen einen großen, unveränderlichen Block teilen — einen langen System-Prompt, ein großes Dokument, einen Tool-Katalog — ermöglicht **Prompt-Caching** der API, den bereits verarbeiteten Präfix wiederzuverwenden, statt ihn bei jedem Aufruf erneut einzulesen. Das senkt sowohl **Kosten** als auch **Latenz** beim gecachten Teil.
+
+<Callout type="objectives" items={["Das mentale Modell: ein Cache-Breakpoint nach einem stabilen Präfix, über Aufrufe hinweg wiederverwendet","Wie man den Breakpoint in Python und TypeScript mit cache_control markiert","Die eine Invariante, an der es steht oder fällt — der Präfix muss Byte für Byte identisch sein","Wie man die usage-Felder liest, um zu bestätigen, dass man wirklich Cache-Treffer erzielt","Wo sich Caching am meisten lohnt und wie man es mit Batching und der richtigen Modelldimensionierung kombiniert"]} />
+
+## Wie es funktioniert (das mentale Modell)
+
+Du markierst einen **Cache-Breakpoint** nach dem stabilen Präfix. Beim ersten Aufruf wird er verarbeitet und gecacht; nachfolgende Aufrufe, die den **exakt gleichen Präfix** teilen, treffen den Cache und zahlen dafür deutlich weniger.
+
+```mermaid
+flowchart LR
+  A[Stable prefix: system + docs + tools] -->|cache_control breakpoint| B[Variable part: the user's turn]
+  A2[Next request, same prefix] -->|cache hit| B2[New variable part]
+```
+
+<Flashcards title="Caching-Vokabular" cards={[{front:"Cache-Breakpoint","back":"Der cache_control-Marker, der nach dem stabilen Präfix platziert wird. Alles bis einschließlich des markierten Blocks wird gecacht."},{front:"Cache-Schreibvorgang","back":"Der kleine Aufschlag des ersten Aufrufs, um den Cache zu befüllen."},{front:"Cache-Lesevorgang","back":"Jeder spätere Aufruf mit demselben Präfix liest ihn zu einem Bruchteil des Eingabepreises zurück."},{front:"Stiller Invalidator","back":"Ein wechselnder Wert nahe dem Anfang des Prompts (Zeitstempel, Benutzername, umsortierte Tool-Liste), der den Präfix ändert und die Trefferquote stillschweigend auf null fallen lässt."}]} />
+
+## Den Breakpoint setzen (zum Kopieren)
+
+Füge `cache_control` zum **letzten stabilen Block** hinzu — hier ein großer System-Prompt. Der Turn des Nutzers kommt danach und variiert frei; alles bis einschließlich des markierten Blocks wird gecacht.
+
+<Steps items={[{title: "Den stabilen Präfix identifizieren", body: "Finde den großen, unveränderlichen Block — einen langen System-Prompt, ein großes Dokument oder einen Tool-Katalog, der über viele Anfragen hinweg wiederverwendet wird."},{title: "cache_control an seinen letzten Block anhängen", body: "Markiere den letzten stabilen Block mit cache_control vom Typ ephemeral, sodass der Präfix bis einschließlich dieses Blocks gecacht wird."},{title: "Den variablen Teil folgen lassen", body: "Setze den Turn des Nutzers nach den markierten Block — er variiert bei jedem Aufruf frei und wird zum vollen Preis abgerechnet."},{title: "Den Treffer bestätigen", body: "Lies cache_read_input_tokens aus dem usage der Antwort. Größer als null bedeutet, du hast einen Cache-Treffer erzielt."}]} />
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()
+
+message = client.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=1024,
+    system=[
+        {
+            "type": "text",
+            "text": LARGE_STABLE_PROMPT,  # long, unchanging — the cached prefix
+            "cache_control": {"type": "ephemeral"},
+        }
+    ],
+    messages=[{"role": "user", "content": "Summarize the key points."}],  # varies per call
+)
+
+print(message.usage.cache_read_input_tokens)  # > 0 means you got a hit
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic();
+
+const message = await client.messages.create({
+  model: "claude-sonnet-5",
+  max_tokens: 1024,
+  system: [
+    {
+      type: "text",
+      text: LARGE_STABLE_PROMPT, // long, unchanging — the cached prefix
+      cache_control: { type: "ephemeral" },
+    },
+  ],
+  messages: [{ role: "user", content: "Summarize the key points." }], // varies per call
+});
+
+console.log(message.usage.cache_read_input_tokens); // > 0 means you got a hit
+```
+
+</TabItem>
+</Tabs>
+
+Der erste Aufruf zahlt einen kleinen **Schreib**-Aufschlag, um den Cache zu befüllen; jeder spätere Aufruf mit demselben Präfix liest ihn zu einem Bruchteil des Eingabepreises zurück. Der Präfix muss lang genug sein, um in Frage zu kommen — einige tausend Tokens, je nach Modell —, sonst wird er stillschweigend nicht gecacht.
+
+## Die Invariante, an der es steht oder fällt
+
+:::warning Caching ist präfix-exakt
+Ein Cache-Treffer erfordert, dass der gecachte Präfix **Byte für Byte identisch** ist. Der häufigste Fehler: ein *stiller Invalidator* nahe dem Anfang des Prompts — ein Zeitstempel, ein wechselnder Benutzername, eine umsortierte Tool-Liste — der den Präfix ändert und deine Trefferquote stillschweigend auf null fallen lässt.
+:::
+
+**Setze alles Stabile zuerst, alles Variable zuletzt** und halte den Präfix wirklich konstant.
+
+## Prüfen, ob es tatsächlich funktioniert
+
+Verlasse dich nicht auf Annahmen — lies es aus dem `usage` der Antwort zurück:
+
+- **`cache_creation_input_tokens`** — Tokens, die bei diesem Aufruf in den Cache geschrieben wurden (die erste Anfrage).
+- **`cache_read_input_tokens`** — Tokens, die aus dem Cache bedient wurden (die Einsparung).
+- **`input_tokens`** — der nicht gecachte Rest, zum vollen Preis abgerechnet.
+
+Wenn `cache_read_input_tokens` über wiederholte Anfragen hinweg, die einen Präfix teilen sollten, bei **null** bleibt, ist ein stiller Invalidator am Werk — vergleiche die gerenderten Prompt-Bytes zweier Aufrufe, um ihn zu finden.
+
+## Wo es sich am meisten lohnt
+
+- Lange **System-Prompts**, die über Nutzer hinweg wiederverwendet werden.
+- **RAG / Dokument-Q&A**, bei dem derselbe Quelltext wiederholt abgefragt wird.
+- **Agenten** mit einem festen Tool-Katalog und festen Anweisungen über viele Runden hinweg.
+
+Kombiniere Caching mit **Batching** für Offline-Workloads und mit der richtigen Dimensionierung des Modells ([Ein Modell auswählen](/docs/api/choosing-a-model)) für die größten kombinierten Einsparungen — siehe [Kosten & Latenz](/docs/foundations/cost-and-latency).
+
+<Quiz title="Überprüfe dich selbst" questions={[{q:"Was erfordert ein Cache-Treffer vom gecachten Präfix?",options:["Er muss mindestens ein Token lang sein","Er muss Byte für Byte identisch mit dem vorherigen Präfix sein","Er muss nach dem Turn des Nutzers kommen"],answer:1,explain:"Ein Cache-Treffer erfordert, dass der gecachte Präfix Byte für Byte identisch ist. Jede Änderung — ein Zeitstempel, eine umsortierte Tool-Liste — macht ihn ungültig."},{q:"Welches usage-Feld sagt dir, dass Tokens aus dem Cache bedient wurden (deine Einsparung)?",options:["input_tokens","cache_creation_input_tokens","cache_read_input_tokens"],answer:2,explain:"cache_read_input_tokens sind die aus dem Cache bedienten Tokens. cache_creation_input_tokens ist das, was beim ersten Aufruf geschrieben wurde; input_tokens ist der nicht gecachte Rest, der zum vollen Preis abgerechnet wird."},{q:"Wohin sollte der variable Inhalt pro Aufruf relativ zum Cache-Breakpoint?",options:["Vor den stabilen Präfix","Zuletzt — nach den markierten Block","Über den gesamten System-Prompt verteilt"],answer:1,explain:"Setze alles Stabile zuerst und alles Variable zuletzt. Der Turn des Nutzers kommt nach den markierten Block und variiert bei jedem Aufruf frei."}]} />
+
+<Callout type="takeaways" items={["Markiere einen Cache-Breakpoint nach dem stabilen Präfix; der erste Aufruf schreibt ihn, spätere Aufrufe lesen ihn günstig zurück.","Ein Cache-Treffer braucht einen Byte für Byte identischen Präfix — halte stabilen Inhalt zuerst, variablen Inhalt zuletzt.","Stille Invalidatoren nahe dem Anfang des Prompts (Zeitstempel, Namen, umsortierte Tools) lassen die Trefferquote stillschweigend auf null fallen.","Überprüfe es mit usage: cache_read_input_tokens > 0 bedeutet einen Treffer; null über wiederholte Anfragen hinweg bedeutet, dass ein Invalidator am Werk ist.","Caching lohnt sich am meisten für wiederverwendete System-Prompts, RAG und Agenten; kombiniere es mit Batching und der richtigen Modelldimensionierung."]} />
+
+## Weiter
+
+- [Tokens, Kontext & Preise](/docs/api/tokens-and-pricing)
+- [Streaming & mehrstufige Konversationen](/docs/api/streaming)
+- [Agenten auf der API bauen](/docs/api/building-agents)

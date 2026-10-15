@@ -1,0 +1,76 @@
+# Slash Command Personalizzati
+
+> Source: https://derob98.github.io/ailmanac/it/docs/claude-code/slash-commands · AILmanac (CC BY 4.0) · last verified 2026-07-06
+
+Trasforma un flusso di lavoro ripetibile in una sola parola.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-07-06" source="https://code.claude.com/docs/en/skills">
+La posizione dei file dei comandi e le opzioni del frontmatter possono cambiare — verifica nella documentazione ufficiale sulle skill (i comandi personalizzati ora vivono lì).
+</VerifyNote>
+
+Uno slash command personalizzato impacchetta un prompt che continui a riscrivere in un singolo `/word`. Definiscilo una volta; riusalo per sempre (e condividilo con il tuo team).
+
+<Callout type="info" items={["I comandi personalizzati sono confluiti nelle Skill. Un file in .claude/commands/deploy.md e una skill in .claude/skills/deploy/SKILL.md creano entrambi /deploy e funzionano allo stesso modo — i tuoi file .claude/commands/ esistenti continuano a funzionare. Le Skill aggiungono una directory per file di supporto, frontmatter per il controllo dell'invocazione e caricamento automatico quando pertinente. Per qualsiasi cosa oltre a un prompt in un singolo file, preferisci una Skill."]} />
+
+<Callout type="objectives" items={["Spiegare cos'è uno slash command personalizzato e perché batte il riscrivere un prompt", "Creare un comando inserendo un file Markdown nella directory giusta", "Distinguere i comandi di progetto da quelli personali in base alla loro posizione", "Usare i mattoni di base: $ARGUMENTS, output bash incorporato, riferimenti a file e frontmatter", "Scegliere tra uno slash command, una skill e un subagent per un dato task"]} />
+
+## Come funzionano
+
+Un comando è semplicemente un file Markdown. Inseriscilo nella tua directory dei comandi e il suo nome di file diventa il comando. Il corpo del file è il prompt che Claude esegue quando lo invochi.
+
+La *posizione* del file ne decide lo scope:
+
+<Steps items={[{title: "Comando di progetto (condivisibile)", body: "Salvalo in .claude/commands/changelog.md → /changelog. Risiede nel repo, quindi l'intero team lo ottiene."}, {title: "Comando personale (tutti i progetti)", body: "Salvalo in ~/.claude/commands/changelog.md → /changelog. Ti segue in ogni progetto sulla tua macchina."}, {title: "Invocalo", body: "Digita la /word in Claude Code. Il corpo del file diventa il prompt che Claude esegue."}]} />
+
+<Callout type="tip" items={["È il nome del file — non il frontmatter — a diventare il nome del comando. changelog.md è sempre /changelog."]} />
+
+## Un esempio minimo
+
+Ecco un file di comando completo. Il frontmatter contiene la `description`; tutto ciò che sta sotto è il prompt.
+
+<PromptCard title="commit.md — redigi un Conventional Commit">{`---
+description: Draft a Conventional Commit message from the staged diff
+---
+
+Look at the staged changes with \`git diff --cached\` and write a single
+Conventional Commit message (feat/fix/docs/refactor/chore). Output only the
+message, no preamble.`}</PromptCard>
+
+Salvalo come `commit.md` e `/commit` lo fa ogni volta. (Chiamalo come preferisci che sia il file — lo stesso corpo salvato come `changelog.md` sarebbe `/changelog`.)
+
+## I mattoni di base utili
+
+Quattro ingredienti trasformano un prompt statico in un comando flessibile:
+
+| Mattone di base | Cosa fa |
+| --- | --- |
+| **`$ARGUMENTS`** | Inietta ciò che l'utente ha digitato dopo il comando. `/review src/auth.ts` → il percorso finisce nel tuo prompt. |
+| **Esegui bash e incorpora l'output** | I comandi possono includere l'output della shell (ad es. il diff corrente) così Claude agisce sullo stato attuale. |
+| **Riferisci file** | Punta ai file per includerne i contenuti. |
+| **Frontmatter** | `description` (mostrata nel menu) e altre opzioni. |
+
+Consulta la [documentazione ufficiale](https://code.claude.com/docs/en/slash-commands) per la sintassi esatta di argomenti, bash e riferimenti ai file.
+
+## Comandi che vale la pena rubare
+
+Un set di partenza si trova nella nostra [Libreria di Slash Command](/docs/templates/slash-commands): messaggio di commit, descrizione di PR, code review, changelog, scaffold-a-component.
+
+## Comando vs skill vs subagent
+
+Tre modi per impacchettare il lavoro — la differenza è *chi lo attiva* e *quanto isolato viene eseguito*:
+
+- **Slash command** — sei *tu* ad attivare un flusso di lavoro noto su richiesta.
+- **[Skill](/docs/claude-code/skills)** — Claude carica competenza *automaticamente* quando è pertinente.
+- **[Subagent](/docs/claude-code/subagents)** — delega una porzione di lavoro a un agente isolato.
+
+<Flashcards cards={[{front: "Slash command", back: "Attivi un flusso di lavoro noto su richiesta digitando /word."}, {front: "Skill", back: "Claude carica competenza automaticamente quando è pertinente — non la invochi tu."}, {front: "Subagent", back: "Delega una porzione di lavoro a un agente isolato."}, {front: ".claude/commands/x.md", back: "Comando di progetto /x — risiede nel repo, condivisibile con il team."}, {front: "~/.claude/commands/x.md", back: "Comando personale /x — ti segue in tutti i progetti."}, {front: "$ARGUMENTS", back: "Inietta nel prompt qualunque cosa l'utente abbia digitato dopo il comando."}]} />
+
+<Quiz title="Mettiti alla prova" questions={[{q: "Dove salvi uno slash command in modo che l'intero team lo ottenga nel repo?", options: [".claude/commands/", "~/.claude/commands/", "Ovunque nella root del repo"], answer: 0, explain: ".claude/commands/changelog.md → /changelog è un comando di progetto — risiede nel repo ed è condivisibile. Il percorso ~/.claude/ è personale, per tutti i tuoi progetti."}, {q: "Cosa determina il nome di uno slash command?", options: ["La description nel frontmatter", "Il nome del file Markdown", "Il primo heading nel corpo"], answer: 1, explain: "È il nome del file a diventare il comando: changelog.md → /changelog. Il corpo è il prompt che Claude esegue."}, {q: "Cosa fa $ARGUMENTS in un comando?", options: ["Elenca tutti i comandi disponibili", "Inietta nel prompt ciò che l'utente ha digitato dopo il comando", "Esegue uno script bash"], answer: 1, explain: "$ARGUMENTS inietta ciò che l'utente ha digitato dopo il comando — ad es. /review src/auth.ts fa finire il percorso nel tuo prompt."}, {q: "Quale opzione di impacchettamento Claude carica automaticamente quando è pertinente, invece di essere attivata da te?", options: ["Slash command", "Skill", "Subagent"], answer: 1, explain: "Una skill carica competenza automaticamente quando è pertinente. Uno slash command è attivato da te su richiesta; un subagent delega lavoro a un agente isolato."}]} />
+
+## Avanti
+
+- [Skill: competenza su richiesta](/docs/claude-code/skills)
+- [Hook: automazione deterministica](/docs/claude-code/hooks)
+- [Libreria di Slash Command](/docs/templates/slash-commands)

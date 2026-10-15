@@ -1,0 +1,76 @@
+# Custom Slash Commands
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-code/slash-commands · AILmanac (CC BY 4.0) · last verified 2026-07-06
+
+Turn a repeatable workflow into one word.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-07-06" source="https://code.claude.com/docs/en/skills">
+Command file locations and frontmatter options can change — confirm in the official skills docs (custom commands now live there).
+</VerifyNote>
+
+A custom slash command packages a prompt you keep retyping into a single `/word`. Define it once; reuse it forever (and share it with your team).
+
+<Callout type="info" items={["Custom commands have merged into Skills. A file at .claude/commands/deploy.md and a skill at .claude/skills/deploy/SKILL.md both create /deploy and work the same way — your existing .claude/commands/ files keep working. Skills add a directory for supporting files, invocation-control frontmatter, and automatic loading when relevant. For anything beyond a one-file prompt, prefer a Skill."]} />
+
+<Callout type="objectives" items={["Explain what a custom slash command is and why it beats retyping a prompt", "Create a command by dropping a Markdown file in the right directory", "Tell project commands apart from personal ones by their location", "Use the building blocks: $ARGUMENTS, embedded bash output, file references, and frontmatter", "Choose between a slash command, a skill, and a subagent for a given task"]} />
+
+## How they work
+
+A command is just a Markdown file. Drop it in your commands directory and its filename becomes the command. The file's body is the prompt Claude runs when you invoke it.
+
+The *location* of the file decides its scope:
+
+<Steps items={[{title: "Project command (shareable)", body: "Save it under .claude/commands/changelog.md → /changelog. It lives in the repo, so the whole team gets it."}, {title: "Personal command (all projects)", body: "Save it under ~/.claude/commands/changelog.md → /changelog. It follows you across every project on your machine."}, {title: "Invoke it", body: "Type the /word in Claude Code. The file's body becomes the prompt Claude runs."}]} />
+
+<Callout type="tip" items={["The filename — not the frontmatter — becomes the command name. changelog.md is always /changelog."]} />
+
+## A minimal example
+
+Here is a complete command file. The frontmatter holds the `description`; everything below it is the prompt.
+
+<PromptCard title="commit.md — draft a Conventional Commit">{`---
+description: Draft a Conventional Commit message from the staged diff
+---
+
+Look at the staged changes with \`git diff --cached\` and write a single
+Conventional Commit message (feat/fix/docs/refactor/chore). Output only the
+message, no preamble.`}</PromptCard>
+
+Save that as `commit.md` and `/commit` does it every time. (Name it whatever the file is — the same body saved as `changelog.md` would be `/changelog`.)
+
+## The useful building blocks
+
+Four ingredients turn a static prompt into a flexible command:
+
+| Building block | What it does |
+| --- | --- |
+| **`$ARGUMENTS`** | Injects what the user typed after the command. `/review src/auth.ts` → the path lands in your prompt. |
+| **Run bash and embed output** | Commands can include shell output (e.g. the current diff) so Claude acts on live state. |
+| **Reference files** | Point at files to include their contents. |
+| **Frontmatter** | `description` (shown in the menu) and other options. |
+
+See the [official docs](https://code.claude.com/docs/en/slash-commands) for the exact syntax of arguments, bash, and file references.
+
+## Commands worth stealing
+
+A starter set lives in our [Slash Command Library](/docs/templates/slash-commands): commit message, PR description, code review, changelog, scaffold-a-component.
+
+## Command vs skill vs subagent
+
+Three ways to package work — the difference is *who triggers it* and *how isolated it runs*:
+
+- **Slash command** — *you* trigger a known workflow on demand.
+- **[Skill](/docs/claude-code/skills)** — Claude loads expertise *automatically* when relevant.
+- **[Subagent](/docs/claude-code/subagents)** — delegate a chunk of work to an isolated agent.
+
+<Flashcards cards={[{front: "Slash command", back: "You trigger a known workflow on demand by typing /word."}, {front: "Skill", back: "Claude loads expertise automatically when it's relevant — you don't invoke it."}, {front: "Subagent", back: "Delegates a chunk of work to an isolated agent."}, {front: ".claude/commands/x.md", back: "Project command /x — lives in the repo, shareable with the team."}, {front: "~/.claude/commands/x.md", back: "Personal command /x — follows you across all projects."}, {front: "$ARGUMENTS", back: "Injects whatever the user typed after the command into the prompt."}]} />
+
+<Quiz title="Check yourself" questions={[{q: "Where do you save a slash command so your whole team gets it in the repo?", options: [".claude/commands/", "~/.claude/commands/", "Anywhere in the repo root"], answer: 0, explain: ".claude/commands/changelog.md → /changelog is a project command — it lives in the repo and is shareable. The ~/.claude/ path is personal, for all your projects."}, {q: "What determines the name of a slash command?", options: ["The description in the frontmatter", "The Markdown file's filename", "The first heading in the body"], answer: 1, explain: "The filename becomes the command: changelog.md → /changelog. The body is the prompt Claude runs."}, {q: "What does $ARGUMENTS do in a command?", options: ["Lists all available commands", "Injects what the user typed after the command into the prompt", "Runs a bash script"], answer: 1, explain: "$ARGUMENTS injects what the user typed after the command — e.g. /review src/auth.ts lands the path in your prompt."}, {q: "Which packaging option does Claude load automatically when it's relevant, rather than you triggering it?", options: ["Slash command", "Skill", "Subagent"], answer: 1, explain: "A skill loads expertise automatically when relevant. A slash command is triggered by you on demand; a subagent delegates work to an isolated agent."}]} />
+
+## Next
+
+- [Skills: On-Demand Expertise](/docs/claude-code/skills)
+- [Hooks: Deterministic Automation](/docs/claude-code/hooks)
+- [Slash Command Library](/docs/templates/slash-commands)

@@ -1,0 +1,41 @@
+# Claude on Mobile
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-app/mobile · AILmanac (CC BY 4.0) · last verified 2026-08-02
+
+The iOS and Android apps as a first-class surface.
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-08-02" source="https://www.anthropic.com">
+Mobile features and platform availability change — confirm current capabilities in the app stores / official docs.
+</VerifyNote>
+
+Claude isn't just a desktop tab. The **iOS and Android apps** put it in your pocket — ideal for capturing ideas, quick questions, and [voice](/docs/claude-app/voice-mode) on the go.
+
+## What mobile is great for
+
+- **Capture on the move.** A thought in the elevator, a photo of a whiteboard, a quick "summarize this" — mobile shines for input you'd lose otherwise.
+- **Voice-first.** Talking is often faster than typing on a phone — see [Voice Mode](/docs/claude-app/voice-mode).
+- **Photos & screenshots.** Snap a menu, a form, an error message, a sign, and ask about it (multimodal input).
+- **Continuity.** Conversations and [Projects](/docs/claude-app/projects) sync, so you can start on mobile and finish on desktop.
+
+## What's better on desktop
+
+- Long-form **writing and editing**.
+- Working with **big documents** or lots of files.
+- **[Artifacts](/docs/claude-app/artifacts)** and anything where screen space helps.
+- **Developer** work ([Claude Code](/docs/claude-code/what-is-claude-code) is desktop/CLI).
+
+## A nice mobile workflow
+
+**Capture by voice → refine on screen.** Brain-dump a messy idea by [voice](/docs/claude-app/voice-mode) while walking, then later ask Claude to *"turn that transcript into a clean outline."* The phone gathers raw material; you polish anywhere.
+
+:::tip Use the share sheet
+On mobile you can often share text/links/images straight into Claude from other apps — a fast way to ask "summarize this" without copy-paste.
+:::
+
+## Next
+
+- [Talking to Claude (Voice Mode)](/docs/claude-app/voice-mode)
+- [Getting Started with Claude.ai](/docs/claude-app/getting-started)
+- [Everyday Productivity](/docs/playbooks/productivity)

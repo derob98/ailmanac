@@ -1,0 +1,93 @@
+# Rezepte für Hooks & settings.json
+
+> Source: https://derob98.github.io/ailmanac/de/docs/templates/hooks-settings · AILmanac (CC BY 4.0) · last verified 2026-08-03
+
+Formatter-, Quality-Gate- und Sicherheits-Hooks zum Kopieren plus Starter-Settings.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-03" source="https://code.claude.com/docs/en/hooks">
+Settings-/Hook-Schlüssel ändern sich — überprüfe das aktuelle Schema in der offiziellen Dokumentation zu Claude Code Settings & Hooks.
+</VerifyNote>
+
+Sofort einsetzbare Rezepte für [`settings.json`](/docs/claude-code/settings), [Berechtigungen](/docs/claude-code/permissions) und [Hooks](/docs/claude-code/hooks). Passe die Befehle an deinen Stack an.
+
+## Starter-`settings.json` fürs Projekt
+
+`.claude/settings.json` (eingecheckt, teamweit):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Bash(npm run test:*)",
+      "Bash(npm run lint)",
+      "Bash(git status)",
+      "Bash(git diff:*)"
+    ],
+    "ask": ["Bash(npm install:*)", "Write"],
+    "deny": ["Read(./.env)", "Read(./**/*.pem)", "Bash(git push --force:*)"]
+  }
+}
+```
+
+Lege persönliche/maschinenspezifische Overrides in `.claude/settings.local.json` ab (git-ignoriert).
+
+## Nach Edits automatisch formatieren
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "f=$(jq -r '.tool_input.file_path'); npx prettier --write \"$f\" 2>/dev/null || true" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+## Quality-Gate vor dem Abschluss
+
+Blockiere „fertig“, bis die Tests bestehen (konzeptionell — verdrahte es laut Doku mit einem `Stop`-/Pre-Finish-Event):
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "npm test --silent" } ] }
+    ]
+  }
+}
+```
+
+## Sicherheits-Guard (Bearbeitung geschützter Pfade blockieren)
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "f=$(jq -r '.tool_input.file_path'); case \"$f\" in *secrets*|*.env|*/vendor/*) echo 'blocked: protected path'; exit 1;; esac" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+:::tip Halte Hooks schnell und idempotent
+Sie laufen ständig. Mach sie schnell, gefahrlos wiederholbar und lautstark nur bei echten Problemen.
+:::
+
+## Weiter
+
+- [Berechtigungen & Berechtigungsmodi](/docs/claude-code/permissions)
+- [Hooks: Deterministische Automatisierung](/docs/claude-code/hooks)
+- [Slash-Command-Bibliothek](/docs/templates/slash-commands)

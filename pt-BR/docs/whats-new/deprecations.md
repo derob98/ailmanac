@@ -1,0 +1,64 @@
+# Acompanhamento de Descontinuações e Migrações
+
+> Source: https://derob98.github.io/ailmanac/pt-BR/docs/whats-new/deprecations · AILmanac (CC BY 4.0) · last verified 2026-10-02
+
+Modelos aposentados, flags renomeadas e mudanças incompatíveis com notas de migração.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-10-02" source="https://platform.claude.com/docs/en/about-claude/model-deprecations">
+Os cronogramas de descontinuação e os detalhes de migração vêm da Anthropic e mudam — sempre confirme datas e substituições na documentação oficial antes de migrar.
+</VerifyNote>
+
+Modelos são aposentados, parâmetros são renomeados, comportamentos mudam. Esta página acompanha as **mudanças incompatíveis** para que as atualizações não te peguem de surpresa. Se você constrói sobre a API, dê uma olhada periodicamente.
+
+## Por que isso importa
+
+Um ID de modelo fixado acabará sendo **descontinuado** e depois **removido**. Código que o codifica de forma rígida quebra. Um pouco de higiene evita surpresas às 2 da manhã.
+
+## Regras de sobrevivência
+
+- **Leia os IDs de modelo a partir da configuração**, nunca espalhe literais pela base de código — assim a migração vira uma mudança de uma linha.
+- **Acompanhe os anúncios** sobre datas de descontinuação e substituições recomendadas.
+- **Reexecute suas [avaliações](/docs/foundations/evals)** quando trocar de modelo — o comportamento pode mudar mesmo em um modelo "mais novo e melhor".
+- **Teste antes do prazo final**, não depois da remoção.
+
+## Tipos comuns de mudança
+
+| Mudança | Exemplo | O que fazer |
+|---|---|---|
+| Modelo aposentado | Um ID de modelo mais antigo para de funcionar | Migre para o sucessor recomendado; reavalie |
+| Parâmetro substituído | Um controle de raciocínio/budget substituído por `effort` | Atualize as chamadas; veja [Thinking e Effort](/docs/api/thinking-and-effort) |
+| Mudança de padrão | Um novo modelo/comportamento padrão | Fixe intencionalmente; verifique se seus prompts ainda funcionam |
+| Atualização de endpoint/SDK | Nova versão major do SDK | Leia o guia de migração; atualize deliberadamente |
+
+## Acompanhamento atual
+
+O cronograma autoritativo fica na [página oficial de descontinuação de modelos](https://platform.claude.com/docs/en/about-claude/model-deprecations) — confirme as datas lá antes de migrar. A Anthropic dá pelo menos 60 dias de aviso antes de aposentar um modelo lançado publicamente.
+
+### Modelos descontinuados
+
+Um modelo Claude lançado publicamente está na janela "descontinuado, mas ainda não aposentado" (verificado em 2 de outubro de 2026): **o `claude-sonnet-4-5-20250929` (Sonnet 4.5) foi descontinuado em 30 de setembro de 2026 e será aposentado em 30 de novembro de 2026.** A substituição recomendada pela Anthropic é `claude-sonnet-5-5`. As chamadas continuam funcionando até a data de aposentadoria e falham depois dela — se você ainda fixa esse ID no código, essa é a sua migração, e o prazo vai até o fim de novembro.
+
+Também descontinuado: o `claude-mythos-preview`, disponível apenas por convite (descontinuado em 9 de junho de 2026, data de aposentadoria a ser anunciada) — participantes do Project Glasswing devem migrar para `claude-mythos-5`.
+
+O próximo ID a acompanhar é o `claude-haiku-4-5-20251001`: sua data de aposentadoria mais antecipada possível é **15 de outubro de 2026**, mas a tabela de status oficial ainda o lista como **Active**, sem nenhuma descontinuação anunciada. Uma data "não antes de" ser alcançada é um sinal para planejar, não uma queda — a Anthropic se compromete a avisar com no mínimo 60 dias de antecedência, e essa contagem começa quando o aviso sai, não quando a data mínima é superada. O Sonnet 4.5 é o exemplo concreto: sua data mínima era 29 de setembro de 2026, o aviso de descontinuação veio em 30 de setembro, e a aposentadoria real é dois meses depois. Confirme na [tabela de status oficial dos modelos](https://platform.claude.com/docs/en/about-claude/model-deprecations#model-status) antes de migrar.
+
+### Aposentados recentemente
+
+- O `claude-opus-4-1-20250805` (Opus 4.1) foi **aposentado em 5 de agosto de 2026** — migre para `claude-opus-4-8` (ou direto para `claude-opus-5`).
+- O `claude-opus-4-20250514` (Opus 4) e o `claude-sonnet-4-20250514` (Sonnet 4) foram **aposentados em 15 de junho de 2026** — os substitutos indicados pela Anthropic são `claude-opus-4-8` e `claude-sonnet-4-6`, respectivamente (ou vá direto para `claude-opus-5` / `claude-sonnet-5`).
+
+Chamadas a qualquer ID aposentado agora retornam um erro de API. Se o seu código ainda fixa um deles, é a primeira coisa a corrigir.
+
+### Descontinuações de parâmetros
+
+No **Claude Opus 4.7 e versões posteriores** — Opus 4.7, Opus 4.8, Opus 5, Opus 5.5, Sonnet 5, Sonnet 5.5, Fable 5, Fable 5.1 — **e no Claude Mythos Preview**, os controles de amostragem `temperature`, `top_p` e `top_k` estão descontinuados: definir qualquer um deles com um valor diferente do padrão retorna um **erro 400**. Omita-os e direcione o comportamento com [prompting](/docs/prompting/prompting-claude) e [Thinking e Effort](/docs/api/thinking-and-effort).
+
+Sempre confirme seus IDs de modelo na tabela de [Modelos e Preços Atuais](/docs/whats-new/models-and-pricing); se você estiver em um ID mais antigo, planeje uma migração.
+
+## Próximos passos
+
+- [Erros, Limites de Taxa e Confiabilidade](/docs/api/errors-and-rate-limits)
+- [Modelos e Preços Atuais](/docs/whats-new/models-and-pricing)
+- [Avaliando a Qualidade da IA (Evals)](/docs/foundations/evals)

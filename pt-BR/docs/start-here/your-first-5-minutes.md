@@ -1,0 +1,117 @@
+# Seus Primeiros 5 Minutos
+
+> Source: https://derob98.github.io/ailmanac/pt-BR/docs/start-here/your-first-5-minutes · AILmanac (CC BY 4.0)
+
+Do zero a uma resposta genuinamente útil com o Claude — a primeira vitória mais rápida possível.
+
+<LevelBadge level="beginner" />
+
+Sem configuração, sem jargão. Em cinco minutos você vai obter um resultado genuinamente útil e entender *por que* funcionou.
+
+<Callout type="objectives" items={[
+  "Abra o Claude e faça sua primeira pergunta de verdade (sem precisar configurar nada)",
+  "Escreva um prompt do jeito que um colega esperto gostaria de recebê-lo: objetivo, tamanho, público, tom",
+  "Refine uma resposta com perguntas de acompanhamento em linguagem simples (refinamento iterativo)",
+  "Adote o único hábito de segurança que importa: verifique antes de confiar"
+]} />
+
+:::tip Adicione uma captura de tela aqui
+Esta página é a base para iniciantes — ela merece capturas de tela anotadas ou um GIF curto. Se você puder contribuir com recursos visuais, por favor [abra um PR](/docs/contribute/contribute-in-10-minutes).
+:::
+
+## O caminho dos 5 minutos
+
+<Steps items={[
+  {title: "Minuto 1 — Abra o Claude", body: "Acesse claude.ai e faça login (o plano gratuito já basta para começar). Você também pode usar o Claude no aplicativo móvel ou por voz — veja Qual Claude eu Devo Usar? para o panorama completo."},
+  {title: "Minuto 2 — Pergunte como perguntaria a um colega esperto", body: "Não 'pesquise'. Dê contexto e diga o que você quer: defina o objetivo, o tamanho, o público, o tom e o que significa 'pronto'. Isso representa 80% da arte de criar prompts, e funciona em qualquer IA."},
+  {title: "Minuto 3 — Leia e, depois, refine", body: "Você não precisa acertar de primeira. Responda em linguagem comum — 'deixe mais curto e mais informal', 'adicione uma frase sobre a sessão gratuita de perguntas e respostas'. Esse vai e vem é o refinamento iterativo."},
+  {title: "Minuto 4 — Tente uma segunda tarefa, diferente", body: "Prove a si mesmo que é de uso geral: resuma um artigo, explique um conceito de forma simples ou planeje um jantar rápido com os ingredientes que você tem."},
+  {title: "Minuto 5 — Aprenda o único hábito de segurança", body: "A IA pode soar confiante e ainda assim estar errada. Para qualquer coisa que importe, confira. Verifique fatos, números, datas, citações e referências."}
+]} />
+
+## Minuto 2, de perto — a maior evolução para iniciantes
+
+A maior vitória do primeiro dia: **dê contexto e diga o que você quer**. Compare:
+
+❌ *"e-mail de marketing"*
+
+✅ *"Escreva um e-mail amigável de 120 palavras convidando clientes atuais para um webinar em 30 de junho sobre nosso novo painel de analytics. Caloroso, mas sem ser vendedor. Termine com uma chamada clara para confirmar presença."*
+
+O segundo prompt define o **objetivo, o tamanho, o público, o tom e o que significa "pronto"**. Isso representa 80% da arte de criar prompts, e funciona em qualquer IA. (Mais em [Fundamentos de Prompting](/docs/prompting/basics).)
+
+<PromptCard title="Seu primeiro prompt para experimentar">{`Write a friendly 120-word email inviting existing customers to a webinar on June 30 about our new analytics dashboard. Warm but not salesy. End with a clear RSVP call to action.`}</PromptCard>
+
+## Minuto 3, de perto — refine em linguagem comum
+
+Você não precisa acertar de primeira. Basta responder como faria com um colega:
+
+- *"Deixe mais curto e mais informal."*
+- *"Adicione uma frase sobre a sessão gratuita de perguntas e respostas no final."*
+- *"Dê-me 3 opções de assunto."*
+
+Esse vai e vem — **refinamento iterativo** — supera ficar se desgastando com um único prompt perfeito.
+
+## Minuto 4, de perto — tente uma segunda tarefa, diferente
+
+Escolha uma para provar que é de uso geral:
+
+- *"Resuma este artigo em 5 tópicos: [cole o texto]."*
+- *"Explique juros compostos para mim como se eu tivesse 12 anos, com um exemplo."*
+- *"Tenho frango, arroz e espinafre. Dê-me um jantar de 20 minutos."*
+
+## Minuto 5, de perto — o único hábito de segurança
+
+:::warning Verifique antes de confiar
+A IA pode soar confiante e ainda assim estar **errada** — especialmente sobre fatos, números, datas, citações e referências. Para qualquer coisa que importe, **confira**. Isso não é uma falha que você consiga eliminar com um prompt; é como a ferramenta funciona. Veja [Alucinações & Como Reduzi-las](/docs/foundations).
+:::
+
+<Callout type="takeaways" items={[
+  "Contexto vence palavras-chave: defina o objetivo, o tamanho, o público, o tom e o que significa 'pronto'",
+  "O refinamento iterativo (acompanhamentos em linguagem simples) vence a busca por um único prompt perfeito",
+  "O Claude é de uso geral — tente uma segunda tarefa, sem relação, para sentir isso",
+  "Sempre verifique tudo que importa; confiança não é correção"
+]} />
+
+## Teste seus conhecimentos
+
+<Quiz title="Teste seus conhecimentos" questions={[
+  {
+    q: "Qual é a maior evolução para iniciantes nos seus prompts?",
+    options: [
+      "Usar mais palavras-chave, como em um mecanismo de busca",
+      "Dar contexto e dizer o que você quer (objetivo, tamanho, público, tom)",
+      "Sempre pagar primeiro pelo plano premium"
+    ],
+    answer: 1,
+    explain: "A página chama isso de 80% da arte de criar prompts — defina o objetivo, o tamanho, o público, o tom e o que significa 'pronto'. Funciona em qualquer IA."
+  },
+  {
+    q: "Sua primeira resposta não ficou bem certa. O que a página recomenda?",
+    options: [
+      "Começar do zero e construir um único prompt perfeito",
+      "Responder em linguagem comum para refiná-la (refinamento iterativo)",
+      "Aceitá-la como está, porque você não pode mudá-la"
+    ],
+    answer: 1,
+    explain: "Refinamento iterativo — acompanhamentos como 'deixe mais curto e mais informal' — supera ficar se desgastando com um único prompt perfeito."
+  },
+  {
+    q: "Qual é o único hábito de segurança a adotar a partir do minuto 5?",
+    options: [
+      "Confiar em respostas que soam confiantes",
+      "Verificar tudo que importa — fatos, números, datas, citações, referências",
+      "Fazer apenas perguntas cuja resposta você já conhece"
+    ],
+    answer: 1,
+    explain: "A IA pode soar confiante e ainda assim estar errada. Para qualquer coisa que importe, confira — isso não é uma falha que você consiga eliminar com um prompt."
+  }
+]} />
+
+## Você decolou 🎉
+
+Para onde ir agora:
+
+- Deixe cada resposta melhor → [Fundamentos de Prompting](/docs/prompting/basics)
+- Escolha um plano estruturado → [Trilhas de Aprendizado](/docs/start-here/learning-paths)
+- Use a IA para trabalho de verdade → [Produtividade no Dia a Dia](/docs/playbooks/productivity)
+- Algo pareceu estranho? → [Solução de Problemas: "Por que o Claude fez isso?"](/docs/contribute/troubleshooting)

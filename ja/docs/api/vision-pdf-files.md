@@ -1,0 +1,56 @@
+# ビジョン、PDF & ファイル入力
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/api/vision-pdf-files · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+画像やドキュメントを送り、file_id でアップロードを再利用する。
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/build-with-claude/vision">
+対応ファイル種別、サイズ上限、Files API の表面は変わります——公式のビジョン／PDF ドキュメントで確認してください。
+</VerifyNote>
+
+<Callout type="objectives" items={["なぜ Claude はマルチモーダルなのか：画像とドキュメントを1つのメッセージに", "ファイルを送る3つの方法：Base64、URL、Files API", "コストと時間を節約するために file_id でアップロードを再利用するとき", "ビジョンが得意なこと——抽出、視覚的理解、ドキュメント Q&A", "安全に使う方法：解像度の上限と、重要な数値の検証"]} />
+
+Claude は**マルチモーダル**です：メッセージに**画像とドキュメント**（PDF など）を含め、それについて質問できます——データを抽出する、チャートを説明する、契約書を要約する、スクリーンショットを読む。
+
+## ファイルを送る3つの方法
+
+<Steps items={[{title: "Base64", body: "バイトをリクエストにインラインでエンコードします。単発に最もシンプル。"}, {title: "URL", body: "ホストされたファイルを指し示します。"}, {title: "Files API", body: "一度アップロードし、その後多くのリクエストで file_id で参照します（大きなファイルの再アップロードを避けられます）。"}]} />
+
+テキストの質問と並ぶ画像コンテンツブロックは次のようになります：
+
+```python
+# Conceptual: an image content block alongside text (see docs for exact fields)
+messages=[{
+  "role": "user",
+  "content": [
+    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+    {"type": "text", "text": "What does this chart show? Give the top 3 takeaways."},
+  ],
+}]
+```
+
+PDF も同様に動作します（ドキュメントコンテンツブロック）；Claude はテキストと視覚的レイアウトを読めて、答えがドキュメントのどこから来たかへ戻る**引用**を要求できます。
+
+## 何に向いているか
+
+<Callout type="tip" items={["抽出 — 請求書、フォーム、表から構造化データを引き出す（構造化出力と組み合わせる：/docs/api/structured-output）。", "視覚物の理解 — チャート、図、スクリーンショット、UI。", "ドキュメント Q&A — 長い PDF をまたいで引用付きで質問する。"]} />
+
+ドキュメント Q&A の手早いコピペ用スターター：
+
+<PromptCard title="ドキュメント Q&A プロンプト">{`What does this chart show? Give the top 3 takeaways.`}</PromptCard>
+
+## コツ
+
+<Callout type="takeaways" items={["同じ大きなドキュメントを繰り返し送るときは file_id で再利用する — より安く速い。", "解像度／サイズが効く — 非常に大きな画像は縮小されうる；上限を確認する。", "抽出した数値を検証する — ビジョンは強力だが万能ではない；重要な数字はスポットチェックする。"]} />
+
+<Callout type="warning" items={["ビジョンは強力だが万能ではない — 重要な数字は必ずスポットチェックする。ハルシネーションを参照：/docs/foundations/hallucinations。"]} />
+
+<Quiz title="理解度チェック" questions={[{q: "ファイルを一度アップロードして、多くのリクエストで file_id で参照できるのはどの方法？", options: ["Base64", "URL", "Files API"], answer: 2, explain: "Files API は一度アップロードして file_id で参照され、大きなファイルの繰り返しアップロードを避けます。"}, {q: "PDF でドキュメント Q&A をするとき、Claude から何を返してもらえる？", options: ["答えがドキュメントのどこから来たかへの引用", "PDF の再レンダリングされたコピー", "ファイルの生の base64"], answer: 0, explain: "Claude はテキストと視覚的レイアウトを読み、答えがどこから来たかへ戻る引用を要求できます。"}, {q: "なぜ抽出した重要な数値をスポットチェックすべき？", options: ["ビジョンは数値で常に失敗するから", "ビジョンは強力だが万能ではないから", "数値は余分なトークンがかかるから"], answer: 1, explain: "ビジョンは強力だが万能ではない——重要な数字は鵜呑みにせず検証してください。"}]} />
+
+## 次へ
+
+- [構造化出力](/docs/api/structured-output)
+- [実ファイルの生成（docx/pptx/xlsx/pdf）](/docs/claude-app/generating-files)
+- [トークン & 料金](/docs/api/tokens-and-pricing) — 画像もトークンを消費する

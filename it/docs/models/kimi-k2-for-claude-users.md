@@ -1,0 +1,165 @@
+# Kimi K2 per utenti Claude
+
+> Source: https://derob98.github.io/ailmanac/it/docs/models/kimi-k2-for-claude-users · AILmanac (CC BY 4.0) · last verified 2026-07-15
+
+Kimi K2 di Moonshot è un agente open-weight da un trilione di parametri costruito per catene di uso strumenti lunghe. Cosa lo rende davvero diverso da Claude — pesi INT4 nativi, 200–300 tool call sequenziali, una licenza permissiva — e quando conviene sceglierlo.
+
+<LevelBadge level="intermediate" />
+
+Ragioni già in Claude. Poi r/LocalLLaMA non smette di parlare di **Kimi K2** — un modello cinese open-weight che tutti continuano a chiamare "il Claude open per gli agenti". Un membro del team vuole eseguirlo sul proprio hardware; un progetto ha bisogno di pesi che si possano davvero scaricare; qualcuno ti passa un codebase in stile OpenAI e ti chiede se Moonshot sia un backend più economico. Questa pagina mappa il tuo modello mentale di Claude sulla **famiglia Kimi K2 di Moonshot AI** e — cosa più utile — ti racconta il pugno di cose che sorprendono davvero le persone, ciascuna con una fonte.
+
+<Callout type="objectives" items={[
+  "Capire cos'è davvero Kimi K2: un MoE sparso da 1 trilione di parametri con solo 32B attivi per token",
+  "Imparare le tre cose non ovvie che K2 fa in modo diverso rispetto a una tipica release di modello (pesi INT4 nativi, catene di tool da 200–300 step, una licenza davvero permissiva)",
+  "Conoscere la stirpe K2 — K2-Instruct, K2 Thinking e la linea K2.x Code — e quale scegliere",
+  "Puntare un codebase in stile Claude o in stile OpenAI su Kimi in poche righe, e sapere quando batte il ricorso a Claude",
+]} />
+
+## La versione in una frase
+
+Kimi K2 è un modello **open-weight** (scaricabile, self-hostabile), **Mixture-of-Experts da un trilione di parametri** di Moonshot AI, sintonizzato specificamente per l'**uso agentico degli strumenti** — lunghe catene di "chiama uno strumento, leggi il risultato, decidi la prossima mossa" — e rilasciato sotto una licenza abbastanza permissiva da consentirne l'uso commerciale.
+
+Quel pezzo "open-weight" è tutta la ragione per cui interessarsene. I pesi di Claude non lasciano mai Anthropic; il modello si affitta tramite API. I pesi di Kimi K2 sono su Hugging Face — puoi scaricarli, eseguirli nel tuo data center, fare fine-tuning e ispezionarli. Se il tuo vincolo è *i dati non possono lasciare la nostra rete* o *dobbiamo possedere il modello*, è una categoria di strumento diversa da Claude, non una versione più economica. (Per gli equivalenti lato Claude di self-hosting e setup ibridi, vedi [Claude + modelli locali](/docs/models/claude-plus-local-models) e [scegliere un modello](/docs/models/choosing-a-model).)
+
+## Tre cose su K2 che sorprendono le persone
+
+La maggior parte delle pagine "nuovo modello open" si limita a riproporre la tabella dei benchmark. Ecco invece le parti davvero non ovvie — quelle che la maggior parte degli utenti Claude non conosce finché qualcuno non gliele indica.
+
+### 1. Ha un trilione di parametri, ma solo ~3% si attivano alla volta
+
+K2 è un **Mixture-of-Experts sparso**: 1 trilione di parametri totali, ma solo **32 miliardi attivati per token**. Il router sceglie **8 esperti su 384** (più un esperto condiviso sempre attivo) per ogni token. Quindi il modello *ha* la capacità di conoscenza di una rete da un trilione di parametri, ma ogni forward pass paga solo ~32B di calcolo.
+
+Perché ti riguarda: "1T di parametri" suona come qualcosa che richiede un supercomputer, e per *contenere* i pesi effettivamente lo è (tanta VRAM). Ma il *costo di inferenza per token* segue il conteggio attivo da 32B, non il trilione. È la stessa scommessa architetturale dietro i modelli MoE più grandi di DeepSeek e Qwen — vedi [modelli open DeepSeek & Qwen](/docs/models/deepseek-qwen-open-models) per l'aria di famiglia.
+
+### 2. I pesi rilasciati sono già INT4 — di proposito
+
+Di solito si scarica un modello in piena precisione e *poi* lo si quantizza da sé per farlo entrare, perdendo un po' di qualità nel processo. Kimi K2 Thinking capovolge tutto questo: Moonshot ha applicato la **Quantization-Aware Training (QAT)** durante il post-training, distribuendo i pesi MoE **nativamente in INT4**. Poiché il modello è stato *addestrato* per essere INT4, la quantizzazione è quasi lossless — e Moonshot riporta una **generazione circa 2× più veloce** come risultato.
+
+Il punto pratico: la versione "piccola, veloce" non è un ripiego degradato — è il modello di riferimento. Non stai scegliendo tra "quello vero" e "quello quantizzato".
+
+<Callout type="tip" items={[
+  "Regola empirica: un modello INT4 richiede circa mezzo byte per parametro per contenere i pesi. Un modello INT4 da un trilione di parametri è comunque un deployment multi-GPU serio — 'open weight' non significa 'gira sul tuo laptop'. Fai il budget di conseguenza, o affittalo tramite un endpoint hosted.",
+]} />
+
+### 3. Rimane coerente attraverso 200–300 tool call
+
+Questo è il numero che ha reso K2 Thinking una notizia. Moonshot riporta che il modello mantiene un **comportamento coerente e diretto verso l'obiettivo attraverso fino a 200–300 invocazioni consecutive di strumenti** — dove, secondo loro, i sistemi agentici precedenti tendono a derivare o perdere il filo dopo **30–50** step.
+
+Se hai costruito agenti, conosci la modalità di fallimento: va bene per dieci step, poi dimentica il proprio obiettivo, ripete una tool call o allucina un risultato. Un modello sintonizzato per sopravvivere a centinaia di step è mirato dritto all'agente *a lungo orizzonte* — loop di ricerca, refactor multi-file, task del tipo naviga-poi-sintetizza. È lo stesso problema attorno a cui è costruito il [tooling per agenti di Claude](/docs/api/building-agents), affrontato dal lato open-weight.
+
+<VerifyNote lastVerified="2026-07-15" source="https://huggingface.co/moonshotai/Kimi-K2-Thinking">
+Le versioni dei modelli, le dimensioni di contesto e i prezzi nella linea K2 cambiano in fretta (K2-Instruct, K2 Thinking e le release K2.5 → K2.6 → K2.7 Code sono arrivate tutte nel giro di mesi). I numeri dei benchmark qui sotto sono le cifre riportate da Moonshot stessa per **Kimi K2 Thinking**; tratta qualsiasi punteggio, prezzo o lunghezza di contesto specifici come una fotografia nel tempo e controlla la fonte linkata per la release attuale.
+</VerifyNote>
+
+## La stirpe K2 — quale vuoi?
+
+"Kimi K2" è una famiglia, non un singolo modello. I tre che incontrerai davvero:
+
+<Flashcards cards={[
+  { front: "Kimi K2-Instruct", back: "Il modello instruct agentico general-purpose (ad esempio la release '0905'). Buon default per uso di strumenti, chat e coding senza una fase di ragionamento lungo separata." },
+  { front: "Kimi K2 Thinking", back: "La variante di ragionamento. Interlaccia pensiero step-by-step con tool call, sostiene run agentiche da 200–300 step, INT4 nativo, contesto 256K. Scegli questa per ricerca a lungo orizzonte e loop agentici." },
+  { front: "Kimi K2.x Code (ad es. K2.7 Code)", back: "La linea specializzata in coding. Opera sempre in modalità thinking, sintonizzata per programmazione end-to-end su contesti lunghi, accetta input testo + immagine. Scegli questa per task di coding autonomi." },
+  { front: "MoE (Mixture of Experts)", back: "Architettura in cui un router invia ogni token a un piccolo sottoinsieme di sotto-reti 'esperte'. K2: 384 esperti, 8 scelti per token + 1 condiviso, quindi ~32B su 1T di parametri sono attivi per token." },
+  { front: "QAT / INT4 nativo", back: "Quantization-Aware Training: il modello è addestrato per lavorare a precisione 4-bit, quindi i pesi INT4 distribuiti sono quasi lossless invece di essere un ripiego degradato." },
+  { front: "Open weight", back: "I pesi addestrati sono scaricabili e self-hostabili (Kimi K2 è sotto una Modified MIT License). In contrasto con Claude, i cui pesi restano dietro l'API di Anthropic." },
+]} />
+
+## Cosa si trasferisce da Claude (quasi tutto)
+
+I tuoi istinti di prompting si trasferiscono. Istruzioni chiare, formati di output espliciti, esempi few-shot, "pensa step by step", dare al modello strumenti con buone descrizioni — funziona tutto allo stesso modo, perché sono proprietà dei transformer instruction-tuned, non specifiche di Claude. Se vuoi la versione più profonda del *perché* le tecniche viaggiano tra modelli, vedi [portare i prompt tra i modelli](/docs/models/porting-prompts-across-models).
+
+Due differenze reali da tenere a mente:
+
+- **Formato delle tool call.** L'API di K2 è **compatibile con OpenAI**, quindi le definizioni di tool/function seguono lo schema OpenAI, non il blocco `tools` di Anthropic. Se arrivi dall'API di Claude, è il principale cambio di forma. (Arrivando da un codebase OpenAI, è quasi un drop-in.)
+- **Il ragionamento è una modalità, non uno slider.** Con Claude regoli [pensiero ed effort](/docs/api/thinking-and-effort). K2 Thinking e la linea Code sono *sempre* in modalità thinking e preservano il ragionamento tra i turni; scegli il modello, invece di regolare l'effort per chiamata.
+
+## Provalo in poche righe
+
+Poiché l'API parla il dialetto OpenAI, punti un client OpenAI esistente sulla base URL di Moonshot e cambi il nome del modello. Nessun nuovo SDK.
+
+<PromptCard title="Chiama Kimi K2 tramite l'endpoint compatibile con OpenAI (Python)">
+{`from openai import OpenAI
+
+client = OpenAI(
+    api_key="YOUR_MOONSHOT_KEY",
+    base_url="https://api.moonshot.ai/v1",   # OpenAI-compatible
+)
+
+resp = client.chat.completions.create(
+    model="kimi-k2-thinking",                # or a K2 Code model
+    messages=[
+        {"role": "system", "content": "You are a careful research agent. Use tools; verify before you conclude."},
+        {"role": "user", "content": "Find the three most-starred MCP server repos and summarize what each does."},
+    ],
+    # tools=[...]  # OpenAI-style function/tool schema
+)
+
+print(resp.choices[0].message.content)`}
+</PromptCard>
+
+<Steps items={[
+  { title: "Ottieni i pesi o un endpoint", body: "Per il self-hosting, scarica i pesi dal repo Hugging Face di Moonshot. Per provarlo e basta, usa l'API hosted di Moonshot (compatibile con OpenAI) o un aggregatore come OpenRouter." },
+  { title: "Punta il tuo client OpenAI su di esso", body: "Imposta base_url sull'endpoint Moonshot e il modello su una variante K2. Il codice OpenAI esistente — incluse le chiamate di tool/function — gira per lo più invariato." },
+  { title: "Scegli la variante per il lavoro", body: "K2 Thinking per lunghi loop di agenti/ricerca; un modello K2.x Code per la programmazione autonoma; K2-Instruct per l'uso di strumenti general-purpose senza una pesante fase di ragionamento." },
+  { title: "Fai il budget per i pesi, non per i parametri attivi", body: "Ricorda lo split 1T/32B: costo ragionevole per token, ma ospitare i pesi completi è un impegno multi-GPU. Affitta un endpoint hosted se non hai bisogno di possedere il modello." },
+]} />
+
+## Quando scegliere Kimi K2 su Claude
+
+Nessuno dei due è strettamente migliore — risolvono vincoli diversi. Scegli **Kimi K2** quando:
+
+- **Hai bisogno dei pesi.** Dati air-gapped, compliance on-prem, "il modello non può lasciare la nostra rete", o vuoi fare fine-tuning su dati proprietari. È la ragione decisiva, e Claude non può soddisfarla per design.
+- **Vuoi una licenza permissiva.** K2 esce sotto una **Modified MIT License** che copre sia codice che pesi — insolitamente liberale per un modello di scala frontiera, e amichevole per l'uso commerciale.
+- **Il task è un lungo loop agentico pesante in strumenti** e vuoi un modello open costruito specificamente per quella resistenza.
+
+Scegli **Claude** quando vuoi la piattaforma gestita attorno al modello — [prompt caching](/docs/api/prompt-caching), [memory e context editing](/docs/api/memory-and-context-editing), [managed agents](/docs/api/managed-agents), computer use, l'app desktop e uno stack di supporto/safety che non devi gestire tu. Con Claude affitti capacità; con K2 possiedi i pesi e gestisci l'infrastruttura. Quel trade — *possiedi-e-gestisci vs. affitta-e-rilassati* — è la vera decisione, non uno scarto di benchmark. Per il lato costi di quel confronto tra provider, vedi [quanto costa l'AI tra i provider](/docs/models/what-ai-costs-across-providers).
+
+## Kimi K2 Thinking, in numeri
+
+Le cifre riportate da Moonshot stessa per la release K2 Thinking, per orientamento (vedi il VerifyNote sopra — cambiano):
+
+- **Architettura:** 1T param totali · 32B attivi · 384 esperti (8 selezionati + 1 condiviso) · attenzione MLA · 61 layer
+- **Contesto:** ~256K token
+- **Pesi:** INT4 nativo via QAT, generazione ~2× più veloce
+- **Resistenza agentica:** coerente attraverso 200–300 tool call sequenziali
+- **Benchmark (riportati da Moonshot):** HLE con strumenti 44,9 · BrowseComp 60,2 · SWE-bench Verified 71,3 · LiveCodeBench V6 83,1
+- **Licenza:** Modified MIT
+
+<Quiz questions={[
+  {
+    q: "Kimi K2 ha 1 trilione di parametri. Circa quanti sono attivi per token?",
+    options: ["Tutti gli 1 trilione", "Circa 32 miliardi", "Circa 500 miliardi", "Esattamente 8"],
+    answer: 1,
+    explain: "K2 è un MoE sparso: il router attiva 8 esperti su 384 (più un esperto condiviso), quindi solo ~32B degli 1T di parametri si attivano per token. Il costo di inferenza segue il conteggio attivo, non il totale."
+  },
+  {
+    q: "Cosa c'è di insolito nel modo in cui i pesi di Kimi K2 Thinking sono quantizzati?",
+    options: [
+      "Non sono quantizzati affatto — solo FP32 pieno",
+      "Sono addestrati a INT4 (QAT), quindi i pesi INT4 distribuiti sono quasi lossless invece di essere un ripiego degradato",
+      "La quantizzazione è illegale sotto la sua licenza",
+      "Devi quantizzarli tu stesso prima del primo uso"
+    ],
+    answer: 1,
+    explain: "Moonshot ha applicato la Quantization-Aware Training durante il post-training, distribuendo i pesi MoE nativamente in INT4 per una generazione ~2× più veloce. La versione veloce È la versione di riferimento."
+  },
+  {
+    q: "Qual è la singola ragione più decisiva per scegliere Kimi K2 su Claude?",
+    options: [
+      "Ottiene sempre punteggi più alti su ogni benchmark",
+      "Hai bisogno dei pesi effettivi — self-hosting, dati air-gapped, compliance on-prem, o fine-tuning",
+      "Ha un'app desktop più bella",
+      "È l'unico modello che supporta l'uso di strumenti"
+    ],
+    answer: 1,
+    explain: "K2 è open-weight; i pesi di Claude restano dietro l'API di Anthropic per design. Se il tuo vincolo è possedere o fare self-hosting del modello, è una capacità che Claude non può eguagliare — il resto è un trade di possiedi-e-gestisci vs. affitta-e-rilassati."
+  }
+]} />
+
+## Fonti e approfondimenti
+
+- [Kimi K2 Thinking — model card (Hugging Face)](https://huggingface.co/moonshotai/Kimi-K2-Thinking) — architettura, INT4/QAT nativo, cifra dei 200–300 tool call, benchmark, Modified MIT License
+- [Kimi K2 — GitHub (Moonshot AI)](https://github.com/moonshotai/Kimi-K2) — la serie di modelli, i pesi e il report tecnico
+- [moonshotai/Kimi-K2-Instruct (Hugging Face)](https://huggingface.co/moonshotai/Kimi-K2-Instruct) — la base instruct/agentica della famiglia
+- [Kimi K2.7 Code (OpenRouter)](https://openrouter.ai/moonshotai/kimi-k2.7-code) — la linea coding: contesto lungo, sempre-thinking, input multimodale, prezzi attuali
+- Correlati su AILmanac: [**Kimi K3 — il più grande modello open-weight al mondo**](/docs/models/kimi-k3-open-weight-frontier) — il successore da 2,8T param: vision nativo, contesto 1M-token, pesi aperti dal 27 luglio 2026 · [Inkling (Thinking Machines)](/docs/models/inkling-thinking-machines) — l'altro MoE open-weights da circa un trilione di parametri, costruito per essere fine-tunato piuttosto che per concatenare strumenti · [Modelli open DeepSeek & Qwen](/docs/models/deepseek-qwen-open-models) · [Claude + modelli locali](/docs/models/claude-plus-local-models) · [Portare i prompt tra i modelli](/docs/models/porting-prompts-across-models)

@@ -1,0 +1,70 @@
+# Berechtigungen & Berechtigungsmodi
+
+> Source: https://derob98.github.io/ailmanac/de/docs/claude-code/permissions · AILmanac (CC BY 4.0) · last verified 2026-07-14
+
+allow-/ask-/deny-Regeln und Modi — weniger Rückfragen ohne Sicherheitsverlust.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-07-14" source="https://code.claude.com/docs/en/permission-modes">
+Die genaue Regelsyntax und die Modusnamen entwickeln sich weiter — prüfe sie gegen die offizielle Claude Code-Dokumentation zu Berechtigungen und Berechtigungsmodi.
+</VerifyNote>
+
+<Callout type="objectives" items={["Was die drei Berechtigungsentscheide (allow / ask / deny) bedeuten", "Wie Berechtigungsregeln ein Tool plus ein Muster zuordnen", "Die sechs Berechtigungsmodi und wann du welchen nutzt", "Wie der auto-Modus Rückfragen durch einen Sicherheits-Klassifikator ersetzt", "Wie du eine vernünftige Start-Allowlist baust, die Rückfragen reduziert ohne Sicherheitsverlust", "Wo du Projekt- vs. persönliche Berechtigungsregeln speicherst"]} />
+
+Berechtigungen entscheiden, **was Claude Code tun darf, ohne dich zu fragen**. Stell sie gut ein und du bekommst Flow ohne Kontrollverlust; stell sie schlecht ein und du winkst entweder alles durch oder ertrinkst in Rückfragen.
+
+## Die drei Entscheide
+
+Jede mögliche Aktion löst sich in einen von ihnen auf:
+
+<Flashcards cards={[{front: "allow", back: "Mach es, keine Rückfrage."}, {front: "ask", back: "Pausiere und frag dich — der Standard für alles, was nicht ausdrücklich erlaubt oder verweigert ist."}, {front: "deny", back: "Niemals, nicht einmal auf Nachfrage."}]} />
+
+Regeln ordnen typischerweise ein Tool plus ein Muster zu, z. B. allow `Bash(npm run test:*)` oder deny `Read(./.env)`.
+
+<PromptCard title="Ein Tool + Muster erlauben">{`Bash(npm run test:*)`}</PromptCard>
+
+<PromptCard title="Ein Tool + Muster verweigern">{`Read(./.env)`}</PromptCard>
+
+## Berechtigungsmodi
+
+Ein Modus setzt die Gesamthaltung für eine Sitzung. Es gibt sechs davon. Wechsle die gängigen mit `Shift+Tab` durch oder setze `permissions.defaultMode` in den Einstellungen.
+
+| Modus | Läuft ohne Rückfrage | Verwende, wenn |
+|---|---|---|
+| **`default`** (angezeigt als **Manual**) | Nur Lesevorgänge | Tägliche Arbeit, sensible Änderungen |
+| **`acceptEdits`** | Lesevorgänge, Dateibearbeitungen, gängige Dateisystembefehle | Eine vertrauenswürdige, gut umrissene Bearbeitungssitzung |
+| **`plan`** | Nur Lesevorgänge; schlägt vor, bearbeitet nie | Große/riskante Aufgaben — siehe [Plan-Modus](/docs/claude-code/plan-mode) |
+| **`auto`** | Alles, geprüft von einem Sicherheits-Klassifikator | Lange Aufgaben, bei denen die Ermüdung durch Rückfragen das eigentliche Risiko ist |
+| **`dontAsk`** | Nur vorab genehmigte Tools; alles andere wird verweigert | Abgeschottete CI und Skripte |
+| **`bypassPermissions`** | Alles, ohne Prüfungen | Nur Sandboxes/Container — **niemals** auf einer Maschine mit Geheimnissen |
+
+### Auto-Modus
+
+`auto` ist der Mittelweg zwischen „bei allem nachfragen“ und „Sicherheit abschalten“. Statt dich zu fragen, prüft ein separates **Klassifikator-Modell** jede Aktion vor der Ausführung und blockiert alles, was über das hinausgeht, worum du gebeten hast, was Infrastruktur berührt, die es nicht kennt, oder was von feindseligen Inhalten getrieben scheint, die Claude gerade gelesen hat. Ausdrückliche `ask`-Regeln halten weiterhin an und fragen dich.
+
+Er blockiert Dinge wie `curl | bash`, Force-Pushes, Produktions-Deployments und -Migrationen sowie das Senden von Geheimnissen an externe Endpunkte — während er Routinearbeit (lokale Bearbeitungen, Installation deklarierter Abhängigkeiten, lesende HTTP-Aufrufe, Push auf deinen eigenen Branch) direkt durchlaufen lässt. Blockiert er dieselbe Aktion wiederholt, pausiert der auto-Modus und übergibt die Rückfragen wieder an dich.
+
+Der auto-Modus ist keine Sicherheitsgarantie — er reduziert Rückfragen, macht aber die Prüfung sensibler Vorgänge nicht überflüssig. Die Verfügbarkeit hängt von deinem Tarif, deinem Modell und (bei Team/Enterprise) einem Admin-Schalter ab.
+
+<Callout type="warning" items={["bypassPermissions gehört in eine Sandbox. Mit allen Rückfragen aus auf deiner echten Maschine zu laufen, ist der Weg, wie ein Agent etwas anfasst, das er nicht sollte. Reserviere es für wegwerfbare Umgebungen — wenn du eigentlich nur weniger Rückfragen willst, nutze stattdessen den auto-Modus. Siehe Autonome Läufe absichern unter /docs/security/hardening-autonomous-runs."]} />
+
+## Eine vernünftige Start-Allowlist
+
+Das Ziel: die sicheren, wiederkehrenden Dinge vorab erlauben; destruktive Dinge auf **ask** oder **deny** halten.
+
+<Steps items={[{title: "Das Sichere + Wiederkehrende erlauben", body: "Dateien lesen, deine Test-/Lint-/Build-Befehle ausführen, git status/diff."}, {title: "Vor dem mittleren Risiko fragen", body: "Abhängigkeiten installieren, Dateien außerhalb des Projekts schreiben, Netzwerkaufrufe."}, {title: "Das Destruktive verweigern", body: "Geheime Dateien lesen (.env, Schlüsseldateien), force-push, rm -rf."}]} />
+
+Speicher Projektregeln in [`settings.json`](/docs/claude-code/settings) (geteilt) und persönliche Überschreibungen in `settings.local.json`.
+
+<Callout type="tip" items={["Lass es aus deinen Rückfragen lernen: genehmige denselben sicheren Befehl ein paar Mal und du weißt genau, was du zu deiner Allowlist hinzufügen sollst — so werden wiederkehrende Rückfragen zu einer einmaligen Regel."]} />
+
+<Callout type="takeaways" items={["Drei Entscheide: allow (keine Rückfrage), ask (Standard — pausieren und bestätigen), deny (niemals).", "Regeln ordnen ein Tool plus ein Muster zu, wie Bash(npm run test:*) oder Read(./.env).", "Sechs Modi setzen die Sitzungshaltung: default (Manual), acceptEdits, plan, auto, dontAsk, bypassPermissions.", "Der auto-Modus prüft jede Aktion über einen Sicherheits-Klassifikator, statt dich zu fragen — das ist das Mittel gegen Ermüdung durch Rückfragen, nicht bypassPermissions.", "Bau eine Allowlist: erlaube Sicheres + Wiederkehrendes, frag bei mittlerem Risiko, verweigere Destruktives.", "Geteilte Regeln gehören in settings.json; persönliche Überschreibungen in settings.local.json."]} />
+
+<Quiz title="Teste dich selbst" questions={[{q: "Was macht der Standard-Entscheid 'ask' bei einer Aktion, die nicht ausdrücklich erlaubt oder verweigert ist?", options: ["Führt sie stillschweigend aus", "Pausiert und bittet dich um Bestätigung", "Blockiert sie dauerhaft"], answer: 1, explain: "ask ist der Standard für alles nicht ausdrücklich Erlaubte/Verweigerte — es pausiert und fragt dich."}, {q: "Welcher Berechtigungsmodus ist NUR in Sandboxes oder Containern sicher, niemals auf einer Maschine mit Geheimnissen?", options: ["plan", "acceptEdits", "bypassPermissions"], answer: 2, explain: "bypassPermissions überspringt Rückfragen und Sicherheitsprüfungen vollständig; reserviere es für wegwerfbare Umgebungen — niemals auf einer Maschine mit Geheimnissen."}, {q: "Du willst bei einer langen Aufgabe deutlich weniger Berechtigungs-Rückfragen, aber trotzdem ein Sicherheitsnetz. Welcher Modus?", options: ["bypassPermissions — es überspringt jede Rückfrage", "auto — ein Klassifikator prüft jede Aktion und blockiert riskante", "dontAsk — es unterbricht dich nie"], answer: 1, explain: "Der auto-Modus ersetzt Rückfragen durch einen Klassifikator, der Eskalationen wie curl | bash, Force-Pushes und Produktions-Deployments blockiert. bypassPermissions entfernt das Sicherheitsnetz; dontAsk verweigert schlicht alles, was nicht vorab genehmigt ist."}, {q: "Wo solltest du geteilte Projekt-Berechtigungsregeln gegenüber persönlichen Überschreibungen speichern?", options: ["Beide in settings.local.json", "Projektregeln in settings.json; persönliche Überschreibungen in settings.local.json", "Projektregeln in settings.local.json; persönliche Überschreibungen in settings.json"], answer: 1, explain: "Projektregeln gehören in settings.json (geteilt); persönliche Überschreibungen gehören in settings.local.json."}, {q: "Welches davon gehört in einer vernünftigen Start-Allowlist auf die 'deny'-Liste?", options: ["git status / diff", "rm -rf und .env lesen", "Deine Test-/Lint-/Build-Befehle ausführen"], answer: 1, explain: "Verweigere destruktive Dinge: geheime Dateien lesen (.env, Schlüsseldateien), force-push und rm -rf."}]} />
+
+## Weiter
+
+- [settings.json: Das Konfigurationssystem](/docs/claude-code/settings)
+- [Hooks](/docs/claude-code/hooks) — Regeln deterministisch erzwingen, über allow/deny hinaus
+- [Sicherheit & verantwortungsvolle Nutzung](/docs/security/responsible-use)

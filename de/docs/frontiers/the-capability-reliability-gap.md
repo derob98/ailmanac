@@ -1,0 +1,110 @@
+# Die Lücke zwischen Fähigkeit und Zuverlässigkeit
+
+> Source: https://derob98.github.io/ailmanac/de/docs/frontiers/the-capability-reliability-gap · AILmanac (CC BY 4.0)
+
+Dass ein Modell etwas in einer Demo einmal tut, ist nicht dasselbe, wie es in der Produktion jedes Mal korrekt zu tun. Diese Lücke zu verstehen, ist die Grundlage für den Bau vertrauenswürdiger KI-Systeme.
+
+<LevelBadge level="intermediate" />
+
+# Die Lücke zwischen Fähigkeit und Zuverlässigkeit
+
+<Callout type="objectives" items={["Warum 'es hat in meiner Demo funktioniert' kein Beleg dafür ist, dass es in der Produktion funktioniert","Fähigkeit vs. Zuverlässigkeit — sie sind verschiedene Eigenschaften, und die meisten Leitfäden verwechseln sie","Wie Varianz eine 95-%-Aufgabe still und leise in ein kaputtes Produkt verwandelt","Eine vierstufige Golden-Set-Eval-Schleife, die du heute mit einer Tabellenkalkulation starten kannst","Warum Evals der eigentliche Burggraben sind — nicht Prompts"]} />
+
+Hier ist ein Muster, das fast jeden trifft, der zum ersten Mal KI an echte Nutzer ausliefert:
+
+> Das Modell macht die Sache in deinem Test perfekt. In der Produktion versagt es. Du bist verwirrt, weil du es funktionieren *gesehen* hast.
+
+Was du erlebt hast, ist die Lücke zwischen Fähigkeit und Zuverlässigkeit.
+
+**Fähigkeit** bedeutet, dass das Modell eine Aufgabe erledigen *kann* — es produziert mindestens einmal, unter bestimmten Bedingungen, eine korrekte Ausgabe.
+
+**Zuverlässigkeit** bedeutet, dass das Modell die Aufgabe *konsistent* korrekt erledigt — über verschiedene Inputs, über wiederholte Läufe, über leichte Änderungen in Formulierung oder Kontext hinweg.
+
+Demos beweisen Fähigkeit. Produktion verlangt Zuverlässigkeit. Das sind verschiedene Eigenschaften, und die meisten Leitfäden verwechseln sie.
+
+## Warum Demos lügen
+
+Wenn du einen Prompt testest, tust du typischerweise Folgendes:
+
+- Du führst ihn auf Inputs aus, die du selbst entworfen hast
+- Du führst ihn eine Handvoll Male aus
+- Du pickst die Ausgabe heraus, die gut aussieht
+- Du passt den Prompt an, bis er richtig aussieht
+
+Dieser Prozess optimiert auf Fähigkeit. Der Prompt funktioniert jetzt auf *deinen* Beispielen. Du hast eine korrekte Ausgabe gesehen. Du lieferst aus.
+
+Das Problem ist, dass Nutzer-Inputs in der Produktion nicht deine Beispiele sind. Sie sind unordentlicher, vielfältiger, auf Arten formuliert, die du nicht vorausgesehen hast. Das Modell wurde nie auf ihnen getestet. Du hast keine Ahnung, wie es darauf abschneidet.
+
+Eine einzelne gute Ausgabe ist keine Leistungsschätzung. Sie ist eine Anekdote.
+
+## Varianz ist die versteckte Variable
+
+LLMs sind stochastisch. Führe denselben Prompt zweimal aus und du bekommst oft unterschiedliche Ausgaben. Diese Varianz ist normal und meist in Ordnung. Aber sie bedeutet, dass die relevante Frage nicht lautet „hat es funktioniert?" — sondern „in welchem Anteil der Fälle funktioniert es?"
+
+Eine Aufgabe, bei der das Modell in 95 % der Fälle erfolgreich ist, sieht in einer Demo großartig aus und bricht bei etwa einem von zwanzig Nutzern. Eine Aufgabe, bei der es in 60 % der Fälle erfolgreich ist, sieht in Ordnung aus, wenn du derjenige bist, der sie ausführt. Das sind sehr verschiedene Situationen, und du kannst sie ohne Messung nicht auseinanderhalten.
+
+## Das Fähigkeit-Zuverlässigkeit-Spektrum in der Praxis
+
+| Dimension | Fähig, aber unzuverlässig | Zuverlässig |
+|---|---|---|
+| Getestete Inputs | Vom Autor entworfene Beispiele | Vielfältige, echte Nutzer-Inputs |
+| Stichprobengröße | Ein paar Läufe | Wiederholte Läufe auf vielen Beispielen |
+| Sichtbarkeit der Fehlermodi | Fehler sind im Test selten, in der Produktion häufig | Fehler werden gemessen und verstanden |
+| Wie du erfährst, dass es kaputt ist | Nutzerbeschwerden | Deine Eval-Suite |
+| Wie du es verbesserst | Prompts raten und prüfen | Bestehensrate verfolgen, Fehler systematisch debuggen |
+| Deployment-Vertrauen | Bauchgefühl-basiert | Evidenz-basiert |
+
+## Evals sind der eigentliche Burggraben
+
+Bessere Prompts können die Fähigkeit erhöhen. Nur Evals können dir sagen, ob du die Zuverlässigkeit erhöht hast.
+
+Ein *Eval* ist ein strukturierter Test: eine Menge von Inputs, erwartete Ausgaben oder Bewertungskriterien und eine Möglichkeit, die Bestehensrate zu messen. Du führst das Modell auf den Inputs aus, bewertest die Ausgaben und bekommst eine Zahl. Dann änderst du etwas — den Prompt, das Modell, die Temperatur — und führst es erneut aus. Jetzt hast du ein Signal.
+
+Das ist nicht glamourös. Es ist der Teil der KI-Produktarbeit, den die meisten Tutorials komplett überspringen. Aber es ist die einzige Möglichkeit, die Frage zu beantworten, die beim Ausliefern wirklich zählt: „Wie oft funktioniert das auf Inputs, die ich nicht gesehen habe?"
+
+### Ein einfacher Einstieg
+
+Du brauchst keine Infrastruktur, um anzufangen. Hier ist eine minimal funktionsfähige Eval-Schleife:
+
+<Steps items={[{title: "Baue ein Golden Set", body: "Sammle 20-50 echte oder realistische Inputs. Schreibe für jeden auf, wie eine korrekte Ausgabe aussieht (oder Kriterien, um sie zu beurteilen). Das sind deine Golden-Beispiele. Bevorzuge echte Nutzer-Inputs gegenüber erfundenen — du suchst nach der Verteilung, gegen die du noch nicht getestet hast."}, {title: "Führe es N-mal aus", body: "Führe deinen Prompt auf jedem Beispiel mehrmals aus (3-5 ist eine vernünftige Untergrenze). Varianz über Läufe hinweg sagt dir etwas über Prompt-Stabilität; Varianz über Beispiele hinweg sagt dir etwas über Abdeckung. Beides zählt."}, {title: "Verfolge die Bestehensrate", body: "Notiere für jedes (Input, Lauf)-Paar bestanden oder nicht bestanden. Berechne die Gesamtrate. Diese eine Zahl ist der Anfang deines Zuverlässigkeitsbildes — alles andere ist Rauschen, bis du sie hast."}, {title: "Mache daraus einen Regressionstest", body: "Jedes Mal, wenn du Prompt, Modell oder Temperatur änderst, führe das Eval erneut aus. Sinkt die Bestehensrate, hast du etwas kaputt gemacht. Steigt sie, hast du eine echte Verbesserung erzielt — im Gegensatz zu einer Änderung, die sich auf dem einen Beispiel, das du dir angesehen hast, besser anfühlte."}]} />
+
+Das ist alles. Eine Tabellenkalkulation reicht. Die Disziplin zählt mehr als das Tooling.
+
+## Warum das ein Engineering-Problem ist, kein Prompting-Problem
+
+Der Instinkt, wenn ein Modell scheitert, ist, den Prompt umzuschreiben. Manchmal ist das richtig. Aber oft ist es eine Art, auf den Fehlerfall zu optimieren, den du gesehen hast, auf Kosten von Regressionen bei Fällen, die du nicht geprüft hast.
+
+Zuverlässigkeits-Engineering für KI sieht so aus:
+
+- Definieren, was „korrekt" bedeutet, bevor du irgendetwas ausführst
+- Gegen eine repräsentative Input-Verteilung messen
+- Änderungen über die Zeit mit konsistenter Methodik verfolgen
+- „Dieses Modell kann diese Aufgabe nicht" von „diese Aufgabe ist unterspezifiziert" unterscheiden
+
+Prompt Engineering ist ein Werkzeug innerhalb dieses Prozesses. Es ist kein Ersatz dafür.
+
+## Die ehrliche Einordnung
+
+Die meisten KI-Fähigkeiten sind real. Die Modelle können wirklich bemerkenswerte Dinge tun. Die Lücke zwischen Fähigkeit und Zuverlässigkeit ist kein Argument dafür, dass die Fähigkeiten vorgetäuscht sind — sie ist ein Argument dafür, dass es nicht reicht, zu wissen, dass sie existieren.
+
+Wenn du brauchst, dass eine Aufgabe in 95 % der Fälle funktioniert, brauchst du *Belege*, dass sie in 95 % der Fälle funktioniert. Diese Belege kommen aus strukturierten Tests, nicht aus dem Vertrauen in die Demo.
+
+Die Ingenieure, die langlebige KI-Produkte bauen, sind nicht unbedingt die, die die besten Prompts schreiben. Es sind die, die wissen, was „funktionieren" bedeutet, bevor sie ausliefern, und die eine Messung haben, die ihnen sagt, ob es stimmt.
+
+<Quiz title="Teste dich selbst" questions={[{q: "Du zeigst deinem Team einen neuen Prompt. Er trifft dein Lieblingsbeispiel dreimal hintereinander perfekt. Was hast du bewiesen?", options: ["Zuverlässigkeit — drei Läufe reichen, um eine Bestehensrate zu etablieren","Fähigkeit — du hast gezeigt, dass das Modell es unter bestimmten Bedingungen KANN, auf Inputs, die du gewählt hast","Nichts, weil die Temperatur wahrscheinlich über null lag"], answer: 1, explain: "Drei Läufe auf Inputs, die du entworfen hast, beweisen Fähigkeit, nicht Zuverlässigkeit. Für eine Zuverlässigkeitsaussage brauchst du eine repräsentative Input-Verteilung und genug Läufe, um die Varianz zu schätzen. Eine einzelne gute Ausgabe ist eine Anekdote, keine Leistungsschätzung."}, {q: "Dein Prompt ist auf dem Golden Set in 95 % der Fälle erfolgreich. Ist er produktionsreif?", options: ["Ja — 95 % liegt deutlich über dem Branchenstandard","Das hängt vom Schadensradius des 5-%-Fehlermodus und deiner Fähigkeit ab, ihn zu erkennen","Nein — Produktion verlangt 99,9 % Bestehensrate"], answer: 1, explain: "95 % bedeutet, dass eine von zwanzig Nutzerinteraktionen scheitert. Ob das ausgeliefert wird, hängt ab von: was bei einem Fehler passiert (stille falsche Ausgabe vs. ein Fehler, den du wiederholen kannst), ob der Nutzer es bemerkt und ob der Fehler begrenzt ist. Es gibt keine universelle Zahl — die tolerierbare Fehlerrate wird von der Aufgabe bestimmt, nicht vom Modell."}, {q: "Du änderst den Prompt, um einen Fehlerfall zu beheben, den du gesehen hast. Bester nächster Schritt?", options: ["Ausliefern — du hast den Bug behoben","Das gesamte Eval erneut ausführen — du könntest bei Fällen regrediert sein, die du nicht geprüft hast","Diesen einen Fall als Few-Shot-Beispiel hinzufügen"], answer: 1, explain: "Auf einen einzelnen beobachteten Fehler zu optimieren, führt oft still zu Regressionen bei Fällen, die du nicht erneut geprüft hast. Deshalb behandelt die Eval-Schleife jede Prompt-Änderung als Regressionstest: dasselbe Golden Set, dieselben Läufe pro Input, die neue Bestehensrate mit der alten vergleichen. Ist sie irgendwo gesunken, hast du einen Bug gegen einen anderen getauscht."}]} />
+
+<Callout type="takeaways" items={["Fähigkeit ist 'kann es das?' Zuverlässigkeit ist 'wie oft tut es das?' — Demos beweisen das Erste, Produktion verlangt das Zweite.","Eine einzelne gute Ausgabe ist eine Anekdote, keine Leistungsschätzung. Echte Belege brauchen vielfältige Inputs, mehrfach ausgeführt.","Varianz ist die versteckte Variable: 95 % Erfolg sieht in einer Demo großartig aus und bricht bei einem von zwanzig Nutzern.","Starte mit einem Golden Set aus 20-50 echten Inputs, führe jeden N-mal aus, verfolge die Bestehensrate und führe es bei jeder Änderung erneut aus.","Bessere Prompts erhöhen die Fähigkeit. Nur Evals erhöhen (und beweisen) die Zuverlässigkeit — Evals sind der eigentliche Burggraben."]} />
+
+## Verwandt
+
+- [Dein erster API-Aufruf](/docs/api/first-call)
+- [Prompting-Grundlagen](/docs/prompting/basics)
+- [Die Aktualitäts-Halbwertszeit](/docs/frontiers/freshness-half-life)
+- [Wenn Agenten ein Unternehmen führen](/docs/frontiers/when-agents-run-a-business) — die Lücke konkret gemacht: zwei echte Experimente, in denen Frontier-Modelle ein echtes Budget bekamen.
+- [Agenten unter KPI-Druck](/docs/frontiers/agents-under-kpi-pressure) — ein Benchmark, der zeigt, wie dieselbe Lücke zu Regelverstößen wird, sobald ein KPI in den Prompt kommt.
+- [Der Verifikations-Flaschenhals](/docs/frontiers/the-verification-bottleneck) — die industrielle Version der Lücke: wenn KI Code schneller schreiben kann, als Teams ihm vertrauen können.
+
+
+## Weiter
+
+- [Der Verifikations-Flaschenhals](/docs/frontiers/the-verification-bottleneck)

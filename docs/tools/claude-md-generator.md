@@ -1,0 +1,21 @@
+# CLAUDE.md Generator
+
+> Source: https://derob98.github.io/ailmanac/docs/tools/claude-md-generator · AILmanac (CC BY 4.0)
+
+Build a tuned CLAUDE.md for your project in 60 seconds — copy or download.
+
+<LevelBadge level="all" />
+
+[`CLAUDE.md`](/docs/claude-code/claude-md) is the highest-leverage thing you can give [Claude Code](/docs/claude-code/what-is-claude-code) — persistent instructions it reads every session. **Pick your stack** to start from sensible, opinionated defaults, then tweak the fields and copy (or download) a ready-to-use file. Everything runs in your browser; nothing is sent anywhere.
+
+<ClaudeMdGenerator />
+
+:::tip Keep it short and true
+Trim anything that isn't actually true of your project — Claude follows `CLAUDE.md` literally. See the full guide on the [CLAUDE.md page](/docs/claude-code/claude-md).
+:::
+
+## Next
+
+- [CLAUDE.md & Memory Files](/docs/claude-code/claude-md) — the full how-to
+- [CLAUDE.md Starters](/docs/templates/claude-md) — hand-written templates by stack
+- [MCP Config Builder](/docs/tools/mcp-config-builder)

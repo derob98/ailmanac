@@ -1,0 +1,64 @@
+# 지원 중단 및 마이그레이션 워치
+
+> Source: https://derob98.github.io/ailmanac/ko/docs/whats-new/deprecations · AILmanac (CC BY 4.0) · last verified 2026-10-02
+
+종료된 모델, 이름이 변경된 플래그, 마이그레이션 노트가 포함된 호환성을 깨는 변경 사항.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-10-02" source="https://platform.claude.com/docs/en/about-claude/model-deprecations">
+지원 중단 일정과 마이그레이션 세부 정보는 Anthropic에서 제공하며 변경됩니다 — 마이그레이션하기 전에 항상 공식 문서에서 날짜와 대체 항목을 확인하세요.
+</VerifyNote>
+
+모델은 종료되고, 파라미터는 이름이 바뀌며, 동작은 달라집니다. 이 페이지는 업그레이드가 갑작스러운 일이 되지 않도록 **호환성을 깨는 변경 사항**을 추적합니다. API 위에서 빌드한다면 주기적으로 훑어보세요.
+
+## 이것이 중요한 이유
+
+고정된 모델 ID는 결국 **지원이 중단**되고 그다음 **제거**됩니다. 이를 하드코딩한 코드는 망가집니다. 약간의 위생 관리가 새벽 2시의 사고를 방지합니다.
+
+## 생존 규칙
+
+- **모델 ID는 설정에서 읽으세요.** 코드베이스 곳곳에 리터럴을 흩뿌리지 마세요 — 그러면 마이그레이션이 한 줄 변경으로 끝납니다.
+- 지원 중단 날짜와 권장 대체 항목을 위해 **공지를 주시하세요.**
+- 모델을 바꿀 때는 **[평가(evals)](/docs/foundations/evals)를 다시 실행하세요** — "더 새롭고 더 좋은" 모델에서도 동작이 달라질 수 있습니다.
+- 제거 이후가 아니라 **마감 기한 전에 테스트하세요.**
+
+## 흔한 변경 유형
+
+| 변경 | 예시 | 해야 할 일 |
+|---|---|---|
+| 모델 종료 | 오래된 모델 ID가 작동을 멈춤 | 권장 후속 모델로 이동, 재평가 |
+| 파라미터 대체 | 추론/예산 노브가 `effort`로 대체됨 | 호출을 업데이트, [사고 및 노력(Thinking & Effort)](/docs/api/thinking-and-effort) 참고 |
+| 기본값 변경 | 새 기본 모델/동작 | 의도적으로 고정, 프롬프트가 여전히 작동하는지 검증 |
+| 엔드포인트/SDK 업데이트 | 새 SDK 메이저 버전 | 마이그레이션 가이드를 읽고 신중하게 버전 업 |
+
+## 현재 워치
+
+권위 있는 일정은 [공식 모델 지원 중단 페이지](https://platform.claude.com/docs/en/about-claude/model-deprecations)에 있습니다 — 마이그레이션하기 전에 그곳에서 날짜를 확인하세요. Anthropic은 공개 출시된 모델을 종료하기 전에 최소 60일의 사전 공지를 제공합니다.
+
+### 지원 중단된 모델
+
+공개 출시된 Claude 모델 중 하나가 "지원 중단되었으나 아직 종료되지 않은" 구간에 있습니다(2026년 10월 2일 확인). **`claude-sonnet-4-5-20250929`(Sonnet 4.5)는 2026년 9월 30일에 지원이 중단되었고 2026년 11월 30일에 종료됩니다.** Anthropic이 권장하는 대체 모델은 `claude-sonnet-5-5`입니다. 종료일까지는 호출이 계속 동작하고 그 이후에는 실패합니다 — 이 ID를 아직 코드에 고정해 두었다면 이것이 바로 처리해야 할 마이그레이션이며, 기한은 11월 말입니다.
+
+함께 지원 중단된 모델: 초대 전용인 `claude-mythos-preview`(2026년 6월 9일 지원 중단, 종료일 미발표) — Project Glasswing 참가자는 `claude-mythos-5`로 이동하세요.
+
+다음으로 주의할 ID는 `claude-haiku-4-5-20251001`입니다. 가장 이른 종료 가능 시점은 **2026년 10월 15일**이지만, 공식 상태 표에는 여전히 **Active**로 표시되어 있고 지원 중단 공지도 나오지 않았습니다. "이후" 날짜가 지나는 것은 장애가 아니라 계획을 세우라는 신호입니다 — Anthropic은 최소 60일 전 사전 공지를 약속하며, 그 기한은 공지가 나간 시점부터 시작됩니다. 하한 날짜가 지난 시점이 아닙니다. Sonnet 4.5가 그 실례입니다: 하한 날짜는 2026년 9월 29일, 지원 중단 공지는 9월 30일, 실제 종료는 그로부터 두 달 뒤입니다. 마이그레이션 전에 [공식 모델 상태 표](https://platform.claude.com/docs/en/about-claude/model-deprecations#model-status)에서 확인하세요.
+
+### 최근 종료됨
+
+- `claude-opus-4-1-20250805` (Opus 4.1)은 **2026년 8월 5일에 종료되었습니다** — `claude-opus-4-8`(또는 곧바로 `claude-opus-5`)로 이동하세요.
+- `claude-opus-4-20250514` (Opus 4)과 `claude-sonnet-4-20250514` (Sonnet 4)은 **2026년 6월 15일에 종료되었습니다** — Anthropic이 제시한 대체 모델은 각각 `claude-opus-4-8`과 `claude-sonnet-4-6`입니다(또는 곧바로 `claude-opus-5` / `claude-sonnet-5`로).
+
+종료된 ID로의 호출은 이제 API 오류를 반환합니다. 코드가 아직 그중 하나를 고정해 두었다면, 그것이 가장 먼저 고쳐야 할 부분입니다.
+
+### 파라미터 지원 중단
+
+**Claude 4.7 세대 이후 모델**(Opus 4.7, Opus 4.8, Opus 5, Opus 5.5, Sonnet 5, Sonnet 5.5, Fable 5, Fable 5.1) **및 Claude Mythos Preview**에서는 샘플링 노브인 `temperature`, `top_p`, `top_k`가 지원 중단되었습니다: 이 중 하나라도 기본값이 아닌 값으로 설정하면 **400 오류**를 반환합니다. 대신 이를 생략하고 [프롬프팅](/docs/prompting/prompting-claude)과 [사고 및 노력(Thinking & Effort)](/docs/api/thinking-and-effort)으로 동작을 조정하세요.
+
+[현재 모델 및 가격](/docs/whats-new/models-and-pricing) 표와 대조하여 모델 ID를 항상 확인하세요. 오래된 ID를 사용 중이라면 마이그레이션을 계획하세요.
+
+## 다음
+
+- [오류, 속도 제한 및 신뢰성](/docs/api/errors-and-rate-limits)
+- [현재 모델 및 가격](/docs/whats-new/models-and-pricing)
+- [AI 품질 평가(Evals)](/docs/foundations/evals)

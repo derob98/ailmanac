@@ -1,0 +1,52 @@
+# Fact Verification & Freshness
+
+> Source: https://derob98.github.io/ailmanac/docs/contribute/fact-verification · AILmanac (CC BY 4.0) · last verified 2026-08-10
+
+How to date volatile facts and respond to needs-verification issues.
+
+<LevelBadge level="intermediate" />
+
+"Always up to date" is a promise we keep with a simple, honest system — not magic. Here's how to uphold it when you contribute.
+
+## Evergreen vs volatile
+
+- **Evergreen** — concepts that don't change (what an LLM is, what RAG is). **No date** needed.
+- **Volatile** — anything that changes release-to-release: model names/IDs, prices, limits, UI labels, beta/feature availability, exact CLI flags. **Must carry a date + source.**
+
+## Stamp volatile facts
+
+Use the `<VerifyNote>` component right under the level badge:
+
+```mdx
+<VerifyNote lastVerified="2026-08-10" source="https://platform.claude.com/docs/...">
+One line on what's volatile here and to confirm at the source.
+</VerifyNote>
+```
+
+- **`lastVerified`** = the date *you* actually checked it against the source.
+- **`source`** = the official page that's authoritative.
+
+## Never hard-code model facts
+
+Model IDs/pricing/context live **only** in `data/models.json`, rendered by `<ModelTable />` on the [models page](/docs/whats-new/models-and-pricing). In prose, **link there** instead of writing a model ID or price. Updating models = a one-line edit to that JSON (a perfect first PR).
+
+## Responding to `needs-verification`
+
+Automation (and readers) open issues labeled `needs-verification` when a fact may be stale. To resolve one:
+
+1. Check the claim against the official source.
+2. If correct → bump `lastVerified` to today.
+3. If changed → fix the content **and** the date, and link the source.
+4. If a model fact → update `data/models.json`, not prose.
+
+## The honesty principle
+
+:::tip An old date is a feature
+A `lastVerified` from months ago doesn't mean we failed — it tells the reader to double-check *that* fact. Better an honest old date than a confident wrong one. Don't bump a date you didn't actually re-verify.
+:::
+
+## Next
+
+- [How Levels & Freshness Work](/docs/start-here/levels-and-freshness)
+- [How Our Automation Works](/docs/contribute/automation)
+- [Content Style Guide](/docs/contribute/style-guide)

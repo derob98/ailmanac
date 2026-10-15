@@ -1,0 +1,59 @@
+# 컨텍스트 관리
+
+> Source: https://derob98.github.io/ailmanac/ko/docs/claude-code/context-management · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+/compact 대 /clear, 자동 압축, 그리고 세션이 길어져도 효과적으로 유지하기.
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["/clear와 /compact를 구분하고 즉시 올바른 것을 고르기", "자동 압축을 이해하고 왜 선제적 정리가 여전히 더 나은지", "긴 세션을 날카롭게 유지하는 네 가지 기법 적용하기", "컨텍스트 윈도우가 가득 찬 증상을 알아채고 빠르게 고치기"]} />
+
+<VerifyNote lastVerified="2026-06-20" source="https://code.claude.com/docs/en">
+/compact와 /clear 같은 명령 이름과 자동 압축 동작은 변할 수 있습니다 — 공식 문서에서 확인하세요.
+</VerifyNote>
+
+## 큰 아이디어
+
+모든 세션은 유한한 [컨텍스트 윈도우](/docs/foundations/tokens-and-context)를 가집니다. 그것이 차면서 오래된 내용이 밀려나고 Claude가 "흐트러지기" 시작할 수 있습니다. 컨텍스트를 의도적으로 관리하는 것이 긴 세션을 날카롭게 유지합니다.
+
+## 두 가지 필수 명령
+
+두 명령이 거의 모든 상황을 덮습니다. 요령은 명령을 의도에 맞추는 것입니다.
+
+<Flashcards cards={[{front: "/clear", back: "대화를 지우고 새로 시작합니다. 관련 없는 작업으로 전환할 때 쓰세요. 깨끗하고 집중된 컨텍스트를 되찾는 가장 저렴한 방법입니다."}, {front: "/compact", back: "지금까지의 대화를 압축된 형태로 요약합니다 — 요지를 유지하면서 공간을 확보합니다. 같은 작업을 계속하고 싶지만 윈도우가 가득 차갈 때 쓰세요."}]} />
+
+한 가지 질문으로 결정하세요: 새 작업인가 같은 작업인가?
+
+```mermaid
+flowchart TD
+  A{New task or same task?} -->|New / unrelated| B[/clear]
+  A -->|Same task, context full| C[/compact]
+```
+
+## 자동 압축
+
+컨텍스트가 한도에 가까워지면, Claude Code는 하드 스톱 없이 작업이 이어지도록 **자동 압축**할 수 있습니다. 이는 안전망입니다 — 하지만 작업 사이에 선제적으로 `/clear`하는 것이 그것에 의존하는 것보다 더 나은 결과를 줍니다.
+
+<Callout type="tip" items={["자동 압축을 전략이 아니라 최후의 방어선으로 다루세요. 관련 없는 작업 사이에 정리하는 것이, 윈도우가 자동 압축이 발동할 때까지 차게 두는 것보다 컨텍스트를 더 깨끗하게 유지합니다."]} />
+
+## 효과적으로 유지하는 기법
+
+두 명령을 넘어, 네 가지 습관이 처음부터 컨텍스트를 가볍게 유지합니다.
+
+<Steps items={[{title: "세션당 하나의 작업", body: "관련 없는 작업들의 오후 전체가 하나의 컨텍스트에 쌓이지 않게 하세요."}, {title: "무거운 읽기는 서브에이전트에 위임", body: "큰 읽기는 서브에이전트에 넘기세요 — 그들이 자기 컨텍스트를 태우고 결론만 반환합니다. /docs/claude-code/subagents를 참고하세요."}, {title: "붙여넣지 말고 참조", body: "큰 덩어리를 붙여넣는 대신 @path로 Claude를 파일에 가리키고, CLAUDE.md를 가볍게 유지하세요(/docs/claude-code/claude-md 참고)."}, {title: "예산을 지켜보기", body: "컨텍스트 사용량을 보여주는 상태 표시줄이 언제 압축할지 알려줍니다. /docs/claude-code/statusline을 참고하세요."}]} />
+
+이들은 라이브 문서에 대응됩니다: [서브에이전트](/docs/claude-code/subagents), [CLAUDE.md](/docs/claude-code/claude-md), [상태 표시줄](/docs/claude-code/statusline).
+
+:::tip 증상 → 해결
+Claude가 이전 지침을 잊거나 같은 말을 반복하기 시작하면, 윈도우가 가득 찼을 가능성이 높습니다. `/compact`(같은 작업) 또는 `/clear`(새 작업)가 보통 즉시 고칩니다. 더 많은 내용은 [문제 해결](/docs/contribute/troubleshooting)에서.
+:::
+
+<Callout type="takeaways" items={["/clear는 새 출발을 위해 대화를 지웁니다 — 관련 없는 작업에 쓰세요", "/compact는 공간 확보를 위해 세션을 요약합니다 — 윈도우가 찰 때 같은 작업을 계속하려면 쓰세요", "자동 압축은 안전망입니다; 작업 사이의 선제적 /clear가 더 나은 결과를 줍니다", "컨텍스트를 가볍게 유지하세요: 세션당 하나의 작업, 무거운 읽기는 서브에이전트에 위임, 붙여넣기 대신 파일 참조, 상태 표시줄로 예산 지켜보기", "잊거나 반복하면 윈도우가 가득 찬 것 — /compact(같은 작업) 또는 /clear(새 작업)가 고칩니다"]} />
+
+<Quiz title="스스로 점검하기" questions={[{q: "작업을 마치고 완전히 관련 없는 것으로 전환합니다. 어떤 명령?", options: ["/compact — 이전 작업을 요약하려고", "/clear — 대화를 지우고 새로 시작하려고", "둘 다 아님 — 자동 압축이 처리하게 둔다"], answer: 1, explain: "/clear는 대화를 지우고 새로 시작합니다. 관련 없는 작업으로 전환할 때 깨끗하고 집중된 컨텍스트를 되찾는 가장 저렴한 방법입니다."}, {q: "작업 중이고 컨텍스트 윈도우가 가득 차가지만 같은 작업을 계속하고 싶습니다. 어떤 명령?", options: ["/clear — 가장 많은 공간을 확보하려고", "/compact — 요지를 유지하며 대화를 요약하려고", "새 터미널 열기"], answer: 1, explain: "/compact는 지금까지의 대화를 압축된 형태로 요약해 요지를 유지하면서 공간을 확보합니다 — 같은 작업을 계속하는 데 이상적입니다."}, {q: "자동 압축을 생각하는 올바른 방식은?", options: ["컨텍스트 관리의 주된 전략", "안전망 — 작업 사이의 선제적 /clear가 더 나은 결과를 준다", "비활성화해야 할 버그"], answer: 1, explain: "자동 압축은 컨텍스트가 한도에 가까워질 때 하드 스톱 없이 작업이 이어지게 하지만, 작업 사이에 선제적으로 /clear하는 것이 그것에 의존하는 것보다 더 나은 결과를 줍니다."}, {q: "Claude가 이전 지침을 잊거나 반복하기 시작합니다. 유력한 원인과 해결은?", options: ["네트워크 문제 — 컴퓨터 재시작", "윈도우가 가득 찼을 가능성 — /compact(같은 작업) 또는 /clear(새 작업)", "모델이 고장 — 모델 전환"], answer: 1, explain: "잊거나 반복하는 것은 보통 윈도우가 가득 찼다는 뜻입니다. /compact(같은 작업) 또는 /clear(새 작업)가 대개 즉시 고칩니다."}]} />
+
+## 다음
+
+- [토큰, 컨텍스트 & 메모리](/docs/foundations/tokens-and-context)
+- [서브에이전트 & 병렬 에이전트](/docs/claude-code/subagents)
+- [상태 표시줄 커스터마이즈](/docs/claude-code/statusline)

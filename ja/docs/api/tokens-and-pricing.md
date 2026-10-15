@@ -1,0 +1,88 @@
+# トークン、コンテキスト & 料金
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/api/tokens-and-pricing · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+トークンを正しく数える、max_tokens vs コンテキストウィンドウ、そしてコストの見積もり。
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={["Anthropic 自身のツールで（他モデルのトークナイザではなく）トークンを正しく数える", "max_tokens とコンテキストウィンドウを見分ける——そしてその違いがなぜ重要か", "入力 + 出力トークンからモデル別レートで API コストを見積もる", "品質を落とさずコストを削る：適正化、キャッシュ、トリム、バッチ"]} />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/about-claude/pricing">
+トークン単価とコンテキスト上限は変わります——常に公式の料金／モデルページで現在の数値を読んでください。[モデル一覧表](/docs/whats-new/models-and-pricing)を参照。
+</VerifyNote>
+
+API でのコストと上限はすべて**[トークン](/docs/foundations/tokens-and-context)**（およそ単語の¾）で測られます。正しく押さえるべきことが3つあります。
+
+## 1. トークンを正しく数える
+
+当てずっぽうにせず、**他モデルのトークナイザを使わない**（例：`tiktoken`）——トークン数はモデルファミリーごとに異なります。Anthropic の**トークンカウント**エンドポイント／SDK ヘルパーを使って、送信する*前に*リクエストを測りましょう。
+
+<Callout type="tip" items={["大まかな計画ルール：約750語 ≈ 約1,000トークン（1トークンはおよそ単語の¾）。"]} />
+
+## 2. `max_tokens` ≠ コンテキストウィンドウ
+
+この2つの上限は混同しやすいですが、別のものを支配します。
+
+| 上限 | 何を制限するか | いつ変えるか |
+| --- | --- | --- |
+| **`max_tokens`** | *返信*の長さ（出力のみ） | 出力が途切れるなら上げる |
+| **コンテキストウィンドウ** | **入力 + 出力**の合計予算 | 大きな入力は出力の余地を減らす |
+
+<Callout type="warning" items={["max_tokens はタスクが必要とする値に設定する。低すぎると返信が切れる。無駄に高くてもコストは増えない——実際に生成されたトークンにだけ課金される——が、返信がだらだらしうる。"]} />
+
+## 3. コストを見積もる
+
+**入力トークン + 出力トークン**に対して、モデル別レート（Opus > Sonnet > Haiku）で課金されます。手早い見積もり：
+
+```
+cost ≈ (input_tokens × input_rate) + (output_tokens × output_rate)
+```
+
+現在のレートは[公式の料金ページ](https://platform.claude.com/docs/en/about-claude/pricing)から取得してください——ここでは意図的にハードコードしていません。
+
+## コストを削る（品質を落とさずに）
+
+<Steps items={[
+  {title: "モデルを適正化する", body: "Sonnet から始め、難しい部分のために Opus を温存します。モデルを選ぶ (/docs/api/choosing-a-model) を参照。"},
+  {title: "プロンプトキャッシングを使う", body: "安定したプロンプト接頭辞を呼び出し間で再利用します。プロンプトキャッシング (/docs/api/prompt-caching) を参照。"},
+  {title: "入力をトリムする", body: "重要なコンテキストだけを送ります。ここは RAG (/docs/foundations/rag) が効くところでもあります。"},
+  {title: "オフライン作業をバッチ化する", body: "レイテンシが重要でないジョブはバッチで。"}
+]} />
+
+さらなる戦略は[コスト & レイテンシのトレードオフ](/docs/foundations/cost-and-latency)で。
+
+<Quiz title="理解度チェック" questions={[
+  {
+    q: "リクエストを計画していて、送信前にトークン数を知りたい。何を使うべき？",
+    options: ["tiktoken のような汎用トークナイザ", "Anthropic のトークンカウントエンドポイント／SDK ヘルパー", "単語数を 0.75 で割った値を最終値とする", "モデル一覧表のコンテキストウィンドウサイズ"],
+    answer: 1,
+    explain: "トークン数はモデルファミリーごとに異なるので、他モデルのトークナイザを流用しないこと。Anthropic のトークンカウントエンドポイント／SDK ヘルパーで送信前に測ります。"
+  },
+  {
+    q: "返信が文の途中で切れ続ける。どの設定を変える？",
+    options: ["max_tokens を下げる", "max_tokens を上げる", "コンテキストウィンドウを縮める", "より小さいモデルに切り替える"],
+    answer: 1,
+    explain: "max_tokens は返信の長さを制限します。出力が途切れるなら上げます。"
+  },
+  {
+    q: "API ではどう課金される？",
+    options: ["リクエストごとに定額", "入力トークンのみ", "入力トークン + 出力トークン、モデル別レートで", "出力の単語ごと"],
+    answer: 2,
+    explain: "cost ≈ (input_tokens × input_rate) + (output_tokens × output_rate)、レートはモデルごとに異なる（Opus > Sonnet > Haiku）。"
+  },
+  {
+    q: "品質を落とさずコストを削る最初の一手として最良なのは？",
+    options: ["すべてに常に Opus を使う", "Sonnet から始め、難しい部分のために Opus を温存する", "max_tokens をできる限り高く設定する", "他モデルのトークナイザを使って呼び出しを節約する"],
+    answer: 1,
+    explain: "モデルを適正化する：Sonnet から始め、難しい部分のために Opus を温存。その上にプロンプトキャッシング、入力トリム、バッチ化を重ねます。"
+  }
+]} />
+
+<Callout type="takeaways" items={["すべてはトークン（およそ単語の¾）で測られる；約750語 ≈ 約1,000トークン。", "トークンは Anthropic 自身のツールで数える——他モデルのトークナイザは決して使わない。", "max_tokens は返信を制限する；コンテキストウィンドウは入力 + 出力の合計予算。", "課金 = 入力トークン + 出力トークン、モデル別レート（Opus > Sonnet > Haiku）で。", "モデルの適正化、接頭辞のキャッシュ、入力のトリム、バッチ化でコストを削る。"]} />
+
+## 次へ
+
+- [Claude モデルを選ぶ](/docs/api/choosing-a-model)
+- [プロンプトキャッシング & コスト最適化](/docs/api/prompt-caching)
+- [ストリーミング & マルチターン](/docs/api/streaming)

@@ -1,0 +1,64 @@
+# Deprecation & Migration Watch
+
+> Source: https://derob98.github.io/ailmanac/docs/whats-new/deprecations · AILmanac (CC BY 4.0) · last verified 2026-10-07
+
+Retired models, renamed flags, and breaking changes with migration notes.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-10-07" source="https://platform.claude.com/docs/en/about-claude/model-deprecations">
+Deprecation schedules and migration details come from Anthropic and change — always confirm dates and replacements in the official docs before migrating.
+</VerifyNote>
+
+Models get retired, parameters get renamed, behaviors shift. This page tracks **breaking changes** so upgrades don't surprise you. If you build on the API, skim it periodically.
+
+## Why this matters
+
+A pinned model ID will eventually be **deprecated** and then **removed**. Code that hard-codes it breaks. A little hygiene prevents 2am surprises.
+
+## Survival rules
+
+- **Read model IDs from config**, never scatter literals across the codebase — then migrating is a one-line change.
+- **Watch announcements** for deprecation dates and recommended replacements.
+- **Re-run your [evals](/docs/foundations/evals)** when you switch models — behavior can shift even on a "newer, better" model.
+- **Test before the deadline**, not after removal.
+
+## Common kinds of change
+
+| Change | Example | What to do |
+|---|---|---|
+| Model retired | An older model ID stops working | Move to the recommended successor; re-eval |
+| Parameter superseded | A reasoning/budget knob replaced by `effort` | Update calls; see [Thinking & Effort](/docs/api/thinking-and-effort) |
+| Default shift | A new default model/behavior | Pin intentionally; verify your prompts still work |
+| Endpoint/SDK update | New SDK major version | Read the migration guide; bump deliberately |
+
+## Current watch
+
+The authoritative schedule lives on the [official model deprecations page](https://platform.claude.com/docs/en/about-claude/model-deprecations) — confirm dates there before you migrate. Anthropic gives at least 60 days' notice before retiring a publicly released model.
+
+### Deprecated models
+
+One publicly released Claude model is in the "deprecated, not yet retired" window (checked October 7, 2026): **`claude-sonnet-4-5-20250929` (Sonnet 4.5) was deprecated September 30, 2026 and retires November 30, 2026.** Anthropic's recommended replacement is `claude-sonnet-5-5`. Calls keep working until the retirement date, then fail — if you still pin this ID, this is your migration, and you have until the end of November.
+
+Also deprecated: the invitation-only `claude-mythos-preview` (deprecated June 9, 2026, retirement date to be announced) — Project Glasswing participants should move to `claude-mythos-5`.
+
+`claude-haiku-4-5-20251001` is the next ID to watch, and as of October 8, 2026 it has picked up the second half of the usual pattern: its earliest-possible retirement date is **October 15, 2026** — the nearest floor in the lineup — and it is now listed among the **legacy models** on the models overview, with a direct successor in `claude-haiku-5-5` (released October 7, 2026). The official status table still lists it as **Active** with no deprecation announced, so the two readings are not in conflict: "legacy" in Anthropic's own lifecycle vocabulary means *no longer receiving updates and may be deprecated in the future*, which is one rung before "deprecated." A "not sooner than" date landing is a signal to plan, not an outage — Anthropic commits to at least 60 days' notice, and that clock starts when the notice goes out, not when the floor date passes. Sonnet 4.5 is the worked example: its floor was September 29, 2026, the deprecation notice followed on September 30, and the actual retirement is two months after that. If you pin this ID, the migration is now worth scheduling rather than watching — and it is not a pure ID swap: see [Claude Haiku 5.5: The 100K Price Cliff](/docs/models/haiku-5-5-the-100k-price-cliff) for the five changes that return 400 and the six that return 200. Confirm against the [official model status table](https://platform.claude.com/docs/en/about-claude/model-deprecations#model-status) before you migrate.
+
+### Recently retired
+
+- `claude-opus-4-1-20250805` (Opus 4.1) was **retired August 5, 2026** — move to `claude-opus-4-8` (or straight to `claude-opus-5`).
+- `claude-opus-4-20250514` (Opus 4) and `claude-sonnet-4-20250514` (Sonnet 4) were **retired June 15, 2026** — Anthropic's listed replacements are `claude-opus-4-8` and `claude-sonnet-4-6` respectively (or go straight to `claude-opus-5` / `claude-sonnet-5`).
+
+Calls to any retired ID now return an API error. If your code still pins one of these, that's the first thing to fix.
+
+### Parameter deprecations
+
+On **Claude 4.7-generation models and later** — Opus 4.7, Opus 4.8, Opus 5, Opus 5.5, Sonnet 5, Sonnet 5.5, Fable 5, Fable 5.1 — **and on Claude Mythos Preview**, the sampling knobs `temperature`, `top_p`, and `top_k` are deprecated: setting any of them to a non-default value returns a **400 error**. Omit them and steer behavior with [prompting](/docs/prompting/prompting-claude) and [Thinking & Effort](/docs/api/thinking-and-effort) instead. Note that the Python SDK (v1.0 and later) removes these three parameters entirely, so passing them raises a `TypeError` before any request is sent; most other SDKs keep them in their request types and let the API return the 400.
+
+Always confirm your model IDs against the [Current Models & Pricing](/docs/whats-new/models-and-pricing) table; if you're on an older ID, plan a migration.
+
+## Next
+
+- [Errors, Rate Limits & Reliability](/docs/api/errors-and-rate-limits)
+- [Current Models & Pricing](/docs/whats-new/models-and-pricing)
+- [Evaluating AI Quality (Evals)](/docs/foundations/evals)

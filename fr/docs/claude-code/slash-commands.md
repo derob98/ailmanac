@@ -1,0 +1,76 @@
+# Commandes slash personnalisées
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/claude-code/slash-commands · AILmanac (CC BY 4.0) · last verified 2026-07-06
+
+Transformez un workflow répétitif en un seul mot.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-07-06" source="https://code.claude.com/docs/en/skills">
+L'emplacement des fichiers de commandes et les options du frontmatter peuvent changer — vérifiez dans la documentation officielle des skills (les commandes personnalisées y vivent désormais).
+</VerifyNote>
+
+Une commande slash personnalisée empaquette une invite que vous retapez sans cesse en un seul `/mot`. Définissez-la une fois ; réutilisez-la pour toujours (et partagez-la avec votre équipe).
+
+<Callout type="info" items={["Les commandes personnalisées ont fusionné avec les Skills. Un fichier .claude/commands/deploy.md et une skill .claude/skills/deploy/SKILL.md créent tous deux /deploy et fonctionnent de la même manière — vos fichiers existants .claude/commands/ continuent de marcher. Les Skills ajoutent un répertoire pour les fichiers de support, un frontmatter de contrôle d'invocation et un chargement automatique quand c'est pertinent. Pour tout ce qui dépasse une invite d'un seul fichier, préférez une Skill."]} />
+
+<Callout type="objectives" items={["Expliquer ce qu'est une commande slash personnalisée et pourquoi elle vaut mieux que retaper une invite", "Créer une commande en déposant un fichier Markdown dans le bon répertoire", "Distinguer les commandes de projet des commandes personnelles par leur emplacement", "Utiliser les briques de base : $ARGUMENTS, la sortie bash intégrée, les références de fichiers et le frontmatter", "Choisir entre une commande slash, une skill et un sous-agent pour une tâche donnée"]} />
+
+## Comment elles fonctionnent
+
+Une commande n'est qu'un fichier Markdown. Déposez-le dans votre répertoire de commandes et son nom de fichier devient la commande. Le corps du fichier est l'invite que Claude exécute lorsque vous l'invoquez.
+
+L'*emplacement* du fichier détermine sa portée :
+
+<Steps items={[{title: "Commande de projet (partageable)", body: "Enregistrez-la sous .claude/commands/changelog.md → /changelog. Elle vit dans le dépôt, donc toute l'équipe l'obtient."}, {title: "Commande personnelle (tous les projets)", body: "Enregistrez-la sous ~/.claude/commands/changelog.md → /changelog. Elle vous suit sur chaque projet de votre machine."}, {title: "Invoquez-la", body: "Tapez le /mot dans Claude Code. Le corps du fichier devient l'invite que Claude exécute."}]} />
+
+<Callout type="tip" items={["C'est le nom de fichier — pas le frontmatter — qui devient le nom de la commande. changelog.md est toujours /changelog."]} />
+
+## Un exemple minimal
+
+Voici un fichier de commande complet. Le frontmatter contient la `description` ; tout ce qui suit est l'invite.
+
+<PromptCard title="commit.md — rédiger un Conventional Commit">{`---
+description: Draft a Conventional Commit message from the staged diff
+---
+
+Look at the staged changes with \`git diff --cached\` and write a single
+Conventional Commit message (feat/fix/docs/refactor/chore). Output only the
+message, no preamble.`}</PromptCard>
+
+Enregistrez cela sous `commit.md` et `/commit` le fait à chaque fois. (Nommez-la comme le fichier — le même corps enregistré sous `changelog.md` serait `/changelog`.)
+
+## Les briques utiles
+
+Quatre ingrédients transforment une invite statique en une commande flexible :
+
+| Brique de base | Ce qu'elle fait |
+| --- | --- |
+| **`$ARGUMENTS`** | Injecte ce que l'utilisateur a tapé après la commande. `/review src/auth.ts` → le chemin se retrouve dans votre invite. |
+| **Exécuter du bash et intégrer la sortie** | Les commandes peuvent inclure la sortie shell (par exemple le diff actuel) pour que Claude agisse sur l'état en direct. |
+| **Référencer des fichiers** | Pointez vers des fichiers pour inclure leur contenu. |
+| **Frontmatter** | `description` (affichée dans le menu) et autres options. |
+
+Consultez la [documentation officielle](https://code.claude.com/docs/en/slash-commands) pour la syntaxe exacte des arguments, du bash et des références de fichiers.
+
+## Des commandes à voler
+
+Un jeu de départ se trouve dans notre [Bibliothèque de commandes slash](/docs/templates/slash-commands) : message de commit, description de PR, revue de code, changelog, génération de composant.
+
+## Commande vs skill vs sous-agent
+
+Trois façons d'empaqueter du travail — la différence tient à *qui les déclenche* et *à quel point elles s'exécutent de façon isolée* :
+
+- **Commande slash** — *vous* déclenchez un workflow connu à la demande.
+- **[Skill](/docs/claude-code/skills)** — Claude charge une expertise *automatiquement* quand c'est pertinent.
+- **[Sous-agent](/docs/claude-code/subagents)** — déléguez une portion de travail à un agent isolé.
+
+<Flashcards cards={[{front: "Commande slash", back: "Vous déclenchez un workflow connu à la demande en tapant /mot."}, {front: "Skill", back: "Claude charge une expertise automatiquement quand c'est pertinent — vous ne l'invoquez pas."}, {front: "Sous-agent", back: "Délègue une portion de travail à un agent isolé."}, {front: ".claude/commands/x.md", back: "Commande de projet /x — vit dans le dépôt, partageable avec l'équipe."}, {front: "~/.claude/commands/x.md", back: "Commande personnelle /x — vous suit sur tous les projets."}, {front: "$ARGUMENTS", back: "Injecte dans l'invite ce que l'utilisateur a tapé après la commande."}]} />
+
+<Quiz title="Vérifiez vos connaissances" questions={[{q: "Où enregistrez-vous une commande slash pour que toute votre équipe l'obtienne dans le dépôt ?", options: [".claude/commands/", "~/.claude/commands/", "N'importe où à la racine du dépôt"], answer: 0, explain: ".claude/commands/changelog.md → /changelog est une commande de projet — elle vit dans le dépôt et est partageable. Le chemin ~/.claude/ est personnel, pour tous vos projets."}, {q: "Qu'est-ce qui détermine le nom d'une commande slash ?", options: ["La description dans le frontmatter", "Le nom de fichier du Markdown", "Le premier titre dans le corps"], answer: 1, explain: "Le nom de fichier devient la commande : changelog.md → /changelog. Le corps est l'invite que Claude exécute."}, {q: "Que fait $ARGUMENTS dans une commande ?", options: ["Liste toutes les commandes disponibles", "Injecte dans l'invite ce que l'utilisateur a tapé après la commande", "Exécute un script bash"], answer: 1, explain: "$ARGUMENTS injecte ce que l'utilisateur a tapé après la commande — par ex. /review src/auth.ts place le chemin dans votre invite."}, {q: "Quelle option d'empaquetage Claude charge-t-il automatiquement quand c'est pertinent, plutôt que vous ne la déclenchiez ?", options: ["Commande slash", "Skill", "Sous-agent"], answer: 1, explain: "Une skill charge une expertise automatiquement quand c'est pertinent. Une commande slash est déclenchée par vous à la demande ; un sous-agent délègue du travail à un agent isolé."}]} />
+
+## Et après
+
+- [Skills : expertise à la demande](/docs/claude-code/skills)
+- [Hooks : automatisation déterministe](/docs/claude-code/hooks)
+- [Bibliothèque de commandes slash](/docs/templates/slash-commands)

@@ -1,0 +1,49 @@
+# Plans, Limits & Billing
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-app/plans-and-billing · AILmanac (CC BY 4.0) · last verified 2026-07-23
+
+Free vs Pro vs Max vs Team, usage limits, and what happens at quota.
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-07-23" source="https://claude.com/pricing">
+Plan names, prices, and limits change regularly — always check the official pricing page for current numbers. We deliberately don't quote dollar amounts here.
+</VerifyNote>
+
+Which Claude plan do you need? Here's how to think about it — without quoting prices that would be stale next month (check the [official pricing](https://claude.com/pricing) for those).
+
+## The tiers, by purpose
+
+| Tier | Roughly for |
+|---|---|
+| **Free** | Trying Claude, light personal use |
+| **Pro** | Regular individual use — more usage, more capability |
+| **Max** | Heavy individual users who hit Pro limits |
+| **Team** | Small teams — shared workspace and management |
+| **Enterprise** | Orgs needing admin, security, scale, and controls |
+
+(Exact names/structure can change — confirm on the pricing page.)
+
+## What "limits" feel like
+
+Consumer plans cap **how much you can use in a window** (messages/usage that reset over time), and higher tiers raise those caps. When you hit a limit you're typically asked to wait until it resets or upgrade — your work isn't lost, you just pause.
+
+Heavier models (and longer conversations) consume your allowance faster. If you're hitting limits, a quick fix is to **start fresh chats** for new topics and keep prompts focused (same idea as [context management](/docs/foundations/tokens-and-context)).
+
+## How to choose
+
+1. **Start Free.** Learn what you actually use it for.
+2. **Upgrade to Pro** when limits interrupt real work.
+3. **Go Max** if you're a power user still hitting caps.
+4. **Team/Enterprise** when colleagues need shared access, admin, or compliance.
+
+## Apps vs API billing — different things
+
+- **App plans** = a flat subscription with usage limits (this page).
+- **API billing** = pay per [token](/docs/api/tokens-and-pricing) for what you build. Different model, different page.
+
+## Next
+
+- [Getting Started with Claude.ai](/docs/claude-app/getting-started)
+- [Tokens, Context & Pricing (API)](/docs/api/tokens-and-pricing)
+- [Privacy & Data Handling](/docs/foundations/privacy)

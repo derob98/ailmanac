@@ -1,0 +1,96 @@
+# Extended Thinking & Effort
+
+> Source: https://derob98.github.io/ailmanac/docs/api/thinking-and-effort · AILmanac (CC BY 4.0) · last verified 2026-08-20
+
+Adaptive reasoning and the effort control — choosing depth by workload.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-20" source="https://platform.claude.com/docs/en/build-with-claude/extended-thinking">
+Reasoning/effort parameters differ by model and evolve. Manual `thinking: {type: "enabled", budget_tokens}` is deprecated on Claude 4.6 (still works) and **rejected with a 400 error on Claude 4.7 and later** (Opus 4.7/4.8/5, Sonnet 5, Fable 5, Mythos 5) — those models use adaptive thinking with `output_config.effort` instead. Confirm the current API in the official docs.
+</VerifyNote>
+
+For hard problems, Claude can spend extra compute **thinking before it answers** — improving accuracy on multi-step reasoning, tricky code, and math. You control roughly *how much* effort to spend. This lesson teaches you to match depth to the task, turn thinking on via the API, and budget it without overpaying.
+
+<Callout type="objectives" items={["Explain the trade-off: less thinking is faster and cheaper, more thinking is better on hard problems", "Pick the right effort tier (Low / Medium / High) for a given workload", "Enable extended thinking on the Messages API and read back the thinking and text blocks", "Budget thinking tokens correctly so budget_tokens stays below max_tokens", "Apply effort wisely in agents and alongside chain-of-thought prompting"]} />
+
+## The one idea behind effort
+
+Thinking is a dial, not a switch. Picture the two ends:
+
+- **Less thinking** = faster, cheaper — fine for simple, well-specified tasks.
+- **More thinking** = better on genuinely hard problems, at higher latency/cost.
+
+Here's the catch that trips people up: extra thinking does **nothing** for a task that was already easy. You only pay the latency and cost. The skill is spending depth *where it changes the answer*.
+
+Newer models expose this as an **effort** control (and adapt thinking depth automatically); on those, you choose a tier rather than a raw token budget. Match the tier to the task.
+
+## Step 1 — Choose your depth
+
+Before you touch any code, ask: *how hard is this task, really?* Map it to a tier.
+
+| Task | Suggested effort |
+|---|---|
+| Formatting, extraction, simple Q&A | Low |
+| Everyday coding, drafting, analysis | Medium |
+| Hard debugging, tricky algorithms, careful proofs | High |
+
+<Callout type="tip" items={["Don't default everything to maximum — you pay in latency and cost for thinking the task doesn't need.", "Start medium; raise it only where quality demands."]} />
+
+> **Try it yourself:** before reading on, classify these three — (a) "extract the email from this text", (b) "refactor this function", (c) "prove this inequality". Which tier fits each? Check your answers against the table above.
+
+## Step 2 — Turn it on (API)
+
+On the Messages API, enable thinking with a `thinking` block and a token budget. Follow these steps.
+
+<Steps items={[{title: "Add a thinking block", body: "Pass thinking={\"type\": \"enabled\", \"budget_tokens\": N} on messages.create to enable extended reasoning."}, {title: "Keep the budget under the cap", body: "The budget is drawn from the same output pool, so budget_tokens must be less than max_tokens."}, {title: "Read back both block types", body: "The reply comes back as a thinking block followed by the answer text — iterate message.content and handle each block.type."}]} />
+
+Now wire it up. Copy this, run it, and watch the reply arrive as two blocks — the reasoning first, then the answer.
+
+<PromptCard title="Enable extended thinking (Python — manual budget, Claude 4.5/4.6)">{`import anthropic
+
+client = anthropic.Anthropic()
+
+message = client.messages.create(
+    model="claude-sonnet-4-6",  # manual budget_tokens still works on 4.6 (deprecated); 4.7+ rejects it
+    max_tokens=16000,
+    thinking={"type": "enabled", "budget_tokens": 10000},
+    messages=[{"role": "user", "content": "Prove that 2^n > n^2 for all n >= 5."}],
+)
+
+for block in message.content:
+    if block.type == "thinking":
+        print("REASONING:", block.thinking)
+    elif block.type == "text":
+        print("ANSWER:", block.text)`}</PromptCard>
+
+A bigger budget buys more room to reason, not a guarantee Claude uses all of it — depth adapts to the problem. Set the budget like a ceiling, then tune down if latency hurts. Model IDs come from the [models table](/docs/whats-new/models-and-pricing).
+
+:::warning Newer models: use adaptive thinking + effort
+On Claude 4.7 and later (Opus 4.7/4.8/5, Sonnet 5, Fable 5, Mythos 5), `thinking: {type: "enabled"}` returns a 400 error. Migrate to `thinking: {type: "adaptive"}` and control depth with `output_config: {effort: "low" | "medium" | "high" | "xhigh" | "max"}`. The follow-up page — [Effort tuning](/docs/api/effort-tuning) — is the practical guide for the newer shape.
+:::
+
+## Step 3 — Use it well in practice
+
+Three habits separate people who *enable* thinking from people who *master* it:
+
+- Extended thinking pairs well with **[chain-of-thought prompting](/docs/prompting/pattern-library)** — but on reasoning models you often don't need to *ask* for step-by-step; the thinking happens internally.
+- Thinking consumes [tokens](/docs/api/tokens-and-pricing), which affects cost — budget accordingly.
+- For agents, more effort on the *planning* step and less on routine tool calls is a good split.
+
+<Callout type="takeaways" items={["Effort/thinking trades latency and cost for accuracy on hard problems — it does nothing for tasks that are already simple.", "Tiers: Low for formatting/extraction/simple Q&A, Medium for everyday coding/drafting/analysis, High for hard debugging/algorithms/proofs.", "On the Messages API, budget_tokens comes from the same output pool, so it must be less than max_tokens; the reply is a thinking block then a text block.", "Treat the budget as a ceiling, not a target — Claude uses only as much as the problem needs.", "In agents, spend effort on planning and conserve it on routine tool calls."]} />
+
+## Lock it in
+
+Quick recall before you go — flip each card and answer out loud.
+
+<Flashcards cards={[{front: "Low effort is best for which tasks?", back: "Formatting, extraction, and simple Q&A."}, {front: "Medium effort is best for which tasks?", back: "Everyday coding, drafting, and analysis."}, {front: "High effort is best for which tasks?", back: "Hard debugging, tricky algorithms, and careful proofs."}, {front: "Why must budget_tokens be less than max_tokens?", back: "The thinking budget is drawn from the same output pool as the answer."}, {front: "Does a bigger budget guarantee more reasoning?", back: "No — it adds room to reason, but depth adapts to the problem; treat the budget as a ceiling."}]} />
+
+<Quiz title="Check yourself" questions={[{q: "What is the core trade-off of spending more thinking effort?", options: ["Higher accuracy on hard problems, at higher latency and cost", "Lower cost with no downside", "Faster responses on every task", "More tokens but identical quality"], answer: 0, explain: "Less thinking is faster and cheaper; more thinking is better on genuinely hard problems, at higher latency/cost."}, {q: "Which effort tier fits everyday coding, drafting, and analysis?", options: ["Low", "Medium", "High", "Maximum"], answer: 1, explain: "The table maps everyday coding, drafting, and analysis to Medium. Start medium and raise only where quality demands."}, {q: "On the Messages API, what must be true of budget_tokens?", options: ["It must equal max_tokens", "It must be greater than max_tokens", "It must be less than max_tokens", "It is independent of max_tokens"], answer: 2, explain: "The budget is drawn from the same output pool, so budget_tokens must be less than max_tokens."}, {q: "How does the reply come back when extended thinking is enabled?", options: ["Only a text block", "A thinking block followed by the answer text", "Two separate API responses", "An error block then text"], answer: 1, explain: "The reply comes back as a thinking block followed by the answer text — iterate message.content and check block.type."}, {q: "For agents, how should you split effort?", options: ["Maximum effort everywhere", "More on routine tool calls, less on planning", "More on the planning step, less on routine tool calls", "Effort cannot be varied per step"], answer: 2, explain: "For agents, more effort on the planning step and less on routine tool calls is a good split."}]} />
+
+## Next
+
+- [Effort tuning: 5 levels, model defaults, and the cache trap](/docs/api/effort-tuning) — the practical follow-up: xhigh/max, per-model starting points, and how switching effort mid-conversation invalidates prompt cache
+- [Choosing a Claude Model](/docs/api/choosing-a-model)
+- [Prompt Caching & Cost Optimization](/docs/api/prompt-caching)
+- [Prompt Patterns Library](/docs/prompting/pattern-library)

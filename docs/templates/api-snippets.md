@@ -1,0 +1,95 @@
+# Production API Snippets
+
+> Source: https://derob98.github.io/ailmanac/docs/templates/api-snippets · AILmanac (CC BY 4.0) · last verified 2026-09-21
+
+Request wrappers with retries, streaming, and tool loops — Python and TypeScript.
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-09-21" source="https://platform.claude.com/docs/en/api/overview">
+SDK method names and parameters evolve — confirm against the official API reference. Model IDs: see the [models table](/docs/whats-new/models-and-pricing).
+</VerifyNote>
+
+Battle-tested shapes for building on the [API](/docs/api/first-call). Adapt and harden for your stack.
+
+## A resilient call wrapper (retries + backoff)
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+import time, random, anthropic
+client = anthropic.Anthropic()
+
+def ask(messages, model="claude-sonnet-5", max_tokens=1024, system=None):
+    for attempt in range(5):
+        try:
+            return client.messages.create(
+                model=model, max_tokens=max_tokens,
+                system=system or anthropic.NOT_GIVEN, messages=messages,
+            )
+        except (anthropic.RateLimitError, anthropic.APIStatusError) as e:
+            if attempt == 4:
+                raise
+            time.sleep(min(2 ** attempt + random.random(), 30))
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+const client = new Anthropic();
+
+export async function ask(messages, { model = "claude-sonnet-5", maxTokens = 1024, system } = {}) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      return await client.messages.create({ model, max_tokens: maxTokens, system, messages });
+    } catch (e: any) {
+      if (attempt === 4 || ![429, 500, 529].includes(e?.status)) throw e;
+      await new Promise((r) => setTimeout(r, Math.min(2 ** attempt * 1000 + Math.random() * 1000, 30000)));
+    }
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+(SDKs also retry transient errors by default — know your client's behavior before stacking your own. See [Errors & Rate Limits](/docs/api/errors-and-rate-limits).)
+
+## Streaming chat
+
+```python
+with client.messages.stream(model="claude-sonnet-5", max_tokens=1024,
+        messages=[{"role": "user", "content": "Hello"}]) as stream:
+    for text in stream.text_stream:
+        print(text, end="", flush=True)
+```
+
+## Tool-use loop (skeleton)
+
+```python
+messages = [{"role": "user", "content": "What's the weather in Rome?"}]
+while True:
+    resp = client.messages.create(model="claude-sonnet-5", max_tokens=1024,
+                                  tools=TOOLS, messages=messages)
+    if resp.stop_reason != "tool_use":
+        break
+    messages.append({"role": "assistant", "content": resp.content})
+    results = [run_tool(b) for b in resp.content if b.type == "tool_use"]
+    messages.append({"role": "user", "content": results})  # tool_result blocks
+```
+
+:::warning Hardening
+Cap iterations and cost, validate tool inputs, and keep secrets in env vars. For autonomous use, read [Securing Agents](/docs/security/securing-agents).
+:::
+
+## Next
+
+- [Your First API Call](/docs/api/first-call) · [Tool Use](/docs/api/tool-use)
+- [Building Agents on the API](/docs/api/building-agents)
+- [Errors, Rate Limits & Reliability](/docs/api/errors-and-rate-limits)

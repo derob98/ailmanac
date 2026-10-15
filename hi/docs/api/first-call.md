@@ -1,0 +1,140 @@
+# आपकी पहली API कॉल
+
+> Source: https://derob98.github.io/ailmanac/hi/docs/api/first-call · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+SDK इंस्टॉल करें, प्रमाणित करें, और Python, TypeScript, या cURL में Claude को एक वास्तविक कॉल करें।
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/api/getting-started">
+नीचे दी गई API संरचना स्थिर है, लेकिन मॉडल ID और SDK संस्करण बदलते रहते हैं। देखें [मौजूदा मॉडल तालिका](/docs/whats-new/models-and-pricing)।
+</VerifyNote>
+
+API *आपके* प्रोग्राम को Claude से बात करने देता है। इस पाठ के अंत तक आप एक वास्तविक अनुरोध चला चुके होंगे और आप ठीक-ठीक समझ जाएँगे कि इसका हर हिस्सा क्या करता है।
+
+<Callout type="objectives" items={["एक API कुंजी बनाएँ और उसे एक एनवायरनमेंट वेरिएबल के रूप में सुरक्षित रखें", "Python या TypeScript के लिए आधिकारिक SDK इंस्टॉल करें (या सादा cURL उपयोग करें)", "अपना पहला messages अनुरोध भेजें और Claude का जवाब पढ़ें", "चार मुख्य फ़ील्ड समझें: model, max_tokens, messages, और system"]} />
+
+## पूरी यात्रा तीन चरणों में
+
+नीचे दी गई हर चीज़ एक सरल अनुक्रम में फिट होती है। आगे बढ़ते समय इस नक्शे को ध्यान में रखें।
+
+<Steps items={[{title: "एक API कुंजी प्राप्त करें", body: "Anthropic Console में एक कुंजी बनाएँ और उसे एक एनवायरनमेंट वेरिएबल के रूप में एक्सपोर्ट करें ताकि यह कभी आपके कोड में न रहे।"}, {title: "SDK इंस्टॉल करें", body: "Python के लिए anthropic पैकेज या TypeScript के लिए @anthropic-ai/sdk जोड़ें। cURL के साथ इंस्टॉल करने को कुछ नहीं है।"}, {title: "कॉल करें", body: "मॉडल को messages की एक सूची भेजें और वह जो content लौटाता है उसे प्रिंट करें।"}]} />
+
+## 1. एक API कुंजी प्राप्त करें
+
+[Anthropic Console](https://console.anthropic.com) में एक बनाएँ। फिर इसे एक एनवायरनमेंट वेरिएबल के रूप में सेट करें ताकि यह कभी आपके कोड में न रहे:
+
+<PromptCard title="अपनी API कुंजी एक्सपोर्ट करें">{`export ANTHROPIC_API_KEY="sk-ant-..."`}</PromptCard>
+
+<Callout type="warning" items={["अपनी कुंजी कभी कमिट न करें। कुंजियाँ एनवायरनमेंट वेरिएबल्स या किसी सीक्रेट्स मैनेजर में रखें, कभी सोर्स कंट्रोल में नहीं। देखें सुरक्षा पेज (/docs/security)।"]} />
+
+## 2. SDK इंस्टॉल करें
+
+अपनी भाषा चुनें। SDK उस एनवायरनमेंट वेरिएबल से कुंजी अपने-आप पढ़ता है जिसे आपने अभी सेट किया है।
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+<PromptCard title="इंस्टॉल (Python)">{`pip install anthropic`}</PromptCard>
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+<PromptCard title="इंस्टॉल (TypeScript)">{`npm install @anthropic-ai/sdk`}</PromptCard>
+
+</TabItem>
+<TabItem value="curl" label="cURL">
+
+इंस्टॉल करने के लिए कुछ नहीं — आपको बस `curl` चाहिए।
+
+</TabItem>
+</Tabs>
+
+## 3. कॉल करें
+
+हर अनुरोध `messages` की एक सूची है। मॉडल `content` के साथ जवाब देता है। अपनी भाषा के लिए स्निपेट चलाएँ और आप Claude को प्रश्न का उत्तर देते हुए देखेंगे।
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+
+message = client.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=1024,
+    messages=[
+        {"role": "user", "content": "In one sentence, what is an API?"}
+    ],
+)
+
+print(message.content[0].text)
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic(); // reads ANTHROPIC_API_KEY from the environment
+
+const message = await client.messages.create({
+  model: "claude-sonnet-5",
+  max_tokens: 1024,
+  messages: [
+    { role: "user", content: "In one sentence, what is an API?" },
+  ],
+});
+
+console.log(message.content[0].text);
+```
+
+</TabItem>
+<TabItem value="curl" label="cURL">
+
+```bash
+curl https://api.anthropic.com/v1/messages \
+  --header "x-api-key: $ANTHROPIC_API_KEY" \
+  --header "anthropic-version: 2023-06-01" \
+  --header "content-type: application/json" \
+  --data '{
+    "model": "claude-sonnet-5",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "In one sentence, what is an API?"}
+    ]
+  }'
+```
+
+</TabItem>
+</Tabs>
+
+## अभी क्या हुआ
+
+आपने जानकारी के चार टुकड़े भेजे। यहाँ बताया गया है कि हर एक क्या नियंत्रित करता है:
+
+- **`model`** — किस Claude का उपयोग करना है। आँख मूँदकर हार्ड-कोड न करें; देखें [एक मॉडल चुनना](/docs/api/choosing-a-model)।
+- **`max_tokens`** — उत्तर की लंबाई पर एक सीमा ([टोकन](/docs/foundations) में)। यह कॉन्टेक्स्ट विंडो *सेट नहीं करता*।
+- **`messages`** — अब तक की बातचीत। API **स्टेटलेस** है: चैट जारी रखने के लिए, हर बार पूरा इतिहास वापस भेजें।
+- **`system`** (वैकल्पिक) — एक शीर्ष-स्तरीय निर्देश जो कॉल के लिए Claude की भूमिका सेट करता है।
+
+<Flashcards title="चार मुख्य फ़ील्ड" cards={[{front: "model", back: "किस Claude का उपयोग करना है। आँख मूँदकर हार्ड-कोड करने के बजाय इसे सोच-समझकर चुनें।"}, {front: "max_tokens", back: "उत्तर की लंबाई पर एक सीमा, टोकन में। यह कॉन्टेक्स्ट विंडो सेट नहीं करता।"}, {front: "messages", back: "अब तक की बातचीत। API स्टेटलेस है, इसलिए आप हर बारी में पूरा इतिहास दोबारा भेजते हैं।"}, {front: "system", back: "वैकल्पिक शीर्ष-स्तरीय निर्देश जो कॉल के लिए Claude की भूमिका सेट करता है।"}]} />
+
+<Callout type="tip" items={["क्योंकि API स्टेटलेस है, एक मल्टी-टर्न चैट बस एक बढ़ती हुई messages सरणी है: हर जवाब को जोड़ें और अगली कॉल पर पूरी सूची दोबारा भेजें।"]} />
+
+<Quiz title="खुद को परखें" questions={[{q: "max_tokens क्या नियंत्रित करता है?", options: ["कॉन्टेक्स्ट विंडो का आकार", "Claude के उत्तर की लंबाई पर एक सीमा", "आप कितने messages भेज सकते हैं"], answer: 1, explain: "max_tokens उत्तर की लंबाई को टोकन में सीमित करता है। यह कॉन्टेक्स्ट विंडो सेट नहीं करता।"}, {q: "API के साथ एक मल्टी-टर्न बातचीत कैसे जारी रखते हैं?", options: ["सर्वर आपके पिछले messages को अपने-आप याद रखता है", "आप हर बार पूरा संदेश इतिहास दोबारा भेजते हैं, क्योंकि API स्टेटलेस है", "आप एक session ID हेडर सेट करते हैं"], answer: 1, explain: "Messages API स्टेटलेस है: चैट जारी रखने के लिए आप हर अनुरोध पर पूरी बातचीत का इतिहास वापस भेजते हैं।"}, {q: "आपकी API कुंजी कहाँ रहनी चाहिए?", options: ["एक एनवायरनमेंट वेरिएबल या सीक्रेट्स मैनेजर में", "आपकी सोर्स फ़ाइल में हार्ड-कोड की हुई", "सुविधा के लिए आपके रिपॉज़िटरी में कमिट की हुई"], answer: 0, explain: "कुंजियाँ एनवायरनमेंट वेरिएबल्स या किसी सीक्रेट्स मैनेजर में रखें, कभी सोर्स कंट्रोल में नहीं।"}]} />
+
+<Callout type="takeaways" items={["तीन चरण: एक कुंजी प्राप्त करें, SDK इंस्टॉल करें, एक messages अनुरोध भेजें।", "कुंजी को ANTHROPIC_API_KEY में रखें ताकि SDK इसे अपने-आप पढ़े और यह कभी आपके कोड में न आए।", "एक अनुरोध messages की एक सूची है; जवाब content में वापस आता है।", "API स्टेटलेस है: चैट जारी रखने के लिए पूरी बातचीत का इतिहास दोबारा भेजें।", "model, max_tokens, messages, और system वे फ़ील्ड हैं जिन तक आप सबसे पहले पहुँचेंगे।"]} />
+
+## आगे
+
+- सही मॉडल चुनें और लागत का अनुमान लगाएँ → [एक मॉडल चुनना](/docs/api/choosing-a-model) · [टोकन और मूल्य निर्धारण](/docs/api)
+- प्रतिक्रियाएँ स्ट्रीम करें और बातचीत जारी रखें → [स्ट्रीमिंग और मल्टी-टर्न](/docs/api)
+- Claude को अपने फ़ंक्शन कॉल करने दें → [टूल उपयोग](/docs/api)
+- प्रोडक्शन-रेडी स्निपेट्स → [API स्निपेट्स](/docs/templates)

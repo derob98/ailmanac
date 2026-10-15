@@ -1,0 +1,70 @@
+# 権限と権限モード
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/claude-code/permissions · AILmanac (CC BY 4.0) · last verified 2026-07-14
+
+allow/ask/deny のルールとモード——安全性を失わずプロンプトを減らす。
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-07-14" source="https://code.claude.com/docs/en/permission-modes">
+正確なルール構文とモード名は進化します。公式の Claude Code の権限および権限モードのドキュメントで確認してください。
+</VerifyNote>
+
+<Callout type="objectives" items={["3 つの権限の判定（allow / ask / deny）の意味", "権限ルールがツールとパターンにどうマッチするか", "6 つの権限モードと、それぞれをいつ使うか", "auto モードがどのようにプロンプトを安全性分類器に置き換えるか", "安全性を失わずプロンプトを減らす、まともな初期 allowlist の作り方", "プロジェクト用と個人用の権限ルールをどこに保存するか"]} />
+
+権限は、**Claude Code が立ち止まってあなたに尋ねることなく何ができるか**を決めます。うまく調整すれば制御を失わず流れに乗れます。下手に調整すれば、すべてをゴム印で承認するか、プロンプトに溺れることになります。
+
+## 3 つの判定
+
+すべての潜在的なアクションは次のいずれかに解決されます：
+
+<Flashcards cards={[{front: "allow", back: "実行する、プロンプトなし。"}, {front: "ask", back: "一時停止してあなたに尋ねる——明示的に許可も拒否もされていないものすべてのデフォルト。"}, {front: "deny", back: "決して、尋ねられても。"}]} />
+
+ルールは通常ツールとパターンにマッチします。例：allow `Bash(npm run test:*)` や deny `Read(./.env)`。
+
+<PromptCard title="ツール + パターンを許可">{`Bash(npm run test:*)`}</PromptCard>
+
+<PromptCard title="ツール + パターンを拒否">{`Read(./.env)`}</PromptCard>
+
+## 権限モード
+
+モードはセッション全体の姿勢を設定します。全部で 6 つあります。よく使うものは `Shift+Tab` で切り替えられます。設定で `permissions.defaultMode` を指定することもできます。
+
+| モード | 尋ねずに実行するもの | 使うとき |
+|---|---|---|
+| **`default`**（**Manual** と表示） | 読み取りのみ | 日常の作業、慎重を要する変更 |
+| **`acceptEdits`** | 読み取り、ファイル編集、一般的なファイルシステムコマンド | 信頼できる、よくスコープされた編集セッション |
+| **`plan`** | 読み取りのみ。提案するが決して編集しない | 大きい／リスクの高いタスク——[プランモード](/docs/claude-code/plan-mode)を参照 |
+| **`auto`** | すべて。ただし安全性分類器による審査あり | プロンプト疲れが本当のリスクになる長時間タスク |
+| **`dontAsk`** | 事前承認されたツールのみ。それ以外はすべて拒否 | ロックダウンされた CI やスクリプト |
+| **`bypassPermissions`** | すべて、チェックなし | サンドボックス／コンテナのみ——シークレットのあるマシンでは**決して**使わない |
+
+### Auto モード
+
+`auto` は、すべてに確認を求めることと、安全性をオフにすることの中間地点です。あなたに尋ねる代わりに、別の**分類器モデル**が各アクションを実行前にレビューし、あなたが依頼した範囲を超えてエスカレートするもの、認識できないインフラに触れるもの、Claude が読んだばかりの敵対的なコンテンツに駆動されているように見えるものをブロックします。明示的な `ask` ルールは引き続き一時停止してあなたに尋ねます。
+
+`curl | bash`、force push、本番デプロイやマイグレーション、外部エンドポイントへのシークレット送信といったものはブロックされます。一方、日常的な作業（ローカルの編集、宣言済み依存関係のインストール、読み取り専用の HTTP、自分のブランチへのプッシュ）はそのまま通します。同じアクションを繰り返しブロックする場合、auto モードは一時停止し、プロンプトの判断をあなたに戻します。
+
+auto モードは安全性の保証ではありません。プロンプトを減らすだけで、慎重を要する操作をレビューする必要がなくなるわけではありません。利用可否はプラン、モデル、そして（Team／Enterprise では）管理者のトグルに依存します。
+
+<Callout type="warning" items={["bypassPermissions はサンドボックスに属します。実際のマシンですべてのプロンプトをオフにして実行することは、エージェントが触るべきでないものに触る原因になります。使い捨て環境のために取っておいてください——本当に欲しいのがプロンプトの削減なら、代わりに auto モードを使いましょう。/docs/security/hardening-autonomous-runs の自律実行のハードニングを参照。"]} />
+
+## まともな初期 allowlist
+
+目標：安全で繰り返しの多いものを事前許可し、破壊的なものは **ask** か **deny** に保つこと。
+
+<Steps items={[{title: "安全 + 繰り返しを許可", body: "ファイルの読み取り、テスト／リント／ビルドコマンドの実行、git status/diff。"}, {title: "中リスクの前には尋ねる", body: "依存関係のインストール、プロジェクト外へのファイル書き込み、ネットワーク呼び出し。"}, {title: "破壊的なものを拒否", body: "シークレットファイル（.env、キーファイル）の読み取り、force-push、rm -rf。"}]} />
+
+プロジェクトのルールは [`settings.json`](/docs/claude-code/settings)（共有）に、個人のオーバーライドは `settings.local.json` に保存します。
+
+<Callout type="tip" items={["プロンプトから学ばせましょう：同じ安全なコマンドを数回承認すれば、allowlist に何を追加すべきか正確に分かります——繰り返されるプロンプトを一度きりのルールに変えられます。"]} />
+
+<Callout type="takeaways" items={["3 つの判定：allow（プロンプトなし）、ask（デフォルト——一時停止して確認）、deny（決して）。", "ルールはツールとパターンにマッチする。Bash(npm run test:*) や Read(./.env) のように。", "6 つのモードがセッションの姿勢を設定する：default（Manual）、acceptEdits、plan、auto、dontAsk、bypassPermissions。", "auto モードはあなたに尋ねる代わりに、すべてのアクションを安全性分類器で審査する——プロンプト疲れへの対処はこれであって、bypassPermissions ではない。", "allowlist を作る：安全 + 繰り返しを許可、中リスクには尋ねる、破壊的なものを拒否。", "共有ルールは settings.json に、個人のオーバーライドは settings.local.json に。"]} />
+
+<Quiz title="確認しよう" questions={[{q: "明示的に許可も拒否もされていないアクションに対して、デフォルトの 'ask' 判定は何をしますか？", options: ["黙って実行する", "一時停止してあなたに確認を求める", "永久にブロックする"], answer: 1, explain: "ask は明示的に許可／拒否されていないものすべてのデフォルトです——一時停止してあなたに尋ねます。"}, {q: "サンドボックスやコンテナでのみ安全で、シークレットのあるマシンでは決して使わない権限モードはどれですか？", options: ["plan", "acceptEdits", "bypassPermissions"], answer: 2, explain: "bypassPermissions はプロンプトも安全性チェックも完全にスキップします。使い捨て環境のために取っておきましょう——シークレットのあるマシンでは決して使わないこと。"}, {q: "長時間のタスクで権限プロンプトを大幅に減らしたいが、それでも安全網は残したい。どのモードですか？", options: ["bypassPermissions——すべてのプロンプトをスキップするから", "auto——分類器が各アクションを審査し、リスクの高いものをブロックする", "dontAsk——決して割り込んでこないから"], answer: 1, explain: "auto モードはプロンプトを分類器に置き換え、curl | bash、force push、本番デプロイのようなエスカレーションをブロックします。bypassPermissions は安全網を取り除きます。dontAsk は事前承認されていないものを単に拒否するだけです。"}, {q: "共有のプロジェクト権限ルールと個人のオーバーライドをそれぞれどこに保存すべきですか？", options: ["両方とも settings.local.json に", "プロジェクトのルールは settings.json に、個人のオーバーライドは settings.local.json に", "プロジェクトのルールは settings.local.json に、個人のオーバーライドは settings.json に"], answer: 1, explain: "プロジェクトのルールは settings.json（共有）に、個人のオーバーライドは settings.local.json に入れます。"}, {q: "まともな初期 allowlist で、これらのうち 'deny' リストに属するのはどれですか？", options: ["git status / diff", "rm -rf と .env の読み取り", "テスト／リント／ビルドコマンドの実行"], answer: 1, explain: "破壊的なものを拒否する：シークレットファイル（.env、キーファイル）の読み取り、force-push、rm -rf。"}]} />
+
+## 次へ
+
+- [settings.json：設定システム](/docs/claude-code/settings)
+- [フック](/docs/claude-code/hooks) — allow/deny を超えて決定論的にルールを強制する
+- [セキュリティと責任ある利用](/docs/security/responsible-use)

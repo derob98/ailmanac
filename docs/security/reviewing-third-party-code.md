@@ -1,0 +1,45 @@
+# Reviewing Third-Party Code
+
+> Source: https://derob98.github.io/ailmanac/docs/security/reviewing-third-party-code · AILmanac (CC BY 4.0)
+
+Plugins, skills and MCP servers can ship executable code — review before you trust.
+
+<LevelBadge level="intermediate" />
+
+The ecosystem around Claude — [skills](/docs/claude-code/skills), [plugins](/docs/claude-code/plugins-marketplaces), [MCP servers](/docs/claude-code/mcp), [hooks](/docs/claude-code/hooks), community [statuslines](/docs/claude-code/statusline) — is powerful precisely because these things can **run code on your machine** and **access your data**. That's also why you should review them like you'd review any dependency.
+
+## What can actually execute
+
+- **Hooks** run shell commands with your privileges.
+- **MCP servers** are programs that run and can read/write data and hit the network.
+- **Plugins** can bundle all of the above.
+- **Skill scripts** can run as part of a skill.
+
+Installing one is closer to "running software" than "reading a doc."
+
+## A quick review checklist
+
+Before installing something you didn't write:
+
+- [ ] **Read the source.** What commands/network calls does it make? Anything it shouldn't need?
+- [ ] **Check the permissions/tools** it requests. Least privilege — be suspicious of broad access.
+- [ ] **Look at provenance.** Who maintains it? Stars, issues, recent activity, a real repo.
+- [ ] **Scan for secrets exfiltration.** Does it read env/credentials and send them somewhere?
+- [ ] **Pin versions** and watch updates (a benign tool can turn malicious in an update — supply-chain risk).
+- [ ] **Try it sandboxed first** if you're unsure.
+
+## Use Claude to help — carefully
+
+Claude itself is great at summarizing what a script does and flagging suspicious calls. Ask it to review the code — but remember it can be fooled too ([prompt injection](/docs/security/prompt-injection) can hide in code comments), so treat its review as one input, not gospel, for anything sensitive. In 2026 this stopped being theoretical: an agent asked to *review* an untrusted repo was tricked into *executing* its payload — see [When Coding Agents Get Weaponized](/docs/security/coding-agents-under-attack).
+
+:::warning Trust is a spectrum, not a checkbox
+"It's on a marketplace" is not the same as "it's safe." The convenience of one-click install is exactly when a quick review pays off most.
+:::
+
+## Next
+
+- [Vetting Agent Skills You Install](/docs/security/vetting-agent-skills) — the skill-specific deep dive, with real attack data
+- [When Coding Agents Get Weaponized](/docs/security/coding-agents-under-attack)
+- [Securing Agents & Tools](/docs/security/securing-agents)
+- [MCP Servers in Claude Code](/docs/claude-code/mcp)
+- [Plugins & Marketplaces](/docs/claude-code/plugins-marketplaces)

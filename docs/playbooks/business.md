@@ -1,0 +1,49 @@
+# Business, Marketing & Strategy
+
+> Source: https://derob98.github.io/ailmanac/docs/playbooks/business · AILmanac (CC BY 4.0)
+
+Research, copy, support drafts and planning for non-technical owners — with caveats.
+
+<LevelBadge level="all" />
+
+For founders and small teams, AI is leverage: it does the work of a junior marketer, analyst, and assistant at once. Direct it well and keep judgment on the things that matter.
+
+## High-leverage uses
+
+- **Positioning & messaging** — nail the value prop, then derive copy from it.
+- **Marketing content** — landing pages, emails, ads, social, FAQs (see [Writing](/docs/playbooks/writing)).
+- **Customer comms** — draft replies, handle complaints, write announcements.
+- **Research** — market/competitor scans (verify!), customer-interview question sets.
+- **Planning** — turn goals into prioritized, time-boxed plans.
+- **Docs & ops** — SOPs, job posts, meeting summaries.
+
+## Start with positioning
+
+Before any copy, get the one-liner right:
+
+```text
+Write 3 versions of a value proposition using: for {audience} who {need},
+{product} is a {category} that {key benefit}, unlike {alternative}.
+Then critique each in one line.
+```
+
+Everything downstream (ads, emails, landing pages) gets easier once this is sharp.
+
+## Caveats for business use
+
+:::warning Don't fabricate proof, and mind the claims
+- **Never invent** testimonials, metrics, case studies, or awards — use `[insert real number]` placeholders and fill them with real data.
+- **Watch regulated or unsubstantiated claims** (health, finance, "#1", guarantees).
+- **Verify** market facts and figures before acting ([Hallucinations](/docs/foundations/hallucinations)).
+- **Protect data** — don't paste customer PII or confidential numbers into unvetted tools ([Privacy](/docs/foundations/privacy)).
+:::
+
+## Make it repeatable
+
+Turn your best prompts into reusable assets — a [Project](/docs/claude-app/projects) with your brand voice and docs, or the [Business & Marketing skill pack](/docs/templates/skills) so the standards apply automatically.
+
+## Next
+
+- [Writing & Content Creation](/docs/playbooks/writing)
+- [Business & Marketing skill pack](/docs/templates/skills)
+- [Everyday Productivity](/docs/playbooks/productivity)

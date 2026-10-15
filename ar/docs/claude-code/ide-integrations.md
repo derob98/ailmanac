@@ -1,0 +1,46 @@
+# تكاملات بيئة التطوير المتكاملة (IDE)
+
+> Source: https://derob98.github.io/ailmanac/ar/docs/claude-code/ide-integrations · AILmanac (CC BY 4.0) · last verified 2026-07-16
+
+إضافات VS Code و JetBrains، والفروقات المضمّنة، والإعدادات المشتركة.
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-07-16" source="https://code.claude.com/docs/en/vs-code">
+بيئات التطوير المدعومة وخطوات الإعداد تتغير — تأكد من ذلك في وثائق تكامل بيئة التطوير الرسمية.
+</VerifyNote>
+
+لست مضطرًا للعيش في الطرفية. يتكامل Claude Code مع محرّرك لتراجع التغييرات **كفروقات (diffs)، في مكان كتابة الشيفرة تمامًا**.
+
+## ما الذي تحصل عليه
+
+- **الفروقات المضمّنة.** تظهر التعديلات المقترحة كفرق قابل للمراجعة في المحرّر، لا مجرد نص في طرفية.
+- **سياق المحرّر.** ملفاتك المفتوحة، والتحديد، والمشروع متاحة لـ Claude.
+- **العقل نفسه.** إنه Claude Code نفسه — [CLAUDE.md](/docs/claude-code/claude-md) الخاص بك، و[الأذونات](/docs/claude-code/permissions)، و[الخطافات](/docs/claude-code/hooks)، و[الإعدادات](/docs/claude-code/settings) تنطبق بشكل متطابق عبر الـ CLI والـ IDE. اضبط مرة واحدة، واستخدم في كل مكان.
+
+## المحرّرات المدعومة
+
+- **VS Code** (والمحرّرات المبنية على VS Code) عبر الإضافة.
+- **بيئات JetBrains** (IntelliJ، PyCharm، WebStorm، إلخ) عبر الإضافة.
+
+ثبّت من سوق المحرّر وصادِق؛ راجع [الوثائق الرسمية](https://code.claude.com/docs/en/vs-code) للخطوات الحالية.
+
+## CLI أم IDE — أيهما؟
+
+إنهما الأداة نفسها؛ اختر حسب التفضيل والمهمة:
+
+| فضّل الـ IDE عندما… | فضّل الـ CLI عندما… |
+|---|---|
+| تريد مراجعة الفروقات بصريًا | تكتب سكربتات أو في وضع [بلا واجهة (headless)](/docs/claude-code/headless-and-agent-sdk) |
+| تكتب الشيفرة في المحرّر أصلًا | تعمل على خادم / SSH |
+| تحب سياق المحرّر المضمّن | تريد أقصى تحكم وأنابيب (pipes) |
+
+:::tip الإعدادات مشتركة
+لأن الـ CLI والـ IDE يقرآن الإعداد نفسه، اضبط [CLAUDE.md](/docs/claude-code/claude-md) و[الأذونات](/docs/claude-code/permissions) مرة واحدة وستتبعك بينهما.
+:::
+
+## التالي
+
+- [CLAUDE.md وملفات الذاكرة](/docs/claude-code/claude-md)
+- [وضع التخطيط](/docs/claude-code/plan-mode)
+- [settings.json](/docs/claude-code/settings)

@@ -1,0 +1,164 @@
+# Local Coding Agents (and How They Pair with Claude)
+
+> Source: https://derob98.github.io/ailmanac/docs/models/local-coding-agents · AILmanac (CC BY 4.0) · last verified 2026-09-30
+
+Coding agents that run on your machine and edit your repo — Aider, Cline, Continue, OpenHands, Claude Code — powered by Claude for quality or a local model for privacy.
+
+<LevelBadge level="intermediate" />
+
+A **local coding agent** is a program that runs on your own machine, reads your repository, and edits your files for you. You describe a change in plain language; the agent plans it, writes code across several files, runs your tests, reads the failures, and tries again — a loop, not a single answer. The chat assistant in a browser tab hands you a snippet to paste; a coding agent does the pasting, running, and fixing itself, inside your repo.
+
+The key insight that makes this page worth reading: **almost all of these tools are model-agnostic.** The agent (the loop that touches your files) is separate from the model (the brain that decides what to write). So the *same* tool can be pointed at **Claude** for the best code quality, or at a **local open-weight model via [Ollama](/docs/models/run-models-locally-ollama)** so your code never leaves your laptop. You pick the agent for how it fits your workflow, and the model for the quality-vs-privacy trade-off — independently.
+
+<Callout type="objectives" items={[
+  "Understand the coding-agent archetype: an agent loop that reads your repo, plans, edits files, runs tests, and iterates",
+  "Know the real open tools — Aider, Cline, Continue, OpenHands — and how Anthropic's own Claude Code fits",
+  "Grasp why 'model-agnostic' matters: point one agent at Claude for quality OR a local model for privacy",
+  "Understand the privacy angle — a local model means your code never leaves your machine",
+  "Choose along two axes: IDE-integrated vs CLI vs autonomous, and Claude-powered vs fully local",
+]} />
+
+## The archetype: an agent loop, not a chat box
+
+Every tool on this page is a variation on the same loop. Once you see the loop, each tool is just a different shape around it:
+
+1. **Read** — the agent gathers context: the files you point it at, the repo structure, sometimes test output or error logs.
+2. **Plan** — it decides what to change and in which files, often proposing a plan before touching anything.
+3. **Edit** — it writes changes to real files on disk (usually shown as a diff you approve).
+4. **Run** — it executes commands: your test suite, a build, a linter, a script.
+5. **Observe and iterate** — it reads what happened (tests passed? a stack trace?) and loops back to step 2 until the task is done or it hands control back to you.
+
+This is the same shape as agentic [tool use](/docs/api/tool-use): the model is given tools (read file, edit file, run command) and decides when to call them. The difference between tools is mostly *how much autonomy* the loop has and *where it lives* — your terminal, your editor, or a sandboxed environment running on its own.
+
+The model in the middle of that loop is swappable. That is the whole reason a single agent can serve two very different users: someone who wants the strongest possible code (point it at Claude) and someone who legally cannot let code leave their network (point it at a local model).
+
+## Why model-agnostic is the headline feature
+
+The agent and the model are separate pieces. The agent owns the loop — reading files, applying diffs, running tests. The model owns the judgment — what to write, why, and when to stop. Decoupling them gives you two independent dials:
+
+- **Quality dial → Claude.** For hard reasoning, multi-file refactors, and long-context work, a frontier model like Claude produces markedly better edits and recovers from failures more reliably. Most of these tools document Claude as a recommended or default choice. (Which Claude tier to pick is its own decision — see [Choosing a Model](/docs/models/choosing-a-model).)
+- **Privacy dial → a local model.** Point the same agent at an open-weight model running under [Ollama](/docs/models/run-models-locally-ollama) and **your code, prompts, and diffs never leave your machine** — no API call, no third party, nothing on the wire. That is the deciding factor for regulated, air-gapped, or confidential codebases. The honest trade-off: a model small enough to run on a laptop is not in the same league as a frontier model on the hardest tasks. You are trading some capability for total data control.
+
+<Callout type="info" items={[
+  "Model-agnostic does not mean every model is equally good. The loop runs the same, but a weak model makes worse edits, misreads test failures, and loops unproductively. Privacy and capability genuinely trade off — choose per task, not once forever.",
+]} />
+
+## The real tools (verified)
+
+Five tools worth knowing. The first four are open-source and model-agnostic; the fifth is Anthropic's own agent, included so you can see where a Claude-native experience sits.
+
+### Aider — the CLI pair programmer
+
+[Aider](https://aider.chat/) runs in your **terminal** and is built around git: it edits files in your repo and **automatically commits each change** with a sensible message, so every AI edit is a diff you can review, undo, or revert. It is model-agnostic — it works best with frontier models like Claude, and it also connects to **local models via Ollama** (`aider --model ollama_chat/<model>`). If you live in the terminal and want tight git hygiene, Aider is the canonical CLI choice.
+
+### Cline — the agent inside your IDE
+
+[Cline](https://github.com/cline/cline) is an open-source coding agent that lives in your **editor** (VS Code and JetBrains) and also ships a terminal/CLI surface. It creates files, runs commands, and uses tools with **human-in-the-loop approval** — you see and approve each step. It is model-agnostic and explicitly supports **Claude** as well as **local models via Ollama or LM Studio**. Reach for Cline when you want an autonomous-ish agent without leaving your editor.
+
+> **Roo Code** is a well-known fork of Cline that added custom "modes" (e.g. an Architect mode for planning, a Coder mode for edits). It was also model-agnostic. Note its status below — the extension has since been discontinued, so do not start a new setup on it.
+
+<VerifyNote lastVerified="2026-09-30" source="https://github.com/RooCodeInc/Roo-Code">
+**Roo Code is shut down, not merely volatile.** The team wound the VS Code extension down in favour of a cloud agent, and the `RooCodeInc/Roo-Code` repository is now archived and read-only, with its last commit on 15 May 2026. Treat it as discontinued: if you want a Cline-style agent in your editor, use Cline itself (the upstream project), which remains the maintained local-first choice. Verify at <a href="https://github.com/RooCodeInc/Roo-Code">github.com/RooCodeInc/Roo-Code</a>.
+</VerifyNote>
+
+### Continue — the open IDE assistant
+
+[Continue](https://continue.dev/) is an open-source assistant for **VS Code and JetBrains** (plus a CLI) covering chat, edit, autocomplete, and an agent mode. It is thoroughly model-agnostic: its docs list **Anthropic (Claude)**, **Ollama** for local models, and many other providers, with different models assignable to different roles (chat, edit, autocomplete). That configurability is its appeal — but the project has stopped shipping, so treat it as a tool that works today and will not be fixed tomorrow.
+
+<VerifyNote lastVerified="2026-09-30" source="https://github.com/continuedev/continue">
+**Continue is no longer actively maintained.** Its README states that the `continuedev/continue` repository "is no longer actively maintained and is read-only for all users", after a final **2.0.0** release of the VS Code extension, CLI and JetBrains plugin. The tool and its Claude/Ollama support still work and <a href="https://docs.continue.dev">docs.continue.dev</a> is still online, so an existing install is fine — but do not standardize a team on it expecting fixes or new model support. Note that GitHub's own "archived" flag on the repository has not been set, so you will not see the usual archive banner; the maintenance statement in the README is the authoritative signal.
+</VerifyNote>
+
+### OpenHands — the autonomous agent
+
+[OpenHands](https://github.com/OpenHands/OpenHands) (**formerly OpenDevin**) is the most autonomous of the four: a platform for AI software-development agents that work in a sandboxed environment, decompose a task (e.g. a GitHub issue), and carry it out end-to-end with less step-by-step approval. It is model-agnostic — "use with any LLM," **Claude** included — and can run self-hosted. Pick OpenHands when you want to hand off a whole task and check back, rather than approve each edit.
+
+<VerifyNote lastVerified="2026-09-30" source="https://github.com/OpenHands/OpenHands">
+OpenHands was renamed from **OpenDevin**, and its GitHub org was renamed from `All-Hands-AI` to `OpenHands` (the old `All-Hands-AI/OpenHands` path still redirects). The docs have moved with it: the canonical home is now <a href="https://docs.openhands.dev/">docs.openhands.dev</a>, and the older `docs.all-hands.dev` redirects there. Confirm the current canonical repo and docs URLs at <a href="https://github.com/OpenHands/OpenHands">github.com/OpenHands/OpenHands</a>.
+</VerifyNote>
+
+### Claude Code — Anthropic's own agent
+
+[Claude Code](https://code.claude.com/) is Anthropic's official **agentic coding tool**: it reads your codebase, edits files, runs commands and tests, and works across your terminal, IDE, desktop app, and the web. Unlike the four above, it is not "point it at any model" — it is built around Claude and tuned for it, which is exactly why the loop feels tighter and the edits land more often on hard tasks. If your priority is the best Claude-powered coding experience rather than maximum model-swappability, this is the native path. Full detail in [What is Claude Code](/docs/claude-code/what-is-claude-code).
+
+## How to choose
+
+Two axes decide almost everything:
+
+**Axis 1 — where the agent lives:**
+
+- **CLI / terminal** (Aider, Claude Code) — scriptable, git-friendly, pipeable into other tools. Best if you live in the shell.
+- **IDE-integrated** (Cline, Continue, Claude Code's editor surface) — diffs and approvals inside your editor, with your code right there. Best for everyday editing.
+- **Autonomous / sandboxed** (OpenHands) — hand off a whole task and review the result. Best for batch or hands-off work.
+
+**Axis 2 — Claude-powered vs fully local:**
+
+- **Claude-powered** — best quality, especially on hard multi-file or long-context tasks. Your code is sent to the model API. Choose when quality matters most and your code can be sent to a provider.
+- **Fully local (Ollama)** — your code never leaves the machine; free to run; works offline. Choose when privacy, regulation, or air-gapping is non-negotiable — accepting that a laptop-sized model is weaker on the hardest tasks.
+
+The durable move: **pick the agent for the surface that fits your workflow, then pick the model per task.** Nothing stops you from running an IDE agent on a local model for the confidential repo and the same agent on Claude for everything else.
+
+## Pick and set up a coding agent
+
+<Steps items={[
+  {title: "Decide the surface", body: "CLI (Aider, Claude Code), IDE-integrated (Cline, Continue), or autonomous (OpenHands). Match it to where you already work — terminal vs editor vs hand-off-and-review."},
+  {title: "Decide the model dial", body: "Claude for best quality (code is sent to the API) or a local Ollama model for full privacy (code never leaves the machine). This is independent of the agent for every tool except Claude Code, which is Claude-native."},
+  {title: "Install the agent", body: "Follow the tool's docs. Aider installs via pip; Cline and Continue install from the VS Code or JetBrains marketplace; OpenHands self-hosts; Claude Code installs via its official installer."},
+  {title: "Wire up the model", body: "For Claude, set your Anthropic API key (or sign in for Claude Code). For local, install Ollama and pull a model first — see Run Models Locally with Ollama — then point the agent at it."},
+  {title: "Start small and keep humans in the loop", body: "Run one bounded task (fix a failing test, add a small function). Review every diff before approving. Trust the autonomy more only after you've seen the loop behave on your repo."},
+]} />
+
+A concrete first run with Aider pointed at a **local** model (private, free, offline) — pull the model with Ollama first, then:
+
+<PromptCard title="Run Aider on a local Ollama model (code stays on your machine)">{`aider --model ollama_chat/qwen3`}</PromptCard>
+
+To point the same tool at **Claude** instead (best quality, code sent to the API), you set your Anthropic key and select a Claude model — the agent loop is identical; only the brain changes:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+aider --model sonnet
+```
+
+That swap — one flag, two completely different privacy/quality profiles, same agent — is the entire point of this page.
+
+<Quiz title="Check yourself" questions={[
+  {q: "What does 'model-agnostic' mean for a coding agent like Aider or Cline?", options: ["It works without any model at all", "The same agent loop can be pointed at different models — e.g. Claude for quality or a local model for privacy", "It only works with open-source models"], answer: 1, explain: "The agent (the loop that reads, edits, and runs) is separate from the model (the brain). Model-agnostic means you swap the model — Claude or a local Ollama model — without changing the agent."},
+  {q: "Your codebase legally cannot leave your network. Which setup fits?", options: ["Any of these agents pointed at the Claude API", "A coding agent pointed at a local open-weight model via Ollama", "It is impossible to use a coding agent at all"], answer: 1, explain: "A local model under Ollama keeps code, prompts, and diffs entirely on your machine — nothing is sent to a provider. Pointing any agent at a hosted API (Claude or otherwise) sends your code off the machine."},
+  {q: "How does Claude Code differ from Aider, Cline, Continue, and OpenHands?", options: ["It cannot edit files", "It is Anthropic's own agent, built around Claude rather than being point-it-at-any-model", "It only runs in the cloud"], answer: 1, explain: "The four open tools are model-agnostic. Claude Code is Anthropic's official agent, tuned specifically for Claude — you trade model-swappability for a tighter Claude-native experience."},
+  {q: "Which tool is the most autonomous — built to take a whole task and run it in a sandbox with less step-by-step approval?", options: ["Aider", "Continue", "OpenHands"], answer: 2, explain: "OpenHands (formerly OpenDevin) is designed to decompose and carry out an entire task end-to-end in a sandboxed environment, rather than approving each individual edit."},
+]} />
+
+<Flashcards cards={[
+  {front: "Local coding agent", back: "A program that runs on your machine, reads your repo, and edits your files in a loop: read → plan → edit → run tests → iterate. Not a chat box — it does the editing and running itself."},
+  {front: "Model-agnostic", back: "The agent (the loop) is separate from the model (the brain). The same tool can be pointed at Claude for quality OR a local model for privacy — you choose independently."},
+  {front: "The privacy angle", back: "Point a coding agent at a local open-weight model via Ollama and your code never leaves your machine — no API call, no third party. The reason to go local on confidential or regulated code."},
+  {front: "Aider", back: "Terminal/CLI pair programmer, git-centric (auto-commits each edit). Model-agnostic: Claude or local via Ollama. aider.chat"},
+  {front: "Cline (and Roo Code)", back: "Open-source agent inside VS Code / JetBrains with human-in-the-loop approval. Supports Claude + local (Ollama/LM Studio). Roo Code was a fork — verify its current status before relying on it."},
+  {front: "Continue", back: "Open-source IDE assistant (VS Code / JetBrains) + CLI; chat, edit, autocomplete, agent. Model-agnostic: Anthropic (Claude), Ollama, and more. No longer maintained — the repo is read-only after a final 2.0.0 release. continue.dev"},
+  {front: "OpenHands (formerly OpenDevin)", back: "The most autonomous: a sandboxed agent that decomposes and runs whole tasks. Use with any LLM, Claude included. Self-hostable. github.com/OpenHands/OpenHands"},
+  {front: "Claude Code", back: "Anthropic's official agentic coding tool — terminal, IDE, desktop, web. Built around Claude (not point-it-at-any-model). Best for a Claude-native experience. code.claude.com"},
+]} />
+
+<Callout type="takeaways" items={[
+  "A coding agent runs a loop on your machine — read repo, plan, edit files, run tests, iterate — instead of handing you snippets to paste.",
+  "Almost all of these tools are model-agnostic: the agent and the model are separate, so you swap the brain without changing the loop.",
+  "Two dials: Claude for the best code quality, or a local open-weight model via Ollama for full privacy — your code never leaves the machine.",
+  "Aider = CLI/git; Cline = agent in your IDE; Continue = configurable IDE assistant, now unmaintained; OpenHands = autonomous/sandboxed; Claude Code = Anthropic's own Claude-native agent.",
+  "Choose along two axes — where the agent lives (CLI vs IDE vs autonomous) and Claude-powered vs fully local — and pick the model per task, not once forever.",
+]} />
+
+## Sources & further reading
+
+- [Aider — official site](https://aider.chat/) and [Aider with Ollama (local models)](https://aider.chat/docs/llms/ollama.html)
+- [Aider — GitHub repository](https://github.com/Aider-AI/aider)
+- [Cline — GitHub repository](https://github.com/cline/cline)
+- [Continue — official site](https://continue.dev/) and [GitHub repository](https://github.com/continuedev/continue)
+- [Continue — Anthropic (Claude) provider docs](https://docs.continue.dev/customize/model-providers/top-level/anthropic) and [Ollama guide](https://docs.continue.dev/guides/ollama-guide)
+- [OpenHands — GitHub repository](https://github.com/OpenHands/OpenHands) and [docs](https://docs.openhands.dev/)
+- [Claude Code — official site](https://code.claude.com/) and [overview docs](https://code.claude.com/docs/en/overview)
+- [Ollama — run open-weight models locally](https://ollama.com/)
+
+
+## Next
+
+- [Connect Claude to Local Tools & Agents with MCP](/docs/models/claude-mcp-local-tools)

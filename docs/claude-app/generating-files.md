@@ -1,0 +1,44 @@
+# Generating Real Files (docx/pptx/xlsx/pdf)
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-app/generating-files · AILmanac (CC BY 4.0) · last verified 2026-08-02
+
+Produce downloadable, styled documents straight from chat.
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-08-02" source="https://www.anthropic.com">
+Which file types Claude can generate and how varies by plan/surface and changes — confirm in the app/help center.
+</VerifyNote>
+
+Beyond text on screen, Claude can produce **real, downloadable files** — Word documents, PowerPoint decks, Excel spreadsheets, PDFs — formatted and ready to use. Great when you need a deliverable, not just an answer.
+
+## What you can ask for
+
+- **Word (.docx)** — reports, letters, proposals, formatted docs.
+- **PowerPoint (.pptx)** — slide decks from an outline or notes.
+- **Excel (.xlsx)** — spreadsheets with data, formulas, simple models.
+- **PDF** — print-ready versions of the above.
+
+## How to get a good file
+
+1. **Describe the deliverable**: type, audience, length, sections, tone.
+2. **Provide the content or source** (notes, data, an outline) — or ask Claude to draft it first.
+3. **Ask for the file** ("export this as a .docx"), then **iterate** ("add a title page," "make the table a chart," "tighten slide 3").
+
+```text
+Turn these notes into a 6-slide investor update deck (.pptx): traction, revenue,
+roadmap, team, ask. Clean and minimal. Notes: {paste}
+```
+
+## Tips
+
+- **Give structure.** Headings/sections in your request → cleaner output.
+- **Provide real data** for spreadsheets — and **verify** any computed numbers ([Hallucinations](/docs/foundations/hallucinations)); don't ship figures you haven't checked.
+- **Refine before exporting** — it's easier to fix in chat than in the final file.
+- These capabilities are powered by [Skills](/docs/claude-code/skills) under the hood — the same idea you can author yourself.
+
+## Next
+
+- [Artifacts: Live, Runnable Outputs](/docs/claude-app/artifacts)
+- [Writing & Content Creation](/docs/playbooks/writing)
+- [Business, Marketing & Strategy](/docs/playbooks/business)

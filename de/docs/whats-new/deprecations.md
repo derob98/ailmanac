@@ -1,0 +1,64 @@
+# Überwachung von Deprecations & Migrationen
+
+> Source: https://derob98.github.io/ailmanac/de/docs/whats-new/deprecations · AILmanac (CC BY 4.0) · last verified 2026-10-02
+
+Eingestellte Modelle, umbenannte Flags und Breaking Changes mit Migrationshinweisen.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-10-02" source="https://platform.claude.com/docs/en/about-claude/model-deprecations">
+Zeitpläne für Deprecations und Migrationsdetails stammen von Anthropic und ändern sich — bestätige Daten und Ersatzoptionen immer in der offiziellen Dokumentation, bevor du migrierst.
+</VerifyNote>
+
+Modelle werden eingestellt, Parameter umbenannt, Verhaltensweisen ändern sich. Diese Seite verfolgt **Breaking Changes**, damit Upgrades dich nicht überraschen. Wenn du auf der API aufbaust, überfliege sie regelmäßig.
+
+## Warum das wichtig ist
+
+Eine fest verankerte Modell-ID wird irgendwann **deprecated** und dann **entfernt**. Code, der sie fest einkodiert, bricht. Ein wenig Hygiene verhindert Überraschungen um 2 Uhr nachts.
+
+## Überlebensregeln
+
+- **Lies Modell-IDs aus der Konfiguration**, verstreue niemals Literale über die Codebasis — dann ist eine Migration eine Änderung von einer Zeile.
+- **Beobachte Ankündigungen** zu Deprecation-Daten und empfohlenen Ersatzoptionen.
+- **Führe deine [Evals](/docs/foundations/evals) erneut aus**, wenn du Modelle wechselst — das Verhalten kann sich selbst bei einem „neueren, besseren“ Modell verschieben.
+- **Teste vor der Frist**, nicht nach der Entfernung.
+
+## Häufige Arten von Änderungen
+
+| Änderung | Beispiel | Was zu tun ist |
+|---|---|---|
+| Modell eingestellt | Eine ältere Modell-ID funktioniert nicht mehr | Wechsle zum empfohlenen Nachfolger; erneut evaluieren |
+| Parameter ersetzt | Ein Reasoning-/Budget-Regler wird durch `effort` ersetzt | Aktualisiere Aufrufe; siehe [Thinking & Effort](/docs/api/thinking-and-effort) |
+| Verschiebung des Defaults | Ein neues Standardmodell/-verhalten | Pinne bewusst; überprüfe, ob deine Prompts noch funktionieren |
+| Endpunkt-/SDK-Update | Neue SDK-Hauptversion | Lies den Migrationsleitfaden; aktualisiere bewusst |
+
+## Aktuelle Überwachung
+
+Der maßgebliche Zeitplan steht auf der [offiziellen Seite zu Modell-Deprecations](https://platform.claude.com/docs/en/about-claude/model-deprecations) — bestätige die Daten dort, bevor du migrierst. Anthropic kündigt die Einstellung eines öffentlich veröffentlichten Modells mindestens 60 Tage im Voraus an.
+
+### Eingestellte Modelle
+
+Ein öffentlich veröffentlichtes Claude-Modell befindet sich im Fenster „eingestellt, aber noch nicht entfernt“ (geprüft am 2. Oktober 2026): **`claude-sonnet-4-5-20250929` (Sonnet 4.5) wurde am 30. September 2026 eingestellt und wird am 30. November 2026 entfernt.** Anthropics empfohlener Ersatz ist `claude-sonnet-5-5`. Aufrufe funktionieren bis zum Entfernungsdatum und schlagen danach fehl — wenn du diese ID noch fest im Code hast, ist das deine Migration, und du hast bis Ende November Zeit.
+
+Ebenfalls eingestellt: das nur auf Einladung verfügbare `claude-mythos-preview` (eingestellt am 9. Juni 2026, Entfernungsdatum noch offen) — Teilnehmende an Project Glasswing sollten zu `claude-mythos-5` wechseln.
+
+`claude-haiku-4-5-20251001` ist die nächste ID, die du im Blick behalten solltest: Ihr frühestmögliches Entfernungsdatum ist der **15. Oktober 2026**, aber die offizielle Statustabelle führt sie weiterhin als **Active**, ohne angekündigte Einstellung. Ein erreichtes „nicht vor“-Datum ist ein Signal zu planen, kein Ausfall — Anthropic sichert mindestens 60 Tage Vorlauf zu, und diese Frist beginnt mit der Ankündigung, nicht mit dem Überschreiten des Mindestdatums. Sonnet 4.5 ist das Lehrbeispiel: Mindestdatum war der 29. September 2026, die Einstellungsankündigung folgte am 30. September, und die tatsächliche Entfernung liegt zwei Monate danach. Prüfe die [offizielle Modell-Statustabelle](https://platform.claude.com/docs/en/about-claude/model-deprecations#model-status), bevor du migrierst.
+
+### Kürzlich entfernt
+
+- `claude-opus-4-1-20250805` (Opus 4.1) wurde **am 5. August 2026 entfernt** — wechsle zu `claude-opus-4-8` (oder direkt zu `claude-opus-5`).
+- `claude-opus-4-20250514` (Opus 4) und `claude-sonnet-4-20250514` (Sonnet 4) wurden **am 15. Juni 2026 entfernt** — die von Anthropic genannten Nachfolger sind `claude-opus-4-8` bzw. `claude-sonnet-4-6` (oder gehe direkt zu `claude-opus-5` / `claude-sonnet-5`).
+
+Aufrufe einer entfernten ID erzeugen jetzt einen API-Fehler. Wenn dein Code noch eine davon pinnt, ist das das Erste, was du beheben solltest.
+
+### Parameter-Deprecations
+
+Ab **Claude Opus 4.7 und später** — Opus 4.7, Opus 4.8, Opus 5, Opus 5.5, Sonnet 5, Sonnet 5.5, Fable 5, Fable 5.1 — **und auf Claude Mythos Preview** sind die Sampling-Regler `temperature`, `top_p` und `top_k` deprecated: Setzt du einen davon auf einen Nicht-Standardwert, gibt es einen **400-Fehler**. Lass sie weg und steuere das Verhalten stattdessen über [Prompting](/docs/prompting/prompting-claude) und [Thinking & Effort](/docs/api/thinking-and-effort).
+
+Bestätige deine Modell-IDs immer anhand der Tabelle [Aktuelle Modelle & Preise](/docs/whats-new/models-and-pricing); wenn du eine ältere ID verwendest, plane eine Migration.
+
+## Weiter
+
+- [Fehler, Rate Limits & Zuverlässigkeit](/docs/api/errors-and-rate-limits)
+- [Aktuelle Modelle & Preise](/docs/whats-new/models-and-pricing)
+- [KI-Qualität bewerten (Evals)](/docs/foundations/evals)

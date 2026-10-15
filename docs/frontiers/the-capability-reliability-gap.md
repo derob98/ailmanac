@@ -1,0 +1,110 @@
+# The Capability-Reliability Gap
+
+> Source: https://derob98.github.io/ailmanac/docs/frontiers/the-capability-reliability-gap · AILmanac (CC BY 4.0)
+
+A model doing something once in a demo is not the same as it doing it correctly every time in production. Understanding this gap is the foundation of building trustworthy AI systems.
+
+<LevelBadge level="intermediate" />
+
+# The Capability-Reliability Gap
+
+<Callout type="objectives" items={["Why 'it worked in my demo' is not evidence that it will work in production","Capability vs. reliability — they are different properties, and most guides confuse them","How variance quietly turns a 95% task into a broken product","A four-step golden-set eval loop you can start today with a spreadsheet","Why evals are the real moat — not prompts"]} />
+
+Here is a pattern that burns almost everyone who ships AI to real users for the first time:
+
+> The model does the thing perfectly in your test. It fails in production. You're confused, because you *saw* it work.
+
+What you ran into is the capability-reliability gap.
+
+**Capability** means the model *can* do a task — it produces a correct output at least once, under some conditions.
+
+**Reliability** means the model *consistently* does the task correctly — across varied inputs, across repeated runs, across slight changes in phrasing or context.
+
+Demos prove capability. Production requires reliability. These are different properties, and most guides confuse them.
+
+## Why demos lie
+
+When you test a prompt, you typically:
+
+- Run it on inputs you designed yourself
+- Run it a handful of times
+- Cherry-pick the output that looks good
+- Tweak the prompt until it looks right
+
+This process optimizes for capability. The prompt now works on *your* examples. You've seen a correct output. You ship it.
+
+The problem is that user inputs in production are not your examples. They're messier, more varied, phrased in ways you didn't anticipate. The model was never tested on them. You have no idea how it performs on them.
+
+A single good output is not a performance estimate. It's an anecdote.
+
+## Variance is the hidden variable
+
+LLMs are stochastic. Run the same prompt twice and you often get different outputs. This variance is normal and usually fine. But it means that the relevant question is not "did it work?" — it's "what fraction of the time does it work?"
+
+A task where the model succeeds 95% of the time looks great in a demo and breaks on roughly one in twenty users. A task where it succeeds 60% of the time looks fine when you're the one running it. These are very different situations, and you cannot tell them apart without measuring.
+
+## The capability-reliability spectrum in practice
+
+| Dimension | Capable but unreliable | Reliable |
+|---|---|---|
+| Inputs tested | Author-designed examples | Diverse, real-user inputs |
+| Sample size | A few runs | Repeated runs on many examples |
+| Failure mode visibility | Failures are rare in testing, common in production | Failures are measured and understood |
+| How you find out it broke | User complaints | Your eval suite |
+| How you improve it | Guess and check prompts | Track pass rate, debug failures systematically |
+| Deployment confidence | Vibe-based | Evidence-based |
+
+## Evals are the real moat
+
+Better prompts can raise capability. Only evals can tell you whether you've raised reliability.
+
+An *eval* is a structured test: a set of inputs, expected outputs or evaluation criteria, and a way to measure pass rate. You run the model on the inputs, score the outputs, and get a number. Then you change something — the prompt, the model, the temperature — and run it again. Now you have a signal.
+
+This is not glamorous. It's the part of AI product work that most tutorials skip entirely. But it's the only way to answer the question that actually matters when you're shipping: "How often does this work on inputs I haven't seen?"
+
+### A simple way to start
+
+You don't need infrastructure to begin. Here's a minimum viable eval loop:
+
+<Steps items={[{title: "Build a golden set", body: "Collect 20-50 real or realistic inputs. For each one, write what a correct output looks like (or criteria for judging it). These are your golden examples. Prefer real user inputs over ones you invented — you are looking for the distribution you have not tested against."}, {title: "Run it N times", body: "Run your prompt on each example multiple times (3-5 is a reasonable floor). Variance across runs tells you about prompt stability; variance across examples tells you about coverage. Both matter."}, {title: "Track pass rate", body: "For each (input, run) pair, record pass or fail. Compute the overall rate. This single number is the start of your reliability picture — everything else is noise until you have it."}, {title: "Make it a regression test", body: "Every time you change the prompt, model, or temperature, run the eval again. If pass rate drops, you have broken something. If it rises, you have made a real improvement — as opposed to a change that felt better on the one example you eyeballed."}]} />
+
+That's it. A spreadsheet works. The discipline matters more than the tooling.
+
+## Why this is an engineering problem, not a prompting problem
+
+The instinct when a model fails is to rewrite the prompt. Sometimes that's right. But often it's a way of optimizing for the failure case you saw, at the cost of regressing on cases you didn't check.
+
+Reliability engineering for AI looks like:
+
+- Defining what "correct" means before you run anything
+- Measuring against a representative input distribution
+- Tracking changes over time with consistent methodology
+- Distinguishing "this model can't do this task" from "this task is underspecified"
+
+Prompt engineering is a tool within that process. It is not a substitute for it.
+
+## The honest framing
+
+Most AI capabilities are real. The models genuinely can do remarkable things. The capability-reliability gap is not an argument that the capabilities are fake — it's an argument that knowing they exist is not enough.
+
+If you need a task to work 95% of the time, you need *evidence* that it works 95% of the time. That evidence comes from running structured tests, not from confidence in the demo.
+
+The engineers who build durable AI products are not necessarily the ones who write the best prompts. They're the ones who know what "working" means before they ship, and who have a measurement that tells them whether it's true.
+
+<Quiz title="Check yourself" questions={[{q: "You demo a new prompt to your team. It nails your favorite example three times in a row. What have you proven?", options: ["Reliability — three runs is enough to establish a pass rate","Capability — you have shown the model CAN do it under some conditions, on inputs you chose","Nothing, because temperature was probably above zero"], answer: 1, explain: "Three runs on inputs you designed proves capability, not reliability. To make a reliability claim you need a representative input distribution and enough runs to estimate variance. A single good output is an anecdote, not a performance estimate."}, {q: "Your prompt succeeds 95% of the time on the golden set. Is it production-ready?", options: ["Yes — 95% is well above the industry bar","It depends on the blast radius of the 5% failure mode and your ability to detect it","No — production requires 99.9% pass rate"], answer: 1, explain: "95% means one in twenty user interactions fails. Whether that ships depends on: what happens on failure (silent bad output vs. an error you can retry), whether the user notices, and whether the failure is bounded. There is no universal number — the tolerable failure rate is set by the task, not the model."}, {q: "You change the prompt to fix one failure case you saw. Best next step?", options: ["Ship — you fixed the bug","Re-run the entire eval — you may have regressed on cases you didn't check","Add that one case as a few-shot example"], answer: 1, explain: "Optimizing for a single observed failure often silently regresses cases you did not re-check. That is why the eval loop treats every prompt change as a regression test: same golden set, same runs-per-input, compare the new pass rate to the old. If it went down anywhere, you traded one bug for another."}]} />
+
+<Callout type="takeaways" items={["Capability is 'can it?' Reliability is 'how often does it?' — demos prove the first, production requires the second.","A single good output is an anecdote, not a performance estimate. Real evidence needs varied inputs run multiple times.","Variance is the hidden variable: 95% success looks great in a demo and breaks on one in twenty users.","Start with a golden set of 20-50 real inputs, run each N times, track pass rate, and re-run on every change.","Better prompts raise capability. Only evals raise (and prove) reliability — evals are the real moat."]} />
+
+## Related
+
+- [Your First API Call](/docs/api/first-call)
+- [Prompting Basics](/docs/prompting/basics)
+- [The Freshness Half-Life](/docs/frontiers/freshness-half-life)
+- [When Agents Run a Business](/docs/frontiers/when-agents-run-a-business) — the gap made concrete: two real experiments where frontier models were handed a live budget.
+- [Agents Under KPI Pressure](/docs/frontiers/agents-under-kpi-pressure) — a benchmark showing how the same gap turns into constraint violations when a KPI enters the prompt.
+- [The Verification Bottleneck](/docs/frontiers/the-verification-bottleneck) — the industrial-scale version of the gap: when AI can write code faster than teams can trust it.
+
+
+## Next
+
+- [The Verification Bottleneck](/docs/frontiers/the-verification-bottleneck)

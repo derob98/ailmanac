@@ -1,0 +1,128 @@
+# 编程 Agent CLI 横向对比
+
+> Source: https://derob98.github.io/ailmanac/zh-Hans/docs/models/coding-agent-clis-compared · AILmanac (CC BY 4.0) · last verified 2026-07-08
+
+Claude Code、Codex CLI、Gemini CLI 以及开源终端 agent —— harness（而不只是模型）如何决定你的结果，以及如何用 AGENTS.md 保持配置的可移植性。
+
+<LevelBadge level="intermediate" />
+
+你已经选好了模型。但真正*包裹*模型的那个程序 —— 读取文件、制定计划、运行命令、检查自身工作并重试的那个循环 —— 是一个独立的选择，而且它的重要性至少不亚于模型本身。社区把这个外壳称为 **harness**（或 **agent**），同一个模型在一个 harness 里可以表现得极其出色，在另一个里却平平无奇。本页梳理 2026 年的终端编程 agent、真正拉开它们差距的因素，以及如何保持配置的可移植性，让切换成本始终维持在低位。
+
+<Callout type="objectives" items={[
+  "分清两个常被混为一谈的选择：模型本身，以及驱动它的 harness",
+  "掌握每个主流 CLI agent 的持久形态 —— Claude Code、Codex CLI、Gemini CLI，以及开源阵营",
+  "在真正起决定作用的维度上做选择：自主性、开放性、模型无关性、沙箱与生态",
+  "用 AGENTS.md 让你的配置可移植，这样切换 agent 时无需重写项目上下文",
+]} />
+
+<VerifyNote lastVerified="2026-07-08" source="https://agents.md">
+本页上的 star 数量、版本号、基准分数、价格以及套餐/层级可用性变化**很快** —— 编程 agent 的排名几乎每月都会重新洗牌，厂商也会在几乎没有预告的情况下改动免费层级。请把下文的*原型与维度*当作持久内容；在做决定之前，请对照每个项目自己的仓库或文档（在“来源”中给出链接）重新核对任何具体数字。
+</VerifyNote>
+
+## 模型不等于 agent
+
+前沿模型是一个文本预测器。而**编程 agent**是围绕它的 harness：系统提示词、工具集（读取、编辑、运行 shell、搜索）、规划循环、上下文管理策略、权限与沙箱模型，以及重试逻辑。改变 harness 就会改变结果 —— 贯穿 2026 年的从业者报告都描述过：同一个模型在真实仓库任务上的表现，会因为驱动它的 agent 不同而波动几十分。
+
+这带来两个现实后果：
+
+- **一个基准数字是一个*组合*，而不是模型分数。**“Terminal-Bench 上 83%”是一个*模型 + harness + 脚手架*的结果。换掉其中任何一部分，它都会变化。
+- **你的循环才是真正的比较单位。**最好的 agent，是在*你的*技术栈、*你的*终端里、以你能接受的价格表现最好的那一个 —— 这和挑选编程模型的逻辑一模一样。模型这一半的决策请见 [Claude vs GPT vs Gemini 编程对比](/docs/models/claude-gpt-gemini-for-coding)；本页讲的是 harness 这一半。
+
+## 2026 年的格局
+
+终端 agent 领域分成了两大阵营：针对某个实验室模型调优的**第一方 agent**，以及可以指向任何模型（或本地权重）的**模型无关** agent。
+
+| Agent | 出品方 | 开放性 | 模型 | 形态 |
+|---|---|---|---|---|
+| **Claude Code** | Anthropic | 闭源 | Claude（第一方） | 自主、agentic 的多文件工作；操作系统级强制沙箱；深厚的 skills/MCP/subagent 生态 |
+| **Codex CLI** | OpenAI | 开放（Apache-2.0，Rust） | GPT（第一方） | 自主终端 agent；原生 Windows 沙箱；广泛的平台覆盖 |
+| **Gemini CLI** | Google | 开源 | Gemini（第一方） | 大上下文 agent，与 Google 生态深度绑定（见下方时效性提示） |
+| **opencode** | 社区（anomalyco） | 开放（MIT，TypeScript） | 任意（模型无关） | star 数最高的开源 agent；CLI + 桌面端；自带模型 |
+| **Aider** | 社区 | 开放（Apache-2.0） | 任意，含本地模型 | git 原生的结对编程伙伴，而非完整的自主编排器 |
+| **Cline / Goose / 其他** | 社区 | 开放 | 任意 | 编辑器内嵌（Cline）或通用开源 agent（Goose）；模型无关 |
+
+<VerifyNote lastVerified="2026-07-08" source="https://github.com/google-gemini/gemini-cli">
+**Gemini CLI 正处于变动之中。**2026 年年中，Google 改动了免费层级的访问方式，并把部分用户引向了一个独立的“Antigravity”CLI。究竟 Gemini CLI、Antigravity 还是某个更新的东西才是正确的 Google 入口，正是那种会迅速过时的事实 —— 在投入之前，请在 Google 自己的文档上确认当前状态。
+</VerifyNote>
+
+## 真正起决定作用的维度
+
+先把排行榜放一边。这些才是持久的问题：
+
+<Steps items={[
+  {title: "第一方还是模型无关？", body: "第一方 agent（Claude Code、Codex CLI、Gemini CLI）针对自家模型调优，通常能给出最顺滑的巅峰体验。模型无关 agent（opencode、Aider、Cline）让你可以更换模型 —— 今天用前沿模型，明天用便宜的或本地的 —— 而无需更换工具。如果避免被锁定、或运行本地权重对你很重要，就选模型无关的。"},
+  {title: "你想要多少自主性？", body: "Aider 是结对编程伙伴：专注、文件级、git 原生的编辑，每次提交你都在环内。Claude Code 和 Codex CLI 是编排器：给一个目标，它们就会在众多文件和 shell 命令上规划并执行。更高的自主性意味着更大的杠杆，也意味着更需要护栏。"},
+  {title: "影响半径有多大？", body: "一个能运行 shell 命令的 agent 可以删除文件、推送代码或花掉钱。相比“相信我”，更应优先选择操作系统级强制沙箱和明确的权限模型。Claude Code 和 Codex CLI 在 2026 年都带有沙箱；在让任何 agent 无人值守运行之前，先确认它能触及什么。"},
+  {title: "生态是否契合你的工作？", body: "在核心循环之外：用于工具的 MCP 服务器、可复用的 skills、subagent、hooks、IDE 集成、CI actions。一个搭配顶级模型的“更薄”agent，可能会输给一个搭配“够用就好”模型的“更厚”agent，因为生态承担了更多工作。"},
+  {title: "在“你的”循环里它要花多少钱？", body: "订阅制还是 API 计量、上下文窗口、缓存，以及 harness 有多“话痨”，都会影响真实账单。一个便宜的模型放进吞 token 的 harness 里，可能比一个更贵的模型放进精简 harness 里花得更多。"},
+]} />
+
+<Callout type="tip" items={["不要凭一个头条基准分数就买下一个 harness。要凭一次 30 分钟的试用来买它 —— 用你自己仓库里的真实任务来试，这正是那个能击败一切模型排行榜的“在你自己的代码上做评测”的做法。", "开放性是一种对冲，而不是你每天都会用到的功能。它的价值会在价格改动或免费层级消失、而你想搬家的那一天显现出来。"]} />
+
+## 可移植性：上下文只写一次
+
+最大的隐藏切换成本是你的**项目上下文** —— 构建命令、约定、测试规则，以及那些 agent 无法自行推断的东西。2026 年这方面有了一个事实标准：**`AGENTS.md`**，一个放在仓库根目录的纯 Markdown 文件，由 Linux Foundation 旗下的 Agentic AI Foundation 维护，并被 Codex、Gemini CLI、Cursor、Aider、Copilot 的 coding agent、opencode、Goose 以及另外 20 多种工具原生读取（已有 6 万多个仓库采用）。
+
+- **`AGENTS.md`** = 跨工具的项目上下文。写一次；大多数 agent 都会读取。
+- **`CLAUDE.md`** = Claude Code 自己的项目记忆文件（见 [CLAUDE.md](/docs/claude-code/claude-md)）。你可以保留一个指向 `AGENTS.md` 的小型 `CLAUDE.md`，或者两者都维护。
+- **`SKILL.md`** = Anthropic 用于打包可复用 [skills](/docs/claude-code/skills) 的独立规范，带 frontmatter 和捆绑脚本。它与 `AGENTS.md` 是*互补*关系，而非竞争者 —— 一个描述项目，另一个打包可复用的流程。
+
+把上下文放在 `AGENTS.md` 里，意味着你尝试另一个 agent 的那天，你的项目规则会免费一起跟过去。
+
+<PromptCard title="精简版 AGENTS.md —— 只写 agent 无法推断的内容">{`# AGENTS.md
+
+## Setup
+- Install: \`pnpm install\`
+- Dev server: \`pnpm dev\` (port 3000)
+
+## Build & test (run before every commit)
+- Typecheck: \`pnpm typecheck\`
+- Lint: \`pnpm lint\`
+- Tests: \`pnpm test\` — all must pass
+
+## Conventions
+- TypeScript strict; no \`any\`.
+- Components in \`src/components\`, one per file.
+- Never edit files under \`generated/\` by hand.
+
+## Constraints
+- Do NOT run \`git push\` or open PRs without being asked.
+- Secrets live in \`.env.local\`; never commit them.
+`}</PromptCard>
+
+<Callout type="warning" items={["只在 AGENTS.md 里放 agent 无法自行发现的内容。重述显而易见的事实会在每次运行时消耗 token，并把真正重要的规则淹没。要手工整理它 —— 自动生成的上下文文件往往都是噪音。"]} />
+
+## 一口气做出决定
+
+- **需要深度、自主的 Claude 工作，配上最丰富的工具生态** → **Claude Code**。
+- **想要一个绑定 GPT、拥有强大平台/Windows 覆盖的开源第一方 agent** → **Codex CLI**。
+- **想要自由更换模型或运行本地权重** → **opencode** 或 **Cline**。
+- **谨慎、git 原生、人在环内的编辑** → **Aider**。
+- **押注庞大的 Google 生态上下文** → **Gemini CLI**（先确认当前访问方式）。
+
+无论你选哪个，都把项目上下文放在 `AGENTS.md` 里，并在投入之前用你自己仓库里的一个真实任务来验证这个选择。
+
+<Quiz questions={[{q: "人们说的编程 agent “harness”是什么意思？", options: ["模型的训练数据", "包裹模型的那个程序 —— 它的工具、规划循环、沙箱和重试逻辑", "IDE 主题", "它运行所在的 GPU"], answer: 1, explain: "harness 是围绕模型的 agent：系统提示词、工具、规划/重试循环、上下文管理和沙箱。在同一个模型上，它能让真实任务的结果波动几十分。"}, {q: "一篇博客报告某 agent 在“某编程基准上 83%”。这个数字真正衡量的是什么？", options: ["单独的模型", "一个特定的模型 + harness + 脚手架组合", "编程语言", "用户的技能"], answer: 1, explain: "编程 agent 的分数是一个组合。换掉模型、harness 或脚手架，数字都会变 —— 这就是为什么你自己的仓库才是唯一算数的测试。"}, {q: "为什么要选择像 opencode 或 Aider 这样的模型无关 agent？", options: ["它总是更准确", "为了自由更换模型、运行本地权重，对冲价格与层级变动", "它无需任何配置", "它只能用一个模型"], answer: 1, explain: "模型无关 agent 让你可以指向任何模型 —— 前沿的、便宜的或本地的 —— 这样价格改动或免费层级取消都不会逼你迁移工具。"}, {q: "AGENTS.md 是做什么用的？", options: ["一个 changelog", "跨工具的项目上下文（构建/测试命令、约定、约束），被 20 多个 agent 读取", "一个许可证文件", "只给 Claude 用的记忆"], answer: 1, explain: "AGENTS.md 是一个事实标准的 Markdown 项目上下文文件，被 Codex、Gemini CLI、Cursor、Aider、opencode 等许多工具读取 —— 写一次，大多数 agent 都会用。CLAUDE.md 是 Claude Code 自己的对应文件。"}]} />
+
+## 记忆卡片
+
+<Flashcards title="编程 agent CLI 词汇表" cards={[
+  {front: "Harness（agent）", back: "把模型包裹成一个编程 agent 的程序：系统提示词、工具（读/编辑/shell/搜索）、规划 + 重试循环、上下文管理、权限与沙箱。重要性不亚于模型本身。"},
+  {front: "第一方 vs 模型无关", back: "第一方 agent（Claude Code→Claude、Codex CLI→GPT、Gemini CLI→Gemini）针对某个实验室的模型调优。模型无关 agent（opencode、Aider、Cline）可指向任何模型，包括本地权重。"},
+  {front: "Claude Code", back: "Anthropic 面向 Claude 的闭源终端 agent。自主的多文件工作、操作系统级强制沙箱，以及深厚的生态：MCP、skills、subagent、hooks、CI actions。"},
+  {front: "Codex CLI", back: "OpenAI 面向 GPT 的开源（Apache-2.0，Rust）终端 agent。自主、原生 Windows 沙箱、广泛的平台覆盖。2026 年年中约有 9.6 万个 GitHub star。"},
+  {front: "opencode", back: "社区出品的开源（MIT，TypeScript）模型无关 agent —— 2026 年 star 数最高的开源编程 agent。CLI 加桌面应用；自带模型。"},
+  {front: "Aider", back: "开源（Apache-2.0）的 git 原生结对编程伙伴。专注的文件级编辑，你在环内，几乎适配任何 LLM 包括本地模型。不是完整的自主编排器。"},
+  {front: "AGENTS.md", back: "位于仓库根目录的事实标准 Markdown 项目上下文文件。由 Agentic AI Foundation（Linux Foundation）维护；被 20 多个 agent、6 万多个仓库读取。上下文写一次，大多数 agent 都会读。"},
+  {front: "CLAUDE.md vs AGENTS.md vs SKILL.md", back: "CLAUDE.md = Claude Code 的项目记忆。AGENTS.md = 跨工具项目上下文。SKILL.md = Anthropic 的可复用 skill 包。互补，而非竞争。"},
+]} />
+
+## 来源与延伸阅读
+
+- [AGENTS.md —— 官方站点与规范](https://agents.md)（Agentic AI Foundation / Linux Foundation）
+- [openai/codex —— Codex CLI 仓库](https://github.com/openai/codex)（Apache-2.0，Rust）
+- [sst/opencode —— opencode 仓库](https://github.com/sst/opencode)（MIT，TypeScript）
+- [Aider-AI/aider —— Aider 仓库](https://github.com/Aider-AI/aider)（Apache-2.0）
+- [google-gemini/gemini-cli —— Gemini CLI 仓库](https://github.com/google-gemini/gemini-cli)
+- [Anthropic —— Claude Code 文档](https://docs.claude.com/en/docs/claude-code/overview)
+- 本站相关：[Claude vs GPT vs Gemini 编程对比](/docs/models/claude-gpt-gemini-for-coding) · [本地编程 agent](/docs/models/local-coding-agents) · [CLAUDE.md](/docs/claude-code/claude-md) · [Skills](/docs/claude-code/skills)

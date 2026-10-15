@@ -1,0 +1,65 @@
+# L'échelle de confiance
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/frontiers/the-trust-ladder · AILmanac (CC BY 4.0)
+
+Cinq échelons d'autonomie que vous pouvez accorder à un agent IA, liés au caractère réversible et à l'ampleur d'une erreur potentielle — et le garde-fou qui rend chaque échelon sûr.
+
+<LevelBadge level="intermediate" />
+
+# L'échelle de confiance
+
+<Callout type="objectives" items={["Pourquoi l'autonomie est une échelle — un échelon à la fois — et non un interrupteur on/off","Les cinq échelons, cartographiés par rayon d'impact et réversibilité (et non par l'intelligence du modèle)","Trois règles pour régler le bon échelon : commencer bas, dimensionner sur le pire cas, choisir par tâche","Comment l'échelle correspond aux modes de permission de Claude Code","Où s'inscrit CLAUDE.md — le fichier qui transforme les « garde-fous que je garde dans ma tête » en garde-fous que l'agent peut réellement suivre"]} />
+
+« Jusqu'où devrais-je laisser l'IA simplement *agir* ? » est la question qui se cache derrière presque chaque décision concernant les agents — permissions de Claude Code, paramètres d'approbation automatique, le fait de laisser un script tourner sans surveillance. Les gens ont tendance à y répondre par un seul interrupteur on/off : soit vous surveillez tout, soit vous lâchez la bride.
+
+Voici la lentille qu'AILmanac utilise à la place :
+
+> **L'autonomie n'est pas un interrupteur, c'est une échelle. Vous la gravissez un échelon à la fois, et l'échelon sur lequel vous vous tenez devrait être déterminé par la gravité d'une erreur potentielle — et non par la confiance que vous accordez au modèle.**
+
+L'idée clé, c'est que le bon niveau d'autonomie n'a presque rien à voir avec l'« intelligence » de l'IA. Il s'agit de **rayon d'impact** (l'ampleur des dégâts qu'une action erronée provoque) et de **réversibilité** (la facilité avec laquelle vous pouvez l'annuler). Un modèle brillant qui fait une chose irréversible sans surveillance est une configuration pire qu'un modèle médiocre qui fait une chose réversible.
+
+## Les cinq échelons
+
+Un modèle que nous trouvons utile consiste à penser à cinq échelons distincts, du moins au plus autonome :
+
+| Échelon | Ce que fait l'IA | Quand c'est approprié | Ce qui le rend sûr |
+| --- | --- | --- | --- |
+| **1. Suggérer uniquement** | Vous dit ce qu'elle *ferait* ; n'entreprend aucune action | Travail à enjeux élevés ou irréversible ; un domaine où vous ne lui faites pas encore confiance ; vous apprenez encore ce dans quoi elle est bonne | C'est vous l'exécutant. Rien ne se passe sans que vous le fassiez à la main. |
+| **2. Rédiger pour relecture** | Produit l'artefact réel (code, e-mail, requête) mais s'arrête avant de l'appliquer | Le résultat est concret et vous pouvez le survoler plus vite que vous ne pourriez l'écrire | Un humain réel a lu avant que quoi que ce soit ne prenne effet. Un diff que vous regardez vraiment, pas que vous parcourez en diagonale. |
+| **3. Agir sur les choses réversibles** | Exécute directement, mais uniquement sur des actions à faibles enjeux et facilement annulables | L'action dispose d'une annulation propre : modifications sous gestion de version, écritures sur une branche brouillon, tout ce qu'une seule commande peut défaire | **La réversibilité est le garde-fou.** Le coût d'une erreur, c'est « l'annuler », pas « l'expliquer au service juridique ». |
+| **4. Agir puis rendre compte** | Fait le travail de manière autonome, puis vous montre exactement ce qu'elle a fait | Tâches répétitives et bien cadrées où relire *après* coûte moins cher que filtrer *avant* | Une piste d'audit complète et honnête — un journal, un diff, un résumé — que vous lisez réellement ensuite. |
+| **5. Agir de manière autonome dans des garde-fous** | Tourne sans surveillance à l'intérieur de limites strictes | Boucles étroites et bien comprises que vous avez vues réussir de nombreuses fois | **Les garde-fous assurent la supervision.** Des frontières strictes que l'IA ne peut pas franchir, plus un coupe-circuit. |
+
+## Comment utiliser l'échelle
+
+Trois règles rendent cela concret :
+
+<Steps items={[{title: "Commencez un échelon plus bas qu'il ne semble nécessaire", body: "Il est peu coûteux de gravir un échelon une fois que vous avez vu quelque chose fonctionner ; il est coûteux de nettoyer après avoir accordé trop, trop tôt. La première fois que vous pointez un agent vers un nouveau type de tâche, descendez à Suggérer ou Rédiger même si vous soupçonnez qu'il peut en gérer davantage."}, {title: "Réglez l'échelon sur le pire cas, pas sur le cas moyen", body: "Si une tâche est réversible 95 % du temps mais que les 5 % restants touchent des données de production, vous réglez l'échelon sur les 5 %. Le rayon d'impact de la pire action plausible est votre plafond."}, {title: "Gravissez par tâche, pas par outil", body: "La même IA peut être à l'échelon 4 pour « formate mon code » et à l'échelon 1 pour « supprime des enregistrements de la base de données », dans la même session. L'échelle porte sur l'action, pas sur un réglage de confiance global que vous basculez une fois pour toutes."}]} />
+
+## La correspondance avec Claude Code
+
+Claude Code est un endroit idéal pour voir l'échelle en action, car son système de permissions est essentiellement un ensemble de curseurs pour choisir votre échelon :
+
+- **Les échelons 1–2** sont la posture prudente par défaut : Claude propose des modifications et des commandes, et vous approuvez chacune. Vous relisez chaque diff avant qu'il n'atterrisse.
+- **L'échelon 3** consiste à autoriser des appels d'outils réversibles spécifiques — modifications de fichiers dans un dépôt git que vous pouvez `git restore`, exécutions sur une branche jetable — tout en filtrant toujours ce qui est destructeur.
+- **L'échelon 4** consiste à mettre en liste d'autorisation des catégories d'actions sûres pour que Claude procède sans demander sur celles-ci, puis à lire la transcription et les diffs ensuite.
+- **L'échelon 5**, c'est une autonomie plus complète pour une boucle étroite et éprouvée — et ce n'est sûr *que* lorsque de vrais garde-fous sont en place : permissions cadrées, répertoire de travail contraint, et la capacité de l'arrêter.
+
+Le mécanisme qui vous permet de gravir en toute sécurité, c'est votre **[CLAUDE.md](/docs/claude-code/claude-md)**. Ce fichier est l'endroit où vous écrivez les garde-fous : ce qui est toujours autorisé, ce qui ne doit jamais arriver, quels chemins sont interdits, quand s'arrêter et demander. Les garde-fous que vous ne gardez que dans votre tête ne contraignent pas un agent — ceux écrits dans CLAUDE.md, si. Si vous ne savez pas comment les formuler, le [Générateur de CLAUDE.md](/docs/tools/claude-md-generator) vous donne un point de départ structuré.
+
+Le résumé honnête : **n'accordez pas d'autonomie parce que l'IA paraît compétente. Accordez-la parce que l'action est réversible, que le rayon d'impact est petit, et que les garde-fous sont écrits.** Puis gravissez un échelon à la fois à mesure que les preuves arrivent.
+
+<Quiz title="Vérifiez vos acquis" questions={[{q: "Vous avez un prompt éprouvé qui n'a jamais échoué en ~200 exécutions de test. Devriez-vous sauter directement à l'échelon 5 (autonome) ?", options: ["Oui — 200 exécutions sans faute sont une preuve solide que le modèle sait faire cela de façon fiable", "Non — l'échelon 5 se règle sur le rayon d'impact et la réversibilité, pas sur le taux de réussite passé", "Oui, tant que le modèle est Opus"], answer: 1, explain: "L'échelle se règle sur la PIRE action plausible, pas sur la fiabilité observée. 200/200 exécutions de test vous renseignent sur la capacité, pas sur ce qui se passe à l'exécution 201 avec une entrée inédite. L'échelon 5 exige des garde-fous stricts plus un coupe-circuit — et uniquement pour des boucles étroites et bien comprises."}, {q: "Une tâche est réversible 95 % du temps. Les 5 % restants touchent des données de facturation en production. Quel échelon ?", options: ["Échelon 4 — la moyenne réversible l'emporte","Échelon 1 ou 2 — vous réglez l'échelon sur le pire cas des 5 %","Échelon 3 — on coupe la poire en deux"], answer: 1, explain: "Vous réglez l'échelon sur le pire cas, pas sur la moyenne. Si un chemin plausible mène à un préjudice irréversible, le plafond est « Suggérer » ou « Rédiger pour relecture » jusqu'à ce que vous puissiez garantir que le chemin des 5 % ne peut pas être emprunté (par exemple un garde-fou qui bloque strictement les écritures sur cette table)."}, {q: "Où résident réellement les garde-fous qui vous permettent de gravir les échelons en toute sécurité ?", options: ["Dans votre tête — vous relisez chaque action au moment où elle se produit","Dans CLAUDE.md et les paramètres de permissions — écrits, pour que l'agent puisse s'y conformer","Dans le modèle — Claude refuse naturellement les actions risquées"], answer: 1, explain: "Les garde-fous que vous ne gardez que dans votre tête ne contraignent pas un agent autonome — l'agent ne peut pas les lire. Pour gravir l'échelle, les frontières doivent être encodées là où l'agent les respectera vraiment : CLAUDE.md, modes de permission, listes d'autorisation/de refus, accès aux outils cadré."}]} />
+
+<Callout type="takeaways" items={["L'autonomie est une échelle, pas un interrupteur — gravissez un échelon à la fois à mesure que les preuves s'accumulent.","Réglez l'échelon sur le rayon d'impact et la réversibilité de la pire action plausible, pas sur l'intelligence apparente du modèle.","La réversibilité est le garde-fou de l'échelon 3 ; une vraie piste d'audit est le garde-fou de l'échelon 4 ; des limites strictes + un coupe-circuit sont le garde-fou de l'échelon 5.","Choisissez l'échelon par tâche, pas par outil — le même agent peut être à l'échelon 4 pour le formatage et à l'échelon 1 pour les suppressions en base de données, dans la même session.","Les garde-fous ont leur place dans CLAUDE.md et les paramètres de permissions — pas dans votre tête."]} />
+
+## Voir aussi
+
+- [Qu'est-ce que CLAUDE.md ?](/docs/claude-code/claude-md)
+- [Générateur de CLAUDE.md](/docs/tools/claude-md-generator)
+- [La demi-vie de fraîcheur](/docs/frontiers/freshness-half-life)
+
+
+## Suite
+
+- [Ingénierie du contexte](/docs/frontiers/context-engineering)

@@ -1,0 +1,72 @@
+# Errori, rate limit e affidabilità
+
+> Source: https://derob98.github.io/ailmanac/it/docs/api/errors-and-rate-limits · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+La mappa degli errori, i retry con backoff, i tier di rate limit e la migrazione dei modelli.
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Leggere la mappa degli errori HTTP e sapere quali status riprovare e quali correggere", "Riprovare gli errori transitori con backoff esponenziale e jitter, con un limite massimo", "Gestire i rate limit con retry-after, smorzamento dei picchi, batching e modelli più economici", "Isolare il tuo codice dalle deprecazioni e migrazioni dei modelli"]} />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/api/errors">
+I codici di stato esatti, gli header e i tier di rate limit cambiano — conferma nella documentazione ufficiale su errori/rate limit.
+</VerifyNote>
+
+Il codice in produzione dialoga con un servizio di rete, quindi deve aspettarsi che qualcosa fallisca. Un po' di struttura qui fa la differenza tra un'integrazione instabile e una affidabile.
+
+## La mappa degli errori
+
+Gli status HTTP tipici che gestirai:
+
+| Status | Significato | Cosa fare |
+|---|---|---|
+| 400 | Richiesta non valida | Correggi il payload; non riprovare così com'è |
+| 401 | API key errata/mancante | Controlla le credenziali |
+| 403 | Non consentito | Controlla accesso/permessi |
+| 429 | Rate limit raggiunto | **Fai backoff e riprova** (rispetta `retry-after`) |
+| 500/529 | Errore del server / sovraccarico | **Riprova con backoff** |
+
+<Callout type="tip" items={["Gli SDK li espongono come eccezioni tipizzate, così puoi ramificare in modo pulito anziché analizzare stringhe."]} />
+
+## Retry con backoff
+
+Per gli errori transitori (429, 5xx), riprova con **backoff esponenziale + jitter**, con un limite massimo:
+
+```python
+import time, random
+for attempt in range(5):
+    try:
+        return client.messages.create(...)
+    except (RateLimitError, APIStatusError) as e:
+        if attempt == 4 or not should_retry(e):
+            raise
+        time.sleep(min(2 ** attempt + random.random(), 30))
+```
+
+<Callout type="warning" items={["Molti SDK riprovano automaticamente gli errori transitori — conosci il comportamento predefinito del tuo client prima di aggiungere il tuo, altrimenti potresti raddoppiare i retry."]} />
+
+## Rate limit
+
+I limiti si applicano per account/tier (richieste e token al minuto). Quando ne raggiungi uno ottieni un **429** con indicazioni temporali. Strategie per restare sotto il tetto:
+
+<Steps items={[{title: "Rispetta retry-after", body: "Quando ricevi un 429, leggi l'indicazione temporale nella risposta e attendi quel tempo prima di riprovare."}, {title: "Smorza i picchi", body: "Distribuisci le richieste nel tempo invece di inviarle tutte in una volta."}, {title: "Raggruppa in batch il lavoro offline", body: "Sposta i job ad alto volume e non interattivi nell'elaborazione in batch."}, {title: "Usa un modello più economico", body: "Indirizza i passi ad alto volume verso un modello più economico — vedi Scegliere un modello."}]} />
+
+Vedi [Scegliere un modello](/docs/api/choosing-a-model) per scegliere il modello giusto per i passi ad alto volume.
+
+## Migrazione dei modelli
+
+Gli ID dei modelli sono datati/versionati e finiscono per essere deprecati. Proteggiti:
+
+- **Leggi l'ID del modello dalla configurazione**, non da letterali sparsi.
+- **Tieni d'occhio le deprecazioni** — vedi [Monitoraggio deprecazioni e migrazioni](/docs/whats-new/deprecations) e la [tabella dei modelli](/docs/whats-new/models-and-pricing).
+- **Riesegui le tue [valutazioni](/docs/foundations/evals)** quando cambi modello.
+
+<Callout type="takeaways" items={["400/401/403 sono colpa tua — correggi la richiesta o le credenziali, non riprovare alla cieca. 429 e 500/529 sono riprovabili.", "Riprova gli errori transitori con backoff esponenziale + jitter, con un limite massimo (es. min(2 ** attempt + random(), 30)).", "Su 429: rispetta retry-after, smorza i picchi, raggruppa in batch il lavoro offline e indirizza i passi ad alto volume verso un modello più economico.", "Leggi gli ID dei modelli dalla configurazione, tieni d'occhio le deprecazioni e riesegui le valutazioni quando migri i modelli."]} />
+
+<Quiz title="Mettiti alla prova" questions={[{q: "Ricevi un 400 Richiesta non valida. Cosa dovresti fare?", options: ["Fare backoff e riprovare lo stesso payload", "Correggere il payload; non riprovare così com'è", "Ruotare la tua API key", "Aspettare retry-after"], answer: 1, explain: "400 significa che la richiesta stessa non è valida — correggi il payload. Riprovare lo stesso payload fallirà di nuovo."}, {q: "Quali status sono quelli da riprovare con backoff?", options: ["400 e 401", "403 e 401", "429 e 500/529", "400 e 429"], answer: 2, explain: "429 (rate limit) e 500/529 (errore del server / sovraccarico) sono transitori — fai backoff e riprova. 400/401/403 sono problemi lato chiamante da correggere invece."}, {q: "Perché aggiungere il jitter al backoff esponenziale?", options: ["Per rendere i retry esatti e prevedibili", "Per randomizzare i tempi di attesa così i retry non si scontrano tutti insieme", "Per saltare l'header retry-after", "Per ridurre il consumo di token"], answer: 1, explain: "L'esempio usa min(2 ** attempt + random.random(), 30) — il componente casuale (jitter) distribuisce i retry così che molti client non riprovino in sincronia, e il limite massimo mantiene le attese limitate."}, {q: "Quale NON è una strategia di rate limit suggerita?", options: ["Rispettare retry-after", "Raggruppare in batch il lavoro offline", "Usare un modello più economico per i passi ad alto volume", "Inserire l'ID del modello hardcoded in ogni punto di chiamata"], answer: 3, explain: "Le strategie di rate limit sono: rispettare retry-after, smorzare i picchi, raggruppare in batch il lavoro offline e usare un modello più economico. Leggere l'ID del modello dalla configurazione (non hardcoded) è una pratica di migrazione dei modelli, non di rate limit."}]} />
+
+## Avanti
+
+- [Sicurezza, rifiuti e fallback](/docs/api/refusals-and-safety)
+- [Token e prezzi](/docs/api/tokens-and-pricing)
+- [Costruire agent sull'API](/docs/api/building-agents)
