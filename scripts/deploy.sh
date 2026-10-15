@@ -6,8 +6,14 @@
 # duplicates files mid-build ("* 2", "* 3" conflict copies) and stalls reads of
 # the 4.3 GB node_modules, which corrupts or hangs in-place `docusaurus build`.
 # The cure is to build ENTIRELY OUTSIDE iCloud: copy the source (NOT node_modules)
-# to /tmp, install deps there once, build there, and force-push build/ to gh-pages.
-# A cold run is ~3-4 min (npm ci); warm runs reuse /tmp deps and finish in <1 min.
+# to a cache directory, install deps there once, build there, and force-push
+# build/ to gh-pages. A cold run is ~3-4 min (npm ci); warm runs reuse the deps.
+#
+# WHY NOT /tmp: macOS deletes files in /tmp that nobody has opened for three
+# days. A Mac left idle over a weekend came back with node_modules half gone
+# (react and @docusaurus/core unresolvable), so the deps now live in
+# ~/Library/Caches, and are reinstalled whenever they no longer match the
+# lockfile they were installed from.
 #
 # CONCURRENCY: scheduled AILmanac tasks can overlap, and two runs sharing $DST
 # will destroy each other -- both `rsync --delete` and `rm -rf build` into the
@@ -21,7 +27,7 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
-DST="${AILMANAC_DEPLOY_DIR:-/tmp/ailmanac_deploy}"
+DST="${AILMANAC_DEPLOY_DIR:-$HOME/Library/Caches/ailmanac_deploy}"
 LOCK="$DST.lock"
 LOCK_WAIT_SECS="${AILMANAC_LOCK_WAIT_SECS:-900}"
 REMOTE="https://github.com/derob98/ailmanac.git"
@@ -74,9 +80,14 @@ find . -path ./node_modules -prune -o \
   \( -name '* 2' -o -name '* 3' -o -name '* 2.*' -o -name '* 3.*' \) \
   -exec rm -rf {} + 2>/dev/null || true
 
-if [ ! -x node_modules/.bin/docusaurus ]; then
-  echo "==> installing dependencies in /tmp (one-time, cold start)"
+# Reinstall when the deps are missing, damaged, or older than the lockfile (a
+# dependency update): the marker is a copy of the lockfile they came from.
+MARKER=node_modules/.ailmanac-installed-from-lock
+if ! cmp -s package-lock.json "$MARKER" ||
+  ! node -e "require.resolve('@docusaurus/core/package.json')" 2>/dev/null; then
+  echo "==> installing dependencies (cold start, or the lockfile changed)"
   npm ci || npm install
+  cp package-lock.json "$MARKER"
 fi
 
 echo "==> building all locales"
