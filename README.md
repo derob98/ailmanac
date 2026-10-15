@@ -32,6 +32,8 @@
 
 **New research: [Claude has never seen 68% of the Claude Code docs](https://derob98.github.io/ailmanac/docs/whats-new/unread-manual).** We replayed 15 months of the official docs, one week at a time. Two-thirds of what they say today was written after June 2026, the training cutoff of every current Claude model. The [`since-cutoff`](./plugins/since-cutoff) plugin tells Claude what it missed, at the start of every session.
 
+<a href="https://derob98.github.io/ailmanac/docs/whats-new/unread-manual"><img alt="68% of what the Claude Code docs say today was written after June 2026, the training cutoff of every current Claude model. Bars show the share for each model's cutoff, from 98.6% for Haiku 4.5 to 68.3% for the newest models." src="data/research/unread-manual.png" width="840"></a>
+
 AI tools change every week, and most guides do not say when they were written. AILmanac is a free, open guide to **Claude** (the apps, **Claude Code** and the **API**) and to the other models and agents around it. Every page is tagged by level, written in plain language, and stamped with the date it was last checked against its source.
 
 > [!NOTE]
