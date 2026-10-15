@@ -133,6 +133,9 @@ const config: Config = {
         docsRouteBasePath: '/docs',
         highlightSearchTermsOnTargetPage: true,
         explicitSearchResultPath: true,
+        // Quiz and flashcard text repeats the page and only adds noise to the
+        // results; leaving it out also trims the index by about 9%.
+        ignoreCssSelectors: ['[class*="questions_"]', '[class*="deck_"]'],
       },
     ],
   ],
