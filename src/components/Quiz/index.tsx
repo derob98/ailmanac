@@ -118,7 +118,9 @@ export default function Quiz({questions, title}: QuizProps): ReactNode {
           <BrainIcon className={styles.kickerIcon} />
         </span>
         <h3 className={styles.title}>{heading}</h3>
-        <span className={styles.count} aria-label={progressLabel}>
+        <span
+          className={`${styles.count} ${allDone ? styles.countDone : ''}`}
+          aria-label={progressLabel}>
           {answeredCount}/{total}
         </span>
       </div>
@@ -220,7 +222,9 @@ export default function Quiz({questions, title}: QuizProps): ReactNode {
       </ol>
 
       {allDone && (
-        <div className={styles.result} role="status">
+        <div
+          className={`${styles.result} ${score === total ? styles.resultPerfect : ''}`}
+          role="status">
           <p className={styles.resultLine}>
             <span className={styles.resultEmoji} aria-hidden="true">
               {result.icon}
