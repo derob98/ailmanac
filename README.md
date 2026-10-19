@@ -20,10 +20,10 @@
   <img alt="License: CC BY 4.0 and MIT" src="https://img.shields.io/badge/license-CC%20BY%204.0%20%26%20MIT-blue">
 </p>
 
-**[Read the site](https://derob98.github.io/ailmanac/)** &nbsp;·&nbsp; **[Install it in Claude Code](#use-it-inside-claude-code)** &nbsp;·&nbsp; **[Cheat sheet](#the-claude-code-cheat-sheet)** &nbsp;·&nbsp; **[Start in 5 minutes](https://derob98.github.io/ailmanac/docs/start-here/your-first-5-minutes)** &nbsp;·&nbsp; **[Contribute](https://derob98.github.io/ailmanac/docs/contribute/contribute-in-10-minutes)**
+**[The unread manual](https://derob98.github.io/ailmanac/docs/whats-new/unread-manual)** &nbsp;·&nbsp; **[Read the site](https://derob98.github.io/ailmanac/)** &nbsp;·&nbsp; **[Install it in Claude Code](#use-it-inside-claude-code)** &nbsp;·&nbsp; **[Cheat sheet](#the-claude-code-cheat-sheet)** &nbsp;·&nbsp; **[Start in 5 minutes](https://derob98.github.io/ailmanac/docs/start-here/your-first-5-minutes)** &nbsp;·&nbsp; **[Contribute](https://derob98.github.io/ailmanac/docs/contribute/contribute-in-10-minutes)**
 
-<a href="https://derob98.github.io/ailmanac/">
-  <img alt="The AILmanac homepage" src="static/img/screenshot-home.jpeg" width="840">
+<a href="https://derob98.github.io/ailmanac/docs/whats-new/unread-manual">
+  <img alt="68% of what the Claude Code docs say today was written after June 2026, the training cutoff of every current Claude model. Bars show the share for each model's cutoff, from 98.6% for Haiku 4.5 to 68.3% for the newest models." src="data/research/unread-manual.png" width="840">
 </a>
 
 </div>
@@ -32,12 +32,14 @@
 
 **New research: [Claude has never seen 68% of the Claude Code docs](https://derob98.github.io/ailmanac/docs/whats-new/unread-manual).** We replayed 15 months of the official docs, one week at a time. Two-thirds of what they say today was written after June 2026, the training cutoff of every current Claude model. The [`since-cutoff`](./plugins/since-cutoff) plugin tells Claude what it missed, at the start of every session.
 
-<a href="https://derob98.github.io/ailmanac/docs/whats-new/unread-manual"><img alt="68% of what the Claude Code docs say today was written after June 2026, the training cutoff of every current Claude model. Bars show the share for each model's cutoff, from 98.6% for Haiku 4.5 to 68.3% for the newest models." src="data/research/unread-manual.png" width="840"></a>
-
 AI tools change every week, and most guides do not say when they were written. AILmanac is a free, open guide to **Claude** (the apps, **Claude Code** and the **API**) and to the other models and agents around it. Every page is tagged by level, written in plain language, and stamped with the date it was last checked against its source.
 
 > [!NOTE]
 > AILmanac is an independent project. It is not affiliated with, sponsored by, or endorsed by Anthropic. "Claude" and "Anthropic" are trademarks of Anthropic. When AILmanac and the [official docs](https://docs.anthropic.com) disagree, the official docs win, and the pages link to them throughout.
+
+<p align="center">
+  <a href="https://derob98.github.io/ailmanac/"><img alt="The AILmanac homepage" src="static/img/screenshot-home.jpeg" width="840"></a>
+</p>
 
 ## Use it inside Claude Code
 
