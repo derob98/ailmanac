@@ -7,7 +7,7 @@
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [日本語](./README.ja.md) · [Español](./README.es.md) · [Italiano](./README.it.md)
 
 <!-- stats:start -->
-**311 pages** · **260 interactive lessons** · **12 languages** · **73 pages re-verified in the last 30 days**
+**312 pages** · **263 interactive lessons** · **12 languages** · **74 pages re-verified in the last 30 days**
 <!-- stats:end -->
 
 <p>
@@ -78,6 +78,7 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 ## Recently added
 
 <!-- fresh:start -->
+- 2026-10-19 — [First-Party OpenTelemetry Tracing: Two Paths, One Trace](https://derob98.github.io/ailmanac/docs/api/opentelemetry-tracing)
 - 2026-10-15 — [Claude has never seen 68% of the Claude Code docs](https://derob98.github.io/ailmanac/docs/whats-new/unread-manual)
 - 2026-10-13 — [Claude Code Cheat Sheet](https://derob98.github.io/ailmanac/docs/claude-code/cheat-sheet)
 - 2026-10-09 — [Agent Observability: Tracing an Agent You Can't Reproduce](https://derob98.github.io/ailmanac/docs/api/agent-observability)
@@ -85,7 +86,6 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 - 2026-10-08 — [Claude Haiku 5.5: The 100K Price Cliff](https://derob98.github.io/ailmanac/docs/models/haiku-5-5-the-100k-price-cliff)
 - 2026-10-07 — [Mistral Large 4 (Le Chonk): the 1.05T open weight you can't download yet](https://derob98.github.io/ailmanac/docs/models/mistral-large-4-le-chonk)
 - 2026-10-07 — [The claude CLI: Flags That Change Outcomes](https://derob98.github.io/ailmanac/docs/claude-code/cli-flags)
-- 2026-10-06 — [Agentic Discovery: Inside the Harness That Found ART](https://derob98.github.io/ailmanac/docs/frontiers/agentic-discovery-art-harness)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).
