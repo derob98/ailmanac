@@ -82,12 +82,12 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 <!-- fresh:start -->
 - 2026-10-20 — [Backdoored Open Weights: The Abliterated-Model Supply Chain](https://derob98.github.io/ailmanac/docs/security/backdoored-open-weights)
 - 2026-10-20 — [Claude Dashboards & Claude Motion](https://derob98.github.io/ailmanac/docs/claude-app/dashboards-and-motion)
+- 2026-10-20 — [The Web Your Agent Reads Isn't the Web You Read](https://derob98.github.io/ailmanac/docs/security/the-web-your-agent-reads)
 - 2026-10-19 — [First-Party OpenTelemetry Tracing: Two Paths, One Trace](https://derob98.github.io/ailmanac/docs/api/opentelemetry-tracing)
 - 2026-10-19 — [Latent Reasoning: Agents That Think Without Words](https://derob98.github.io/ailmanac/docs/models/latent-reasoning-hybrid-agents)
 - 2026-10-15 — [Claude has never seen 68% of the Claude Code docs](https://derob98.github.io/ailmanac/docs/whats-new/unread-manual)
 - 2026-10-13 — [Claude Code Cheat Sheet](https://derob98.github.io/ailmanac/docs/claude-code/cheat-sheet)
 - 2026-10-09 — [Agent Observability: Tracing an Agent You Can't Reproduce](https://derob98.github.io/ailmanac/docs/api/agent-observability)
-- 2026-10-09 — [Whistle: Speech-to-Text in 16.9 MB — and the Benchmark Bars Nobody Labelled](https://derob98.github.io/ailmanac/docs/models/whistle-on-device-speech-to-text)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).
