@@ -7,7 +7,7 @@
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [日本語](./README.ja.md) · [Español](./README.es.md) · [Italiano](./README.it.md)
 
 <!-- stats:start -->
-**315 pages** · **268 interactive lessons** · **12 languages** · **80 pages re-verified in the last 30 days**
+**316 pages** · **269 interactive lessons** · **12 languages** · **81 pages re-verified in the last 30 days**
 <!-- stats:end -->
 
 <p>
@@ -80,6 +80,7 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 ## Recently added
 
 <!-- fresh:start -->
+- 2026-10-20 — [Backdoored Open Weights: The Abliterated-Model Supply Chain](https://derob98.github.io/ailmanac/docs/security/backdoored-open-weights)
 - 2026-10-20 — [Claude Dashboards & Claude Motion](https://derob98.github.io/ailmanac/docs/claude-app/dashboards-and-motion)
 - 2026-10-19 — [First-Party OpenTelemetry Tracing: Two Paths, One Trace](https://derob98.github.io/ailmanac/docs/api/opentelemetry-tracing)
 - 2026-10-19 — [Latent Reasoning: Agents That Think Without Words](https://derob98.github.io/ailmanac/docs/models/latent-reasoning-hybrid-agents)
@@ -87,7 +88,6 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 - 2026-10-13 — [Claude Code Cheat Sheet](https://derob98.github.io/ailmanac/docs/claude-code/cheat-sheet)
 - 2026-10-09 — [Agent Observability: Tracing an Agent You Can't Reproduce](https://derob98.github.io/ailmanac/docs/api/agent-observability)
 - 2026-10-09 — [Whistle: Speech-to-Text in 16.9 MB — and the Benchmark Bars Nobody Labelled](https://derob98.github.io/ailmanac/docs/models/whistle-on-device-speech-to-text)
-- 2026-10-08 — [Claude Haiku 5.5: The 100K Price Cliff](https://derob98.github.io/ailmanac/docs/models/haiku-5-5-the-100k-price-cliff)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).
