@@ -7,7 +7,7 @@
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [日本語](./README.ja.md) · [Español](./README.es.md) · [Italiano](./README.it.md)
 
 <!-- stats:start -->
-**317 pages** · **272 interactive lessons** · **12 languages** · **76 pages re-verified in the last 30 days**
+**319 pages** · **274 interactive lessons** · **12 languages** · **78 pages re-verified in the last 30 days**
 <!-- stats:end -->
 
 <p>
@@ -80,6 +80,7 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 ## Recently added
 
 <!-- fresh:start -->
+- 2026-10-21 — [Agent SDK Permissions: the Six-Step Order](https://derob98.github.io/ailmanac/docs/claude-code/agent-sdk-permissions)
 - 2026-10-20 — [Backdoored Open Weights: The Abliterated-Model Supply Chain](https://derob98.github.io/ailmanac/docs/security/backdoored-open-weights)
 - 2026-10-20 — [Claude Dashboards & Claude Motion](https://derob98.github.io/ailmanac/docs/claude-app/dashboards-and-motion)
 - 2026-10-20 — [The Web Your Agent Reads Isn't the Web You Read](https://derob98.github.io/ailmanac/docs/security/the-web-your-agent-reads)
@@ -87,7 +88,6 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 - 2026-10-19 — [Latent Reasoning: Agents That Think Without Words](https://derob98.github.io/ailmanac/docs/models/latent-reasoning-hybrid-agents)
 - 2026-10-15 — [Claude has never seen 68% of the Claude Code docs](https://derob98.github.io/ailmanac/docs/whats-new/unread-manual)
 - 2026-10-13 — [Claude Code Cheat Sheet](https://derob98.github.io/ailmanac/docs/claude-code/cheat-sheet)
-- 2026-10-09 — [Agent Observability: Tracing an Agent You Can't Reproduce](https://derob98.github.io/ailmanac/docs/api/agent-observability)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).
