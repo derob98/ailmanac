@@ -1,17 +1,22 @@
-import React, {useState, type ReactNode} from 'react';
+import React, {useId, useState, type ReactNode} from 'react';
 import Link from '@docusaurus/Link';
 import Translate, {translate} from '@docusaurus/Translate';
-import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import styles from './styles.module.css';
 
 type Difficulty = 'simple' | 'medium' | 'hard';
 type Priority = 'quality' | 'balanced' | 'cost';
 type Volume = 'low' | 'high';
 
+/* The three Claude tiers, cheapest → most capable. Brand names, so they stay
+   in Latin script in every locale (the models table does the same). The index
+   doubles as the rung the recommendation lights up on the ladder below. */
+const TIERS = ['Haiku', 'Sonnet', 'Opus'] as const;
+
 function recommend(d: Difficulty, p: Priority, v: Volume) {
   if (p === 'cost' || v === 'high' || d === 'simple') {
     return {
       model: 'Claude Haiku',
+      tier: 0,
       why: translate({
         id: 'mp.why.haiku',
         message:
@@ -22,6 +27,7 @@ function recommend(d: Difficulty, p: Priority, v: Volume) {
   if (d === 'hard' && p === 'quality') {
     return {
       model: 'Claude Opus',
+      tier: 2,
       why: translate({
         id: 'mp.why.opus',
         message:
@@ -31,6 +37,7 @@ function recommend(d: Difficulty, p: Priority, v: Volume) {
   }
   return {
     model: 'Claude Sonnet',
+    tier: 1,
     why: translate({
       id: 'mp.why.sonnet',
       message:
@@ -44,6 +51,8 @@ export default function ModelPicker(): ReactNode {
   const [p, setP] = useState<Priority>('balanced');
   const [v, setV] = useState<Volume>('low');
   const rec = recommend(d, p, v);
+  // useId is stable across server render and hydration → no React #418.
+  const baseId = useId();
   // Docusaurus localizes "/docs/..." links per locale build automatically.
   const lp = '';
 
@@ -65,39 +74,66 @@ export default function ModelPicker(): ReactNode {
   } as const;
 
   const row = (
+    key: string,
     title: string,
     value: string,
     opts: readonly (readonly [string, string])[],
     set: (x: any) => void,
-  ) => (
-    <div className={styles.row}>
-      <span className={styles.rowLabel}>{title}</span>
-      <div className={styles.choices}>
-        {opts.map(([val, label]) => (
-          <button
-            key={val}
-            type="button"
-            aria-pressed={value === val}
-            className={`${styles.choice} ${value === val ? styles.active : ''}`}
-            onClick={() => set(val)}>
-            {label}
-          </button>
-        ))}
+  ) => {
+    const labelId = `${baseId}-${key}`;
+    return (
+      <div className={styles.row}>
+        <span className={styles.rowLabel} id={labelId}>
+          {title}
+        </span>
+        {/* role=group + aria-labelledby: without it a screen reader hears three
+            undifferentiated sets of buttons. aria-pressed (not radio) keeps the
+            plain Tab-between-pills keyboard model intact. */}
+        <div className={styles.choices} role="group" aria-labelledby={labelId}>
+          {opts.map(([val, label]) => (
+            <button
+              key={val}
+              type="button"
+              aria-pressed={value === val}
+              className={`${styles.choice} ${value === val ? styles.active : ''}`}
+              onClick={() => set(val)}>
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className={styles.wrap}>
-      {row(translate({id: 'mp.row.difficulty', message: 'Task difficulty'}), d, OPTIONS.d, setD)}
-      {row(translate({id: 'mp.row.priority', message: 'What matters most'}), p, OPTIONS.p, setP)}
-      {row(translate({id: 'mp.row.volume', message: 'Request volume'}), v, OPTIONS.v, setV)}
+      <div className={styles.head}>
+        <span className={styles.kicker}>
+          <Translate id="mp.kicker">Model picker</Translate>
+        </span>
+      </div>
+      {row('d', translate({id: 'mp.row.difficulty', message: 'Task difficulty'}), d, OPTIONS.d, setD)}
+      {row('p', translate({id: 'mp.row.priority', message: 'What matters most'}), p, OPTIONS.p, setP)}
+      {row('v', translate({id: 'mp.row.volume', message: 'Request volume'}), v, OPTIONS.v, setV)}
       <div className={styles.resultLive} aria-live="polite">
         <div className={styles.result} key={rec.model}>
           <span className={styles.eyebrow}>
             <Translate id="mp.result.eyebrow">Recommended</Translate>
           </span>
           <div className={styles.model}>{rec.model}</div>
+          {/* Capability ladder: places the answer on the cheap→capable scale, so
+              the reader sees not just WHICH model but how far up they landed.
+              aria-hidden — the model name above already carries the fact. */}
+          <div className={styles.tiers} aria-hidden="true">
+            {TIERS.map((name, i) => (
+              <div
+                key={name}
+                className={`${styles.tier} ${i === rec.tier ? styles.tierOn : ''}`}>
+                <span className={styles.tierBar} />
+                <span className={styles.tierName}>{name}</span>
+              </div>
+            ))}
+          </div>
           <p className={styles.why}>{rec.why}</p>
           <p className={styles.note}>
             <Translate id="mp.note.pre">Look up the exact model ID on the</Translate>{' '}
