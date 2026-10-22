@@ -80,6 +80,7 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 ## Recently added
 
 <!-- fresh:start -->
+- 2026-10-22 — [API Version 2026-10-21 — The First Breaking Version in Three Years](https://derob98.github.io/ailmanac/docs/api/api-version-2026-10-21)
 - 2026-10-21 — [Agent SDK Permissions: the Six-Step Order](https://derob98.github.io/ailmanac/docs/claude-code/agent-sdk-permissions)
 - 2026-10-21 — [Code Erosion: Why Your Agent Breaks What It Already Built](https://derob98.github.io/ailmanac/docs/frontiers/code-erosion-slopcodebench)
 - 2026-10-21 — [DeepInfer: DeepSeek's Own Inference Engine, Read Honestly](https://derob98.github.io/ailmanac/docs/models/deepinfer-deepseek-inference-engine)
@@ -87,7 +88,6 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 - 2026-10-20 — [Claude Dashboards & Claude Motion](https://derob98.github.io/ailmanac/docs/claude-app/dashboards-and-motion)
 - 2026-10-20 — [The Web Your Agent Reads Isn't the Web You Read](https://derob98.github.io/ailmanac/docs/security/the-web-your-agent-reads)
 - 2026-10-19 — [First-Party OpenTelemetry Tracing: Two Paths, One Trace](https://derob98.github.io/ailmanac/docs/api/opentelemetry-tracing)
-- 2026-10-19 — [Latent Reasoning: Agents That Think Without Words](https://derob98.github.io/ailmanac/docs/models/latent-reasoning-hybrid-agents)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).
