@@ -1,0 +1,376 @@
+---
+sidebar_position: 12.2
+title: "La backdoor .pth: LiteLLM 1.107.0 e il codice che gira prima del tuo import"
+description: "Il 21 ottobre 2026 litellm 1.107.0 ha pubblicato sette wheel avvelenate e quattro tag Docker per circa 100 minuti. Il payload non aveva bisogno che qualcuno importasse litellm: è arrivato come file .pth, che Python esegue a ogni avvio dell'interprete. Il meccanismo, perché «le wheel non possono eseguire codice in fase di installazione» era vero e inutile, la causa radice che dovrebbe spaventare ogni operatore di AI gateway (token GitHub degli sviluppatori nei log del proxy), perché Trusted Publishing e la firma delle immagini non sono serviti, un comando di audit verificato e la tabella dei controlli che avrebbero davvero fermato l'attacco."
+keywords: [LiteLLM, litellm 1.107.0, pth backdoor, sitecustomize, supply chain attack, PyPI, credential stealer, privcollect, AI gateway, Trusted Publishing, PyPI attestations, Docker digest pinning, lookalike repository, Claude Code gh token, response body logging, site module, python -S, hash pinning, remote code loader, Berri-AI]
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Capire perché il payload è girato su host dove nessuno aveva mai importato litellm — il modulo site di Python esegue le righe dei file .pth che iniziano con import, a ogni avvio dell'interprete, prima del tuo codice", "Vedere perché la rassicurante regola «le wheel non eseguono codice in fase di installazione» era del tutto vera e del tutto irrilevante qui", "Ripercorrere la causa radice che conta per chiunque gestisca un AI gateway: un agente di coding ha messo un token OAuth di GitHub nel corpo di una risposta, e il proxy registrava i corpi delle risposte", "Capire perché Trusted Publishing, la firma delle immagini Docker e i tag immutabili — tutti già attivi da marzo — non hanno fermato una release costruita da un repository lookalike", "Vedere l'attaccante adottare questa primitiva in tempo reale: a marzo 2026 litellm 1.82.7 richiedeva di usare il pacchetto, e la 1.82.8 — la release successiva — è passata a un .pth", "Eseguire un audit verificato delle righe .pth eseguibili sulle tue macchine e leggere correttamente il risultato (setuptools ne include una legittima)", "Applicare la tabella dei controlli: quali delle quindici difese abituali della supply chain avrebbero davvero bloccato questo attacco, quali avrebbero firmato il malware e la configurazione di una riga che avrebbe fermato entrambi gli incidenti LiteLLM"]} />
+
+Il **21 ottobre 2026**, per circa **100 minuti**, `pip install litellm` ha installato un ladro di credenziali e un loader remoto di codice con cadenza oraria. Il thread di Hacker News è arrivato in prima pagina con 519 punti. È seguito il solito consiglio: fissa le versioni, ruota le chiavi.
+
+Quel consiglio è giusto, ed è anche la cosa meno interessante di questo incidente. Tre dettagli giustificano una pagina:
+
+1. **Il payload non aveva bisogno di essere importato.** Era distribuito come file `.pth`, che il modulo `site` di Python esegue a **ogni avvio dell'interprete** in quell'ambiente. Un host che aveva installato LiteLLM in un virtualenv condiviso e poi eseguiva uno script non correlato ha comunque perso le proprie credenziali.
+2. **L'accesso iniziale è passato dai log di un AI gateway.** Secondo il post-mortem di LiteLLM stessa, Claude Code incorpora in un corpo di risposta il token OAuth della GitHub CLI dell'utente; il deployment interno di LiteLLM registrava i corpi delle risposte; quel deployment era raggiungibile da internet pubblico. L'attaccante ha letto da un log del proxy le credenziali GitHub di tre sviluppatori.
+3. **La release era firmata, pubblicata tramite Trusted Publishing e attribuibile al repository vero** — perché l'attaccante non ha falsificato il publisher. Ha modificato il workflow del publisher per costruire da `Berri-AI/litellm` invece che da `BerriAI/litellm`.
+
+Se gestisci un proxy LLM davanti ad agenti di coding, il punto 2 è quello da leggere due volte. I log di richieste e risposte del tuo gateway sono un deposito di credenziali che probabilmente non hai mai classificato come tale.
+
+<VerifyNote lastVerified="2026-10-22" source="LiteLLM's incident post (docs.litellm.ai/blog/security-incident-oct-21-2026), plus StepSecurity, SafeDep, JFrog and Wiz technical analyses, The Hacker News, and the Python 3 site module documentation. Timestamps, the credential-theft chain and the remediation steps are the maintainers' own account, which was still being updated at the time of writing — expect the root-cause wording to be refined. The sdist omitting the payload is SafeDep's and JFrog's finding; the March 2026 Trivy-driven first compromise is JFrog's. Independently verified on 2026-10-22: litellm 1.107.0 is absent from the PyPI JSON API and the newest release is 1.106.2 (7 wheels + 1 sdist, consistent with the maintainers' 'seven wheels'; Wiz's writeup counts eight distributions); PyPI's integrity endpoint returns 'No provenance available' for litellm 1.106.2; github.com/BerriAI/litellm returns 200 and github.com/Berri-AI/litellm returns 404. The .pth execution behaviour, the duplicate firing in a venv and the -S suppression were reproduced locally on CPython 3.14.6, as was setuptools shipping a legitimate executable .pth line. The claim that a provenance attestation would have verified correctly is this page's inference from the maintainers' description of the workflow change, not a published finding." />
+
+## La cronologia
+
+Tutti gli orari in UTC, 21 ottobre 2026, dal post-mortem dei maintainer.
+
+| Ora | Cosa è successo |
+|---|---|
+| 10:08:29 | La branch protection **rifiuta** una modifica non autorizzata al workflow di release |
+| 10:08:34 | Cinque secondi dopo, una credenziale di un **owner dell'organizzazione** disattiva la branch protection e fa force-push |
+| 10:46:39 | Il workflow modificato avvia un'esecuzione di staging contro il repo lookalike `Berri-AI/litellm` |
+| 11:08:53 | Inizia la pipeline di release in produzione |
+| 11:11:18 | Una **seconda** credenziale di sviluppatore supera il gate di approvazione della produzione |
+| 11:39:51–11:40:13 | **Sette wheel avvelenate** per `litellm==1.107.0` arrivano su PyPI |
+| 11:46:56 | Immagine avvelenata pubblicata; i tag Docker `v1.107.0`, `latest`, `main-latest`, `main-stable` puntano tutti a essa |
+| 11:53:49 | Una **terza** credenziale elimina i record delle esecuzioni del workflow di release |
+| 12:09–12:24 | Il workflow non autorizzato viene rimosso e quello vero ripristinato |
+| entro le 13:23 | PyPI rimuove `litellm==1.107.0` |
+| 13:51 | Tag GHCR confermati non disponibili |
+| 14:20 | Tag Docker Hub rimossi o riportati ad artefatti verificati |
+
+Due cose da notare. Il **gate di approvazione ha funzionato esattamente come progettato** — richiedeva un secondo essere umano, e l'attaccante aveva il token di un secondo essere umano. E la finestra di esposizione Docker è stata più lunga di quella di PyPI: **circa due ore e mezza**, durante le quali sia `latest` sia `main-stable` erano avvelenati. Chiunque abbia scaricato un tag flottante in quella finestra l'ha preso, compresi coloro che credevano che `main-stable` significasse qualcosa.
+
+## Parte 1 — Il meccanismo: codice che gira prima del tuo import
+
+### Cos'è un file .pth e cosa può fare
+
+Un file `.pth` in `site-packages` normalmente è noioso: un elenco di directory da aggiungere a `sys.path`. È così che funzionano le installazioni editable. Ma il formato ha un secondo comportamento, molto meno noto, ed è nella documentazione della libreria standard:
+
+> Una riga di un file `.pth` che **inizia con `import`** seguito da uno spazio o da una tabulazione viene **eseguita con `exec()`**.
+
+Il `cook.pth` dell'attaccante è lungo **12 byte**. Tutto il suo contenuto è `import cook`. Basta questo. Il modulo `site` di Python, importato automaticamente durante l'avvio dell'interprete, trova il file, vede il prefisso `import` e lo esegue — il che importa `cook.py`, un blob su una riga in base64 e zlib che contiene il ladro.
+
+Insieme a esso la wheel ha depositato **`sitecustomize.py`**, che non ha bisogno di alcun `.pth`: il modulo `site` tenta di importare un modulo con esattamente quel nome a ogni avvio, per progetto, come hook per l'amministratore. E c'è un dettaglio nella documentazione di cui l'attaccante si avvantaggia direttamente — se l'import di `sitecustomize` solleva qualunque cosa diversa da un `ImportError` corrispondente, **l'errore viene inghiottito in silenzio**. Un payload malfunzionante non produce traceback né avvisi.
+
+Quindi: **nessuno deve importare litellm.** Qualunque processo Python in quell'ambiente esegue entrambi i payload. Un cron job. Un controllo `--version`. Uno script non correlato nello stesso container.
+
+### Verificalo tu stesso
+
+È un comportamento documentato, non una vulnerabilità, quindi puoi confermarlo in un virtualenv usa e getta in trenta secondi. Riprodotto su CPython 3.14.6:
+
+<PromptCard title="Prove the .pth mechanism in a disposable venv">
+{`python3 -m venv /tmp/pthdemo
+SP=$(/tmp/pthdemo/bin/python -c "import site;print(site.getsitepackages()[0])")
+printf 'import sys; sys.stderr.write("[pth ran: no import needed]\\n")\\n' > "$SP/zz_demo.pth"
+
+# A command that imports nothing at all:
+/tmp/pthdemo/bin/python -c "print('hello')"
+#   [pth ran: no import needed]
+#   hello
+
+# -S skips the site module entirely, so nothing runs:
+/tmp/pthdemo/bin/python -S -c "print('hello')"
+#   hello
+
+rm -rf /tmp/pthdemo`}
+</PromptCard>
+
+Due osservazioni utili dall'esecuzione. Primo, `-S` sopprime l'intero meccanismo — il che conta più avanti, perché vuoi fare l'audit dei payload **senza eseguirli**. Secondo, la riga di demo è stata stampata **due volte** per ogni avvio dell'interprete: in un virtualenv la stessa directory site può essere enumerata più di una volta, e la documentazione è esplicita nel dire che le voci di percorso vengono deduplicate mentre **i punti di ingresso eseguibili no**. Un payload può scattare più di una volta per processo.
+
+### La parte che sopravvive all'incidente
+
+Se ricordi un solo fatto duraturo di questa pagina, che sia questo: **le righe di import nei `.pth` sono deprecate da Python 3.15 e ne è prevista la rimozione in Python 3.20.** La sostituzione è un file di punto d'ingresso esplicito `.start`, e una riga di import in un `.pth` viene **ignorata in silenzio** quando esiste un file `.name.start` corrispondente.
+
+È una vera fine, con data, per questa specifica primitiva di attacco — e un motivo per trovare adesso le righe `.pth` eseguibili nei tuoi ambienti, perché alcune sono portanti e si romperanno.
+
+Altri due comportamenti documentati da conoscere, entrambi a favore di un payload silenzioso: dalla 3.15 un errore su una riga `.pth` **non interrompe più** l'elaborazione delle righe restanti, e durante il periodo di deprecazione la diagnostica per una riga di import eseguita viene **emessa solo con `-v`**.
+
+### Perché «le wheel non eseguono codice in fase di installazione» non ha salvato nessuno
+
+C'è un'idea molto ripetuta del packaging Python che è davvero corretta: una **sdist** può eseguire codice arbitrario in fase di installazione tramite `setup.py`, mentre una **wheel** è solo un archivio zip che l'installer decomprime copiando file. Le wheel sono il formato più sicuro. Preferisci le wheel.
+
+Tutto questo è vero. Nulla di ciò è servito, perché **il payload non aveva bisogno di esecuzione in fase di installazione.** L'attaccante ha aggiunto una riga a `pyproject.toml` sotto la configurazione di build di maturin —
+
+```toml
+[tool.maturin]
+data = "cook"
+```
+
+— che istruisce il backend di build a impacchettare la directory `cook/` come **dati** della wheel, facendone arrivare il contenuto alla radice di `site-packages` all'installazione. Nessun hook, nessuno script, nessun `setup.py`. Solo tre file copiati al loro posto, uno dei quali Python esegue a ogni avvio successivo.
+
+La lezione si estende oltre questo incidente: «questo pacchetto esegue codice quando lo installo?» è la domanda sbagliata. Quella giusta è **«quali file questo pacchetto colloca nel mio ambiente, e il mio runtime ne esegue qualcuno da solo?»**
+
+<Callout type="warning" items={["Tratta un file .pth in una wheel come equivalente a uno script di installazione. È strettamente più potente: uno script di installazione gira una volta, sotto il tuo installer, dove potresti vederlo. Una riga .pth gira a ogni avvio dell'interprete, per sempre, sotto qualunque processo avvii Python subito dopo."]} />
+
+## Parte 2 — La wheel e il sorgente non coincidevano
+
+Ecco la scoperta che dovrebbe cambiare il modo in cui riesamini una release. **La distribuzione sorgente non conteneva il payload.** Secondo SafeDep e JFrog, la directory `cook/` è assente dalla sdist — ma il suo `pyproject.toml` porta la riga `data = "cook"`, e quella riga non compare in **alcun commit pubblico** di `BerriAI/litellm`. Era l'unica traccia visibile della manomissione, in una configurazione di build, nel solo artefatto.
+
+Segui le conseguenze:
+
+- Chi ha confrontato con diff il tag git `v1.107.0` contro `v1.106.2` non ha visto nulla di sbagliato — il tag è pulito.
+- Chi ha letto la pagina di release su GitHub non ha visto nulla di sbagliato.
+- Chi ha installato con `--no-binary :all:` non poteva aver ricevuto i tre file del payload, perché la sdist non li distribuisce.
+- Chi ha eseguito `pip install litellm` — la cosa normale, che preferisce le wheel — ha ricevuto il ladro.
+
+JFrog aggiunge un dettaglio forense da conoscere: i timestamp delle voci ZIP dei file del payload **coincidono con quelli dei file legittimi** nella wheel, il che indica che il malware è stato incluso durante una normale build della wheel e non aggiunto riconfezionando l'archivio in seguito. L'artefatto è esattamente ciò che ha prodotto la build avvelenata — il che ci porta alla parte scomoda.
+
+## Parte 3 — Perché l'hardening non è servito
+
+LiteLLM non era stata trascurata sulla sicurezza delle release — e il motivo per cui non lo era fa parte della storia. **Questa è stata la seconda compromissione di LiteLLM del 2026.** A **marzo**, secondo JFrog, la pipeline di build del progetto ha eseguito una release malevola di **Trivy 0.69.4 non fissata**, che ha esposto credenziali di CI/CD e di pubblicazione e ha portato alle versioni con backdoor **1.82.7 e 1.82.8**. JFrog descrive i payload e l'infrastruttura di ottobre come diversi, senza alcuna connessione apparente tra le due campagne.
+
+L'hardening di marzo era la risposta a quel primo incidente. Per ammissione degli stessi maintainer, da allora avevano spostato le release su **repository privati**, adottato i **Trusted GitHub Publishers**, reso **immutabili** i tag Docker e abilitato la **firma delle immagini Docker**. È una postura migliore di quella della maggior parte dei progetti di pari dimensioni — e si noti che la prima compromissione è iniziata con una **dipendenza non fissata in una pipeline di build**, che è la stessa lezione con cui si chiude la tabella dei controlli più sotto.
+
+Ognuno di quei controlli era soddisfatto dalla release di ottobre. Ecco perché.
+
+<Steps items={[
+  {title: "L'attaccante non ha impersonato il publisher — l'ha usato", body: "Il workflow malevolo è girato dentro il repository legittimo, attraverso la pipeline di release legittima, con l'identità di pubblicazione legittima. Ciò che è cambiato è stato quale sorgente ha fatto checkout. Trusted Publishing lega un artefatto al workflow e al repository che l'hanno prodotto; non dice nulla su cosa quel workflow abbia scelto di costruire."},
+  {title: "Un nome di organizzazione lookalike ha fatto il resto", body: "Il workflow è stato puntato a Berri-AI/litellm invece che a BerriAI/litellm. Un trattino. In un diff di un file di workflow è quasi invisibile — e il controllo di branch protection che avrebbe imposto una revisione è stato disattivato da una credenziale di org-owner cinque secondi dopo che era scattato."},
+  {title: "La firma ha firmato il malware", body: "La firma dell'immagine prova che un artefatto proviene dalla pipeline che ti aspetti, non modificato da allora. L'artefatto proveniva da lì. La firma è valida e l'immagine è avvelenata; le due cose non sono in tensione, perché una firma attesta l'origine, non l'intento."},
+  {title: "I tag immutabili hanno protetto la cosa sbagliata", body: "I tag immutabili impediscono di sostituire in silenzio ciò a cui punta v1.107.0. Qui l'immagine avvelenata è stata la prima e unica cosa mai pubblicata con quel tag — quindi l'immutabilità ha bloccato il malware. I tag flottanti erano peggio: latest, main-latest e main-stable sono stati tutti riportati su di essa."},
+  {title: "«Verified» sui commit valeva meno di quanto sembrasse", body: "I commit malevoli erano firmati come Berri-AI <un indirizzo protonmail> e portavano il badge Verified di GitHub. Quel badge significa che GitHub ha firmato il commit per conto di una sessione autenticata — tipicamente l'editor web — non che l'autore indicato sia chi sembra. Un badge Verified accanto a un nome di organizzazione plausibile non è un controllo d'identità."},
+  {title: "E la release pulita non ha comunque un'attestazione da verificare", body: "Verificato il 2026-10-22: l'endpoint di integrità di PyPI restituisce 'No provenance available' per litellm 1.106.2. Quindi, anche dopo l'incidente, sulla release attuale non c'è nulla contro cui un consumatore possa verificare — il che è il caso comune su tutto PyPI, non una critica specifica a questo progetto."}
+]} />
+
+Il riassunto onesto è che la toolchain mainstream della supply chain del software è costruita per rispondere a *«questo artefatto proviene dalla vera pipeline del progetto?»* Ha risposto **sì**, correttamente. Quasi nulla è costruito per rispondere a *«la vera pipeline del progetto ha costruito il vero sorgente del progetto?»* — ed è questa la domanda su cui ha fatto leva l'attacco.
+
+## Parte 4 — La causa radice: i log del tuo gateway sono un deposito di credenziali
+
+Ora la parte specifica dell'infrastruttura AI, e il motivo per cui questo incidente sta su questo sito e non solo in una newsletter di packaging.
+
+L'attaccante non ha fatto phishing a un maintainer né violato una password. Secondo il post-mortem dei maintainer, la catena è stata:
+
+<Steps items={[
+  {title: "Un deployment interno di LiteLLM era raggiungibile da internet pubblico", body: "L'indagine ha trovato un 'account utente inatteso dal nome innocuo' in quel deployment. Il team sospettava che l'accesso fosse avvenuto tramite una vulnerabilità patchata di recente, ma al momento della scrittura non aveva confermato il vettore."},
+  {title: "Ci passava traffico di agenti di coding, con un token OAuth", body: "Citando il post-mortem: Claude Code incorporerà il token OAuth della GitHub CLI di un utente in un corpo di risposta, e dove i corpi delle risposte vengono registrati, quei token possono comparire nei log di LiteLLM. Il gateway faceva esattamente ciò per cui i gateway sono configurati — conservare i payload di richiesta e risposta per debug, attribuzione dei costi e valutazioni."},
+  {title: "I log hanno fornito le credenziali GitHub di tre sviluppatori", body: "Una apparteneva a uno dei due owner dell'organizzazione. È questo singolo fatto che ha trasformato 'accesso in lettura a una tabella di log' in 'disattivare la branch protection e fare force-push del workflow di release'."},
+  {title: "Il malware è poi andato a cercare la stessa classe di segreti", body: "Il ladro, che si chiama da solo privcollect, raccoglie sedici categorie: password e cookie del browser, chiavi SSH e GPG, credenziali AWS/Azure/GCP, configurazioni Kubernetes, segreti di CI (GitLab Runner, Jenkins, Vault, Terraform), cronologia di shell e database, l'ambiente di ogni processo tramite /proc/<pid>/environ, token di strumenti AI di coding (Claude, Cursor, Copilot, Gemini e altri) — e, dove DATABASE_URL era impostata, un dump Prisma del database stesso del proxy LiteLLM, contenente le chiavi dei provider che era stato costruito per intermediare."}
+]} />
+
+Quest'ultima voce chiude il cerchio, ed è il punto strutturale. **Un gateway LLM è, per costruzione, l'unico host del tuo parco che detiene ogni chiave di provider e vede ogni prompt e ogni completamento.** Aggiungi la registrazione dei corpi delle risposte e detiene anche qualunque segreto i tuoi agenti vi facciano transitare. Comprometterne uno vale più che compromettere il laptop di uno sviluppatore, e la lista della spesa del malware mostra che l'attaccante lo sapeva.
+
+<Callout type="key" items={["Se gestisci un AI gateway, l'azione da portare a casa da questo incidente non è solo «fissa litellm». È: scopri se il tuo gateway conserva i corpi di richieste e risposte, decidi se dovrebbe farlo e, se deve, oscura le stringhe che sembrano credenziali. Il traffico degli agenti non è traffico API ordinario — gli agenti di coding portano in-band token per GitHub, provider cloud e registri di pacchetti."]} />
+
+### Cosa ha fatto il payload sull'host
+
+Per completezza, il secondo file. `sitecustomize.py` ha creato con fork un demone distaccato — `setsid()`, I/O su `/dev/null`, directory di lavoro `/`, così sopravvive al genitore — che si risvegliava **ogni 3.600 secondi**, risolveva il proprio prossimo host di comando e controllo da un dead drop (un `domain.txt` in un account GitHub poi eliminato), scaricava `/codepy` da esso via HTTP semplice e lo eseguiva tramite `exec()`. L'esfiltrazione andava a `www.litellm[.]dev/healthcheck`, anch'essa HTTP semplice, con il corpo cifrato AES-256-CBC sotto una chiave incapsulata con RSA-4096 — un lookalike del vero `litellm.ai` del progetto, registrato il **13 ottobre 2026**, otto giorni prima della release. (I domini sono neutralizzati su questa pagina; non risolverli.)
+
+StepSecurity osserva che il percorso di daemonizzazione **fallisce in silenzio su Windows**, dato che si basa su `fcntl` e `os.fork`. È stata pubblicata una wheel per Windows, quindi considera il ladro come eseguito lì e il loader orario come la parte che probabilmente non lo è stata.
+
+<Callout type="warning" items={["Disinstallare il pacchetto non chiude l'incidente, per quattro ragioni indipendenti. Le credenziali rubate sono già uscite. Il demone generato con fork è un processo separato che non ha più alcun rapporto con il pacchetto. Ogni avvio di Python su quell'host nel frattempo ha eseguito di nuovo il ladro. E — come fa notare JFrog — pip è esso stesso un processo Python, quindi il tuo comando di bonifica esegue il payload ancora una volta all'uscita. L'indicazione degli stessi maintainer è di trattare l'host come compromesso: termina il demone, rimuovi i file, ricostruisci e ruota tutto."]} />
+
+## Parte 5 — Lo stesso pacchetto, sette mesi prima, e l'escalation dell'attaccante
+
+L'incidente di marzo merita uno sguardo attento, perché le sue due versioni malevole mostrano la tecnica `.pth` che viene *adottata* — in un solo incremento di versione.
+
+Secondo Datadog Security Labs, che lo traccia come la campagna **TeamPCP**:
+
+- **`litellm` 1.82.7** portava il payload dentro `litellm/proxy/proxy_server.py`. Per scattare, la vittima doveva installare il pacchetto **e poi usarlo davvero**.
+- **`litellm` 1.82.8** — la release immediatamente successiva — ha aggiunto **`litellm_init.pth`**. Stesso progetto, stessa campagna, a pochi giorni di distanza, e ora il payload scattava **all'avvio dell'interprete**, senza bisogno di importare LiteLLM.
+
+È l'attaccante che scopre la primitiva di cui parla tutta questa pagina, ed è il motivo per cui il payload di ottobre si apriva con un `.pth` da 12 byte invece che con un modulo iniettato. Se stai facendo il triage delle tue dipendenze, l'escalation da «codice a livello di modulo» a «dropper `.pth`» è lo schema da aspettarsi, non un trucco isolato.
+
+Il payload di marzo è anche riconoscibilmente lo stesso *mestiere* di quello di ottobre: AES-256 con chiave incapsulata RSA-4096, esfiltrazione verso un **dominio lookalike costruito col nome stesso del progetto** (`models.litellm[.]cloud` allora, `litellm[.]dev` a ottobre), raccolta di credenziali tra variabili d'ambiente, chiavi SSH, credenziali cloud e Kubernetes — più, a marzo, persistenza systemd tramite `~/.config/sysmon/sysmon.py`, polling di comandi su `checkmarx[.]zone/raw` e la capacità di creare pod Kubernetes per diffondersi in un cluster. La campagna di marzo si è propagata a catena da **Trivy il 19 marzo**, attraverso npm (CanisterWorm) e gli strumenti Checkmarx, arrivando a PyPI il **24 marzo** (`litellm`) e il **27 marzo** (`telnyx`).
+
+<Callout type="note" items={["Le fonti non concordano sul fatto che i due incidenti LiteLLM siano collegati, e questa pagina non lo risolve. JFrog afferma che i payload e l'infrastruttura di ottobre sono diversi, senza alcuna connessione apparente con la campagna di marzo. In senso contrario: entrambi usavano un dropper .pth, entrambi AES-256 sotto una chiave incapsulata RSA-4096, ed entrambi esfiltravano verso un dominio lookalike derivato dal nome del progetto — mentre l'etichetta di campagna di Datadog (TeamPCP) e il nome autoscelto dal ladro di ottobre (privcollect, marcatore PRIVCOLLECT_ACTIVE) invitano a un confronto su cui nessuno ha pubblicato un verdetto. L'attribuzione spetta ai ricercatori; tratta la somiglianza come inspiegata, non come una scoperta."]} />
+
+### L'unico controllo che li avrebbe fermati entrambi
+
+Il rapporto di incidente di PyPI su marzo è dove sta il numero più utile: **LiteLLM viene installata circa 1.700 volte al minuto**, e **119.000 download** sono avvenuti durante la finestra di esposizione di marzo. PyPI ha messo in quarantena la release di marzo **2 ore e 32 minuti** dopo il caricamento; a ottobre le wheel sono sparite in circa **1 ora e 43 minuti**. La risposta sta diventando più rapida — e non sarà mai abbastanza rapida, perché a quel ritmo di installazione i primi dieci minuti sono già un evento di compromissione di massa.
+
+Ecco perché la raccomandazione principale di PyPI ai consumatori non è «leggi il codice». È un **dependency cooldown**: rifiutarsi di risolvere qualunque release più giovane di N giorni. Entrambe le compromissioni di LiteLLM sono state rilevate e ritirate nel giro di ore. **Un cooldown di tre giorni le avrebbe rese entrambe un non-evento per chiunque ne avesse uno.**
+
+È il controllo di alto valore meno adottato dell'elenco, ed è una riga di configurazione.
+
+<PromptCard title="Dependency cooldowns in the three tools that support them">
+{`# --- uv: pyproject.toml (or uv.toml at the root) ---
+# exclude-newer accepts an RFC 3339 timestamp, a friendly duration,
+# or an ISO 8601 duration. Relative durations landed in uv 0.9.17.
+[tool.uv]
+exclude-newer = "7 days"     # equivalently: "P7D"
+
+# --- Renovate: renovate.json ---
+# The oldest implementation of the idea (formerly stabilityDays).
+{
+  "minimumReleaseAge": "7 days"
+}
+
+# --- Dependabot: .github/dependabot.yml ---
+# Note: Dependabot already applies a DEFAULT 3-day cooldown to version
+# updates even with no cooldown block at all -- and never to security
+# updates. Configure it only to lengthen or target the window.
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule: { interval: "weekly" }
+    cooldown:
+      default-days: 7
+      semver-patch-days: 3`}
+</PromptCard>
+
+Il compromesso è esplicito e piccolo: ricevi gli aggiornamenti non di sicurezza con fino a una settimana di ritardo. In cambio, la finestra in cui una release avvelenata può raggiungerti si riduce da «tutto il tempo che passa finché qualcuno se ne accorge» a «zero, purché qualcuno se ne accorga entro il cooldown» — e in entrambi i casi LiteLLM qualcuno se n'è accorto nel giro di ore.
+
+<Callout type="tip" items={["Un cooldown non deve ritardare le patch di sicurezza, altrimenti hai scambiato un rischio con un altro. Dependabot lo fa giusto per costruzione: il cooldown è un'opzione solo degli aggiornamenti di versione ed è documentato come non applicabile agli aggiornamenti di sicurezza. Se implementi un cooldown da te — con l'exclude-newer di uv in CI, per esempio — tieni un percorso di override documentato per una release che corregge un advisory noto.", "Controlla cosa hai già prima di aggiungere configurazione. Il default di 3 giorni di Dependabot significa che molti repository sono parzialmente coperti senza che nessuno l'abbia scelto, mentre un Dockerfile che scarica un tag flottante e uno step di CI che esegue pip install -U non sono coperti da nulla di tutto questo."]} />
+
+## Triage: riguarda te?
+
+Esegui questi in ordine. La prima domanda è economica e risolve il caso per la maggior parte delle persone.
+
+<PromptCard title="1. Did 1.107.0 ever get resolved anywhere?">
+{`# Lockfiles, requirement files, constraints — anywhere a resolver wrote a version down
+grep -rniE "litellm[=<>~! ]*1\\.107\\.0([^0-9rc]|$)" . \\
+  --include="requirements*.txt" --include="*.lock" --include="*.txt" \\
+  --include="poetry.lock" --include="Pipfile.lock" --include="uv.lock" 2>/dev/null
+
+# Installed right now, in this environment
+pip list 2>/dev/null | grep -i litellm
+
+# Container images you are actually running (compare against the poisoned digest)
+docker images --digests | grep -i litellm`}
+</PromptCard>
+
+<PromptCard title="2. Look for the three dropped files and the runtime markers">
+{`# The payload files, at the ROOT of site-packages (not inside a litellm/ directory)
+find / -name "cook.pth" -path "*site-packages*" 2>/dev/null
+find / -name "cook.py" -path "*site-packages*" 2>/dev/null
+find / -name "sitecustomize.py" -path "*site-packages*" 2>/dev/null
+
+# Known SHA-256 of the three files
+#   cook.pth          7f191632e7320705d154b85204f1ae546b543acbd7e8861229b76f5042b92bdb
+#   cook.py           9dd0a3926f96a37eb86cf1ee2310d9be93139cc4ebef3ef9e2efe9531390be25
+#   sitecustomize.py  34bef04fe88ac9d0aae0475630b1738681d15b94f233ac8aa46eacf5968305fa
+
+# Execution markers
+ls -la /tmp/.pc_once_72129118c59f5636c0bb /tmp/remote_code_loader.lock 2>/dev/null
+ls -d /tmp/.pc_sq_* /tmp/.pc_e_* 2>/dev/null
+
+# The live hourly loader: whatever process holds the lock (parent PID 1, cwd /)
+lsof /tmp/remote_code_loader.lock 2>/dev/null`}
+</PromptCard>
+
+<PromptCard title="3. Network-side, if you keep egress or DNS logs">
+{`# Exfiltration, dead drop, and the fetched payload path
+#   litellm.dev                                    (NOT litellm.ai — the lookalike)
+#   www.litellm.dev/healthcheck                    plain HTTP POST, encrypted body
+#   raw.githubusercontent.com/letters9813/...      dead drop for the next C2 host
+#   any request path ending in /codepy             the fetched code
+
+grep -hiE "litellm\\.dev|letters9813|/codepy" /var/log/**/*.log 2>/dev/null | head`}
+</PromptCard>
+
+Se uno qualsiasi di questi dà riscontro: termina il demone, elimina `cook.pth`, `cook.py`, `sitecustomize.py` e le relative voci in `__pycache__`, fissa `litellm==1.106.2` (o l'immagine `v1.106.2` **per digest**), poi ricostruisci l'host e **ruota tutto** — credenziali IAM cloud, chiavi API dei provider, password dei database, chiavi SSH, segreti di CI, token degli strumenti degli agenti — e verifica CloudTrail o l'equivalente per l'uso di quelle credenziali da fonti sconosciute. I maintainer affermano che i clienti sulla release enterprise privata non sono stati colpiti.
+
+## L'audit da tenere: quali file .pth eseguono codice?
+
+Indipendentemente da questo incidente, dovresti sapere cosa viene eseguito all'avvio di Python sulle macchine a cui tieni. Nota il `-S` — l'audit non deve innescare proprio ciò che sta cercando.
+
+<PromptCard title="List every executable .pth line in an environment (run with -S)">
+{`cat > /tmp/audit_pth.py <<'EOF'
+import glob, os, site, sys
+dirs = list(site.getsitepackages())
+try:
+    if site.ENABLE_USER_SITE:
+        dirs.append(site.getusersitepackages())
+except Exception:
+    pass
+seen, hits = set(), 0
+for d in dirs:
+    if d in seen or not os.path.isdir(d):
+        continue
+    seen.add(d)
+    for p in sorted(glob.glob(os.path.join(d, "*.pth"))):
+        for n, line in enumerate(open(p, encoding="utf-8", errors="replace"), 1):
+            s = line.strip()
+            if s[:6] == "import" and s[6:7] in (" ", "\\t"):
+                hits += 1
+                print(f"{p}:{n}: {s}")
+print(f"\\n{hits} executable line(s) across {len(seen)} site dir(s): {sys.executable}")
+EOF
+
+python3 -S /tmp/audit_pth.py`}
+</PromptCard>
+
+**Leggi correttamente l'output.** Un riscontro non è una scoperta. Su un virtualenv nuovo con solo `setuptools`, questo segnala **una** riga eseguibile, ed è legittima:
+
+```
+.../site-packages/distutils-precedence.pth:1: import os; var = 'SETUPTOOLS_USE_DISTUTILS'; ...
+```
+
+È `setuptools` che installa il suo shim di distutils, ed è l'uso legittimo più comune del meccanismo. Le installazioni editable (`__editable__*.pth`) sono un altro. Il segnale che cerchi è **una riga eseguibile che non sai attribuire a un pacchetto che hai installato di proposito** — e un file alla radice di `site-packages` il cui nome non corrisponde a nessuna distribuzione che sai nominare è la versione più forte di quel segnale. Sugli host compromessi il nome era `cook`.
+
+## Cosa lo avrebbe davvero fermato
+
+Questa è la tabella da portare nella tua configurazione. «Sì» significa che il controllo blocca questo specifico attacco, non che sia sufficiente in generale.
+
+| Controllo | Lo ferma? | Perché |
+|---|---|---|
+| **Dependency cooldown** (3-7 giorni) | **Sì — e anche marzo** | Entrambe le release sono state ritirate nel giro di ore. L'unico controllo di questa tabella che copre anche la prossima. |
+| Pin esatto della versione (`litellm==1.106.2`) | **Sì** | 1.107.0 non entra mai nella risoluzione. Il controllo di maggior valore qui. |
+| Pin degli hash (`pip install --require-hashes`) | **Sì** | Stesso motivo, e in più intercetta un nuovo caricamento sotto un numero di versione esistente. |
+| Lockfile committato e rispettato in CI | **Sì** | La finestra di 100 minuti raggiunge solo i resolver a cui è permesso scegliere una nuova versione. |
+| `pip install -U` / installazioni non fissate in quella finestra | **No** | È esattamente chi è stato colpito. |
+| Docker `latest` / `main-latest` / `main-stable` | **No** | Tutti e tre sono stati riportati sul digest avvelenato per ~2,5 ore. |
+| Pin Docker **per digest** | **Sì** | Un digest non può essere riassegnato. |
+| Trusted Publishing / attestazioni PyPI | **No** *(inferenza)* | Il workflow vero nel repo vero l'ha pubblicata; la provenienza li avrebbe nominati correttamente. |
+| Firma delle immagini Docker | **No** | La firma è valida; attesta l'origine, non l'intento. |
+| Tag Docker immutabili | **No** | L'immagine avvelenata è stata il primo artefatto mai pubblicato sotto quel tag. |
+| «Evita le sdist, preferisci le wheel» | **No** | Qui capovolto: le wheel erano avvelenate e la sdist non distribuiva il payload. |
+| «Blocca i pacchetti con script in fase di installazione» | **No** | Non c'era alcun hook di installazione. Il payload era un file di dati. |
+| Build da sorgente (`--no-binary :all:`) | **Sì**, qui | Solo perché la sdist ometteva i file del payload. Non è un controllo generale. |
+| Allowlist di egress rigorosa su host dev/CI | **In parte** | L'esfiltrazione verso un dominio nuovissimo via HTTP semplice è esattamente ciò che un'allowlist nega. |
+| Non registrare i corpi delle risposte nel tuo gateway | **Accesso iniziale** | Avrebbe eliminato le credenziali che l'attaccante ha usato per iniziare. |
+| Token GitHub di breve durata e con ambito ristretto | **Accesso iniziale** | Un token OAuth di owner d'organizzazione di lunga durata in un log è l'intero perno. |
+
+I controlli economici e noiosi vincono. **Imposta un cooldown, fissa esattamente, blocca il pin, scarica le immagini per digest e non lasciare che un gateway conservi ciò che non gli serve.** Nota quanto poco di tutto questo richieda di ispezionare codice: i tre controlli in cima alla tabella funzionano proprio perché non richiedono che qualcuno si accorga di qualcosa.
+
+<Callout type="takeaways" items={["Un file .pth è una primitiva di esecuzione di codice, non un elenco di percorsi. Il modulo site di Python esegue con exec ogni riga che inizia con import, a ogni avvio dell'interprete, senza che il pacchetto debba essere importato. Trattalo come strettamente più pericoloso di uno script di installazione.", "Il consiglio «preferisci le wheel» riguarda l'esecuzione in fase di installazione e non copre l'esecuzione all'avvio del runtime. Una riga in una configurazione di build — data = \"cook\" — ha messo tre file alla radice di site-packages senza alcun hook.", "Il sorgente e l'artefatto possono non coincidere. Il tag git era pulito e la sdist non distribuiva il payload; solo le wheel lo portavano, quindi confrontare il repository con un diff non ha trovato nulla. L'unica traccia visibile era una riga di configurazione di build presente in nessun commit pubblico.", "La firma della supply chain risponde a «questo viene dalla vera pipeline?» — e qui la risposta era legittimamente sì. Non risponde a «la vera pipeline ha costruito il vero sorgente?», ed è lì che è passata un'organizzazione lookalike distante un trattino.", "Un AI gateway è l'host di maggior valore in uno stack AI: ogni chiave di provider, ogni prompt e — se registri i corpi delle risposte — qualunque token i tuoi agenti di coding portino in-band. Classifica i suoi log come segreti o smetti di conservarli.", "Le righe di import eseguibili nei .pth sono deprecate in Python 3.15 e rimosse nella 3.20, sostituite da file .start espliciti. Fai l'audit dei tuoi adesso, con python -S, e aspettati che setuptools sia un riscontro legittimo.", "Questa è stata la seconda compromissione di LiteLLM del 2026, e la prima è iniziata con una dipendenza non fissata nella pipeline di build. Fissare le versioni non è solo il modo per proteggersi da una release avvelenata — è anche il modo in cui un progetto evita di pubblicarne una.", "Il miglior controllo singolo è un dependency cooldown, perché è l'unico che non dipende dal fatto che qualcuno si accorga di qualcosa. Entrambe le release LiteLLM sono state ritirate nel giro di ore; un cooldown di 3 giorni le avrebbe rese entrambe un non-evento. Dependabot applica già 3 giorni per default, e mai agli aggiornamenti di sicurezza."]} />
+
+<Flashcards title="Nove termini di questo incidente" cards={[
+  {front: "File .pth", back: "Un file in site-packages, normalmente un elenco di directory aggiunte a sys.path. Una riga che inizia con 'import' più uno spazio bianco viene invece eseguita con exec() dal modulo site a ogni avvio dell'interprete. Deprecato in Python 3.15, rimozione prevista per la 3.20."},
+  {front: "sitecustomize.py", back: "Un nome di modulo che il modulo site tenta di importare a ogni avvio, per progetto, come hook per l'amministratore. Non ha bisogno di alcun file .pth per scattare, e qualsiasi eccezione durante il suo import viene inghiottita in silenzio."},
+  {front: "python -S", back: "Sopprime l'import automatico del modulo site: niente elaborazione dei .pth, niente sitecustomize, niente usercustomize. Usalo quando fai l'audit di un ambiente sospetto, così l'audit non esegue il payload."},
+  {front: "Directory data della wheel", back: "I file che una wheel dichiara come dati vengono copiati nella radice dell'ambiente — per purelib, è site-packages stesso. Qui, una riga (data = \"cook\") sotto la configurazione di build di maturin ha distribuito cook.pth, cook.py e sitecustomize.py senza alcun codice in fase di installazione."},
+  {front: "privcollect", back: "Il nome che il ladro dà a sé stesso. Sedici categorie: password e cookie del browser, chiavi SSH e GPG, credenziali AWS/Azure/GCP, configurazioni Kubernetes, segreti di CI, cronologia di shell e DB, l'ambiente di ogni processo tramite /proc, token di strumenti AI di coding e un dump Prisma del database del proxy LiteLLM."},
+  {front: "Repository lookalike", back: "Berri-AI/litellm, a un trattino da BerriAI/litellm. Il workflow di release nel repo autentico è stato forzato con un force-push per costruire da esso, così l'identità di pubblicazione, la firma e la provenienza sono rimaste tutte autentiche mentre il sorgente no."},
+  {front: "Trusted Publishing", back: "Lega un artefatto pubblicato al workflow e al repository specifici che l'hanno prodotto, sostituendo i token API di lunga durata. Era attivo ed è stato soddisfatto: il workflow vero nel repo vero ha pubblicato il malware."},
+  {front: "Tag immutabili", back: "Impediscono che un tag di container pubblicato venga riassegnato in seguito. Inutili quando il primo artefatto sotto il tag è già malevolo — e irrilevanti per i tag flottanti (latest, main-stable) che sono stati riportati su di esso."},
+  {front: "Remote code loader", back: "Il payload di sitecustomize: un demone distaccato (setsid, cwd /, I/O su /dev/null) che si risveglia ogni ora, risolve il proprio prossimo host C2 da un dead drop su GitHub, scarica /codepy via HTTP semplice e lo esegue tramite exec(). Protetto da /tmp/remote_code_loader.lock."}
+]} />
+
+<Quiz title="Verifica te stesso" questions={[
+  {q: "Un host ha installato litellm 1.107.0 in un virtualenv alle 11:50 UTC, e nulla su quell'host ha mai importato litellm. Qual è l'esposizione?", options: ["Nessuna — il payload gira solo all'import", "Totale — cook.pth viene eseguito dal modulo site di Python a ogni avvio dell'interprete, quindi qualunque processo Python in quell'ambiente ha eseguito il ladro", "Solo se il proxy LiteLLM è stato avviato", "Solo su Windows"], answer: 1, explain: "È il meccanismo centrale. Un file .pth da 12 byte contenente 'import cook' viene eseguito con exec durante l'avvio dell'interprete dal modulo site. Qualunque processo Python in quell'ambiente — un cron job, un controllo --version, uno script non correlato — ha eseguito entrambi i payload. L'indicazione dei maintainer è di trattare l'host come completamente compromesso."},
+  {q: "La tua policy è «preferisci le wheel alle sdist, perché le sdist possono eseguire setup.py in fase di installazione». Come è andata questa policy qui?", options: ["Ha impedito la compromissione", "Era corretta nei fatti ma ha capovolto l'esito: solo le wheel portavano il payload, che la sdist non distribuiva", "È sbagliata — le wheel eseguono codice in fase di installazione", "Non ha fatto differenza in nessun caso"], answer: 1, explain: "L'idea è accurata: le wheel vengono decomprese copiando file, senza esecuzione in fase di installazione. Al payload semplicemente non ne serviva alcuna. Una riga nella configurazione di build di maturin ha messo tre file in site-packages come dati della wheel — e la sdist non conteneva affatto la directory cook/, quindi una build da sorgente non avrebbe potuto installare il payload."},
+  {q: "LiteLLM aveva Trusted Publishing, la firma delle immagini Docker e i tag immutabili attivi da marzo. Perché nessuno di questi ha bloccato questa release?", options: ["Erano configurati male", "L'attaccante ha rubato il token API di PyPI", "L'attaccante ha usato la pipeline autentica e ha cambiato solo quale sorgente costruiva — provenienza e firme hanno correttamente attestato un'origine autentica per un artefatto avvelenato", "La firma copre solo le sdist"], answer: 2, explain: "Il workflow malevolo è girato nel repository vero con la vera identità di pubblicazione, facendo checkout del lookalike Berri-AI/litellm. Questi controlli rispondono a «questo viene dalla vera pipeline del progetto?» — e la risposta onesta era sì. Non sono progettati per rispondere a «la vera pipeline ha costruito il vero sorgente?»"},
+  {q: "Secondo il post-mortem dei maintainer, come ha ottenuto l'attaccante, per la prima volta, le credenziali GitHub degli sviluppatori?", options: ["Una campagna di phishing contro i maintainer", "Un file .env trapelato in un commit pubblico", "Dai log di un deployment interno di LiteLLM esposto a internet, dove il token OAuth della GitHub CLI di un agente di coding compariva nei corpi di risposta registrati", "Violando la 2FA"], answer: 2, explain: "Il post-mortem afferma che Claude Code incorpora il token OAuth della GitHub CLI di un utente in un corpo di risposta, e che dove i corpi delle risposte vengono registrati quei token possono comparire nei log di LiteLLM. L'attaccante ha raggiunto quel deployment interno esposto pubblicamente e ha letto dai suoi log le credenziali di tre sviluppatori — una di un owner dell'organizzazione."},
+  {q: "Quale coppia di controlli avrebbe bloccato questo attacco nel modo più economico?", options: ["Attestazioni PyPI più firma delle immagini", "Un pin esatto della versione in un lockfile committato, più il download delle immagini container per digest", "Analisi statica del sorgente del pacchetto", "Bloccare i pacchetti che dichiarano script in fase di installazione"], answer: 1, explain: "Entrambi i controlli basati sulla firma erano soddisfatti dalla release avvelenata, e non c'erano script in fase di installazione da bloccare — mentre l'analisi del sorgente non avrebbe trovato nulla, dato che il sorgente pubblico era pulito. I controlli noiosi vincono: un lockfile fissato significa che 1.107.0 non entra mai nella risoluzione, e un digest non può essere riassegnato come lo sono stati latest, main-latest e main-stable."},
+  {q: "Entrambe le compromissioni di LiteLLM sono state rilevate e ritirate nel giro di ore — 2h32m a marzo, circa 1h43m a ottobre. Quale controllo lato consumatore trasforma questo in una protezione quasi totale?", options: ["Leggere il diff di ogni aggiornamento delle dipendenze", "Un dependency cooldown: rifiutarsi di risolvere qualunque release più giovane di 3-7 giorni", "Eseguire uno scanner di vulnerabilità in CI", "Iscriversi a una mailing list di sicurezza"], answer: 1, explain: "È la raccomandazione principale di PyPI stessa ai consumatori, e l'unico controllo della tabella che copre anche il prossimo incidente oltre a questi due. A circa 1.700 installazioni al minuto, il rilevamento non supererà mai l'esposizione — ma un cooldown di tre giorni rende un incidente contenuto in poche ore irrilevante per te. L'exclude-newer di uv, il minimumReleaseAge di Renovate e il cooldown di Dependabot lo implementano tutti; Dependabot applica un default di 3 giorni anche non configurato, e mai agli aggiornamenti di sicurezza."},
+  {q: "A marzo 2026, litellm 1.82.7 metteva il payload in proxy_server.py e la 1.82.8 distribuiva invece litellm_init.pth. Cosa ti dice questo cambiamento?", options: ["L'attaccante ha perso l'accesso e ha dovuto ricominciare", "L'attaccante è passato da un payload che richiedeva alla vittima di usare il pacchetto a uno che scatta a ogni avvio dell'interprete", "La 1.82.8 è stata un tentativo fallito", "Nulla — i due sono equivalenti"], answer: 1, explain: "È la stessa campagna che scopre la primitiva. Un payload a livello di modulo gira solo se qualcuno importa e usa LiteLLM; un .pth gira a ogni avvio di Python nell'ambiente a prescindere. Il cook.pth da 12 byte di ottobre è partito da dove era arrivato marzo, ed è per questo che il passaggio da «codice a livello di modulo» a «dropper .pth» è una progressione da aspettarsi e non un caso isolato."},
+  {q: "Esegui l'audit dei .pth su una macchina di sviluppo e segnala una riga eseguibile, in distutils-precedence.pth. Cosa dovresti concludere?", options: ["La macchina è compromessa", "Non c'è nulla di sbagliato — è lo shim di distutils di setuptools, l'uso legittimo più comune del meccanismo", "Il file va eliminato subito", "Python va reinstallato"], answer: 1, explain: "Un riscontro non è una scoperta. setuptools distribuisce distutils-precedence.pth con una vera riga di import eseguibile, e le installazioni editable aggiungono __editable__*.pth. Il segnale è una riga eseguibile che non sai attribuire a un pacchetto che hai scelto di installare — come un file chiamato cook che non corrisponde a nessuna distribuzione sul sistema."}
+]} />
+
+## Fonti e letture di approfondimento
+
+- **LiteLLM** — *Contained: Oct 21, 2026 LiteLLM release v1.107.0 Compromised*: https://docs.litellm.ai/blog/security-incident-oct-21-2026 — il post-mortem dei maintainer, e la fonte primaria per la cronologia, la catena di furto delle credenziali, il repository lookalike, l'hardening precedente e i passi di bonifica.
+- **Python documentation** — `site` — *Site-specific configuration hook*: https://docs.python.org/3/library/site.html — la descrizione autorevole dell'elaborazione dei `.pth`, della regola delle righe `import`, della deprecazione in 3.15 e rimozione in 3.20, dei file `.start`, di `sitecustomize`/`usercustomize` e del flag `-S`.
+- **StepSecurity** — *litellm 1.107.0 Compromised on PyPI: Backdoored Wheels Drop a Credential Stealer and an Hourly Remote Code Loader*: https://www.stepsecurity.io/blog/litellm-1-107-0-compromised-pypi-backdoored-wheels-credential-stealer — dimensioni e hash dei file, le sedici categorie del ladro, la daemonizzazione e il dead drop del loader, gli header di esfiltrazione e l'elenco degli IOC.
+- **SafeDep** — *Compromised LiteLLM 1.107.0 on PyPI Installs a Credential Stealer and Backdoor*: https://safedep.io/litellm-pypi-compromise-credential-stealer-backdoor/ — la scoperta che la sdist omette la cartella `cook/` e che nessun commit pubblico contiene `data = "cook"`. È l'articolo che ha raggiunto la prima pagina di Hacker News.
+- **JFrog Security Research** — *LiteLLM Hijacked Again: Malicious 1.107.0 Wheels Steal Credentials*: https://research.jfrog.com/post/litellm-hijacked-again/ — la prima compromissione di marzo 2026 (Trivy 0.69.4 non fissato nella pipeline di build, 1.82.7/1.82.8 con backdoor, XRAY-955589), i timestamp ZIP coincidenti che indicano un'iniezione in fase di build e l'osservazione che persino un comando `pip` innesca il payload.
+- **Wiz** — *LiteLLM Compromised, Steals Credentials*: https://www.wiz.io/blog/litellm-compromised-steals-credentials — un resoconto indipendente della finestra di esposizione, delle distribuzioni interessate e dei tag container.
+- **The Hacker News** — *LiteLLM Suspects GitHub Token Leak in AI Gateway Logs Behind Malicious Package Release*: https://thehackernews.com/2026/10/litellm-suspects-github-token-leak-in.html — cronaca indipendente della causa radice nei log del gateway.
+- **Hacker News discussion** — *Compromised LiteLLM 1.107.0 on PyPI Installs a Credential Stealer and Backdoor*: https://news.ycombinator.com/item?id=50181114 — il thread in prima pagina, 519 punti e 170 commenti al 2026-10-22.
+- **Datadog Security Labs** — *LiteLLM compromised on PyPI: the TeamPCP supply-chain campaign*: https://securitylabs.datadoghq.com/articles/litellm-compromised-pypi-teampcp-supply-chain-campaign/ — l'incidente di marzo 2026, compreso `litellm_init.pth` nella 1.82.8 contro il payload a livello di modulo nella 1.82.7, il dominio di esfiltrazione e la persistenza systemd.
+- **PyPI blog** — *Incident report: LiteLLM and Telnyx supply-chain attack* (2026-04-02): https://blog.pypi.org/posts/2026-04-02-incident-report-litellm-telnyx-supply-chain-attack/ — le cifre di ~1.700 installazioni al minuto e 119.000 download, le tempistiche di quarantena e la raccomandazione di PyPI stessa sui dependency cooldown.
+- **LiteLLM** — *Security Update: Suspected Supply Chain Incident* (March 2026): https://docs.litellm.ai/blog/security-update-march-2026 — il primo post sull'incidente dei maintainer.
+- **uv** — riferimento alle impostazioni `exclude-newer`: https://docs.astral.sh/uv/reference/settings/ — accetta timestamp RFC 3339, durate leggibili e durate ISO 8601 come `P7D`.
+- **GitHub Docs** — riferimento alle opzioni di Dependabot, `cooldown`: https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference — le sotto-chiavi, il default di 3 giorni applicato anche se non configurato e il fatto documentato che il cooldown non si applica agli aggiornamenti di sicurezza.
+- **Renovate** — opzione di configurazione `minimumReleaseAge`: https://docs.renovatebot.com/configuration-options/#minimumreleaseage — l'implementazione più longeva dell'idea.
+- **PyPI** — pagina del progetto `litellm`: https://pypi.org/project/litellm/ — 1.107.0 è assente; 1.106.2 è la corrente. L'API di provenienza di PyPI per un dato file: https://docs.pypi.org/api/integrity/
+- **BerriAI/litellm** (il repository autentico): https://github.com/BerriAI/litellm
+
+## Prossimo passo
+
+- [Reviewing Third-Party Code](/docs/security/reviewing-third-party-code) — la disciplina generale di revisione delle dipendenze, dopo che questo incidente ha mostrato che leggere il repo non è la stessa cosa che leggere l'artefatto
+- [AI Gateways: LiteLLM, OpenRouter, Portkey](/docs/models/ai-gateways-litellm-openrouter-portkey) — a cosa serve un gateway, e le decisioni su logging e gestione delle chiavi che questa pagina sostiene vadano riviste
+- [GemStuffer: How OpenAI Agents Attacked RubyGems](/docs/security/rubygems-gemstuffer-rogue-agents) — l'altra compromissione di registro del 2026, in cui il registro era il meccanismo di consegna e non il bersaglio
