@@ -1,0 +1,65 @@
+# The Trust Ladder
+
+> Source: https://derob98.github.io/ailmanac/docs/frontiers/the-trust-ladder · AILmanac (CC BY 4.0)
+
+Five rungs of autonomy you can grant an AI agent, tied to how reversible and how big a mistake would be — and the guardrail that makes each rung safe.
+
+<LevelBadge level="intermediate" />
+
+# The Trust Ladder
+
+<Callout type="objectives" items={["Why autonomy is a ladder — one rung at a time — not an on/off switch","The five rungs, mapped by blast radius and reversibility (not by how smart the model is)","Three rules for setting the right rung: start low, size to worst case, choose per-task","How the ladder maps onto Claude Code permission modes","Where CLAUDE.md fits in — the file that turns 'guardrails I hold in my head' into ones the agent can actually follow"]} />
+
+"How much should I let the AI just *do*?" is the question behind almost every agent decision — Claude Code permissions, auto-approve settings, whether to let a script run unattended. People tend to answer it as a single on/off switch: either you babysit everything, or you let it loose.
+
+Here's a lens AILmanac uses instead:
+
+> **Autonomy isn't a switch, it's a ladder. You climb it one rung at a time, and the rung you stand on should be set by how bad a mistake would be — not by how much you trust the model.**
+
+The key insight is that the right amount of autonomy has almost nothing to do with how "smart" the AI is. It's about **blast radius** (how much damage a wrong action does) and **reversibility** (how easily you can undo it). A brilliant model doing an irreversible thing unsupervised is a worse setup than a mediocre model doing a reversible one.
+
+## The five rungs
+
+A model we find useful is to think of five distinct rungs, from least to most autonomy:
+
+| Rung | What the AI does | When it's appropriate | What makes it safe |
+| --- | --- | --- | --- |
+| **1. Suggest only** | Tells you what it *would* do; takes no action | High-stakes or irreversible work; a domain you don't yet trust it in; you're still learning what it's good at | You are the executor. Nothing happens without you doing it by hand. |
+| **2. Draft for review** | Produces the actual artifact (code, email, query) but stops before applying it | The output is concrete and you can eyeball it faster than you could write it | A real human read before anything takes effect. A diff you actually look at, not skim. |
+| **3. Act on reversible things** | Executes directly, but only on low-stakes, easily-undone actions | The action has a clean undo: edits in version control, writes to a scratch branch, anything a single command rolls back | **Reversibility is the guardrail.** The cost of a mistake is "undo it," not "explain it to legal." |
+| **4. Act then report** | Does the work autonomously, then shows you exactly what it did | Repetitive, well-scoped tasks where reviewing *after* is cheaper than gating *before* | A complete, honest audit trail — a log, a diff, a summary — that you actually read afterward. |
+| **5. Act autonomously within guardrails** | Runs unattended inside hard limits | Narrow, well-understood loops you've watched succeed many times | **The guardrails do the supervising.** Hard boundaries the AI cannot cross, plus a kill switch. |
+
+## How to use the ladder
+
+Three rules make this practical:
+
+<Steps items={[{title: "Start one rung lower than feels necessary", body: "It is cheap to climb a rung once you have watched something work; it is expensive to clean up after granting too much too soon. The first time you point an agent at a new kind of task, drop to Suggest or Draft even if you suspect it can handle more."}, {title: "Set the rung by the worst case, not the average case", body: "If a task is reversible 95% of the time but the other 5% touches production data, you set the rung for the 5%. The blast radius of the worst plausible action is your ceiling."}, {title: "Climb per-task, not per-tool", body: "The same AI can be at rung 4 for 'format my code' and rung 1 for 'delete records from the database,' in the same session. The ladder is about the action, not a global trust setting you flip once."}]} />
+
+## Mapping it to Claude Code
+
+Claude Code is a clean place to see the ladder in action, because its permission system is essentially a set of dials for choosing your rung:
+
+- **Rungs 1–2** are the default cautious posture: Claude proposes edits and commands, and you approve each one. You're reviewing every diff before it lands.
+- **Rung 3** is allowing specific reversible tool calls — file edits inside a git repo you can `git restore`, runs on a throwaway branch — while still gating anything destructive.
+- **Rung 4** is allow-listing categories of safe actions so Claude proceeds without prompting on those, then reading the transcript and diffs afterward.
+- **Rung 5** is fuller autonomy for a narrow, proven loop — and it's *only* safe when real guardrails are in place: scoped permissions, a constrained working directory, and the ability to stop it.
+
+The mechanism that lets you climb safely is your **[CLAUDE.md](/docs/claude-code/claude-md)**. That file is where you write the guardrails down: what's always allowed, what must never happen, which paths are off-limits, when to stop and ask. Guardrails you only hold in your head don't constrain an agent — guardrails written into CLAUDE.md do. If you're not sure how to phrase them, the [CLAUDE.md Generator](/docs/tools/claude-md-generator) gives you a structured starting point.
+
+The honest summary: **don't grant autonomy because the AI seems capable. Grant it because the action is reversible, the blast radius is small, and the guardrails are written down.** Then climb one rung at a time as the evidence comes in.
+
+<Quiz title="Check yourself" questions={[{q: "You have a proven prompt that has never failed in ~200 test runs. Should you jump straight to rung 5 (autonomous)?", options: ["Yes — 200 clean runs is strong evidence the model can do this reliably", "No — rung 5 is set by blast radius and reversibility, not by past success rate", "Yes, as long as the model is Opus"], answer: 1, explain: "The ladder is set by the WORST plausible action, not by observed reliability. 200/200 test runs tells you about capability, not about what happens on run 201 in a novel input. Rung 5 requires hard guardrails plus a kill switch — and only for narrow, well-understood loops."}, {q: "A task is reversible 95% of the time. The other 5% touches production billing data. Which rung?", options: ["Rung 4 — reversible-average dominates","Rung 1 or 2 — you set the rung for the 5% worst case","Rung 3 — split the difference"], answer: 1, explain: "You set the rung by the worst case, not the average. If any plausible path leads to irreversible harm, the ceiling is 'Suggest' or 'Draft for review' until you can guarantee the 5% path cannot be taken (e.g., a guardrail that hard-blocks writes to that table)."}, {q: "Where do the guardrails that let you climb rungs safely actually live?", options: ["In your head — you review each action as it happens","In CLAUDE.md and permission settings — written down so the agent can act on them","In the model — Claude naturally refuses risky actions"], answer: 1, explain: "Guardrails you only hold in your head do not constrain an autonomous agent — the agent cannot read them. To climb the ladder, the boundaries must be encoded where the agent will actually respect them: CLAUDE.md, permission modes, allow/deny lists, scoped tool access."}]} />
+
+<Callout type="takeaways" items={["Autonomy is a ladder, not a switch — climb one rung at a time as evidence accumulates.","Set the rung by blast radius and reversibility of the worst plausible action, not by how smart the model seems.","Reversibility is the guardrail on rung 3; a real audit trail is the guardrail on rung 4; hard limits + a kill switch are the guardrail on rung 5.","Choose the rung per task, not per tool — the same agent can be rung 4 for formatting and rung 1 for database deletes in the same session.","Guardrails belong in CLAUDE.md and permission settings — not in your head."]} />
+
+## Related
+
+- [What Is CLAUDE.md?](/docs/claude-code/claude-md)
+- [CLAUDE.md Generator](/docs/tools/claude-md-generator)
+- [The Freshness Half-Life](/docs/frontiers/freshness-half-life)
+
+
+## Next
+
+- [Context Engineering](/docs/frontiers/context-engineering)

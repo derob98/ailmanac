@@ -1,0 +1,114 @@
+# La tua prima chiamata API in produzione (attenta ai costi)
+
+> Source: https://derob98.github.io/ailmanac/it/docs/walkthroughs/first-production-call · AILmanac (CC BY 4.0)
+
+Una chiamata reale: in streaming, con gestione degli errori e budget di costo.
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Nominare le quattro discipline che separano una chiamata di produzione da una riga giocattolo: segreti, streaming, costi e gestione degli errori", "Scrivere una chiamata resiliente in streaming che riprova i fallimenti transitori (429/5xx) con backoff — e non riprova mai un 400", "Tenere l'ID del modello nella configurazione, così cambiare modello è una modifica di una riga e non un cerca-e-sostituisci", "Tenere d'occhio il costo in token a ogni chiamata e limitarlo in modo deliberato"]} />
+
+Una [chiamata API](/docs/api/first-call) di esempio è una sola riga. Una chiamata di *produzione* gestisce gli errori, trasmette l'output in streaming, tiene d'occhio i costi e protegge i segreti. Costruiamola, passo dopo passo.
+
+## Passo 1 — Segreti e modello dalla configurazione
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."   # never in source control
+```
+
+Tieni l'**ID del modello nella configurazione**, non in valori letterali sparsi nel codice, così la migrazione è banale ([perché](/docs/api/errors-and-rate-limits)). Scegli con criterio — [Scegliere un modello](/docs/api/choosing-a-model).
+
+## Passo 2 — Una chiamata resiliente in streaming
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+import os, time, random, anthropic
+client = anthropic.Anthropic()
+MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
+
+def ask_stream(prompt, system=None, max_tokens=1024):
+    for attempt in range(5):
+        try:
+            with client.messages.stream(
+                model=MODEL, max_tokens=max_tokens,
+                system=system or anthropic.NOT_GIVEN,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                for text in stream.text_stream:
+                    print(text, end="", flush=True)
+                final = stream.get_final_message()
+            print()
+            usage = final.usage
+            print(f"\n[tokens in/out: {usage.input_tokens}/{usage.output_tokens}]")
+            return final
+        except (anthropic.RateLimitError, anthropic.APIStatusError):
+            if attempt == 4: raise
+            time.sleep(min(2 ** attempt + random.random(), 30))
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+const client = new Anthropic();
+const MODEL = process.env.CLAUDE_MODEL ?? "claude-sonnet-5";
+
+export async function askStream(prompt: string, system?: string, maxTokens = 1024) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const stream = client.messages.stream({ model: MODEL, max_tokens: maxTokens, system,
+        messages: [{ role: "user", content: prompt }] });
+      for await (const e of stream)
+        if (e.type === "content_block_delta") process.stdout.write(e.delta.text ?? "");
+      const final = await stream.finalMessage();
+      console.error(`\n[tokens in/out: ${final.usage.input_tokens}/${final.usage.output_tokens}]`);
+      return final;
+    } catch (e: any) {
+      if (attempt === 4 || ![429, 500, 529].includes(e?.status)) throw e;
+      await new Promise(r => setTimeout(r, Math.min(2 ** attempt * 1000, 30000)));
+    }
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+Fai uno smoke test prima di collegarla a qualsiasi cosa — una piccola chiamata dimostra che lo streaming, la riga dei token e la tua chiave funzionano tutti:
+
+<PromptCard title="Primo smoke test (REPL Python)">{`ask_stream("Say hello in one sentence.", max_tokens=64)`}</PromptCard>
+
+## Passo 3 — Tieni d'occhio i costi
+
+- **Registra l'uso dei token** (qui sopra) così puoi vedere quanto costa ogni chiamata.
+- **Dimensiona correttamente `max_tokens`** e il modello; limita l'input con prompt mirati.
+- Per prefissi stabili e ripetuti, aggiungi il [prompt caching](/docs/api/prompt-caching).
+- Vedi [Token e prezzi](/docs/api/tokens-and-pricing) e [Costo e latenza](/docs/foundations/cost-and-latency).
+
+## Passo 4 — Gestisci i percorsi infelici
+
+- Riprova gli errori **transitori** (429/5xx) con backoff (qui sopra); non riprovare i 400.
+- Gestisci i [rifiuti](/docs/api/refusals-and-safety) in modo elegante.
+- Imposta un **timeout** e un **budget di costo/iterazioni** per qualsiasi cosa agentica.
+
+## Verifica
+
+Forza ogni percorso e osserva cosa succede — una chiamata di produzione si guadagna il nome fallendo bene, non solo riuscendo:
+
+<Steps items={[{title: "L'output in streaming compare", body: "Il testo viene stampato progressivamente man mano che è generato, non in un unico blocco bloccante alla fine. È il guadagno di latenza che gli utenti percepiscono."}, {title: "La riga dei token viene stampata", body: "Dopo la risposta vedi la riga [tokens in/out: …]. È il tuo contatore di costo per chiamata, registrato a ogni chiamata."}, {title: "Una chiave errata fallisce in modo pulito", body: "Imposta ANTHROPIC_API_KEY su un valore sbagliato e riesegui — dovresti ottenere un errore pulito, non un crash con stack trace."}, {title: "Gli errori transitori vengono riprovati, i 400 no", body: "Gli errori 429/5xx vengono riprovati con backoff fino a 5 tentativi; una richiesta 400 malformata deve emergere subito invece di essere riprovata inutilmente."}]} />
+
+<Quiz title="Mettiti alla prova" questions={[{q: "Perché tenere l'ID del modello nella configurazione invece di spargere la stringa letterale nel codice?", options: ["I valori di configurazione sono cifrati a riposo dall'SDK", "Migrare a un nuovo modello diventa una modifica di una riga invece di una caccia ai letterali sparsi", "L'SDK Anthropic si rifiuta di funzionare senza una variabile d'ambiente"], answer: 1, explain: "Gli ID dei modelli cambiano man mano che escono nuove versioni. Tenere l'ID in un unico valore di configurazione rende la migrazione una sola modifica; i letterali sparsi significano un cerca-e-sostituisci in tutto il codice ogni volta che cambi modello."}, {q: "Il loop di retry intercetta alcuni fallimenti e ne rilancia altri. Quali errori dovrebbe riprovare?", options: ["Tutti gli errori, per massimizzare le probabilità di successo", "Gli errori transitori come 429 e 5xx, con backoff esponenziale — ma non i 400", "Solo gli errori 400, dato che sono colpa del client"], answer: 1, explain: "429 (rate limit) e 5xx (server) sono transitori — aspettare e riprovare spesso funziona. Un 400 significa che la richiesta stessa è malformata; riprovarla invariata spreca solo chiamate e tempo, quindi deve emergere subito."}, {q: "Qual è il modo più economico per vedere quanto costa davvero ogni chiamata?", options: ["Chiamare un endpoint dei prezzi prima di ogni richiesta", "Registrare i conteggi di token in ingresso/uscita restituiti in usage a ogni chiamata", "Attivare il prompt caching così il costo scende a zero"], answer: 1, explain: "Il messaggio finale porta con sé un oggetto usage con i conteggi dei token in ingresso e in uscita. Registrarlo trasforma gratuitamente ogni chiamata nel proprio contatore di costo. Il prompt caching abbassa il costo per i prefissi ripetuti, ma non lo misura."}]} />
+
+<Callout type="takeaways" items={["Una chiamata di produzione è quattro discipline sovrapposte alla riga singola: segreti fuori dal codice sorgente, output in streaming, costo monitorato, errori gestiti", "Riprova i fallimenti transitori (429/5xx) con backoff esponenziale più jitter — e non riprovare mai un 400, che è un bug della richiesta da correggere", "Tieni l'ID del modello nella configurazione, così cambiare modello è una riga e non un cerca-e-sostituisci su tutto il codice", "Registra l'uso dei token a ogni chiamata: è il tuo contatore di costo per richiesta e aggiungerlo non costa nulla", "Lo streaming migliora la latenza percepita; timeout e un budget di costo/iterazioni impediscono ai loop agentici di scappare di mano"]} />
+
+## Prossimi passi
+
+- [Errori, rate limit e affidabilità](/docs/api/errors-and-rate-limits)
+- [Snippet API per la produzione](/docs/templates/api-snippets)
+- [Costruire agenti con l'API](/docs/api/building-agents)

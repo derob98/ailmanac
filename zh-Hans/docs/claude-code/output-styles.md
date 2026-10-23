@@ -1,0 +1,166 @@
+# 输出风格
+
+> Source: https://derob98.github.io/ailmanac/zh-Hans/docs/claude-code/output-styles · AILmanac (CC BY 4.0) · last verified 2026-06-21
+
+改变 Claude Code 的语气、详略程度和讲解行为。
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-06-21" source="https://code.claude.com/docs/en/output-styles">
+内置风格、确切的切换机制以及自定义风格的文件格式可能会在不同版本之间发生变化。请在官方文档中确认（Claude Code 文档已从 `docs.anthropic.com` 迁移至 `code.claude.com`）。
+</VerifyNote>
+
+<Callout type="objectives" items={[
+  "什么是输出风格——以及它与改变 Claude 所知内容有何不同",
+  "四种内置风格：Default、Proactive、Explanatory、Learning",
+  "如何用 /config 切换风格——以及为什么更改需要一个全新会话才能生效",
+  "如何把你自己的自定义风格编写为一个 Markdown 文件",
+  "何时该使用输出风格，何时该用 CLAUDE.md，何时该用 Claude.ai 自定义指令"
+]} />
+
+**输出风格**通过直接修改系统提示词，来改变 Claude Code *如何*交流——它的角色、语气、详略程度，以及是否解释自己的推理过程。它们改变的是 Claude *如何*回应，而非它*知道什么*。如果你每一轮都在为了同样的语气或格式反复重写提示词，那就该用它了。
+
+## 为什么使用它们
+
+- **匹配你的工作流。** 当你节奏很快时，简洁、行动优先；当你在学习时，注重讲解。
+- **教学模式。** 有些风格会增加教学性的讲解——在你熟悉一个代码库或一种技术时非常有用。
+- **一致性。** 一次设定好你偏好的风格，之后每个会话都会按你喜欢的方式呈现。
+
+## 内置风格
+
+Claude Code 自带四种：
+
+| 风格 | 作用 |
+|---|---|
+| **Default** | 标准的软件工程系统提示词——高效、行动优先。 |
+| **Proactive** | 立即执行，并对常规决策做出合理假设，而不是停下来等待。比自动模式有更强的自主执行引导，但在工具运行前你仍会看到权限确认提示。 |
+| **Explanatory** | 在各步骤之间增加教学性的“Insights”，解释实现选择和代码库中的模式。 |
+| **Learning** | 协作式、在实践中学习：既分享 Insights，*又*会请你自己编写一些小片段，在你的代码中留下 `[TODO(human)]` 标记。 |
+
+<Callout type="warning" items={[
+  "Explanatory 和 Learning 在设计上就会产生更长的回应，因此它们比 Default 消耗更多的输出 token。"
+]} />
+
+<Flashcards cards={[
+  { front: "Default", back: "标准的软件工程系统提示词——高效、行动优先。" },
+  { front: "Proactive", back: "立即执行，并对常规决策做出合理假设，而不是停下来等待。比自动模式有更强的自主引导，但在工具运行前你仍会看到权限确认提示。" },
+  { front: "Explanatory", back: "在各步骤之间增加教学性的“Insights”，解释实现选择和代码库中的模式。" },
+  { front: "Learning", back: "协作式、在实践中学习：既分享 Insights，又会请你自己编写一些小片段，在你的代码中留下 [TODO(human)] 标记。" }
+]} />
+
+## 如何切换
+
+运行 `/config`，在 **Output style** 下选择一种风格。你的选择会保存到项目级别的 `.claude/settings.local.json`。若想不通过菜单来设置，可在任意设置文件中编辑 `outputStyle` 字段。
+
+<Steps items={[
+  { title: "打开配置菜单", body: "在你的会话中运行 /config，找到 Output style 选项。" },
+  { title: "选择一种风格", body: "选择 Default、Proactive、Explanatory 或 Learning 之一。你的选择会保存到项目级别的 .claude/settings.local.json。" },
+  { title: "或者直接设置", body: "跳过菜单，在任意设置文件中编辑 outputStyle 字段（见下方 JSON）。" },
+  { title: "开启一个全新会话", body: "风格是系统提示词的一部分，只在会话开始时读取一次——运行 /clear 或开启新会话才能让它生效。" }
+]} />
+
+```json
+{
+  "outputStyle": "Explanatory"
+}
+```
+
+:::warning 更改需要全新会话
+输出风格是系统提示词的一部分，而 Claude Code **在会话开始时只读取一次**。更改只有在 `/clear` 之后或新会话中才会生效。（独立的 `/output-style` 命令已在 v2.1.91 中移除——请使用 `/config` 或上面的设置项。）
+:::
+
+## 创建自定义风格
+
+自定义风格是一个 Markdown 文件：先是 frontmatter，然后是要追加到系统提示词的指令。把它保存在用户级别（`~/.claude/output-styles/`）或项目级别（`.claude/output-styles/`）；除非你设置了 `name`，否则文件名就会成为风格的名称。
+
+<PromptCard title="自定义风格示例——图先行">{`---
+name: Diagrams first
+description: Lead every explanation with a diagram
+keep-coding-instructions: true
+---
+
+When explaining code, architecture, or data flow, start with a Mermaid
+diagram showing the structure, then explain in prose.`}</PromptCard>
+
+<Callout type="tip" items={[
+  "当你只是想改变 Claude 如何交流、但仍希望它正常写代码时，设置 keep-coding-instructions: true。",
+  "当 Claude 根本不在做软件工程时——比如它是一个纯写作或数据分析助手——就将其省略（默认值），这样内置的写代码指令会被丢弃。"
+]} />
+
+## 输出风格 vs CLAUDE.md vs 其他调节手段
+
+- **输出风格** = 针对角色、语气和格式的系统提示词预设——适用于*每一个*回应。
+- **[CLAUDE.md](/docs/claude-code/claude-md)** = 持久化的*项目*事实与规则（约定、护栏），作为一条消息添加在系统提示词之后。
+- **[自定义指令 / 回应风格](/docs/claude-app/custom-instructions)** = Claude.ai 消费者应用中的同类功能。
+
+:::tip 使用正确的调节手段
+想让 Claude “在完成前总是运行测试”？那是一条 **CLAUDE.md 护栏**，而不是风格。想让它“边做边解释每一步”？那是一种**输出风格**。把行为规则放在 CLAUDE.md 中，把呈现方式放在风格中。
+:::
+
+<Quiz title="自我检测" questions={[
+  {
+    q: "输出风格实际改变的是什么？",
+    options: [
+      "Claude 对你项目的了解",
+      "Claude 如何交流——角色、语气、详略程度——通过修改系统提示词来实现",
+      "Claude Code 运行的是哪个模型",
+      "工具运行前的权限确认提示"
+    ],
+    answer: 1,
+    explain: "输出风格修改系统提示词，改变的是 Claude 如何回应，而非它知道什么。"
+  },
+  {
+    q: "哪种内置风格会留下 [TODO(human)] 标记并请你自己编写一些小片段？",
+    options: ["Default", "Proactive", "Explanatory", "Learning"],
+    answer: 3,
+    explain: "Learning 是协作式、在实践中学习的风格：它既分享 Insights，又请你编写一些小片段，在你的代码中留下 [TODO(human)] 标记。"
+  },
+  {
+    q: "更改输出风格后，它什么时候生效？",
+    options: [
+      "立即生效，在下一条消息上",
+      "只有在 /clear 之后或新会话中才生效，因为系统提示词在会话开始时只读取一次",
+      "在你重启电脑之后",
+      "在你运行 /output-style 之后"
+    ],
+    answer: 1,
+    explain: "风格是系统提示词的一部分，而 Claude Code 在会话开始时只读取一次——所以更改只有在 /clear 之后或新会话中才生效。独立的 /output-style 命令已在 v2.1.91 中移除。"
+  },
+  {
+    q: "你想让 Claude “在完成前总是运行测试”。这是哪种调节手段？",
+    options: [
+      "一种输出风格",
+      "一条 CLAUDE.md 护栏",
+      "一条 Claude.ai 自定义指令",
+      "Proactive 内置风格"
+    ],
+    answer: 1,
+    explain: "行为规则属于 CLAUDE.md；呈现方式属于输出风格。“总是运行测试”是一条护栏。"
+  },
+  {
+    q: "在自定义风格中，什么时候该设置 keep-coding-instructions: true？",
+    options: [
+      "当 Claude 根本不在做软件工程时",
+      "当你只是想改变 Claude 如何交流、但仍希望它正常写代码时",
+      "总是，在每个自定义风格中都设置",
+      "只在项目级别设置，绝不在用户级别设置"
+    ],
+    answer: 1,
+    explain: "保持为 true 可以在只改变呈现方式的同时保留内置的写代码指令。对于纯写作或数据分析助手，就将其省略（默认值）。"
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "输出风格改变的是 Claude 如何交流（角色、语气、详略程度），而非它知道什么——它们编辑系统提示词。",
+  "四种内置：Default（行动优先）、Proactive（带假设地执行）、Explanatory（增加 Insights）、Learning（Insights + [TODO(human)] 标记）。",
+  "Explanatory 和 Learning 消耗更多输出 token，因为其回应在设计上更长。",
+  "通过 /config（保存到 .claude/settings.local.json）或 outputStyle 设置项来切换——更改需要 /clear 或一个新会话。",
+  "自定义风格是位于 ~/.claude/output-styles/ 或 .claude/output-styles/ 中的 Markdown 文件；用 keep-coding-instructions: true 来保留写代码行为。",
+  "用 CLAUDE.md 管理行为规则/护栏，用输出风格管理呈现方式。"
+]} />
+
+## 下一步
+
+- [CLAUDE.md 与记忆文件](/docs/claude-code/claude-md)
+- [设置与配置](/docs/claude-code/settings)
+- [自定义指令与风格（Claude.ai）](/docs/claude-app/custom-instructions)

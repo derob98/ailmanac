@@ -1,0 +1,96 @@
+# 스킬 팩 및 SKILL.md 템플릿
+
+> Source: https://derob98.github.io/ailmanac/ko/docs/templates/skills · AILmanac (CC BY 4.0) · last verified 2026-07-20
+
+사용자 유형별로 바로 쓰는 Agent Skills, 그리고 직접 작성하는 방법.
+
+<LevelBadge level="all" />
+
+<VerifyNote lastVerified="2026-07-20" source="https://code.claude.com/docs/en/skills">
+스킬 파일 레이아웃과 스킬을 사용할 수 있는 곳(Claude Code, Claude.ai, Cowork, 클라우드 세션)은 계속 바뀝니다 — 구체적인 사항은 공식 Skills 문서에서 확인하세요. 커스텀 명령은 이제 스킬에 통합되었습니다: `.claude/commands/` 아래의 파일도 여전히 동작하지만, 권장되는 형태는 스킬입니다.
+</VerifyNote>
+
+**스킬**은 여러분의 요청과 일치할 때 *필요에 따라* 로드되는 집중된 전문성을 Claude에게 부여합니다 — 그래서 매번 여러분의 필요를 다시 설명할 필요가 없습니다. AILmanac은 사용자 종류별로 하나씩, **바로 쓰는 스킬 팩** 모음을 제공합니다. 개념을 깊이 있게 익히려면 [Skills](/docs/claude-code/skills) 페이지를 보세요.
+
+## 준비된 팩
+
+팩은 저장소의
+[`plugins/ailmanac/skills`](https://github.com/derob98/ailmanac/tree/main/plugins/ailmanac/skills) 폴더에 있습니다:
+
+| 팩 | 대상 | 하는 일 |
+|---|---|---|
+| `ailmanac` | Claude나 다른 AI 도구에 대해 묻는 모든 사람 | 이 가이드에서 답을 찾아, 검증 날짜와 함께 해당 페이지를 인용 |
+| `claude-md-check` | Claude Code 사용자 | `CLAUDE.md`를 저장소 내용 및 메모리 파일이 로드되는 방식과 대조해 점검 |
+| `writing-content-pro` | 작가, 마케터, 크리에이터 | 브리프 → 단계별 초안 작성 → 여러분의 목소리에 맞추기 → 재활용 |
+| `developer-workflow` | 개발자 | 컨텍스트 우선 코딩, 리뷰, 테스트, 명료한 커밋 |
+| `research-analyst` | 연구자, 분석가 | 인용 규율을 지키는 출처 기반 종합 |
+| `data-analyst` | 데이터 및 스프레드시트 사용자 | SQL/수식 + 평이한 언어로 읽기 + 통계 점검 |
+| `business-marketing` | 창업자, 중소기업 소유자 | 포지셔닝, 카피, 고객 커뮤니케이션, 가벼운 기획 |
+| `student-learning` | 학생 및 학습자 | 소크라테스식 튜터링 + 가르치며 익히기(베끼지 말고 배우기) |
+| `everyday-productivity` | 모두 | 이메일, 요약, 기획, 의사결정 |
+
+각 팩은 핵심 원칙을 녹여냈습니다: **맥락을 주고, 반복하며, 중요한 것을 검증하라.**
+
+## 설치하기 (Claude Code)
+
+전부 한 번에, 플러그인으로:
+
+```bash
+claude plugin marketplace add derob98/ailmanac --sparse .claude-plugin plugins
+claude plugin install ailmanac@ailmanac
+```
+
+또는 저장소를 클론한 곳에서 팩 하나만 복사하세요:
+
+```bash
+# personal — available in all your projects
+mkdir -p ~/.claude/skills && cp -r plugins/ailmanac/skills/writing-content-pro ~/.claude/skills/
+
+# or per-project — shareable with your team via the repo
+mkdir -p .claude/skills && cp -r plugins/ailmanac/skills/writing-content-pro .claude/skills/
+```
+
+여러분의 요청이 스킬의 `description`과 일치하면 Claude가 자동으로 스킬을 활성화합니다. Claude.ai / Cowork에서는 스킬을 만들고 팩의 `SKILL.md`를 붙여넣으세요(가용성은 요금제에 따라 다릅니다).
+
+## 직접 작성하기 — 최소 템플릿
+
+스킬은 `SKILL.md`를 담은 폴더입니다: YAML 프론트매터 + 지침. `description`이 **트리거**입니다 — "Use when…" 형태로 작성하세요. 필수인 것은 `description`뿐이며, 명령 이름은 폴더 이름에서 가져옵니다.
+
+```markdown
+---
+description: Use when the user is doing X — be specific about the trigger so Claude knows when to load this and when not to.
+---
+
+# My Skill
+
+Short statement of the role/goal.
+
+## Workflow
+1. Step one…
+2. Step two…
+
+## Rules
+- The non-negotiables (accuracy, privacy, output format).
+
+## Default output
+What a good response looks like.
+```
+
+### 유효성 체크리스트
+
+- [ ] 폴더 이름이 kebab-case이다 — 이것이 `/command-name`이 된다.
+- [ ] `description`은 무엇인지가 아니라 **언제 쓰는지**(트리거)를 말한다. 핵심 사용 사례를 맨 앞에 둔다(`description`과 `when_to_use`를 합친 내용은 스킬 목록에서 1,536자에서 잘린다).
+- [ ] 지침이 구체적이고 범위가 한정되어 있다 — 하나의 명확한 역할.
+- [ ] 비밀, 자격 증명, 개인/고객 데이터가 없다.
+- [ ] 불확실성을 다루는 방법을 명시한다(지어내지 말고, 검증하기).
+
+## 관련 항목
+
+- [Skills: 필요에 따른 전문성](/docs/claude-code/skills) — 전체 개념
+- [커스텀 슬래시 명령](/docs/claude-code/slash-commands) — 필요할 때 직접 트리거하는 것들
+- [서브에이전트](/docs/claude-code/subagents) — 작업 덩어리 전체를 위임하기
+
+
+## 다음
+
+- [MCP 설정 및 서버 스캐폴드](/docs/templates/mcp-config)

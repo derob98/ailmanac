@@ -1,0 +1,43 @@
+# 이달의 Claude
+
+> Source: https://derob98.github.io/ailmanac/ko/docs/whats-new/this-month · AILmanac (CC BY 4.0) · last verified 2026-07-01
+
+최근 모델, Claude Code, API 변경 사항을 쉬운 말로 정리한 다이제스트.
+
+<LevelBadge level="all" />
+
+<VerifyNote lastVerified="2026-06-24" source="https://platform.claude.com/docs">
+이 페이지는 사람이 직접 큐레이션하는 지속적으로 갱신되는 다이제스트입니다. 변경 사항의 권위 있는 전체 목록은 항상 공식 Anthropic 문서와 Claude Code 변경 이력을 참고하세요.
+</VerifyNote>
+
+Claude 전반에서 최근에 무엇이 바뀌었는지를 쉬운 말로 정리한 다이제스트입니다 — 모든 변경 이력을 읽지 않고도 "무엇이 새롭고 나에게 어떤 의미인지"를 훑어볼 수 있습니다. 최신순으로 정렬되어 있습니다.
+
+:::info 이 페이지가 최신을 유지하는 방법
+항목은 커뮤니티와 [자동 워처](/docs/contribute/automation)에 의해 추가되며, 워처는 업스트림 변경 사항을 플래그로 표시해 사람이 작성하도록 합니다. 각 항목은 공식 출처로 링크됩니다. 빠진 내용이 있나요? [추가해 주세요](/docs/contribute/contribute-in-10-minutes).
+:::
+
+## 항목 읽는 방법
+
+각 업데이트는 **표면(surface)**별로 태그가 붙습니다 — 🗣️ 앱(채팅/음성/모바일), 🛠️ Claude Code, 🔌 API, 🧠 모델 — 그리고 **"나에게 어떤 의미인지"**를 알려줍니다.
+
+## 최근 업데이트
+
+- 🧠 **모델** — **Claude Sonnet 5**가 2026년 6월 30일에 출시되어 이제 **Claude Code의 기본 모델**이 되었으며, 네이티브 1M-token 컨텍스트 창과 August 31, 2026까지 적용되는 도입 가격을 제공합니다. 이것은 Claude Sonnet 4.6(현재 레거시 모델)을 대체하는 새로운 균형 잡힌 "여기서 시작하세요" Sonnet 등급입니다. *의미:* 모델을 고정해서 사용한다면 `claude-sonnet-5`로 마이그레이션하세요. 그리고 블로그 게시물의 수치에 의존하기 전에 정확한 ID와 실시간 가격은 항상 [현재 모델 및 가격](/docs/whats-new/models-and-pricing) 표에서 확인하세요. <VerifyNote lastVerified="2026-07-01" source="https://platform.claude.com/docs/en/models/overview">API ID `claude-sonnet-5`; Sonnet 등급; 1M-token 컨텍스트; 128k 최대 출력; 2026년 1월 지식 컷오프. $2 / $10 per MTok의 도입 가격이 Aug 31, 2026까지 적용됩니다(표준 $3 / $15). [변경 이력](https://code.claude.com/docs/en/changelog)에 따라 이제 Claude Code 기본 모델입니다(v2.1.197, June 30 2026).</VerifyNote>
+- 🛠️ **Claude Code** — **동적 워크플로(Dynamic workflows)**가 리서치 프리뷰로 제공됩니다: 요청하거나(`/effort ultracode`로 설정하면) Claude가 백그라운드에서 수십에서 수백 개의 [서브에이전트](/docs/claude-code/subagents)를 조율하는 JavaScript 스크립트를 작성합니다 — 코드베이스 전반 감사, 대규모 마이그레이션, 교차 검증된 리서치를 위해서요. 번들로 제공되는 것을 보려면 `/deep-research`를 실행하고, 실행 과정을 지켜보려면 `/workflows`를 실행하세요. *의미:* 이제 하나의 대화로는 결코 조율할 수 없었던 대규모 작업을 수행할 수 있으며, 그 조율 과정은 재실행 가능한 명령으로 저장됩니다. [동적 워크플로 및 ultracode](/docs/claude-code/dynamic-workflows)를 참고하세요. <VerifyNote lastVerified="2026-06-24" source="https://code.claude.com/docs/en/workflows">Claude Code v2.1.154+ 필요; 유료 요금제, API, Bedrock, Vertex, Foundry에서 사용 가능.</VerifyNote>
+- 🧠 **모델** — 새로운 최상위 등급 모델인 **Claude Fable 5**가 2026년 6월에 출시되었습니다(Claude Code v2.1.170+). *의미:* 모델을 고정하기 전에 실시간 라인업과 정확한 ID는 [현재 모델 및 가격](/docs/whats-new/models-and-pricing) 표에서 확인하세요 — 블로그 게시물의 모델 정보를 절대 하드코딩하지 마세요.
+- 🛠️ **Claude Code** — 서브에이전트가 이제 **자체 서브에이전트를 생성**할 수 있으며(최대 5단계 깊이), `/code-review --fix`는 리뷰 결과를 작업 트리에 적용합니다. *의미:* 위임이 더 깊게 구성되며, 리뷰가 단순히 보고하는 데 그치지 않고 루프를 닫을 수 있습니다. 정확한 동작은 [공식 변경 이력](https://code.claude.com/docs/en/changelog)에서 교차 확인하세요.
+- 🔌 **API** — 구조화된 출력, 확장된 사고(extended thinking), 프롬프트 캐싱 같은 기능이 진화합니다. *의미:* 정확한 파라미터에 의존하기 전에 [API 섹션](/docs/api/first-call)을 다시 확인하세요.
+
+## 전체 내역을 원하시나요?
+
+이것은 *다이제스트*이지 완전한 로그가 아닙니다. 모든 내용은 다음에서 확인하세요:
+
+- [Anthropic 문서 및 공지](https://platform.claude.com/docs)
+- [Claude Code 변경 이력](https://code.claude.com/docs/en/overview)
+- [지원 중단 및 마이그레이션 워치](/docs/whats-new/deprecations)
+
+## 다음
+
+- [현재 모델 및 가격](/docs/whats-new/models-and-pricing)
+- [지원 중단 및 마이그레이션 워치](/docs/whats-new/deprecations)
+- [사이트 변경 이력](/docs/whats-new/site-changelog)

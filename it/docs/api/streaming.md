@@ -1,0 +1,82 @@
+# Streaming e conversazioni multi-turno
+
+> Source: https://derob98.github.io/ailmanac/it/docs/api/streaming · AILmanac (CC BY 4.0)
+
+Esegui lo streaming delle risposte e gestisci la cronologia su un'API stateless.
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Eseguire lo streaming delle risposte token per token così gli utenti vedono subito l'output", "Capire perché l'API è stateless e come gestire tu stesso la cronologia della conversazione", "Continuare una conversazione multi-turno rinviando l'intero scambio precedente", "Evitare che le conversazioni lunghe facciano esplodere la finestra di contesto e i costi"]} />
+
+Costruire esperienze tipo chat sull'API si riduce a due realtà pratiche: usa lo **streaming** così gli utenti vedono subito l'output, e **gestisci tu stesso la cronologia** perché l'API è stateless. Padroneggia entrambe e la tua UX di chat risulterà veloce e ricorderà tutto.
+
+## Streaming
+
+Senza streaming, l'utente attende l'intera risposta. Con lo streaming, i token arrivano man mano che vengono generati — una velocità percepita molto migliore.
+
+<Callout type="tip" items={["Usa l'helper di streaming dell'SDK invece di analizzare gli eventi grezzi a mano — gestisce per te il ciclo di vita degli eventi."]} />
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+with client.messages.stream(
+    model="claude-sonnet-5", max_tokens=1024,
+    messages=[{"role": "user", "content": "Explain RAG in two sentences."}],
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="", flush=True)
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+const stream = client.messages.stream({
+  model: "claude-sonnet-5", max_tokens: 1024,
+  messages: [{ role: "user", content: "Explain RAG in two sentences." }],
+});
+for await (const event of stream) {
+  if (event.type === "content_block_delta") process.stdout.write(event.delta.text ?? "");
+}
+```
+
+</TabItem>
+</Tabs>
+
+## Multi-turno: la cronologia la tieni tu
+
+L'API **non ha memoria** tra le chiamate ([perché](/docs/foundations/tokens-and-context)). Per continuare una conversazione, rinvia ogni volta l'**intero scambio precedente**.
+
+<Steps items={[{title: "Avvia la conversazione", body: "Invia il primo messaggio dell'utente nella lista messages."}, {title: "Cattura la risposta", body: "Leggi il testo della risposta dell'assistente dal risultato."}, {title: "Aggiungi entrambi i turni", body: "Aggiungi la risposta dell'assistente e il messaggio successivo dell'utente alla stessa lista messages."}, {title: "Rinvia la lista completa", body: "Invia di nuovo la lista messages completa — è così che Claude 'ricorda' lo scambio."}]} />
+
+```python
+messages = [{"role": "user", "content": "Hi, I'm planning a trip."}]
+# ... get assistant reply, then append both turns:
+messages.append({"role": "assistant", "content": assistant_text})
+messages.append({"role": "user", "content": "Make it 3 days."})
+# send the full `messages` list again
+```
+
+## Le conversazioni lunghe riempiono la finestra
+
+Man mano che la cronologia cresce, consuma la [finestra di contesto](/docs/foundations/tokens-and-context) e il costo aumenta. Strategie per tenerla sotto controllo:
+
+- **Riassumi/compatta** i turni più vecchi in un breve riepilogo che porti avanti.
+- **Sfoltisci** i turni precedenti non rilevanti.
+- Abbina al **[prompt caching](/docs/api/prompt-caching)** per evitare di ripagare un prefisso stabile.
+
+<Callout type="warning" items={["Ogni chiamata rinvia l'intera cronologia — le conversazioni lunghe costano di più e, se non compatti o sfoltisci mai, possono finire per superare la finestra di contesto."]} />
+
+<Callout type="takeaways" items={["Esegui lo streaming dei token per una velocità percepita elevata; l'helper dell'SDK gestisce il ciclo di vita degli eventi.", "L'API è stateless — non ha memoria tra le chiamate.", "Continua una conversazione aggiungendo ogni turno e rinviando la lista messages completa.", "Compatta, sfoltisci e usa la cache per controllare il costo e la dimensione delle conversazioni lunghe."]} />
+
+<Quiz title="Mettiti alla prova" questions={[{q: "Perché lo streaming migliora l'esperienza di chat?", options: ["Usa meno token complessivamente", "I token arrivano man mano che vengono generati, migliorando la velocità percepita", "Dà al modello memoria tra le chiamate", "Evita il limite della finestra di contesto"], answer: 1, explain: "Senza streaming l'utente attende l'intera risposta; con lo streaming, i token arrivano man mano che vengono generati — una velocità percepita molto migliore."}, {q: "Come si continua una conversazione multi-turno su questa API?", options: ["L'API memorizza per te l'id della sessione", "Invia solo l'ultimo messaggio dell'utente", "Rinvia ogni volta l'intero scambio precedente", "Attiva un flag 'memory' nella richiesta"], answer: 2, explain: "L'API non ha memoria tra le chiamate, quindi devi rinviare ogni volta l'intero scambio precedente — aggiungendo sia la risposta dell'assistente sia il turno successivo dell'utente."}, {q: "Quale strategia NON è suggerita per evitare che le conversazioni lunghe riempiano la finestra di contesto?", options: ["Riassumere/compattare i turni più vecchi", "Sfoltire i turni precedenti non rilevanti", "Abbinare il prompt caching per un prefisso stabile", "Aumentare max_tokens a ogni richiesta"], answer: 3, explain: "La pagina raccomanda di riassumere/compattare, sfoltire e usare il prompt caching. Aumentare max_tokens non riduce la cronologia che riempie la finestra."}]} />
+
+## Avanti
+
+- [Uso degli strumenti / Function calling](/docs/api/tool-use)
+- [Prompt caching](/docs/api/prompt-caching)
+- [Errori, rate limit e affidabilità](/docs/api/errors-and-rate-limits)

@@ -1,0 +1,93 @@
+# フックと settings.json のレシピ
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/templates/hooks-settings · AILmanac (CC BY 4.0) · last verified 2026-08-03
+
+コピー＆ペーストできるフォーマッター、品質ゲート、安全ガードのフック、そしてスターター設定。
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-03" source="https://code.claude.com/docs/en/hooks">
+設定・フックのキーは変化します。公式の Claude Code 設定・フックドキュメントで現在のスキーマを確認してください。
+</VerifyNote>
+
+[`settings.json`](/docs/claude-code/settings)、[権限](/docs/claude-code/permissions)、[フック](/docs/claude-code/hooks)のための、そのまま使えるレシピです。コマンドはあなたのスタックに合わせて調整してください。
+
+## スタータープロジェクトの `settings.json`
+
+`.claude/settings.json`（コミットしてチーム全体で共有）:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Bash(npm run test:*)",
+      "Bash(npm run lint)",
+      "Bash(git status)",
+      "Bash(git diff:*)"
+    ],
+    "ask": ["Bash(npm install:*)", "Write"],
+    "deny": ["Read(./.env)", "Read(./**/*.pem)", "Bash(git push --force:*)"]
+  }
+}
+```
+
+個人用・マシン固有の上書きは `.claude/settings.local.json`（git で無視）に置いてください。
+
+## 編集後の自動フォーマット
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "f=$(jq -r '.tool_input.file_path'); npx prettier --write \"$f\" 2>/dev/null || true" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+## 完了前の品質ゲート
+
+テストが通るまで「完了」をブロックします（概念的なもの — ドキュメントに従って `Stop`／完了前イベントに接続してください）:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "npm test --silent" } ] }
+    ]
+  }
+}
+```
+
+## 安全ガード（保護パスの編集をブロック）
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "f=$(jq -r '.tool_input.file_path'); case \"$f\" in *secrets*|*.env|*/vendor/*) echo 'blocked: protected path'; exit 1;; esac" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+:::tip フックは高速かつ冪等に保つ
+フックは絶えず実行されます。素早く、再実行しても安全で、本当の問題のときだけ声を上げるようにしてください。
+:::
+
+## 次のステップ
+
+- [権限と権限モード](/docs/claude-code/permissions)
+- [フック: 決定論的な自動化](/docs/claude-code/hooks)
+- [スラッシュコマンドライブラリ](/docs/templates/slash-commands)

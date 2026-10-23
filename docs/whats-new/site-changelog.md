@@ -1,0 +1,34 @@
+# Site Changelog
+
+> Source: https://derob98.github.io/ailmanac/docs/whats-new/site-changelog · AILmanac (CC BY 4.0)
+
+AILmanac's own edits in Keep a Changelog format.
+
+<LevelBadge level="all" />
+
+Changes to **AILmanac itself** — structure, features, and major content drops. (For changes to *Claude*, see [This Month in Claude](/docs/whats-new/this-month).) Format follows [Keep a Changelog](https://keepachangelog.com/).
+
+## Unreleased
+
+### Added
+- Full **Claude Code** and **Claude API** sections (every page written).
+- **AI Foundations**, **Prompting**, **Claude.ai & Apps**, **Playbooks**, **Templates**, and **Security** sections completed.
+- Interactive widgets: **Prompt Builder**, **Model Picker**, **Token Estimator**.
+- **7 skill packs** (`/skills`) for different user types.
+- Branded **Open Graph** social card; premium theme + animated homepage.
+- Freshness system: `data/models.json` source of truth + `<VerifyNote>` stamps.
+
+### Changed
+- Premium visual redesign (typography, palette, custom logo).
+
+## Notes
+
+- This is a community project — see who contributed in the repo.
+- Want your change logged here? Mention it in your PR ([Contribute](/docs/contribute/contribute-in-10-minutes)).
+- Subscribe to changes by watching the [GitHub repo](https://github.com/derob98/ailmanac).
+
+## Next
+
+- [This Month in Claude](/docs/whats-new/this-month)
+- [Contribute in 10 Minutes](/docs/contribute/contribute-in-10-minutes)
+- [How Our Automation Works](/docs/contribute/automation)

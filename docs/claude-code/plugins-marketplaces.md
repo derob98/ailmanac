@@ -1,0 +1,55 @@
+# Plugins & Marketplaces
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-code/plugins-marketplaces · AILmanac (CC BY 4.0) · last verified 2026-10-22
+
+Bundle skills, agents, commands, hooks and MCP into one installable unit.
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-10-22" source="https://code.claude.com/docs/en/plugins">
+Plugin structure and marketplace mechanics are evolving fast — confirm details in the official Claude Code docs.
+</VerifyNote>
+
+A **plugin** bundles several customizations — [skills](/docs/claude-code/skills), [subagents](/docs/claude-code/subagents), [slash commands](/docs/claude-code/slash-commands), [hooks](/docs/claude-code/hooks), [MCP servers](/docs/claude-code/mcp), and since Claude Code v2.1.287 a [**mod**](/docs/claude-code/mods) — into a single, versioned, installable unit. A **marketplace** is a catalog of plugins people can discover and install.
+
+## Why plugins matter
+
+- **Ship a team toolkit in one step.** Instead of asking everyone to copy five files, publish a plugin; teammates install it and get the same commands, hooks, agents, and MCP connections.
+- **Versioning.** Update the plugin, everyone pulls the new version.
+- **Distribution.** A marketplace makes your toolkit (or others') discoverable.
+
+```mermaid
+flowchart LR
+  P[Plugin] --> S[skills/]
+  P --> A[agents/]
+  P --> H[hooks]
+  P --> M[MCP servers]
+  P --> L[LSP servers]
+  P --> MO[monitors]
+  P --> W[workflows]
+  P -->|published to| MK[Marketplace]
+```
+
+## What's typically inside
+
+A plugin is a structured folder of components. The `.claude-plugin/plugin.json` manifest is **optional**: without one, Claude Code loads whatever it finds in the [standard layout](https://code.claude.com/docs/en/plugins-reference#standard-layout) — so a folder holding nothing but a `SKILL.md` already loads as a plugin. Write a manifest when you want metadata, a version, a component outside its default directory, or user-configurable values.
+
+Beyond skills, a plugin can bundle subagents, hooks, and MCP servers, and — more recently — [LSP servers](https://code.claude.com/docs/en/plugins-reference#lspservers) for code intelligence, background [monitors](https://code.claude.com/docs/en/plugins-reference#monitors), [workflows](https://code.claude.com/docs/en/workflows#distribute-a-workflow-in-a-plugin), a `bin/` of executables, and default settings. Keep each plugin **coherent** — a "team conventions" plugin, a "Python toolkit" plugin — rather than a grab-bag.
+
+## Trust before you install
+
+:::warning Plugins can ship executable code
+Hooks and MCP servers in a plugin run with your privileges. Install from sources you trust and review what a plugin does first — see [Reviewing Third-Party Code](/docs/security/reviewing-third-party-code).
+:::
+
+## A path to scale your setup
+
+The natural progression: a `CLAUDE.md` → a few [skills](/docs/claude-code/skills) and [commands](/docs/claude-code/slash-commands) → bundle them into a plugin → publish to a marketplace for your team or the community. That last step is part of how AILmanac wants to help the ecosystem grow.
+
+## Next
+
+- [Mods: In-Process Extensions](/docs/claude-code/mods) — the one plugin component that runs *inside* Claude Code and can replace its built-in behavior
+- [Plugin Evals](/docs/claude-code/plugin-evals) — prove the plugin helps with `claude plugin eval` before you publish it
+- [Skills](/docs/claude-code/skills) · [Subagents](/docs/claude-code/subagents) · [MCP](/docs/claude-code/mcp)
+- [Reviewing Third-Party Code](/docs/security/reviewing-third-party-code)
+- AILmanac's [skill packs](/docs/templates/skills)

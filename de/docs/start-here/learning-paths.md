@@ -1,0 +1,89 @@
+# Lernpfade (Wähle deinen Track)
+
+> Source: https://derob98.github.io/ailmanac/de/docs/start-here/learning-paths · AILmanac (CC BY 4.0)
+
+Geordnete Lesereihenfolgen für vier Lesertypen, mit Zeitschätzungen.
+
+<LevelBadge level="all" />
+
+Wähle den Track, der am ehesten nach dir klingt. Jeder ist ein geordneter Pfad — mach die Schritte der Reihe nach, überspring, was du schon kannst. Die Zeiten sind grobe Richtwerte.
+
+<Callout type="objectives" items={["Den einen Track finden, der zu deinen Zielen passt — Einsteiger, Wissensarbeiter, Entwickler oder Team-Lead", "Einem klaren, geordneten Lesepfad folgen, statt zu raten, wo man anfängt", "Ungefähr wissen, wie viel Zeit jeder Track braucht (~45 Min. bis ~½ Tag)", "Wo man anfängt, wenn keiner der Tracks sofort passt"]} />
+
+:::tip Nicht sicher, welcher Track deiner ist?
+Orientiere dich an deinem **Ziel**, nicht an deiner Jobbezeichnung. Ergebnisse ohne Programmieren? Einsteiger. Echte Arbeit schneller erledigen? Wissensarbeiter. Claude Code oder die API anpassen? Entwickler. KI für andere ausrollen? Team-Lead.
+:::
+
+## 🌱 Der neugierige Einsteiger · ~45 Min.
+
+Du willst KI gut nutzen, ohne Programmierer zu werden.
+
+<Steps items={[
+  {title: "Deine ersten 5 Minuten", body: "Einsteiger. Erziele in fünf Minuten ein echtes Ergebnis mit Claude. /docs/start-here/your-first-5-minutes"},
+  {title: "Welches Claude soll ich nutzen?", body: "Einsteiger. Wähle das richtige Modell für das, was du tust. /docs/start-here/which-claude"},
+  {title: "Prompting-Grundlagen", body: "Einsteiger. Die Kerngriffe, die Antworten besser machen. /docs/prompting/basics"},
+  {title: "Was ist ein LLM?", body: "Einsteiger. Ein einfaches mentales Modell davon, wie Claude funktioniert. /docs/foundations"},
+  {title: "Produktivität im Alltag", body: "Einsteiger. Wende es auf tägliche Aufgaben und kleine Erfolge an. /docs/playbooks/productivity"}
+]} />
+
+## 💼 Der Wissensarbeiter · ~2 Std.
+
+Du willst, dass KI deine echte Arbeit schneller macht — Schreiben, Recherche, Analyse.
+
+<Steps items={[
+  {title: "Starte mit dem Track des neugierigen Einsteigers", body: "Mach zuerst den ~45-Min.-Track oben, dann mach unten weiter."},
+  {title: "Bibliothek der Prompt-Muster", body: "Alle Level. Wiederverwendbare Muster, die du in echte Arbeit übernehmen kannst. /docs/prompting"},
+  {title: "Halluzinationen & wie man sie reduziert", body: "Fortgeschritten. Erzeuge Ausgaben, denen du wirklich vertrauen kannst. /docs/foundations"},
+  {title: "Wähle dein Playbook", body: "Wähle Schreiben, Recherche oder Datenanalyse. /docs/playbooks"},
+  {title: "Projekte + wiederverwendbare Prompt-Vorlagen", body: "Dauerhafte Arbeitsbereiche (/docs/claude-app) und Vorlagen, die du wiederverwendest (/docs/templates)."}
+]} />
+
+## 🛠️ Der Entwickler / Developer · ~½ Tag
+
+Du schreibst Code und willst Claude Code anpassen und auf der API aufbauen.
+
+<Steps items={[
+  {title: "Was Claude Code ist", body: "Einsteiger. Was die CLI ist und warum sie wichtig ist. /docs/claude-code/what-is-claude-code"},
+  {title: "CLAUDE.md, Memory-Dateien & Plan-Modus", body: "Einsteiger. Bring Claude dein Projekt bei und plane, bevor es handelt. /docs/claude-code"},
+  {title: "Berechtigungen & settings.json", body: "Fortgeschritten. Kontrolliere, was Claude tun darf und wie es sich verhält. /docs/claude-code"},
+  {title: "Dein erster API-Aufruf → Tool Use → Agenten bauen", body: "Profi. Geh von einem Aufruf über Tool Use bis zu vollwertigen Agenten. Beginne bei /docs/api/first-call, dann /docs/api"},
+  {title: "Walkthrough: Claude Code für ein echtes Repo anpassen", body: "Fortgeschritten. Bring alles an einem echten Projekt zusammen. /docs/walkthroughs"},
+  {title: "Sicherheit & verantwortungsvolle Nutzung", body: "Profi. Liefere sicher aus, sobald du für den Ernstfall baust. /docs/security"}
+]} />
+
+## 👥 Der Team-Lead · ~3 Std.
+
+Du rollst KI für ein Team aus und legst Wert auf Konsistenz, Sicherheit und Kosten.
+
+<Steps items={[
+  {title: "Grundlagen des Entwickler-Tracks (Schritte 1–3)", body: "Decke die Entwickler-Grundlagen oben ab, bevor du hier weitermachst."},
+  {title: "Plugins & Marktplätze", body: "Profi. Liefere ein gemeinsames Toolkit aus, damit das Team gleich arbeitet. /docs/claude-code"},
+  {title: "Kosten- & Latenz-Abwägungen + Modellwahl", body: "Fortgeschritten. Balanciere Geschwindigkeit, Qualität und Ausgaben. /docs/foundations und /docs/api/choosing-a-model"},
+  {title: "Agenten absichern + autonome Läufe härten", body: "Profi. Mach autonome Läufe im großen Maßstab sicher. /docs/security"},
+  {title: "Verantwortungsvolle Nutzung & Verifikation", body: "Alle Level. Lege die Normen fest, an die sich das Team hält. /docs/security"}
+]} />
+
+## Tracks auf einen Blick
+
+| Track | Du bist… | Zeit | Erster Schritt |
+| --- | --- | --- | --- |
+| 🌱 Neugieriger Einsteiger | KI gut nutzen, kein Code | ~45 Min. | [Deine ersten 5 Minuten](/docs/start-here/your-first-5-minutes) |
+| 💼 Wissensarbeiter | Echte Arbeit beschleunigen | ~2 Std. | [Bibliothek der Prompt-Muster](/docs/prompting) |
+| 🛠️ Entwickler / Developer | Claude Code + API anpassen | ~½ Tag | [Was Claude Code ist](/docs/claude-code/what-is-claude-code) |
+| 👥 Team-Lead | KI für ein Team ausrollen | ~3 Std. | [Plugins & Marktplätze](/docs/claude-code) |
+
+:::note Die Tracks bauen aufeinander auf
+Der Wissensarbeiter-Track beginnt mit dem gesamten Einsteiger-Track. Der Team-Lead-Track beginnt mit den Entwickler-Grundlagen (Schritte 1–3). Wenn du einen Track abschließt, ist der nächsthöhere meist schon zum Großteil erledigt.
+:::
+
+<Quiz title="Prüf dich selbst" questions={[
+  {q: "Du willst, dass KI dein Schreiben und deine Recherche beschleunigt, aber du programmierst nicht. Welcher Track passt?", options: ["Der Entwickler / Developer", "Der Wissensarbeiter", "Der Team-Lead"], answer: 1, explain: "Der Wissensarbeiter-Track (~2 Std.) ist dafür da, deine echte Arbeit schneller zu machen, und er beginnt mit dem Track des neugierigen Einsteigers."},
+  {q: "Wie lang ist der Track des neugierigen Einsteigers ungefähr?", options: ["~45 Min.", "~2 Std.", "~½ Tag"], answer: 0, explain: "Der Track des neugierigen Einsteigers dauert etwa 45 Minuten — der kürzeste Pfad auf der Seite."},
+  {q: "Was ist der erste Schritt des Entwickler-/Developer-Tracks?", options: ["Dein erster API-Aufruf", "Was Claude Code ist", "Berechtigungen & settings.json"], answer: 1, explain: "Der Entwickler-Track beginnt mit „Was Claude Code ist“, dann geht es zu CLAUDE.md und Memory-Dateien, bevor die API kommt."}
+]} />
+
+<Callout type="takeaways" items={["Vier Tracks, eine Regel: Wähle nach Ziel, dann folge den Schritten der Reihe nach.", "Die Zeiten reichen von ~45 Min. (Einsteiger) bis ~½ Tag (Entwickler).", "Die Tracks sind verschachtelt — Wissensarbeiter baut auf Einsteiger auf; Team-Lead baut auf Entwickler auf.", "Im Zweifel beginne mit „Deine ersten 5 Minuten“ — es zahlt sich auf jedem Track aus."]} />
+
+---
+
+Nicht sicher, welcher passt? Beginne mit [Deine ersten 5 Minuten](/docs/start-here/your-first-5-minutes) — es ist nützlich, egal wo du landest. Und lies [Wie Level & Aktualität funktionieren](/docs/start-here/levels-and-freshness), damit die Badges und Daten Sinn ergeben.

@@ -1,0 +1,159 @@
+# Glossar
+
+> Source: https://derob98.github.io/ailmanac/de/docs/start-here/glossary · AILmanac (CC BY 4.0)
+
+Über 40 KI- und Claude-Begriffe in einfachem Deutsch.
+
+<LevelBadge level="all" />
+
+Klare Definitionen in einfachem Deutsch, ohne Vorwissen. Überfliege es oder suche nach einem Begriff, auf den du anderswo gestoßen bist.
+
+**Wiederhole die Grundlagen als Flashcards** — tippe zum Umdrehen:
+
+<Flashcards title="Kernbegriffe" cards={[
+  {front: "Agent", back: "Eine KI, die in einer Schleife Aktionen ausführt — liest ein Ziel, ruft Tools auf, sieht die Ergebnisse und wiederholt, bis fertig."},
+  {front: "Token", back: "Die Einheit, in der Modelle lesen und schreiben — etwa ¾ eines Worts. Kontextgrenzen und Preise werden in Tokens gemessen."},
+  {front: "MCP", back: "Model Context Protocol — ein offener Standard, der Claude mit externen Tools und Datenquellen verbindet."},
+  {front: "Kontextfenster", back: "Die maximale Tokenzahl (dein Prompt plus die Antwort), die ein Modell auf einmal berücksichtigen kann."},
+  {front: "System-Prompt", back: "Anweisungen, die die Rolle und Regeln des Modells festlegen, getrennt von der Nachricht des Nutzers."},
+  {front: "RAG", back: "Retrieval-Augmented Generation — relevante Dokumente zur Abfragezeit holen und dem Modell als Kontext geben."},
+  {front: "Knowledge Cutoff", back: "Das Datum, nach dem ein Modell keine Trainingsdaten hat — liefere aktuelle Fakten im Prompt, sonst antwortet es aus veralteten oder erfundenen Infos."},
+  {front: "Streaming", back: "Ausgabe Token für Token senden, während sie erzeugt wird, sodass sie in Echtzeit erscheint und die wahrgenommene Latenz bei langen Antworten sinkt."},
+  {front: "Zero-Shot", back: "Ohne Beispiele fragen, nur mit Anweisungen — im Gegensatz zu Few-Shot, das durchgearbeitete Beispiele enthält, um Format oder Stil zu leiten."},
+]} />
+
+### Agent
+Eine KI, die darauf eingerichtet ist, **in einer Schleife Aktionen auszuführen** — sie liest ein Ziel, ruft Tools auf, sieht die Ergebnisse und wiederholt, bis fertig. Claude Code ist ein Agent für deine Codebasis.
+
+### Anthropic
+Das Unternehmen, das Claude herstellt.
+
+### API (Application Programming Interface)
+Eine Möglichkeit für *deine* Software, programmatisch mit Claude zu sprechen, statt in einem Chatfenster zu tippen. Siehe [Dein erster API-Aufruf](/docs/api/first-call).
+
+### Artifact
+Eine live lauffähige Ausgabe (eine App, ein Diagramm oder ein Dokument), die Claude in einem Seitenpanel auf claude.ai rendert, getrennt vom Chat.
+
+### Chain-of-Thought (CoT)
+Das Modell bitten, vor der Antwort **Schritt für Schritt zu argumentieren**, was die Genauigkeit bei schwierigen Problemen verbessert.
+
+### Claude
+Die Familie der KI-Modelle (und Apps) von Anthropic. „Claude“ kann je nach Kontext die Chat-App, die Modelle oder die Marke meinen.
+
+### Claude Code
+Anthropics **agentisches Kommandozeilen-/IDE-Tool**, das deine Codebasis lesen und bearbeiten, Befehle ausführen und Tools nutzen kann. Siehe [Was Claude Code ist](/docs/claude-code/what-is-claude-code).
+
+### CLAUDE.md
+Eine Klartextdatei, in der du Claude Code dauerhafte Anweisungen zu deinem Projekt gibst — seine wirkungsvollste Anpassung.
+
+### Compaction
+Das automatische Verdichten älterer Konversations-Turns zu einer kurzen Zusammenfassung, wenn das [Kontextfenster](/docs/foundations/tokens-and-context) sich füllt, damit eine lange Sitzung weitergehen kann, ohne den Faden zu verlieren. Siehe [Context Management](/docs/claude-code/context-management).
+
+### Context Engineering
+Bewusst entscheiden, was in das [Kontextfenster](/docs/foundations/tokens-and-context) des Modells kommt — Anweisungen, Beispiele, abgerufene Daten — um das beste Ergebnis zu erzielen. Die Disziplin hinter Prompting, RAG und Memory.
+
+### Kontextfenster
+Die maximale Textmenge (gemessen in **Tokens**), die ein Modell auf einmal berücksichtigen kann — dein Prompt *plus* seine Antwort. Überschreite es, und der älteste Inhalt fällt weg.
+
+### Effort
+Eine Steuerung bei neueren Claude-Modellen dafür, ungefähr **wie viel das Modell nachdenkt**, bevor es antwortet. Passe das Tier an die Aufgabe an, statt es auszureizen — du zahlst fürs Nachdenken in Latenz und Kosten. Siehe [Extended Thinking & Effort](/docs/api/thinking-and-effort).
+
+### Embedding
+Eine Liste von Zahlen, die die *Bedeutung* eines Textstücks repräsentiert, sodass Software Dinge finden kann, die sich in der Bedeutung ähneln (nicht nur in den Schlüsselwörtern). Treibt semantische Suche und RAG an.
+
+### Eval (Evaluation)
+Ein wiederholbarer Test der Qualität von KI-Ausgaben, damit du erkennst, ob eine Änderung etwas besser oder schlechter gemacht hat.
+
+### Few-Shot
+Ein paar **durchgearbeitete Beispiele** in deinen Prompt aufzunehmen, um dem Modell das gewünschte Muster zu zeigen.
+
+### Fine-Tuning
+Ein Modell mit deinen eigenen Beispielen weiter zu trainieren, um es zu spezialisieren. Meist ein letztes Mittel — probiere [zuerst Prompting und RAG](/docs/foundations).
+
+### Grounding
+Das Modell anweisen, **nur aus dem von dir bereitgestellten Kontext** zu antworten — und „Ich weiß es nicht“ zu sagen, wenn die Antwort nicht da ist. Die wichtigste Verteidigung auf Prompt-Ebene gegen Halluzination. Siehe [die Musterbibliothek](/docs/prompting/pattern-library).
+
+### Guardrails
+Regeln und Grenzen, die das Verhalten einer KI sicher und auf Kurs halten — z. B. Berechtigungsregeln, „vor dem Abschluss Tests laufen lassen“ oder menschliche Freigabe für riskante Aktionen. Siehe [Agenten absichern](/docs/security/securing-agents).
+
+### Halluzination
+Wenn ein Modell etwas **Falsches, aber Selbstbewusstes** behauptet. Die Kernfähigkeit ist Verifikation. Siehe [Halluzinationen](/docs/foundations).
+
+### Hook
+In Claude Code ein Befehl, der **automatisch** bei einem Lifecycle-Ereignis läuft (z. B. nach jeder Dateibearbeitung), um Formatierung, Gates oder Sicherheit durchzusetzen.
+
+### Inference
+Der Akt, ein Modell auszuführen, um eine Ausgabe zu erhalten (im Gegensatz zum Training).
+
+### Knowledge Cutoff
+Das Datum, nach dem ein Modell **keine Trainingsdaten** hat — es weiß wirklich nicht, was später geschah, es sei denn, du lieferst die Fakten in deinem Prompt. Claudes Cutoff wird in den Release Notes jedes Modells veröffentlicht. Deshalb können Fragen zu sehr aktuellen Ereignissen ohne Kontext veraltete oder erfundene Antworten erzeugen; die Lösung ist, die relevanten Fakten einzufügen oder ein Tool zu nutzen, das Live-Informationen abruft.
+
+### Latenz
+Wie lange du auf eine Antwort wartest. Größere Modelle sind meist langsamer; [Streaming](/docs/api/streaming) verbessert die *wahrgenommene* Latenz, indem die Ausgabe gezeigt wird, während sie erzeugt wird.
+
+### LLM (Large Language Model)
+Die Art KI hinter Claude: trainiert, um **den nächsten Textbrocken vorherzusagen**, was sich als genug erweist, um zu schreiben, zu coden, zusammenzufassen und zu argumentieren. Siehe [Was ist ein LLM?](/docs/foundations).
+
+### MCP (Model Context Protocol)
+Ein **offener Standard**, um KI mit externen Tools und Daten zu verbinden (Datenbanken, GitHub, Browser). Ein „MCP-Server“ stellt ein Tool bereit; Claude kann es aufrufen. Siehe [MCP](/docs/claude-code).
+
+### Multimodal
+Ein Modell, das **mehr als Text** verarbeitet — z. B. Bilder und PDFs als Eingabe.
+
+### Output Style
+In Claude Code eine Voreinstellung, die ändert, **wie Claude kommuniziert** (z. B. prägnant, erklärend, lernend), ohne zu ändern, was es kann. Siehe [Output Styles](/docs/claude-code/output-styles).
+
+### Permission Mode
+In Claude Code, wie viel es **ohne zu fragen** tun darf — vom Nachfragen bei jeder Aktion bis zum automatischen Akzeptieren von Edits. Der wichtigste Geschwindigkeit-vs-Sicherheit-Regler. Siehe [Permissions](/docs/claude-code/permissions).
+
+### Plan Mode
+Ein schreibgeschützter Claude-Code-Modus, der recherchiert und einen Plan vorschlägt, **bevor** er Dateien anfasst — du genehmigst, bevor es handelt. Siehe [Plan Mode](/docs/claude-code/plan-mode).
+
+### Prompt
+Was du dem Modell sendest: deine Anweisungen, Frage und jeglicher Kontext.
+
+### Prompt Caching
+Den unveränderten vorderen Teil eines Prompts über Aufrufe hinweg wiederverwenden, um Kosten und Latenz zu senken. Siehe [Prompt Caching](/docs/api).
+
+### Prompt Injection
+Ein Angriff, bei dem **schädliche Anweisungen, die in Inhalten versteckt** sind, die die KI liest (eine Webseite, ein Dokument), versuchen, sie zu kapern. Siehe [Prompt Injection](/docs/security).
+
+### RAG (Retrieval-Augmented Generation)
+Relevante Schnipsel aus *deinen* Daten holen und sie dem Prompt hinzufügen, damit das Modell darüber antwortet. Siehe [RAG](/docs/foundations).
+
+### Reasoning / Extended Thinking
+Ein Modus, in dem das Modell zusätzliche Rechenleistung fürs „Nachdenken“ vor der Antwort aufwendet, für schwierigere Aufgaben. Bei neueren Modellen stimmst du es mit [Effort](/docs/api/thinking-and-effort) ab.
+
+### Skill
+Eine verpackte Fähigkeit (Anweisungen + optionale Skripte), die Claude **bei Bedarf** lädt, wenn sie relevant ist. Siehe [Skills](/docs/claude-code).
+
+### Slash Command
+Eine mit `/` beginnende Abkürzung in Claude Code — eingebaut (wie `/clear`) oder dein eigener wiederverwendbarer Prompt — die eine definierte Aktion auslöst. Siehe [Slash Commands](/docs/claude-code/slash-commands).
+
+### Streaming
+Die Ausgabe des Modells **Token für Token** senden, während sie erzeugt wird, statt auf die ganze Antwort zu warten. Für einen Nutzer sieht es so aus, als würde das Modell in Echtzeit tippen; für einen Entwickler bedeutet es, einen Strom von Chunks zu verarbeiten statt eines einzigen Response-Objekts. Es verbessert die *wahrgenommene* Latenz bei langen Ausgaben drastisch und lässt dich mit dem Rendern beginnen, bevor das Modell fertig ist. Siehe [Streaming](/docs/api/streaming).
+
+### Structured Output
+Ergebnisse in einer strikten, maschinenlesbaren Form erhalten (z. B. JSON, das einem Schema entspricht) statt Freitext — sodass andere Software sich darauf verlassen kann. Siehe [Structured Output](/docs/api/structured-output).
+
+### Subagent
+Eine separate Claude-Instanz mit eigenem Kontext und eigenen Tools, genutzt, um einen Teil einer Aufgabe zu **delegieren** (z. B. Recherche), damit die Hauptsitzung fokussiert bleibt.
+
+### System-Prompt
+Die übergeordneten Anweisungen, die die Rolle und Regeln des Modells für eine ganze Konversation festlegen — dein mächtigster Steuerungshebel.
+
+### Temperature
+Eine Einstellung (bei manchen Modellen), die die Zufälligkeit steuert: niedrig = fokussiert und reproduzierbar, hoch = variabel und kreativ.
+
+### Token
+Die Einheit, in der Modelle lesen und zählen — etwa ¾ eines Worts im Englischen. Preise und Kontextgrenzen werden in Tokens gemessen. Siehe [Tokens & Kontext](/docs/foundations).
+
+### Tool Use / Function Calling
+Dem Modell erlauben, von dir definierte Funktionen aufzurufen (Suche, Rechner, deine API) und die Ergebnisse zu nutzen. Siehe [Tool Use](/docs/api).
+
+### Zero-Shot
+Das Modell bitten, eine Aufgabe **ohne Beispiele** zu lösen — nur mit Anweisungen. Die meisten Alltags-Prompts sind Zero-Shot. Im Gegensatz zu [Few-Shot](#few-shot), wo du durchgearbeitete Beispiele einfügst, um Format oder Stil zu leiten. Zero-Shot ist für unkomplizierte Aufgaben in Ordnung; füge Beispiele hinzu, wenn das Modell die gewünschte Ausgabeform immer wieder verfehlt.
+
+---
+
+Fehlt ein Begriff? [Füge ihn hinzu](/docs/contribute/contribute-in-10-minutes) — Glossareinträge sind ein perfekter erster Beitrag.

@@ -1,0 +1,86 @@
+# MCP 設定とサーバーのひな形
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/templates/mcp-config · AILmanac (CC BY 4.0) · last verified 2026-08-10
+
+.mcp.json に加えて、最小構成の stdio・リモートサーバースターター。
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-10" source="https://modelcontextprotocol.io">
+MCP の設定キーや SDK の API は変化します。公式の MCP ドキュメントおよび Claude Code の MCP ドキュメントで確認してください。
+</VerifyNote>
+
+[MCP](/docs/claude-code/mcp) 経由で Claude をツールに接続するための、コピー＆ペースト用スターターです。必要なものだけに削ぎ落としてください。
+
+## `.mcp.json` — サーバーを宣言する（プロジェクト共有）
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "${DATABASE_URL}"]
+    }
+  }
+}
+```
+
+:::warning シークレットをファイルに含めない
+環境変数（`${GITHUB_TOKEN}`）を参照してください — コミットされるファイルにトークンをハードコードしないでください。
+:::
+
+## 最小構成の stdio サーバー（TypeScript）
+
+ツールを 1 つだけ公開する小さなサーバーです。ハンドラをあなたのデータに合わせて調整してください。
+
+```ts
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { z } from "zod";
+
+const server = new McpServer({ name: "echo", version: "1.0.0" });
+
+server.registerTool(
+  "echo",
+  {
+    description: "Echo back the provided text",
+    inputSchema: z.object({ text: z.string().describe("Text to echo back") }),
+  },
+  async ({ text }) => ({ content: [{ type: "text", text: `You said: ${text}` }] }),
+);
+
+await server.connect(new StdioServerTransport());
+```
+
+## 最小構成の stdio サーバー（Python）
+
+```python
+from mcp.server import MCPServer
+
+mcp = MCPServer("echo")
+
+@mcp.tool()
+def echo(text: str) -> str:
+    """Echo the text back."""
+    return f"You said: {text}"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
+
+## サーバーを出荷する前に
+
+- **最小権限** — 必要なデータ・操作だけに（[エージェントのセキュリティ確保](/docs/security/securing-agents)）。
+- **入力を検証する**。エラーは結果として返し、クラッシュさせないでください。
+- **サードパーティ製サーバーを精査する**。接続する前に確認してください（[サードパーティコードのレビュー](/docs/security/reviewing-third-party-code)）。
+
+## 次のステップ
+
+- [Claude Code における MCP サーバー](/docs/claude-code/mcp)
+- [はじめての MCP サーバーを構築して接続する](/docs/walkthroughs/first-mcp-server)
+- [フックと settings.json のレシピ](/docs/templates/hooks-settings)

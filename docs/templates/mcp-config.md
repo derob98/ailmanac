@@ -1,0 +1,90 @@
+# MCP Config & Server Scaffolds
+
+> Source: https://derob98.github.io/ailmanac/docs/templates/mcp-config · AILmanac (CC BY 4.0) · last verified 2026-08-10
+
+.mcp.json plus minimal stdio and remote server starters.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-10" source="https://modelcontextprotocol.io">
+MCP config keys and SDK APIs evolve — confirm against the official MCP docs and the Claude Code MCP docs.
+</VerifyNote>
+
+Copy-paste starters for connecting Claude to tools via [MCP](/docs/claude-code/mcp). Trim to what you need.
+
+## `.mcp.json` — declare servers (project-shared)
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "${DATABASE_URL}"]
+    }
+  }
+}
+```
+
+:::warning Keep secrets out of the file
+Reference env vars (`${GITHUB_TOKEN}`) — don't hard-code tokens in a committed file.
+:::
+
+## Minimal stdio server (TypeScript)
+
+A tiny server exposing one tool. Adapt the handler to your data.
+
+```ts
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { z } from "zod";
+
+const server = new McpServer({ name: "echo", version: "1.0.0" });
+
+server.registerTool(
+  "echo",
+  {
+    description: "Echo back the provided text",
+    inputSchema: z.object({ text: z.string().describe("Text to echo back") }),
+  },
+  async ({ text }) => ({ content: [{ type: "text", text: `You said: ${text}` }] }),
+);
+
+await server.connect(new StdioServerTransport());
+```
+
+:::note SDK package rename (MCP TS SDK v2)
+`@modelcontextprotocol/sdk` was split into `@modelcontextprotocol/server` and `@modelcontextprotocol/client` in v2. The v1 package still receives bug fixes; new projects should use v2.
+:::
+
+## Minimal stdio server (Python)
+
+```python
+from mcp.server import MCPServer
+
+mcp = MCPServer("echo")
+
+@mcp.tool()
+def echo(text: str) -> str:
+    """Echo the text back."""
+    return f"You said: {text}"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
+
+## Before you ship a server
+
+- **Least privilege** — only the data/actions it needs ([Securing Agents](/docs/security/securing-agents)).
+- **Validate inputs**; return errors as results, don't crash.
+- **Review third-party servers** before connecting ([Reviewing Third-Party Code](/docs/security/reviewing-third-party-code)).
+
+## Next
+
+- [MCP Servers in Claude Code](/docs/claude-code/mcp)
+- [Build & Wire Your First MCP Server](/docs/walkthroughs/first-mcp-server)
+- [Hooks & settings.json Recipes](/docs/templates/hooks-settings)

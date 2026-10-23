@@ -1,0 +1,58 @@
+# Boas-vindas & Por que isto existe
+
+> Source: https://derob98.github.io/ailmanac/pt-BR/docs/start-here/welcome · AILmanac (CC BY 4.0)
+
+O que é o AILmanac, para quem ele é e o que ele deliberadamente não tenta substituir.
+
+<LevelBadge level="all" />
+
+O **AILmanac** é um **almanaque** gratuito, construído pela comunidade, **para extrair o máximo do Claude — e de qualquer IA**. Um almanaque é uma referência à qual você sempre volta: completa, em linguagem clara e mantida atualizada. Esse é o objetivo aqui.
+
+<Callout type="objectives" items={["Entender o que é o AILmanac — e o que ele deliberadamente não é", "Encontrar o nível que combina com você: iniciante, intermediário ou avançado", "Escolher seu caminho mais rápido de entrada e começar a ler em menos de um minuto"]} />
+
+## Para quem isto é
+
+Para todos, de propósito — e informamos o nível de cada página para que você nunca se sinta perdido ou subestimado:
+
+| Nível | Este é você se... |
+| --- | --- |
+| <LevelBadge level="beginner" /> | Você mal usou IA e quer uma primeira vitória garantida. |
+| <LevelBadge level="intermediate" /> | Você já usa o Claude e quer resultados visivelmente melhores. |
+| <LevelBadge level="advanced" /> | Você desenvolve com o Claude Code, a API, agentes e MCP. |
+
+## O que torna isto diferente
+
+Já existem ótimos recursos (veja [o Mapa do Cenário](/docs/start-here/landscape-map)). O AILmanac **não** é um amontoado de links e **não** é uma cópia da documentação oficial. Ele é:
+
+- **Opinativo** — dizemos a você a *única forma recomendada* e, depois, as alternativas.
+- **Marcado por nível** — toda página recebe um selo para que você leia o que é certo para você.
+- **Rico em modelos** — [pontos de partida prontos para copiar e colar](/docs/templates) que você pode usar em 30 segundos.
+- **Honesto sobre atualidade** — fatos que mudam (nomes de modelos, preços, recursos) carregam uma data de "última verificação" e um link para a fonte.
+
+## O que isto NÃO é
+
+:::warning A documentação oficial é a fonte da verdade
+Quando o AILmanac e a [documentação oficial da Anthropic](https://platform.claude.com/docs) divergirem, **a documentação oficial vence**. As ferramentas de IA mudam rápido; trabalhamos duro para nos manter atualizados, mas sempre confirme qualquer coisa crítica na fonte que indicamos.
+:::
+
+Também não armazenamos seus dados, não conseguimos ver sua conta e não tomaremos decisões por você em trabalhos de alto risco — veja [Uso Responsável](/docs/security).
+
+## Três formas de começar
+
+Escolha a porta que combina com onde você está agora:
+
+<Steps items={[{title: "Totalmente novo?", body: "Comece por Seus Primeiros 5 Minutos para uma primeira vitória garantida — /docs/start-here/your-first-5-minutes."}, {title: "Quer um plano?", body: "Escolha uma Trilha de Aprendizado para seguir um caminho estruturado — /docs/start-here/learning-paths."}, {title: "Confuso com um termo?", body: "Vá para o Glossário para definições em linguagem clara — /docs/start-here/glossary."}]} />
+
+- **Totalmente novo?** → [Seus Primeiros 5 Minutos](/docs/start-here/your-first-5-minutes)
+- **Quer um plano?** → [Escolha uma Trilha de Aprendizado](/docs/start-here/learning-paths)
+- **Confuso com um termo?** → [Glossário](/docs/start-here/glossary)
+
+## Ajude-o a crescer
+
+O AILmanac continua completo porque as pessoas contribuem com ele. Encontrou uma lacuna, um erro ou algo recém-lançado? [Contribuir leva 10 minutos](/docs/contribute/contribute-in-10-minutes).
+
+<Quiz title="Teste-se" questions={[{q: "Quando o AILmanac e a documentação oficial da Anthropic divergem, qual deles vence?", options: ["O AILmanac, porque é opinativo", "A documentação oficial da Anthropic", "Aquela que foi atualizada primeiro"], answer: 1, explain: "A documentação oficial é a fonte da verdade. O AILmanac trabalha para se manter atualizado, mas sempre confirme fatos críticos na fonte indicada."}, {q: "Você é totalmente novo em IA. Por qual porta deve começar primeiro?", options: ["Seus Primeiros 5 Minutos", "Escolha uma Trilha de Aprendizado", "O Glossário"], answer: 0, explain: "Seus Primeiros 5 Minutos foi feito para dar a usuários totalmente novos uma primeira vitória garantida."}, {q: "O que o AILmanac faz com seus dados e sua conta?", options: ["Ele armazena seus dados para personalizar páginas", "Ele consegue ver sua conta para dar conselhos", "Ele não armazena nada e não consegue ver sua conta"], answer: 2, explain: "O AILmanac não armazena seus dados, não consegue ver sua conta e não tomará decisões de alto risco por você — veja Uso Responsável."}]} />
+
+<Callout type="takeaways" items={["O AILmanac é uma referência gratuita, construída pela comunidade, opinativa e marcada por nível para extrair o máximo do Claude e de qualquer IA", "Toda página recebe um selo de iniciante, intermediário ou avançado para que você leia o que combina com você", "A documentação oficial da Anthropic é sempre a fonte da verdade", "Três formas de começar: Seus Primeiros 5 Minutos, uma Trilha de Aprendizado ou o Glossário"]} />
+
+**A seguir:** [Seus Primeiros 5 Minutos](/docs/start-here/your-first-5-minutes) · [Escolha uma Trilha de Aprendizado](/docs/start-here/learning-paths) · [Glossário](/docs/start-here/glossary)

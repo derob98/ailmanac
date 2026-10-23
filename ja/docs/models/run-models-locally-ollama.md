@@ -1,0 +1,186 @@
+# Ollama で AI モデルをローカル実行する
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/models/run-models-locally-ollama · AILmanac (CC BY 4.0) · last verified 2026-10-21
+
+オープンウェイトモデル(Llama、Mistral、Qwen など)を自分のマシンで動かす。プライベート、オフライン、実行コストゼロ。Ollama のセットアップ、CLI、コードからの呼び出し方。
+
+<LevelBadge level="intermediate" />
+
+フロンティアモデルはクラウド上にありますが、**オープンウェイト**モデル(Llama、Mistral、Qwen、DeepSeek、Gemma)の一群は、自分のノートパソコンやサーバーにダウンロードして動かせます。[Ollama](https://ollama.com/) はそのいちばん簡単な方法です。インストールは 1 回、コマンドは 1 つで、モデルがローカルで動き出します。このページでは、ゼロからモデルを動かし、コードから呼び出すところまでを扱い、あわせてトレードオフも押さえます。7B のローカルモデルがフロンティアモデルと同じように振る舞うとは期待しないようにするためです。
+
+<Callout type="objectives" items={[
+  "なぜモデルをローカルで動かすのか、そしてクラウドのフロンティアモデルと比べた正直なトレードオフを知る",
+  "Ollama をインストールし、2 つのコマンドで最初のモデルを動かす",
+  "基本の CLI を使う:pull、run、list、ps、rm、stop",
+  "Ollama の OpenAI 互換 API 経由で、ローカルモデルをコードから呼び出す",
+  "RAM の必要量、モデルサイズ、量子化を理解し、手元のマシンで実際に動くモデルを選ぶ",
+  "LM Studio(GUI)のほうが出発点として向いている場面を知る",
+]} />
+
+## なぜモデルをローカルで動かすのか(そして、いつ動かさないのか)
+
+自分のハードウェアでモデルを動かすと、4 つのものが手に入ります。
+
+- **プライバシー** — プロンプトもデータも手元のマシンの外に出ません。規制の厳しい分野や機微な分野のチームがローカルモデルを選ぶ理由です。([モデルの選び方](/docs/models/choosing-a-model)にあるプライバシー/セルフホストの分岐を参照してください。)
+- **オフライン** — インターネットも API も不要で、障害への依存もありません。モデルはディスク上のただのファイルです。
+- **コスト** — トークンごとの請求がありません。ダウンロードしてしまえば、動かすのは「無料」です(支払うのは電気代とハードウェアであって、API 費用ではありません)。大規模運用で[トークン支出](/docs/power-user/token-economy)が制約になるなら、ローカルが有利になることがあります。
+- **制御** — 正確なバージョンを固定し、挙動をカスタマイズし、レート制限や利用規約の想定外の変更なしに組み込めます。
+
+正直なトレードオフ:
+
+- **能力の差。** ノートパソコンで動かせるモデル(パラメータ数 1B〜14B)は、難しい推論、長いコンテキスト、エージェント的なタスクでは、クラウドのフロンティアモデルとは**同じ水準ではありません**。日常的なタスクの多くでは差は小さいですが、最も難しいタスクでは大きな差になります。
+- **ハードウェア。** 大きくて高性能なモデルほど、一般的なマシンより多くの RAM/VRAM を必要とします。選ぶのは、世の中で最高のモデルではなく、*ハードウェアが動かせる最大のモデル*であることが多いのです。
+- **運用は自分で行う。** マネージドなスケーリングも自動アップグレードもありません。それが制御の対価です。
+
+長続きする定番のパターンはこうです。クラウドモデルと同じ方法(「[モデルの選び方](/docs/models/choosing-a-model)」参照)で、小さな評価を使って**試作して選び**、プライベート/オフライン/大規模でも安く済む作業にはローカルを使い、追加の能力が本当に必要なタスクにはフロンティア API を使います。
+
+## Ollama をインストールして最初のモデルを動かす
+
+<Steps items={[
+  {title: "Ollama をインストールする", body: "macOS と Windows:ollama.com/download からインストーラーをダウンロードして実行します。Linux:公式のインストールスクリプトを使います(下記)。これで ollama コマンドとローカルのバックグラウンドサービスがインストールされます。"},
+  {title: "モデルを実行する", body: "ollama run <model> は初回にモデルをダウンロードし(数 GB になることもあります)、その後対話チャットに入ります。初回はウェイトを取得するため遅く、2 回目以降は即座に起動します。"},
+  {title: "チャットして、終了する", body: "プロンプトを入力して Enter を押します。対話セッションを終了するには /bye と入力する(または Ctrl+D を押す)。モデルは次回のためにディスク上にキャッシュされたままです。"},
+  {title: "ダウンロードしたものを管理する", body: "ollama list でインストール済みのモデルを確認し、ollama rm <model> で 1 つ削除してディスク容量を取り戻します。"},
+]} />
+
+Linux でのインストール(macOS/Windows は代わりにダウンロードしたインストーラーを使います):
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+<PromptCard title="小さなモデルを取得して実行する(最初の一歩に最適)">{`ollama run gemma4:e2b`}</PromptCard>
+
+この 1 つのコマンドで `gemma4:e2b` をダウンロードし、対話チャットを開始します。これは Ollama 自身のクイックスタートが最初に使うモデルで、*実効*パラメータ数が約 2.3B、ディスク上で数 GB のエッジ向け Gemma 4 バリアントです。まだチャットせずにダウンロードだけしたい場合は、代わりに `ollama pull` を使います。
+
+<VerifyNote lastVerified="2026-10-21" source="https://docs.ollama.com/quickstart">
+正確な**モデル名、利用できるパラメータサイズ、タグは、新しいリリースが出るたびに頻繁に変わります**。このページで使っている名前 — `gemma4:e2b`、`qwen3`、`deepseek-r1`、`gemma3`、`mistral`、`llama3.2` — は、検証日の時点で Ollama のライブラリにありました。あわせて、`qwen3.5` のような新顔や、`gemma4` のより大きな `12b`/`26b`/`31b` タグもありました。特定の名前やサイズはすべて「傷みやすい情報」として扱ってください。現在の正確な pull 名とサイズは <a href="https://ollama.com/library">ollama.com/library</a> で確認できます。
+</VerifyNote>
+
+## 基本の CLI
+
+数個のコマンドでほとんどすべてをまかなえます。全一覧は `ollama --help` で確認できます。
+
+```bash
+# Download a model without starting a chat
+ollama pull qwen3
+
+# Start an interactive chat (downloads first if needed)
+ollama run qwen3
+
+# One-shot: pass the prompt inline, get the answer, exit
+ollama run qwen3 "Summarize the CAP theorem in two sentences."
+
+# List models you've downloaded
+ollama list
+
+# Show models currently loaded in memory
+ollama ps
+
+# Stop a running/loaded model (frees memory)
+ollama stop qwen3
+
+# Delete a downloaded model to reclaim disk
+ollama rm qwen3
+```
+
+対話式の `ollama run` セッション内では、`/bye` で終了し、`/?` でセッション内コマンドを確認できます。実際にモデルを提供するバックグラウンドサービスは `ollama serve` で起動します(デスクトップアプリなら自動で起動してくれます)。
+
+## コードから呼び出す(OpenAI 互換 API)
+
+ここが、ローカルモデルをアプリで本当に役立つものにする部分です。Ollama のバックグラウンドサービスは、デフォルトポート **11434** の **`http://localhost:11434`** でローカル HTTP API を公開します。独自のネイティブエンドポイント(`/api/generate`、`/api/chat`)**に加えて**、`/v1` に **OpenAI 互換**レイヤーがあるので、OpenAI SDK 向けに書かれたコードの大半は、2 行を変えるだけでローカルモデルに対して動きます。
+
+`curl` による生の HTTP(ネイティブエンドポイント):
+
+```bash
+curl http://localhost:11434/api/chat -d '{
+  "model": "gemma4:e2b",
+  "messages": [
+    { "role": "user", "content": "Why is the sky blue?" }
+  ],
+  "stream": false
+}'
+```
+
+公式の OpenAI SDK を使った Python からの呼び出し — `base_url` を Ollama に向け、空でない任意の `api_key` を渡すだけです(Ollama はこのフィールドを必須としますが、値は無視します):
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:11434/v1",
+    api_key="ollama",  # required by the SDK, ignored by Ollama
+)
+
+response = client.chat.completions.create(
+    model="gemma4:e2b",
+    messages=[
+        {"role": "system", "content": "You are a concise assistant."},
+        {"role": "user", "content": "Explain gradient descent in two sentences."},
+    ],
+)
+
+print(response.choices[0].message.content)
+```
+
+OpenAI 互換なので、ホスト型 API に対して使うのと同じパターンがそのまま使えます。ストリーミングや[ツール使用 / 関数呼び出し](/docs/api/tool-use)も含まれ、ローカルでもクラウドと同じように動きます(モデルがそれを実際に得意としている場合に限ります)。Ollama の `/v1` レイヤーがカバーするのは、`/v1/chat/completions`、`/v1/completions`、`/v1/responses`、`/v1/models`(および `/v1/models/{model}`)、`/v1/embeddings` です。
+
+## ハードウェア、モデルサイズ、量子化
+
+モデルにつく数字 — **1B、7B、8B、70B** — は、その**パラメータ数**(単位は十億)です。パラメータが多いほど、一般に高性能*で*、メモリも多く必要になります。実際に何を動かせるかの現実的な限界は **RAM**(GPU の場合は **VRAM**)です。
+
+**量子化**は、これを普通のマシンで可能にする重要な工夫です。モデルのウェイトはもともと高精度(例:16 ビット)で保存されていますが、品質の低下をわずか(多くは気づかない程度)に抑えながら約 4 ビットまで圧縮できます。Ollama はほとんどのモデルをデフォルトで量子化した状態で提供しており、だから数十億パラメータのモデルが数 GB に収まるのです。おおまかな目安は次のとおりです(個々のモデルのページで確認してください):
+
+- **約 1B〜3B** のモデル:最近のほとんどのノートパソコンで快適に動きます(数 GB の RAM)。
+- **約 7B〜8B** のモデル:性能と実行しやすさのバランスがよい最適点です。空き RAM は数 GB 見込んでください。
+- **約 13B〜14B** のモデル:かなりスペックの高いマシンが必要です。
+- **約 70B 以上**のモデル:大量の RAM か強力な GPU を備えたワークステーション/サーバーが必要で、一般的なノートパソコンの守備範囲ではありません。
+
+実践的な手順:まず小さなモデル(`gemma4:e2b`)で始めてワークフローを端から端まで確認し、それからハードウェアで快適に動く範囲で最大のモデルへサイズを*上げて*いきます。世の中で最大のモデルではありません。
+
+<Flashcards title="ローカルモデルの用語集" cards={[
+  {front: "ウェイト(重み)", back: "モデルそのものである、学習済みの数値(パラメータ)。モデルをローカルで動かすとは、そのウェイトのファイルをメモリに読み込み、それを使って計算することです。"},
+  {front: "オープンウェイトモデル", back: "ウェイトをダウンロードして自分で動かせるモデル(Llama、Mistral、Qwen、DeepSeek、Gemma)。ローカル実行の大前提です。"},
+  {front: "パラメータ(例:7B)", back: "ウェイトの数で、単位は十億。大きいほど一般に高性能で、メモリも多く必要です。手元のマシンで動かせるかどうかを左右する主な要因です。"},
+  {front: "量子化", back: "ウェイトをより低い精度(例:16 ビット→4 ビット)に圧縮し、わずかな品質低下と引き換えに、モデルをはるかに少ない RAM に収めること。数十億パラメータのモデルが数 GB に収まる理由です。"},
+  {front: "コンテキストウィンドウ", back: "モデルが一度に考慮できるトークン数(プロンプト+出力)。ローカルモデルはフロンティアモデルより使えるコンテキストが小さいことが多く、コンテキストを大きくするほどメモリを消費します。"},
+  {front: "量子化タグ(例:q4)", back: "モデルのバリアントにつけられた、精度とサイズのトレードオフを示すラベル。ビット数が低いほど小さく高速、高いほど完全な品質に近づきます。"},
+]} />
+
+## LM Studio:GUI という選択肢
+
+コマンドラインが苦手なら、**[LM Studio](https://lmstudio.ai/)** があります。これは(macOS、Windows、Linux 向けの)デスクトップアプリで、同じ仕事をグラフィカルなインターフェースで行います。オープンモデルを探してダウンロードし、組み込みの UI でチャットでき、Ollama と同様に**ローカルの OpenAI 互換サーバー**を起動して、コードから接続することもできます。開発者でない人や、ターミナルよりポイント&クリックを好む人には入りやすい入口です。スクリプト化できる CLI と軽量なバックグラウンドサービスが欲しいなら、Ollama のほうが向いています。どちらも同じ種類のオープンウェイトモデルを動かすので、このページの概念はそのまま通用します。
+
+<Quiz title="理解度チェック" questions={[
+  {q: "モデルをローカルで動かすことと、クラウドのフロンティアモデルを使うことを比べたとき、最も大きな正直なトレードオフは何ですか?", options: ["ローカルモデルはコードから呼び出せない", "ノートパソコンサイズのローカルモデルは、難しいタスクでは能力が劣る", "ローカルモデルはトークンあたりのコストが高い"], answer: 1, explain: "能力の差が本当のトレードオフです。ローカルで動かせるほど小さいモデルは、最も難しい推論/エージェント的タスクではクラウドのフロンティアモデルに及びません。コードからのアクセスやトークンあたりのコストは、むしろローカルの利点です。"},
+  {q: "モデルを(必要なら)ダウンロードし、さらにそのモデルとのチャットも開始するコマンドはどれですか?", options: ["ollama pull gemma4:e2b", "ollama serve gemma4:e2b", "ollama run gemma4:e2b"], answer: 2, explain: "ollama run は初回にダウンロードしてから対話セッションを開きます。ollama pull はダウンロードのみ、ollama serve はバックグラウンドサービスを起動します。"},
+  {q: "OpenAI SDK のコードからローカルモデルを呼び出すには、何を設定しますか?", options: ["有料の本物の OpenAI API キー", "base_url を http://localhost:11434/v1 にし、空でない任意の api_key", "何も不要 — 自動的に api.openai.com に対して動く"], answer: 1, explain: "base_url を Ollama のローカル /v1 エンドポイントに向け、空でない任意の api_key を渡します(Ollama はこのフィールドを必須としますが、値は無視します)。"},
+  {q: "数十億パラメータのモデルが、わずか数 GB の RAM に収まるのはなぜですか?", options: ["パラメータがクラウドからストリーミングされるから", "量子化がウェイトをより低い精度に圧縮するから", "Ollama がモデルの一部だけを読み込むから"], answer: 1, explain: "量子化はウェイトをより低い精度(例:16 ビットではなく 4 ビット)で保存し、わずかな品質低下と引き換えにメモリ使用量を縮小します。"},
+]} />
+
+<Callout type="takeaways" items={[
+  "ローカル = プライバシー + オフライン + トークン単位のコストなし + 制御。トレードオフは、実在する能力の差とハードウェアの限界です。",
+  "動かすのに必要なのは 2 つのコマンド:Ollama をインストールし、ollama run gemma4:e2b を実行します。",
+  "基本の CLI:pull(ダウンロード)、run(チャット)、list、ps、stop、rm — これでほぼ足ります。",
+  "OpenAI 互換エンドポイント経由でコードから呼び出す:base_url は http://localhost:11434/v1、api_key は空でない任意の値。",
+  "パラメータ数と量子化が、手元のマシンでモデルを動かせるかを決めます。小さく始めて、快適に動く範囲までサイズを上げましょう。",
+  "GUI がお好みなら?LM Studio がポイント&クリックで同じ仕事をこなし、ローカルの OpenAI 互換サーバーも公開します。",
+]} />
+
+## 出典と参考資料
+
+- [Ollama](https://ollama.com/) — 公式サイトとダウンロード。
+- [Ollama モデルライブラリ](https://ollama.com/library) — 現在のモデルと、その正確な pull 名・サイズ。
+- [Ollama CLI リファレンス](https://docs.ollama.com/cli) · [Ollama API ドキュメント](https://docs.ollama.com/api) — コマンドとエンドポイントの信頼できるリファレンス。
+- [Ollama の OpenAI 互換性に関するブログ記事](https://ollama.com/blog/openai-compatibility) — `/v1` エンドポイントと SDK の使い方。
+- [GitHub 上の Ollama](https://github.com/ollama/ollama) — ソースコード、issue、詳細なドキュメント。
+- [LM Studio](https://lmstudio.ai/) — ローカルモデルを動かす GUI の代替手段。
+
+## 次へ
+
+- 取得したモデルにツールへのアクセスを与える前に → [バックドア入りのオープンウェイト:abliterated モデルのサプライチェーン](/docs/security/backdoored-open-weights) — 取得する GGUF は、たいてい 3 者の信頼の連鎖の 3 番目のホップです
+- 大きな Claude のシステムプロンプトをローカルモデルに移すなら? → [35 KB のシステムプロンプトがローカルモデルで壊れる理由](/docs/models/large-system-prompts-on-local-models)
+- 量子化は 4 ビットよりどこまで下げられる? → [三値量子化の実践:Bonsai 2 27B を 5.95 GB で](/docs/models/ternary-quantization-bonsai-2-27b) — 1 ウェイトあたり 1.75 ビット、そして Ollama が読み込めない理由
+- タスクごとにローカルかクラウドかを決める → [モデルの選び方](/docs/models/choosing-a-model)
+- ローカルでもツールを動かす → [ツール使用](/docs/api/tool-use)
+- モデルを動かす実際のコストを把握する → [トークンエコノミー](/docs/power-user/token-economy)

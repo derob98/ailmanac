@@ -1,0 +1,196 @@
+# ChatGPT for Claude Users
+
+> Source: https://derob98.github.io/ailmanac/docs/models/chatgpt-for-claude-users · AILmanac (CC BY 4.0) · last verified 2026-10-07
+
+Fluent in Claude, need to use ChatGPT? The differences that matter, what transfers, and when to reach for which — including the Custom GPT retirement and the Plugins that replace them.
+
+<LevelBadge level="beginner" />
+
+You already think in Claude. Now a teammate shares a Custom GPT, or a client lives in ChatGPT, and you need to be productive there **today** — without relearning how to use an AI assistant from scratch. Good news: almost everything you know transfers. This page maps your Claude mental model onto ChatGPT, flags the handful of things that genuinely work differently, and tells you when each one tends to shine.
+
+<Callout type="objectives" items={[
+  "Translate Claude concepts to their ChatGPT equivalents (Projects, Custom GPTs and the Plugins replacing them, custom instructions/memory, canvas, the model picker)",
+  "Know which of your Claude prompting habits carry over unchanged (most of them)",
+  "Spot the few things you genuinely have to adjust",
+  "Know when to reach for ChatGPT vs when to stay in Claude",
+]} />
+
+<VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/docs/models">
+Exact model names, the layout of the model picker, plan tiers, file/upload limits, prices, and which features pair with which model **change constantly** at OpenAI. This page teaches the durable mental model and concept-mapping; for any specific name, limit, or price, check OpenAI's own current docs (linked in Sources) rather than trusting a number here.
+</VerifyNote>
+
+:::warning Custom GPTs are on their way out — plugins replace them
+OpenAI is **transitioning custom GPTs to plugins**, and custom GPTs will stop working at retirement. If a teammate hands you a Custom GPT today it still runs, but don't build anything new on one — read **Projects vs Custom GPTs** below before you invest.
+:::
+
+## The 60-second concept map
+
+If you only read one section, read this. Here's how the things you know in Claude line up with ChatGPT:
+
+| In Claude you call it… | In ChatGPT it's… | Same idea? |
+| --- | --- | --- |
+| Claude Projects (workspace + files + project instructions) | **Projects** | Yes — nearly the same concept |
+| Custom Style / a saved system prompt you reuse | **Custom GPTs** — being replaced by **Plugins** (skills + apps) | Close, with a twist (see below) |
+| Your account-level preferences / "how I want you to respond" | **Custom instructions** | Yes |
+| Claude's memory of past chats | **Memory** | Yes — same idea, evolves often |
+| Artifacts (side panel for documents/code) | **Canvas** | Yes — same idea |
+| Model selector (Opus / Sonnet / Haiku) | The **model picker** (speed vs reasoning tiers) | Yes — same idea, different names |
+| Tool use / function calling (API) | **Function calling** | Yes — same shape, different JSON details |
+
+The takeaway: there's almost no *new concept* to learn. It's mostly **renaming and relocating** things you already understand.
+
+## Projects vs Custom GPTs — the one distinction worth getting right
+
+This is the single point where Claude users most often get confused, because ChatGPT has **two** things that both feel like "a customized Claude," and they're for different jobs.
+
+- **Projects** are *organizational* — a workspace that bundles many chats, uploaded files, and shared instructions around one ongoing effort. Continuity across multiple conversations is the point. Reach for a Project when you'd open a Claude Project: a long research thread, an evolving piece of writing, a workstream with reference docs. <VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/docs/projects">OpenAI's own wording: "Use a project to keep related chats, files, instructions, and sources together" — for work that "will continue over time, produce more than one output, or depend on the same files and sources." Availability across free and paid plans changes over time; check the current page.</VerifyNote>
+
+- **Custom GPTs** are *packaged assistants* — a saved configuration (a system prompt, optional knowledge files, enabled tools, sometimes API actions) that you invoke as a single, fresh chat with a fixed persona. They're built to be reused and shared, so one person builds the expertise and many people run it. **They are being retired.**
+
+- **Plugins** are the replacement: in OpenAI's words, "a reusable package for a workflow that can include skills, apps, or both" — *skills* carry the instructions for how to do the work, *apps* connect ChatGPT to other services. Same instinct as a Custom GPT, bigger surface. <VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/codex/migrate-custom-gpts">OpenAI: "We're transitioning custom GPTs to plugins. Use the milestones below to plan your migration before custom GPTs are retired." The published milestones are Admin notice → Migration → Custom GPT retirement, at which point "custom GPTs stop running and leave the GPT directory." The original GPT "remains usable until retirement," and a GPT can still be migrated after retirement even though it no longer runs. Specific dates are workspace-scoped (the guide is written for ChatGPT Enterprise admins and GPT creators) and subject to change — read the milestones on the linked page rather than trusting a date here.</VerifyNote>
+
+The mental shortcut:
+
+- **Need continuity across many chats with shared context?** → Project.
+- **Need a reusable, shareable specialist that behaves the same every time?** → a Plugin (and migrate the Custom GPT you already have).
+
+Two gotchas for Claude users:
+
+- A Custom GPT or Plugin chat tends to start **fresh** each time with only its preset instructions plus that conversation — don't expect it to remember your last session the way an ongoing Project thread does.
+- Migration is **not** lossless. Custom actions have to be rebuilt separately — against a supported connector or your own MCP server — so a GPT that leans on them needs real work, not a one-click convert. If you're the one rebuilding, [Codex Agent Plugins](/docs/models/codex-agent-plugins-catalogs) covers the packaging layer.
+
+## Custom instructions & memory — same idea, slightly different layers
+
+In Claude you set global preferences and let it remember context. ChatGPT does the same, just with more explicit layers you can set instructions at:
+
+<Steps items={[
+  {title: "Account-level custom instructions", body: "Your standing preferences — tone, detail level, what to focus on. Applied to all chats, like your Claude account preferences."},
+  {title: "Project instructions", body: "Context scoped to one Project's subject — the equivalent of Claude Project instructions."},
+  {title: "Plugin (or Custom GPT) instructions", body: "The 'system prompt' baked into a packaged assistant — a Plugin's skill, or the instructions field of a Custom GPT you haven't migrated yet. This is where a builder fully controls behavior."},
+  {title: "In-chat, one-off", body: "Just say it in the conversation when you need a single-message adjustment — exactly like Claude."},
+]} />
+
+**Memory** is its own evolving system: ChatGPT can carry context across separate chats. Treat *what* it remembers, *how much*, and *where it's available* (e.g. inside a packaged assistant or not) as **volatile** — it changes frequently, so verify current behavior rather than assuming. <VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/codex/personalize">OpenAI: "Use custom instructions for preferences you want ChatGPT to follow across chats, such as your preferred response style." Layering is real — in Codex the personal layer lives in your global `AGENTS.md`, and "projects and repositories can also provide their own instructions." Specifics and availability change — check the current page.</VerifyNote>
+
+## Canvas is ChatGPT's Artifacts
+
+If you love Claude Artifacts — a side panel where a document or code block becomes a live, editable object — you'll feel at home with **canvas**. It opens a dedicated editing surface for writing and coding so you and the model can revise in place instead of regenerating the whole message. Same instinct, different name.
+
+One thing to watch (and a good example of why we don't hard-code specifics): **the editing surface you get depends on where you are**, not just on what you asked for. OpenAI's current docs describe preview-and-edit behaviour as differing by surface — the desktop app previews generated documents alongside the chat, the CLI has no visual preview at all, and the IDE extension reviews files in the editor. The selected model can matter too. If the side panel doesn't appear, suspect your surface or model before you suspect a bug. <VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/codex/artifacts-viewer">OpenAI's file-preview docs frame availability by surface: the desktop app "previews generated documents, presentations, spreadsheets, and PDF files alongside the chat," the CLI "doesn't include a visual file preview," and the IDE extension reviews text and code files in the editor. The page does not assert model-based gating, so treat the model caveat as a hedge, not a documented rule. Canvas itself is documented separately on OpenAI's help centre (linked in Sources).</VerifyNote>
+
+## The model picker — pick by job, not by name
+
+Just as you choose Opus vs Sonnet vs Haiku, ChatGPT asks you to pick a model — generally along a **speed ↔ reasoning** spectrum (fast/instant options for quick turns, higher-reasoning options for hard problems, with the top tiers gated to paid plans). The *names and number of tiers shift often*; the durable skill is the same one you already use with Claude: **match the model to the task's difficulty and your latency/cost tolerance.**
+
+This is exactly the framework in [Choosing a Model](/docs/models/choosing-a-model) and [Which Claude Should I Use?](/docs/start-here/which-claude) — it's provider-agnostic. Don't memorize a model name; learn to read "fast vs deep" and pick accordingly.
+
+To make the point concrete rather than to be memorized: as of **7 October 2026** the picker runs **Astra** (the most capable), **GPT-6.1 Sol** ("near-Astra performance for complex work at a lower cost than Astra", rolling out to Plus, Pro, Business, Enterprise and Edu) and **GPT-6 Luna** (the efficient model for focused, high-volume work) — while **GPT-5.5 retires from ChatGPT, ChatGPT Work and Codex on 14 October 2026**, remaining available on the API. If you're reading this much after that date, every name in this paragraph has probably moved. That's the point. <VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/docs/models">Model line-up, plan availability and the GPT-5.5 retirement date read from OpenAI's current models page. Earlier retirements listed there: GPT-5.3-Codex-Spark on 14 September 2026, GPT-5.4 and GPT-5.4-mini on 31 August 2026. This list goes stale fast by design — re-read the source instead of trusting it here.</VerifyNote>
+
+<Callout type="tip" items={[
+  "Reach for the fast/instant tier for routine drafting, formatting, and quick Q&A.",
+  "Reach for the high-reasoning tier for multi-step logic, tricky code, or careful analysis.",
+  "If a feature like canvas or a tool seems missing, suspect your surface (desktop vs web vs CLI vs IDE) or the selected model before you suspect a bug.",
+]} />
+
+## Function calling — same shape, different JSON details
+
+If you've done [tool use](/docs/api/tool-use) with Claude, OpenAI's **function calling** will feel immediately familiar, because the *loop is the same*:
+
+<Steps items={[
+  {title: "Declare tools", body: "You describe each tool with a name, a description, and a JSON-schema of its parameters (which are required, their types). Same idea as a Claude tool definition."},
+  {title: "Model requests a call", body: "Given the prompt and the available tools, the model returns a structured tool call — the tool name plus arguments — instead of (or alongside) text."},
+  {title: "You execute it", body: "Your application runs the actual function with those arguments. The model never runs anything itself."},
+  {title: "Return the result", body: "You feed the tool's output back to the model."},
+  {title: "Model answers", body: "It uses the result to produce the final response — and may request more calls before finishing."},
+]} />
+
+What's identical: the describe → model-requests → you-execute → return-result → answer loop, multiple/parallel calls, and the principle that *the model proposes, your code disposes*. <VerifyNote lastVerified="2026-10-07" source="https://developers.openai.com/api/docs/guides/function-calling">Confirmed verbatim against OpenAI's guide, which defines "a function" as "a specific kind of tool, defined by a JSON schema" with `type`, `name`, `description`, `parameters` and `strict`, and lists the same five steps: request the model with tools it could call → receive a tool call → execute code on the application side → make a second request with the tool output → receive a final response (or more tool calls). Exact field names and options change — check the current API guide.</VerifyNote>
+
+What **differs** and will trip you up if you copy-paste: the exact JSON field names, how tool calls and results are represented in the message list, "strict"/structured-output options, and the specific API endpoint shape. As a rule across providers, **prompting and architecture transfer; wire-format details do not** — always re-check the per-provider schema.
+
+## What transfers (spoiler: almost everything)
+
+Your hard-won Claude habits are not wasted. These carry over essentially unchanged:
+
+- **Prompt structure** — clear role, explicit task, examples, requested output format → [Prompting Basics](/docs/prompting/basics)
+- **Giving context deliberately** — paste the right material, scope it, don't dump everything
+- **Asking for a specific output format** — tables, JSON, steps; works the same
+- **Iterating in place** — refine via follow-ups (and now via canvas)
+- **The tool-use loop** — describe tools, let the model call them, return results → [Tool Use](/docs/api/tool-use)
+- **Choosing a model by task difficulty** — fast vs deep, same judgment call
+
+<PromptCard title="Provider-neutral system prompt — drop into a Custom GPT or a Project's instructions">{`You are a {role}.
+Goal: {one clear sentence}.
+Rules:
+- Use ONLY the context I provide; if the answer isn't there, say "I don't know".
+- Be concise. No preamble.
+- Output format: {exact format — e.g. a markdown table with columns X, Y, Z}.
+When you need information you don't have, ask one focused question instead of guessing.`}</PromptCard>
+
+## What to genuinely adjust
+
+A short, honest list of things that are actually different:
+
+- **Two "customization" objects, not one.** Decide up front: ongoing workspace (Project) or reusable packaged assistant (a Plugin — or a Custom GPT on its way to becoming one)? Picking the wrong one is the most common early mistake.
+- **Custom GPTs are a migration target, not a destination.** OpenAI is moving them to Plugins and retiring them. Inherit one, plan its migration; don't start a new one.
+- **Feature ↔ surface pairing.** In ChatGPT, whether a preview/editing panel (or a given tool) is available can depend on where you're running it — and sometimes on the selected model. When something's missing, check those before anything else.
+- **Wire-format for tools.** The function-calling *concept* is identical; the JSON details are not — never reuse Claude's exact tool JSON verbatim.
+- **Volatile specifics.** Model names, tiers, limits, and prices move fast. Build the habit of confirming at the source, exactly as you should for Claude too.
+
+## When each tends to shine
+
+Both are excellent general assistants and the gap on any given task is often small and shifting — so treat this as *tendencies*, not laws, and let your own [eval on your own data](/docs/models/choosing-a-model) decide:
+
+- **Reach for ChatGPT when** you need its specific ecosystem — a Custom GPT a team already maintains, a Project a collaborator set up, or a built-in tool/integration you rely on there. If your client or coworkers live in ChatGPT, meeting them there beats friction.
+- **Reach for Claude when** you're already in the Claude workflow this site is built around — Projects, Artifacts, and the prompting/agent patterns documented throughout AILmanac — and want to go deep on them.
+
+The honest answer most of the time: **whichever you (or your team) are already set up in.** The skill is portable; the setup cost is the real switching cost.
+
+<Flashcards title="ChatGPT to Claude vocabulary" cards={[
+  {front: "ChatGPT Projects", back: "Organizational workspace bundling many chats, files, and shared instructions around one ongoing effort. ≈ Claude Projects."},
+  {front: "Custom GPT", back: "A packaged, reusable, shareable assistant — system prompt + optional knowledge + tools — invoked as a fresh chat with a fixed persona. Being retired: OpenAI is transitioning custom GPTs to Plugins."},
+  {front: "Plugin", back: "The replacement for Custom GPTs. OpenAI's words: 'a reusable package for a workflow that can include skills, apps, or both' — skills say how to do the work, apps connect ChatGPT to other services. Custom actions don't convert; they must be rebuilt."},
+  {front: "Custom instructions", back: "Your standing preferences for how ChatGPT responds, applied across chats. Can also be layered at project and repository level. ≈ Claude account preferences."},
+  {front: "Canvas", back: "A side-panel editing surface for writing and coding you can revise in place. ≈ Claude Artifacts."},
+  {front: "Function calling", back: "OpenAI's tool use: describe tools via JSON schema, model requests a call, you execute and return the result. Same loop as Claude tool use; different JSON details."},
+  {front: "The portable skill", back: "Prompting structure, context discipline, output-format requests, the tool loop, and model-by-task choice — they work on both."},
+]} />
+
+<Quiz title="Check yourself" questions={[
+  {q: "You want a workspace that keeps many related chats, reference files, and shared instructions together for an ongoing research effort. What do you use in ChatGPT?", options: ["A Custom GPT", "A Project", "Custom instructions"], answer: 1, explain: "Projects are the organizational workspace for continuity across many chats — the closest match to a Claude Project. A Custom GPT is a single packaged assistant, not a multi-chat workspace."},
+  {q: "You've used Claude tool use. What's true about OpenAI function calling?", options: ["A completely different concept you must relearn", "The same describe→call→execute→return loop, but the exact JSON field names differ", "Identical down to the JSON, so you can paste Claude's tool definitions unchanged"], answer: 1, explain: "The loop and architecture transfer directly; only the wire-format details (field names, message shapes) differ — so don't copy the raw JSON across providers."},
+  {q: "The side-panel preview doesn't appear when you expect it. What's the most likely first thing to check?", options: ["Your internet connection", "Which surface you're on — OpenAI documents preview behaviour as differing between the desktop app, web, CLI and IDE extension", "Whether you've used up your memory"], answer: 1, explain: "OpenAI's current docs frame preview-and-edit availability by surface: the desktop app previews generated files alongside the chat, the CLI has no visual preview at all, and the IDE extension reviews files in the editor. The selected model can matter too — but surface is the documented difference."},
+  {q: "A colleague hands you a Custom GPT the team relies on. What's the right move?", options: ["Keep building on it — it's the ChatGPT equivalent of a Claude Project", "Plan its migration to a Plugin, allowing extra time for any custom actions", "Ignore it; Custom GPTs never worked well"], answer: 1, explain: "OpenAI is transitioning custom GPTs to Plugins, and at retirement custom GPTs stop running and leave the GPT directory. The original stays usable until then, so there's time — but custom actions don't convert automatically and have to be rebuilt against a supported connector or your own MCP server."},
+]} />
+
+<Callout type="takeaways" items={[
+  "There's almost no new concept — Projects ≈ Claude Projects, a Plugin ≈ a packaged reusable assistant, canvas ≈ Artifacts, function calling ≈ tool use.",
+  "Get the one distinction right: Projects = organize many chats; a Plugin = a reusable, shareable specialist.",
+  "Custom GPTs are being transitioned to Plugins and will be retired — migrate what you inherit, don't start new ones, and budget real time for custom actions.",
+  "Your prompting, context, output-format, and tool-loop habits transfer unchanged — choose models by task difficulty, same as Opus/Sonnet/Haiku.",
+  "Adjust only a few things: two customization objects, feature↔surface pairing, and tool-call JSON details.",
+  "Names, tiers, limits, and prices go stale fast — verify specifics at OpenAI's docs, just as you should for Claude.",
+]} />
+
+## Sources & further reading
+
+- [Models — learn.chatgpt.com](https://learn.chatgpt.com/docs/models) — the current model picker, which plans each model is on, and retirement notices. The place to check before trusting any model name.
+- [Projects — learn.chatgpt.com](https://learn.chatgpt.com/docs/projects) — what Projects are and how they work.
+- [Moving your custom GPT workflows to plugins — learn.chatgpt.com](https://learn.chatgpt.com/codex/migrate-custom-gpts) — the migration milestones, what converts, and what has to be rebuilt.
+- [Personalize ChatGPT — learn.chatgpt.com](https://learn.chatgpt.com/codex/personalize) — custom instructions and how the instruction layers stack.
+- [Work with files — learn.chatgpt.com](https://learn.chatgpt.com/codex/artifacts-viewer) — preview-and-edit behaviour, and how it differs by surface.
+- [ChatGPT & Codex changelog — learn.chatgpt.com](https://learn.chatgpt.com/docs/changelog) — the canonical place to track volatile feature/model changes.
+- [What is the canvas feature in ChatGPT — OpenAI Help Center](https://help.openai.com/en/articles/9930697-what-is-the-canvas-feature-in-chatgpt-and-how-do-i-use-it) — the canvas editing surface.
+- [Plugins in ChatGPT and Codex — OpenAI Help Center](https://help.openai.com/en/articles/20001256-plugins-in-chatgpt-and-codex) — the plugin concept, as linked from OpenAI's own migration guide.
+- [Function calling — OpenAI API docs](https://developers.openai.com/api/docs/guides/function-calling) — the tool-calling shape and request/response loop.
+
+## Next
+
+- **The current flagship** → [GPT-6 Astra for Claude users](/docs/models/openai-astra-preview) — OpenAI's top model, and how it reads next to Opus
+- **The DevDay 2026 release** → [GPT-6.1 Sol for Claude users](/docs/models/gpt-6-1-sol-devday-2026) — same rate card as Sonnet 5.5, a 272K cost cliff, and the benchmark row Sonnet still wins
+- **Replacing a Custom GPT** → [Codex Agent Plugins & catalog federation](/docs/models/codex-agent-plugins-catalogs) — the packaging layer your migrated workflow lands on
+- **The identity layer** → [Sign in with ChatGPT](/docs/models/sign-in-with-chatgpt) — the OAuth/OIDC provider, what it shares, and how to accept it in your app
+- The provider-neutral way to pick → [Choosing a Model](/docs/models/choosing-a-model)
+- Coming from the other big assistants too? → [Gemini for Claude Users](/docs/models/gemini-for-claude-users) · [Grok for Claude Users](/docs/models/grok-for-claude-users)
+- Habits that travel everywhere → [Prompting Basics](/docs/prompting/basics) · [Tool Use](/docs/api/tool-use)
+- Go deep on the core → [Which Claude Should I Use?](/docs/start-here/which-claude)

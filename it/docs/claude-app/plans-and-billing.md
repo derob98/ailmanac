@@ -1,0 +1,110 @@
+# Piani, limiti e fatturazione
+
+> Source: https://derob98.github.io/ailmanac/it/docs/claude-app/plans-and-billing · AILmanac (CC BY 4.0) · last verified 2026-10-20
+
+Free, Pro, Max, Team o Enterprise: a cosa serve davvero ogni piano, quali funzioni dipendono dal piano, come si vivono i limiti d'uso e perché abbonamenti all'app e fatturazione API sono due cose diverse.
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-10-20" source="https://claude.com/pricing">
+Nomi, prezzi e limiti dei piani cambiano spesso: controlla sempre la pagina ufficiale dei prezzi per i valori aggiornati. **Qui non riportiamo volutamente cifre in dollari**, così la pagina resta valida quando il listino cambia. La disponibilità delle funzioni per piano qui sotto si basa sull'[articolo del Help Center sugli artifact](https://support.claude.com/en/articles/17153992-what-are-artifacts-and-how-do-i-use-them) e riflette le modifiche dell'**8–15 ottobre 2026**; anche queste restrizioni si spostano, quindi verifica prima di acquistare un piano per una sola funzione.
+</VerifyNote>
+
+Quale piano di Claude ti serve? Ecco come ragionarci, senza citare prezzi che il mese prossimo sarebbero già vecchi (per quelli vedi i [prezzi ufficiali](https://claude.com/pricing)).
+
+<Callout type="objectives" items={[
+  "Abbinare un piano a uno scopo, non a un prezzo",
+  "Vedere quali funzioni dipendono davvero dal piano — e quali no",
+  "Capire come si vive il raggiungimento di un limite d'uso e come evitarlo nel modo più economico",
+  "Smettere di confondere un abbonamento all'app con la fatturazione API"
+]} />
+
+## I piani, per scopo
+
+| Piano | Indicativamente per |
+|---|---|
+| **Free** | Provare Claude, uso personale leggero |
+| **Pro** | Uso individuale regolare — più utilizzo, più funzioni |
+| **Max** | Utenti individuali intensivi che toccano i limiti di Pro |
+| **Team** | Piccoli team — spazio di lavoro condiviso e gestione |
+| **Enterprise** | Organizzazioni che richiedono amministrazione, sicurezza, scala e controlli |
+
+(Nomi e struttura esatti possono cambiare: conferma sulla pagina dei prezzi.)
+
+## Cosa dipende davvero dal piano
+
+Nella maggior parte dei casi la risposta è *l'utilizzo*, non le *funzioni* — ed è per questo che passare a un piano superiore per una sola funzione di solito è il motivo sbagliato. Queste sono le eccezioni da conoscere, a ottobre 2026:
+
+| Funzione | Free | Pro | Max | Team | Enterprise |
+|---|---|---|---|---|---|
+| Artifact, codice, grafici | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Creazione di file](/docs/claude-app/generating-files) (docx/pptx/xlsx/pdf) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Docs, Slides, Design](/docs/claude-app/one-claude-docs-and-slides) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Dashboard](/docs/claude-app/dashboards-and-motion) (beta) | ❌ | ✅ | ✅ | ✅ | ✅ |
+| [Motion](/docs/claude-app/dashboards-and-motion) (beta) | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Controlli di amministrazione a livello di organizzazione su quanto sopra | — | — | — | ✅ | ✅ |
+
+Da questa tabella emergono due schemi che valgono in generale:
+
+<Steps items={[
+  {title: "Le novità arrivano a pagamento e poi scendono di livello", body: "Docs, Slides e Design sono partiti in beta sui piani a pagamento e sono arrivati su Free l'8 ottobre 2026, dopo l'uscita dalla beta. Dashboard e Motion sono a uno stadio precedente dello stesso percorso. Se una beta che ti interessa è sopra il tuo piano, aspettare è spesso la scelta giusta."},
+  {title: "Enterprise parte restrittivo di proposito", body: "Una funzione attiva di default su Pro, Max e Team è spesso disattivata su Enterprise finché un owner non la abilita nelle impostazioni dell'organizzazione — e gli owner possono limitarla a gruppi specifici con ruoli personalizzati. Su Enterprise, \"il mio piano la include\" e \"posso usarla\" sono domande diverse."},
+  {title: "Gli interruttori non riguardano solo gli admin", body: "Alcune funzioni vanno attivate anche sui piani individuali — la creazione di file sta dietro Impostazioni → Funzionalità su Free, Pro e Max. Prima di concludere che il tuo piano non ha qualcosa, controlla l'interruttore."}
+]} />
+
+## Come si vivono i "limiti"
+
+I piani consumer limitano **quanto puoi usare in una finestra di tempo** (messaggi e utilizzo che si azzerano nel tempo) e i piani superiori alzano questi tetti. Quando raggiungi un limite, di solito ti viene chiesto di aspettare il ripristino o di passare a un piano superiore — **il lavoro non va perso, ti fermi solo un momento**.
+
+I modelli più pesanti e le conversazioni più lunghe consumano la tua quota più in fretta. E dopo l'[unificazione di settembre 2026](/docs/claude-app/one-claude-docs-and-slides) vale anche un'altra cosa: **una richiesta formulata in modo casuale nella normale casella di chat può avviare una lunga esecuzione agentica** che cerca sul web, esegue codice e scrive file. Il segnale di costo si è spostato dalla porta al prompt, quindi conviene essere espliciti in entrambe le direzioni.
+
+<PromptCard title="Tieni economica una richiesta quando vuoi solo una risposta">{`Answer from this conversation only. Do not search the web, do not
+run code, and do not create any files or artifacts. Two paragraphs.`}</PromptCard>
+
+Quattro abitudini che fanno recuperare più quota di un upgrade — tutte varianti della [gestione del contesto](/docs/foundations/tokens-and-context):
+
+<Steps items={[
+  {title: "Apri una chat nuova per ogni argomento", body: "Ogni turno rinvia l'intera conversazione. Un thread lungo da cui ti sei allontanato è puro spreco — vedi Token e contesto."},
+  {title: "Di' quando non serve tutto l'apparato", body: "Il prompt qui sopra vale la pena di salvarlo come snippet. La maggior parte delle domande non richiede né una ricerca web né l'esecuzione di codice."},
+  {title: "Scegli il modello adatto al compito", body: "Usare il modello più potente per una riscrittura veloce consuma quota per niente. Vedi Modelli e prezzi per la gamma attuale."},
+  {title: "Raggruppa le modifiche", body: "Tre piccole correzioni in un solo messaggio costano più o meno il contesto di un turno; tre messaggi separati rinviano il thread tre volte. L'eccezione sono gli artifact, dove una modifica alla volta arriva a destinazione in modo più affidabile."}
+]} />
+
+## Come scegliere
+
+<Steps items={[
+  {title: "Parti da Free", body: "Scopri per cosa usi davvero Claude prima di pagare per una forma d'uso che stai solo ipotizzando."},
+  {title: "Passa a Pro quando i limiti interrompono lavoro vero", body: "Non quando raggiungi un limite una volta — quando l'interruzione ti costa più dell'abbonamento."},
+  {title: "Passa a Max se sei un utente intensivo che tocca ancora i tetti", body: "È una decisione sull'utilizzo, non sulle funzioni."},
+  {title: "Team o Enterprise quando ci sono altre persone coinvolte", body: "Spazio di lavoro condiviso, controlli di amministrazione, requisiti di conformità — e le due beta riservate alle organizzazioni. Il criterio sono i colleghi e la governance, non il volume puro."}
+]} />
+
+## App vs fatturazione API — cose diverse
+
+- **Piani app** = un abbonamento fisso con limiti d'uso (questa pagina).
+- **Fatturazione API** = paghi per [token](/docs/api/tokens-and-pricing) ciò che costruisci. Modello diverso, pagina diversa.
+
+Non condividono saldo, limite né fattura. Pagare Max non ti dà credito API, e la spesa API non alza i limiti della chat. Claude Code può attingere all'uno o all'altra, a seconda di come lo autentichi.
+
+## Quiz
+
+<Quiz questions={[
+  {q: "Sei su Pro e vuoi creare uno spiegone animato con Claude Motion. Qual è la situazione?", options: ["Lo abiliti in Impostazioni → Funzionalità", "Motion è in beta solo su Team ed Enterprise — Pro non può ancora usarlo", "È disponibile su ogni piano dall'8 ottobre 2026", "Richiede la fatturazione API oltre a Pro"], answer: 1, explain: "Motion è in beta solo sui piani Team ed Enterprise (attivo di default su Team, disattivato su Enterprise finché un owner non lo abilita). Dashboard è la beta che arriva su Pro e Max. Docs, Slides e Design sono usciti dalla beta l'8 ottobre 2026 e sono su ogni piano, Free incluso."},
+  {q: "Raggiungi il limite d'uso a metà di un lavoro lungo. Che fine fa il lavoro?", options: ["Viene scartato e ricominci dopo il ripristino", "Niente — ti fermi finché il limite non si azzera o passi a un piano superiore", "Si conclude con qualità ridotta su un modello più piccolo", "Viene messo in coda e si completa da solo più tardi"], answer: 1, explain: "Raggiungere un limite ti mette in pausa; non distrugge il lavoro. Aspetti che la finestra si azzeri oppure passi a un piano superiore. La soluzione più economica di solito sta a monte: chat nuove per ogni argomento, un esplicito \"non cercare e non eseguire codice\" quando vuoi solo una risposta, e un modello adatto al compito."},
+  {q: "Paghi Claude Max. Quanto credito API ti dà?", options: ["Una quota mensile di token proporzionale al piano", "Nessuno — abbonamenti all'app e fatturazione API sono separati e non condividono il saldo", "Accesso API illimitato per i progetti personali", "Accesso API a una tariffa scontata per token"], answer: 1, explain: "Un piano app è un abbonamento fisso con limiti d'uso; la fatturazione API è a consumo per token per ciò che costruisci. Non condividono saldo, limite né fattura. Claude Code può autenticarsi con l'uno o con l'altra, ed è qui che di solito nasce la confusione."}
+]} />
+
+<Callout type="takeaways" items={[
+  "I piani limitano soprattutto l'utilizzo, non le funzioni. Passare a un piano superiore per una singola funzione di solito è il motivo sbagliato — controlla prima l'interruttore.",
+  "Le eccezioni attuali: Dashboard è in beta da Pro in su, Motion è in beta solo su Team ed Enterprise. Docs, Slides, Design e creazione di file sono su ogni piano, Free incluso.",
+  "Su Enterprise, \"incluso nel mio piano\" e \"disponibile per me\" sono domande diverse — gli owner abilitano le funzioni per organizzazione e possono limitarle a gruppi.",
+  "Raggiungere un limite ti mette in pausa, non fa perdere il lavoro. Chat nuove, un'istruzione esplicita di non cercare e un modello della taglia giusta fanno recuperare più quota di un upgrade.",
+  "Abbonamenti all'app e fatturazione API sono sistemi separati con saldi separati. Max non ti dà credito API."
+]} />
+
+## Prossimi passi
+
+- [Primi passi con Claude.ai](/docs/claude-app/getting-started) — se stai ancora decidendo per cosa lo useresti
+- [Token, contesto e prezzi (API)](/docs/api/tokens-and-pricing) — l'altro modello di fatturazione, spiegato
+- [Modelli e prezzi](/docs/whats-new/models-and-pricing) — la gamma attuale, per scegliere il modello della taglia giusta
+- [Privacy e gestione dei dati](/docs/foundations/privacy) — cosa cambia tra piani consumer e business

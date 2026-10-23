@@ -1,0 +1,114 @@
+# Dein erster produktiver API-Aufruf (kostenbewusst)
+
+> Source: https://derob98.github.io/ailmanac/de/docs/walkthroughs/first-production-call · AILmanac (CC BY 4.0)
+
+Ein echter, gestreamter, fehlerbehandelter, kostenbudgetierter Call.
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Die vier Disziplinen benennen, die einen produktiven Call von einem Spielzeug-Einzeiler trennen: Secrets, Streaming, Kosten und Fehlerbehandlung", "Einen resilienten gestreamten Call schreiben, der transiente Fehler (429/5xx) mit Backoff wiederholt — und einen 400 niemals wiederholt", "Die Model-ID in der Config halten, sodass ein Modellwechsel eine Ein-Zeilen-Änderung ist, kein Search-and-Replace", "Token-Kosten bei jedem Call beobachten und bewusst deckeln"]} />
+
+Ein Spielzeug-[API-Call](/docs/api/first-call) ist eine Zeile. Ein *produktiver* Call behandelt Fehler, streamt Ausgaben, beobachtet Kosten und hält Secrets sicher. Bauen wir das Schritt für Schritt.
+
+## Schritt 1 — Secrets & Modell aus der Config
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."   # never in source control
+```
+
+Halte die **Model-ID in der Config**, nicht in verstreuten Literalen, damit Migration trivial wird ([warum](/docs/api/errors-and-rate-limits)). Wähle sie bewusst — [Modell auswählen](/docs/api/choosing-a-model).
+
+## Schritt 2 — Ein resilienter, gestreamter Call
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+import os, time, random, anthropic
+client = anthropic.Anthropic()
+MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
+
+def ask_stream(prompt, system=None, max_tokens=1024):
+    for attempt in range(5):
+        try:
+            with client.messages.stream(
+                model=MODEL, max_tokens=max_tokens,
+                system=system or anthropic.NOT_GIVEN,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                for text in stream.text_stream:
+                    print(text, end="", flush=True)
+                final = stream.get_final_message()
+            print()
+            usage = final.usage
+            print(f"\n[tokens in/out: {usage.input_tokens}/{usage.output_tokens}]")
+            return final
+        except (anthropic.RateLimitError, anthropic.APIStatusError):
+            if attempt == 4: raise
+            time.sleep(min(2 ** attempt + random.random(), 30))
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+const client = new Anthropic();
+const MODEL = process.env.CLAUDE_MODEL ?? "claude-sonnet-5";
+
+export async function askStream(prompt: string, system?: string, maxTokens = 1024) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const stream = client.messages.stream({ model: MODEL, max_tokens: maxTokens, system,
+        messages: [{ role: "user", content: prompt }] });
+      for await (const e of stream)
+        if (e.type === "content_block_delta") process.stdout.write(e.delta.text ?? "");
+      const final = await stream.finalMessage();
+      console.error(`\n[tokens in/out: ${final.usage.input_tokens}/${final.usage.output_tokens}]`);
+      return final;
+    } catch (e: any) {
+      if (attempt === 4 || ![429, 500, 529].includes(e?.status)) throw e;
+      await new Promise(r => setTimeout(r, Math.min(2 ** attempt * 1000, 30000)));
+    }
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+Rauchtest vor der Verdrahtung — ein kleiner Call beweist Stream, Token-Zeile und deinen Key:
+
+<PromptCard title="Erster Rauchtest (Python REPL)">{`ask_stream("Say hello in one sentence.", max_tokens=64)`}</PromptCard>
+
+## Schritt 3 — Auf die Kosten achten
+
+- **Token-Nutzung loggen** (oben), damit du siehst, was jeder Call kostet.
+- **`max_tokens` richtig dimensionieren** und das Modell wählen; Input mit fokussierten Prompts deckeln.
+- Für wiederholte, stabile Präfixe: [Prompt-Caching](/docs/api/prompt-caching) hinzufügen.
+- Siehe [Tokens & Preise](/docs/api/tokens-and-pricing) und [Kosten & Latenz](/docs/foundations/cost-and-latency).
+
+## Schritt 4 — Die unglücklichen Pfade behandeln
+
+- **Transiente** Fehler (429/5xx) mit Backoff wiederholen (oben); keine 400 wiederholen.
+- [Verweigerungen](/docs/api/refusals-and-safety) souverän behandeln.
+- Ein **Timeout** und ein **Kosten-/Iterations-Budget** für alles Agentische setzen.
+
+## Verifizieren
+
+Erzwinge jeden Pfad und schau zu, was passiert — ein produktiver Call verdient den Namen, indem er *gut scheitert*, nicht nur, indem er erfolgreich ist:
+
+<Steps items={[{title: "Gestreamte Ausgabe erscheint", body: "Text wird inkrementell gedruckt, während er erzeugt wird, nicht in einem blockierenden Rutsch am Ende. Das ist der Latenz-Gewinn, den Nutzer spüren."}, {title: "Die Token-Zeile wird gedruckt", body: "Nach der Antwort siehst du die Zeile [tokens in/out: …]. Das ist dein Per-Call-Kostenzähler, bei jedem Call geloggt."}, {title: "Ein falscher Key scheitert sauber", body: "Setze ANTHROPIC_API_KEY auf einen falschen Wert und starte erneut — du solltest einen sauberen Fehler bekommen, keinen Stack-Trace-Crash."}, {title: "Transiente Fehler retryen, 400 nicht", body: "429/5xx retryen mit Backoff bis zu 5 Versuche; ein malformer 400-Request sollte sofort erscheinen, statt sinnlos zu retryen."}]} />
+
+<Quiz title="Prüfe dich selbst" questions={[{q: "Warum die Model-ID in der Config halten, statt den Literal-String durch deinen Code zu streuen?", options: ["Config-Werte werden vom SDK at rest verschlüsselt", "Die Migration auf ein neues Modell wird zu einer Ein-Zeilen-Änderung, statt zu einer Jagd nach verstreuten Literalen", "Das Anthropic-SDK weigert sich, ohne Env Var zu laufen"], answer: 1, explain: "Model-IDs ändern sich, wenn neue Versionen ausgeliefert werden. Die ID in einem Config-Wert zu halten macht die Migration zu einer einzigen Edit; verstreute Literale bedeuten bei jedem Modellwechsel ein Search-and-Replace durch die Codebase."}, {q: "Der Retry-Loop fängt manche Fehler und wirft andere neu. Welche Fehler sollte er wiederholen?", options: ["Jeden Fehler, um die Erfolgschance zu maximieren", "Transiente Fehler wie 429 und 5xx, mit exponentiellem Backoff — aber keine 400", "Nur 400-Fehler, weil die Schuld beim Client liegt"], answer: 1, explain: "429 (Rate Limit) und 5xx (Server) sind transient — Zurückweichen und Wiederholen gelingt oft. Ein 400 heißt, der Request selbst ist malform; unverändert zu retryen verbrennt nur Calls und Zeit, also sollte er sofort erscheinen."}, {q: "Was ist der günstigste Weg, zu sehen, was jeder Call tatsächlich kostet?", options: ["Vor jedem Request einen Preis-Endpoint aufrufen", "Die Input/Output-Token-Zahlen aus usage bei jedem Call loggen", "Prompt-Caching aktivieren, damit die Kosten auf null fallen"], answer: 1, explain: "Die finale Nachricht trägt ein usage-Objekt mit Input- und Output-Token-Zahlen. Es zu loggen macht jeden Call gratis zu einem Kostenzähler. Prompt-Caching senkt die Kosten wiederholter Präfixe, misst sie aber nicht."}]} />
+
+<Callout type="takeaways" items={["Ein produktiver Call ist vier Disziplinen auf dem Einzeiler: Secrets aus dem Source raushalten, Ausgabe streamen, Kosten beobachten, Fehler behandeln", "Transiente Fehler (429/5xx) mit exponentiellem Backoff plus Jitter retryen — und niemals einen 400 retryen, das ist ein Request-Bug, den du fixen musst", "Model-ID in der Config halten, damit ein Modellwechsel eine Zeile ist, kein codebase-weites Search-and-Replace", "Token-Nutzung bei jedem Call loggen: dein Per-Request-Kostenzähler, kostet nichts", "Streaming verbessert die gefühlte Latenz; Timeouts und ein Kosten-/Iterations-Budget hindern agentische Loops daran, davonzulaufen"]} />
+
+## Weiter
+
+- [Fehler, Rate Limits & Zuverlässigkeit](/docs/api/errors-and-rate-limits)
+- [Produktions-API-Snippets](/docs/templates/api-snippets)
+- [Agenten auf der API bauen](/docs/api/building-agents)

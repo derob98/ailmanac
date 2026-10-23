@@ -1,0 +1,125 @@
+# Almacenamiento en caché de prompts y optimización de costos
+
+> Source: https://derob98.github.io/ailmanac/es/docs/api/prompt-caching · AILmanac (CC BY 4.0) · last verified 2026-06-21
+
+Reutiliza un prefijo de prompt estable para reducir costo y latencia, y el detalle que lo arruina.
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-06-21" source="https://platform.claude.com/docs/en/build-with-claude/prompt-caching">
+La mecánica de la caché, los requisitos de elegibilidad y el precio de los tokens en caché frente a los nuevos cambian: confírmalo en la documentación oficial de prompt-caching.
+</VerifyNote>
+
+Si muchas de tus solicitudes comparten un bloque grande e inmutable —un system prompt largo, un documento extenso, un catálogo de herramientas—, el **almacenamiento en caché de prompts** permite que la API reutilice el prefijo ya procesado en lugar de releerlo en cada llamada. Eso reduce tanto el **costo** como la **latencia** de la parte en caché.
+
+<Callout type="objectives" items={["El modelo mental: un punto de corte de caché tras un prefijo estable, reutilizado entre llamadas","Cómo marcar el punto de corte en Python y TypeScript con cache_control","El único invariante que lo hace funcionar o lo arruina: el prefijo debe ser idéntico byte a byte","Cómo leer los campos de uso para confirmar que realmente obtienes aciertos de caché","Dónde rinde más la caché, y cómo combinarla con el procesamiento por lotes y la elección del tamaño adecuado"]} />
+
+## Cómo funciona (el modelo mental)
+
+Marcas un **punto de corte de caché** después del prefijo estable. En la primera llamada se procesa y se almacena en caché; las llamadas posteriores que comparten el **mismo prefijo exacto** aciertan en la caché y pagan mucho menos por él.
+
+```mermaid
+flowchart LR
+  A[Stable prefix: system + docs + tools] -->|cache_control breakpoint| B[Variable part: the user's turn]
+  A2[Next request, same prefix] -->|cache hit| B2[New variable part]
+```
+
+<Flashcards title="Vocabulario de la caché" cards={[{front:"Punto de corte de caché","back":"El marcador cache_control colocado tras el prefijo estable. Todo lo que precede al bloque marcado, incluido este, se almacena en caché."},{front:"Escritura de caché","back":"El pequeño sobreprecio de la primera llamada para poblar la caché."},{front:"Lectura de caché","back":"Cada llamada posterior con el mismo prefijo lo lee de vuelta a una fracción del precio de entrada."},{front:"Invalidador silencioso","back":"Un valor que cambia cerca del inicio del prompt (marca de tiempo, nombre de usuario, lista de herramientas reordenada) que altera el prefijo y reduce silenciosamente la tasa de aciertos a cero."}]} />
+
+## Marca el punto de corte (copiar y pegar)
+
+Agrega `cache_control` al **último bloque estable**: aquí, un system prompt extenso. El turno del usuario viene después y varía libremente; todo lo que precede al bloque marcado, incluido este, se almacena en caché.
+
+<Steps items={[{title: "Identifica el prefijo estable", body: "Encuentra el bloque grande e inmutable: un system prompt largo, un documento extenso o un catálogo de herramientas reutilizado en muchas solicitudes."},{title: "Adjunta cache_control a su último bloque", body: "Marca el último bloque estable con cache_control de tipo ephemeral, de modo que el prefijo hasta él, incluido, quede en caché."},{title: "Deja que siga la parte variable", body: "Coloca el turno del usuario después del bloque marcado: varía libremente en cada llamada y se factura a precio completo."},{title: "Confirma el acierto", body: "Lee cache_read_input_tokens del uso de la respuesta. Mayor que cero significa que obtuviste un acierto de caché."}]} />
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()
+
+message = client.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=1024,
+    system=[
+        {
+            "type": "text",
+            "text": LARGE_STABLE_PROMPT,  # long, unchanging — the cached prefix
+            "cache_control": {"type": "ephemeral"},
+        }
+    ],
+    messages=[{"role": "user", "content": "Summarize the key points."}],  # varies per call
+)
+
+print(message.usage.cache_read_input_tokens)  # > 0 means you got a hit
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic();
+
+const message = await client.messages.create({
+  model: "claude-sonnet-5",
+  max_tokens: 1024,
+  system: [
+    {
+      type: "text",
+      text: LARGE_STABLE_PROMPT, // long, unchanging — the cached prefix
+      cache_control: { type: "ephemeral" },
+    },
+  ],
+  messages: [{ role: "user", content: "Summarize the key points." }], // varies per call
+});
+
+console.log(message.usage.cache_read_input_tokens); // > 0 means you got a hit
+```
+
+</TabItem>
+</Tabs>
+
+La primera llamada paga un pequeño sobreprecio de **escritura** para poblar la caché; cada llamada posterior con el mismo prefijo lo lee de vuelta a una fracción del precio de entrada. El prefijo debe ser lo bastante largo para ser elegible —unos cuantos miles de tokens, según el modelo— o, de lo contrario, no se almacenará en caché de forma silenciosa.
+
+## El invariante que lo hace funcionar o lo arruina
+
+:::warning La caché es exacta en el prefijo
+Un acierto de caché requiere que el prefijo en caché sea **idéntico byte a byte**. El error más común: un *invalidador silencioso* cerca del inicio del prompt —una marca de tiempo, un nombre de usuario que cambia, una lista de herramientas reordenada— que altera el prefijo y reduce silenciosamente tu tasa de aciertos a cero.
+:::
+
+**Pon todo lo estable primero y todo lo variable al final,** y mantén el prefijo verdaderamente constante.
+
+## Verifica que realmente funciona
+
+No lo des por hecho: léelo de vuelta desde el campo `usage` de la respuesta:
+
+- **`cache_creation_input_tokens`**: tokens escritos en la caché en esta llamada (la primera solicitud).
+- **`cache_read_input_tokens`**: tokens servidos desde la caché (el ahorro).
+- **`input_tokens`**: el resto no almacenado en caché, facturado a precio completo.
+
+Si `cache_read_input_tokens` se mantiene en **cero** en solicitudes repetidas que deberían compartir un prefijo, hay un invalidador silencioso en acción: compara los bytes del prompt renderizado entre dos llamadas para encontrarlo.
+
+## Dónde rinde más
+
+- **System prompts** largos reutilizados entre usuarios.
+- **RAG / preguntas y respuestas sobre documentos** donde el mismo texto fuente se consulta repetidamente.
+- **Agentes** con un catálogo de herramientas e instrucciones fijos a lo largo de muchos turnos.
+
+Combina la caché con el **procesamiento por lotes** para cargas de trabajo offline, y con la elección del tamaño adecuado del modelo ([Elegir un modelo](/docs/api/choosing-a-model)) para el mayor ahorro combinado: consulta [Costo y latencia](/docs/foundations/cost-and-latency).
+
+<Quiz title="Compruébate" questions={[{q:"¿Qué requiere un acierto de caché del prefijo en caché?",options:["Que tenga al menos un token de longitud","Que sea idéntico byte a byte al prefijo anterior","Que venga después del turno del usuario"],answer:1,explain:"Un acierto de caché requiere que el prefijo en caché sea idéntico byte a byte. Cualquier cambio —una marca de tiempo, una lista de herramientas reordenada— lo invalida."},{q:"¿Qué campo de uso te indica que se sirvieron tokens desde la caché (tu ahorro)?",options:["input_tokens","cache_creation_input_tokens","cache_read_input_tokens"],answer:2,explain:"cache_read_input_tokens son los tokens servidos desde la caché. cache_creation_input_tokens es lo que se escribió en la primera llamada; input_tokens es el resto no almacenado en caché facturado a precio completo."},{q:"¿Dónde debería ir el contenido variable de cada llamada respecto al punto de corte de caché?",options:["Antes del prefijo estable","Al final, después del bloque marcado","Intercalado por todo el system prompt"],answer:1,explain:"Pon todo lo estable primero y todo lo variable al final. El turno del usuario viene después del bloque marcado y varía libremente en cada llamada."}]} />
+
+<Callout type="takeaways" items={["Marca un punto de corte de caché tras el prefijo estable; la primera llamada lo escribe y las posteriores lo leen de vuelta de forma barata.","Un acierto de caché necesita un prefijo idéntico byte a byte: mantén el contenido estable primero y el variable al final.","Los invalidadores silenciosos cerca del inicio del prompt (marcas de tiempo, nombres, herramientas reordenadas) reducen silenciosamente la tasa de aciertos a cero.","Verifica con el uso: cache_read_input_tokens > 0 significa un acierto; cero en solicitudes repetidas significa que hay un invalidador en acción.","La caché rinde más en system prompts reutilizados, RAG y agentes; combínala con el procesamiento por lotes y la elección del tamaño adecuado del modelo."]} />
+
+## Siguiente
+
+- [Tokens, contexto y precios](/docs/api/tokens-and-pricing)
+- [Streaming y multi-turno](/docs/api/streaming)
+- [Construir agentes sobre la API](/docs/api/building-agents)

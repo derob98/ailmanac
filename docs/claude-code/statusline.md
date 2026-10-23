@@ -1,0 +1,49 @@
+# Statusline Customization
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-code/statusline · AILmanac (CC BY 4.0) · last verified 2026-09-23
+
+Surface model, cwd, context budget and git state with a custom script.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-09-23" source="https://code.claude.com/docs/en/statusline">
+Configured with a `statusLine` block (`type: "command"` plus a `command` that is a script path or an inline shell command); the script reads session JSON on stdin. Fields used below are `model.display_name` and `context_window.used_percentage`; the official page lists the full set, which can grow between releases.
+</VerifyNote>
+
+The **statusline** is the persistent strip Claude Code shows about your session. Customizing it keeps the facts you care about — which model, where you are, how much context is left, your git branch — always in view.
+
+## What you can surface
+
+- **Model** in use (so you don't accidentally run an expensive one for a trivial task).
+- **Current directory / project**.
+- **Context budget** — how full the window is, a cue to [`/compact`](/docs/claude-code/context-management).
+- **Git state** — branch, dirty/clean, and which [worktree](/docs/claude-code/worktrees) you're in.
+
+## How it works
+
+You point the statusline at a **script** (configured in [settings](/docs/claude-code/settings)) that receives session data and prints a line. Because it's just a script, you can show anything you can compute.
+
+```bash
+#!/usr/bin/env bash
+# reads session JSON on stdin; prints a status line
+input=$(cat)
+model=$(echo "$input" | jq -r '.model.display_name // "claude"')
+branch=$(git branch --show-current 2>/dev/null)
+printf "%s · %s · %s" "$model" "$(basename "$PWD")" "${branch:-no-git}"
+```
+
+(The exact input fields are documented — check before relying on a specific key.)
+
+## Don't want to script it?
+
+Community tools (e.g. `ccstatusline`) provide ready-made, configurable statuslines you can drop in instead of writing your own. Treat any third-party script as code to [review](/docs/security/reviewing-third-party-code) before trusting.
+
+:::tip The most useful field
+For most people, **context budget + model** earn their place: they prevent the two most common surprises — running out of context mid-task, and burning the wrong (pricier) model.
+:::
+
+## Next
+
+- [Context Management](/docs/claude-code/context-management)
+- [settings.json](/docs/claude-code/settings)
+- [Git Worktrees](/docs/claude-code/worktrees)

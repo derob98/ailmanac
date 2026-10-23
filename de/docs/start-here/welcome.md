@@ -1,0 +1,58 @@
+# Willkommen & warum es das gibt
+
+> Source: https://derob98.github.io/ailmanac/de/docs/start-here/welcome · AILmanac (CC BY 4.0)
+
+Was AILmanac ist, für wen es ist und was es bewusst nicht zu ersetzen versucht.
+
+<LevelBadge level="all" />
+
+**AILmanac** ist ein kostenloser, von der Community gebauter **Almanach, um das Beste aus Claude — und jeder KI — herauszuholen**. Ein Almanach ist eine Referenz, zu der man zurückkehrt: vollständig, klar gesprochen und aktuell gehalten. Das ist hier das Ziel.
+
+<Callout type="objectives" items={["Verstehen, was AILmanac ist — und was es bewusst nicht ist", "Das Level finden, das zu dir passt: Einsteiger, Fortgeschritten oder Profi", "Deinen schnellsten Einstieg wählen und in unter einer Minute zu lesen beginnen"]} />
+
+## Für wen das ist
+
+Für alle, mit Absicht — und wir sagen dir das Level jeder Seite, damit du dich nie verloren oder herablassend behandelt fühlst:
+
+| Level | Das bist du, wenn... |
+| --- | --- |
+| <LevelBadge level="beginner" /> | Du KI kaum genutzt hast und einen garantierten ersten Erfolg willst. |
+| <LevelBadge level="intermediate" /> | Du Claude bereits nutzt und merklich bessere Ergebnisse willst. |
+| <LevelBadge level="advanced" /> | Du mit Claude Code, der API, Agenten und MCP baust. |
+
+## Was das anders macht
+
+Es gibt bereits exzellente Ressourcen (siehe [die Übersichtskarte](/docs/start-here/landscape-map)). AILmanac ist **keine** Linksammlung und **keine** Kopie der offiziellen Doku. Es ist:
+
+- **Meinungsstark** — wir sagen dir den *einen empfohlenen Weg*, dann die Alternativen.
+- **Level-gekennzeichnet** — jede Seite ist mit einem Badge versehen, damit du liest, was für dich richtig ist.
+- **Reich an Vorlagen** — [Copy-Paste-Starter](/docs/templates), die du in 30 Sekunden nutzen kannst.
+- **Ehrlich zur Aktualität** — Tatsachen, die sich ändern (Modellnamen, Preise, Funktionen), tragen ein „zuletzt geprüft“-Datum und einen Link zur Quelle.
+
+## Was das NICHT ist
+
+:::warning Die offizielle Doku ist die Quelle der Wahrheit
+Wenn AILmanac und die [offizielle Anthropic-Dokumentation](https://platform.claude.com/docs) sich widersprechen, **gewinnt die offizielle Doku**. KI-Tools ändern sich schnell; wir arbeiten hart daran, aktuell zu bleiben, aber bestätige alles Kritische immer gegen die Quelle, die wir verlinken.
+:::
+
+Wir speichern auch deine Daten nicht, können dein Konto nicht sehen und treffen bei heiklen Aufgaben keine Entscheidungen für dich — siehe [Verantwortungsvolle Nutzung](/docs/security).
+
+## Drei Einstiege
+
+Wähle die Tür, die dazu passt, wo du gerade stehst:
+
+<Steps items={[{title: "Ganz neu?", body: "Beginne mit Deine ersten 5 Minuten für einen garantierten ersten Erfolg — /docs/start-here/your-first-5-minutes."}, {title: "Willst du einen Plan?", body: "Wähle einen Lernpfad, um einer strukturierten Route zu folgen — /docs/start-here/learning-paths."}, {title: "Von einem Begriff verwirrt?", body: "Spring zum Glossar für klar gesprochene Definitionen — /docs/start-here/glossary."}]} />
+
+- **Ganz neu?** → [Deine ersten 5 Minuten](/docs/start-here/your-first-5-minutes)
+- **Willst du einen Plan?** → [Wähle einen Lernpfad](/docs/start-here/learning-paths)
+- **Von einem Begriff verwirrt?** → [Glossar](/docs/start-here/glossary)
+
+## Hilf ihm zu wachsen
+
+AILmanac bleibt vollständig, weil Menschen etwas beitragen. Eine Lücke, einen Fehler oder etwas frisch Veröffentlichtes gefunden? [Ein Beitrag dauert 10 Minuten](/docs/contribute/contribute-in-10-minutes).
+
+<Quiz title="Prüf dich selbst" questions={[{q: "Wenn AILmanac und die offizielle Anthropic-Doku sich widersprechen, welche gewinnt?", options: ["AILmanac, weil es meinungsstark ist", "Die offizielle Anthropic-Doku", "Was auch immer zuerst aktualisiert wurde"], answer: 1, explain: "Die offizielle Doku ist die Quelle der Wahrheit. AILmanac arbeitet daran, aktuell zu bleiben, aber bestätige kritische Tatsachen immer gegen die verlinkte Quelle."}, {q: "Du bist ganz neu bei KI. Welche Tür solltest du zuerst nehmen?", options: ["Deine ersten 5 Minuten", "Wähle einen Lernpfad", "Das Glossar"], answer: 0, explain: "Deine ersten 5 Minuten ist darauf ausgelegt, ganz neuen Nutzern einen garantierten ersten Erfolg zu geben."}, {q: "Was macht AILmanac mit deinen Daten und deinem Konto?", options: ["Es speichert deine Daten, um Seiten zu personalisieren", "Es kann dein Konto sehen, um Rat zu geben", "Es speichert nichts und kann dein Konto nicht sehen"], answer: 2, explain: "AILmanac speichert deine Daten nicht, kann dein Konto nicht sehen und trifft bei heiklen Aufgaben keine Entscheidungen für dich — siehe Verantwortungsvolle Nutzung."}]} />
+
+<Callout type="takeaways" items={["AILmanac ist eine kostenlose, von der Community gebaute, meinungsstarke, level-gekennzeichnete Referenz, um das Beste aus Claude und jeder KI herauszuholen", "Jede Seite ist mit Einsteiger, Fortgeschritten oder Profi gekennzeichnet, damit du liest, was zu dir passt", "Die offizielle Anthropic-Doku ist immer die Quelle der Wahrheit", "Drei Einstiege: Deine ersten 5 Minuten, ein Lernpfad oder das Glossar"]} />
+
+**Weiter:** [Deine ersten 5 Minuten](/docs/start-here/your-first-5-minutes) · [Wähle einen Lernpfad](/docs/start-here/learning-paths) · [Glossar](/docs/start-here/glossary)

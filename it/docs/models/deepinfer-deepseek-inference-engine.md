@@ -1,0 +1,317 @@
+# DeepInfer: il motore di inferenza di DeepSeek, letto onestamente
+
+> Source: https://derob98.github.io/ailmanac/it/docs/models/deepinfer-deepseek-inference-engine · AILmanac (CC BY 4.0) · last verified 2026-10-21
+
+Il 20 ottobre 2026 DeepSeek ha reso open source DeepInfer, il motore dietro il suo servizio di produzione: 16,3k stelle in un giorno, 2.251 punti su Hacker News. Questa pagina copre le quattro cose che i titoli hanno mancato: è un fork di vLLM, non un motore scritto da zero; 'NVIDIA SM100' esclude ogni H100 e ogni GPU consumer che possiedi; il suo throughput di decodifica è pubblicato con un conteggio a piena accettazione, che conta i token di bozza che siano stati accettati o no; e la sua funzionalità davvero importante, l'inferenza batch-invariant, è mutuamente esclusiva con il suo stesso decoder speculativo.
+
+<LevelBadge level="advanced" />
+
+Alle 09:08 UTC del **20 ottobre 2026**, un link intitolato *"DeepInfer: High-performance inference framework for DeepSeek models"* è arrivato su Hacker News e si è fermato a **2.251 punti e 856 commenti**, la più grande storia di AI sul sito quella settimana. Il repository, `deepseek-ai/DeepInfer`, era stato creato quattro giorni prima e la mattina dopo aveva raccolto **16.337 stelle e 1.620 fork**. Apache 2.0. Scritto in Python.
+
+L'inquadratura ovunque era *"DeepSeek rende open source il motore che fa girare DeepSeek."* Quell'inquadratura è vera e quasi inutile. Il thread da 856 commenti è una dimostrazione quasi perfetta del divario: è una lunga discussione su se l'inferenza sia redditizia per i laboratori di frontiera, e non contiene essenzialmente **nessuna discussione su cosa faccia il codice**. Nessuno vi riferisce di aver provato a eseguirlo.
+
+Questa pagina fa quindi la parte poco appariscente. Quattro cose nella documentazione di DeepInfer cambiano in modo sostanziale ciò che dovresti concludere dal rilascio, e nessuna è finita nella copertura:
+
+1. È un **fork di vLLM**, per i suoi stessi ringraziamenti, non un motore clean-room.
+2. **"NVIDIA SM100"** esclude ogni H100 e ogni scheda consumer. La maggior parte dei lettori non può eseguirlo affatto.
+3. Il suo throughput di decodifica in evidenza è calcolato con un **conteggio a piena accettazione**: conta i token di bozza speculativi *indipendentemente dal vero tasso di accettazione*.
+4. Il suo contributo più duraturo, l'**inferenza batch-invariant**, si attiva con un flag che *disattiva* il decoder speculativo di DeepInfer stesso. Velocità e riproducibilità sono qui un aut-aut.
+
+<Callout type="objectives" items={[
+  "Descrivere con precisione cosa spedisce DeepInfer e cosa trattiene esplicitamente: un sistema di KV cache, la disaggregazione prefill/decode e il bilanciamento del carico DP sono tutti assenti, quindi è un motore, non un server",
+  "Decodificare la riga sull'hardware: SM100 significa Blackwell da datacenter, che esclude SM90 (H100/H200) e SM120 (serie RTX 50), e abbinarlo a ~763 GB di pesi FP8 per dimensionare un deployment reale",
+  "Spiegare perché temperature 0 non è mai stato deterministico, e perché la diffusa spiegazione 'GPU più virgola mobile sono casuali' è sbagliata",
+  "Applicare la ricetta di campionamento deterministico di DeepInfer e riconoscerne il costo: lo stesso flag disabilita il percorso MTP a lunghezza variabile su cui viaggia DSpark",
+  "Leggere correttamente i numeri pubblicati di prefill/decode, inclusi il conteggio a piena accettazione, la normalizzazione per GPU e perché le tracce del profiler non vanno mai usate per ricavare gli step al secondo",
+  "Impostare i due valori di configurazione che corrompono l'output o sprecano capacità se sbagliati: i keep-token del replay SWA e gli esperti ridondanti EPLB",
+]} />
+
+<VerifyNote lastVerified="2026-10-21" source="https://github.com/deepseek-ai/DeepInfer">
+I conteggi delle stelle, l'elenco dei modelli supportati (oggi: solo DeepSeek-V4.1-Flash), le versioni delle dipendenze fissate e i nomi delle variabili d'ambiente qui riportati sono stati letti dal repository il 21 ottobre 2026, quattro giorni dopo la sua creazione. Un repo di quattro giorni con 172 issue aperte e nessuna release taggata si muoverà in fretta: rileggi il README e `examples/README.md` prima di impegnare un deployment su una qualsiasi di queste cose.
+</VerifyNote>
+
+## Cos'è, in un paragrafo
+
+DeepInfer è il percorso di **inferenza offline** dello stack di produzione di DeepSeek, estratto e pubblicato. Esegue esattamente una famiglia di modelli, `DeepSeek-V4.1-Flash`, su due target hardware, con le librerie di kernel di DeepSeek collegate: [FlashMLA](https://github.com/deepseek-ai/FlashMLA) per l'attenzione latente multi-testa, [DeepGEMM](https://github.com/deepseek-ai/DeepGEMM) per la moltiplicazione di matrici, [DeepEP](https://github.com/deepseek-ai/DeepEP) per la comunicazione expert-parallel, [DeepSelect](https://github.com/deepseek-ai/DeepSelect) per l'attenzione sparsa e il top-k del sampler, e [TileKernels](https://github.com/deepseek-ai/TileKernels) più kernel TileLang nel repo per il resto. Quei cinque repo non sono nuovi: FlashMLA, DeepGEMM e DeepEP risalgono tutti a febbraio 2025 e hanno rispettivamente 13,1k, 9,1k e 10,3k stelle; DeepSelect è di settembre 2026 e ne ha 510. DeepInfer è la cosa che mancava da sempre: lo **scheduler e runtime** che li assembla.
+
+### La discendenza che nessuno ha citato
+
+Direttamente dai ringraziamenti: DeepInfer "was originally built primarily on **vLLM**, with additional inspiration from **SGLang** and **TensorRT-LLM**."
+
+Vale la pena fermarsi su questo. La lettura dominante di questo rilascio era *un laboratorio di frontiera ha rifiutato lo stack di serving open source e ne ha costruito uno proprio.* Il contrario è più vicino al vero: DeepSeek ha preso vLLM, lo ha specializzato a fondo per una sola architettura su una sola classe di acceleratori, e ha restituito il risultato con gli stessi termini permissivi. Se esegui già vLLM, DeepInfer è una dichiarazione su come appare un derivato di vLLM quando elimini ogni generalità, non un concorrente da valutare per forza.
+
+### Tre pezzi che trattiene deliberatamente
+
+Il README ha una sezione che la maggior parte dei riassunti ha saltato, intitolata "Required for a complete inference service (not included in this release)":
+
+- un **sistema di KV cache**
+- la **disaggregazione VE/prefill/decode** (DeepSeek nota che la maggior parte della funzionalità lato motore è implementata, ma l'orchestrazione no)
+- il **bilanciamento del carico tra repliche data-parallel**, sia per prefill sia per decode
+
+Qui non c'è un server HTTP compatibile OpenAI a cui puntare il tuo client. Ogni esempio è `python examples/offline_inference.py`. Se il tuo modello mentale era "tolgo vLLM, metto DeepInfer, stesso endpoint", tre dei pezzi più difficili di una piattaforma di serving sono quelli che dovresti scrivere tu.
+
+<Callout type="warning" items={[
+  "\"Inferenza offline\" fa un lavoro vero in quella frase. DeepInfer è un motore batch con il livello di serving rimosso, che è esattamente la forma che vuoi per le eval e per i rollout RL, ed esattamente la forma sbagliata per un'API di produzione senza mesi di lavoro di piattaforma.",
+]} />
+
+## La riga sull'hardware, decodificata
+
+Il README elenca due target: **GPU NVIDIA SM100** e **NPU Huawei Ascend 950**. Una riga, che esclude in silenzio quasi tutti.
+
+`SM100` è la compute capability CUDA **10.0**: Blackwell *da datacenter*, la classe B100/B200. Non è:
+
+| Il tuo hardware | Arch | Elencato? |
+|---|---|---|
+| H100 / H200 | SM90 (Hopper) | **No** |
+| RTX 5090 / serie 50 | SM120 (Blackwell consumer, cc 12.0) | **No** |
+| B200 / B100 | SM100 | Sì |
+| Ascend 950 | CANN 9.2 | Sì |
+
+E i due Blackwell non sono intercambiabili: non c'è compatibilità binaria tra `sm_100` e `sm_120`, perché i kernel Blackwell da datacenter usano l'istruzione `tcgen05` e TMEM, una memoria tensoriale dedicata che il Blackwell consumer non ha affatto. Un kernel scritto per SM100 non "gira più lento" su una RTX 5090: non gira.
+
+L'elenco delle dipendenze fissate dice la stessa cosa in un altro dialetto. `requirements-nvidia.txt` è di tre righe: `torch==2.13.0+cu132`, `flash-attn-4==4.0.0b34` e i requisiti di sviluppo; e `build.sh` poi reinstalla forzatamente `nvidia-nccl-cu13==2.32.3` sopra qualunque cosa arrivasse con Torch. Una build beta di FlashAttention-4, CUDA 13.2 e un NCCL patchato a mano. È uno stack fissato sulle macchine esatte dei rack di DeepSeek.
+
+### Ora aggiungi i pesi
+
+Il checkpoint di default di DeepInfer è `deepseek-ai/DeepSeek-V4.1-Flash-1017`: licenza MIT, FP8, pubblicato il **17 ottobre 2026**, distribuito su 48 shard safetensors. Hugging Face riporta circa **763 miliardi di parametri**. In FP8 sono dell'ordine di **763 GB di pesi prima di qualsiasi KV cache**, ed è per questo che gli esempi sono scritti come `--ep 8` e il benchmark di decodifica gira su 64 GPU.
+
+Otto schede da 80 GB (640 GB) non lo contengono. Stai guardando otto GPU di classe B200 come minimo, dentro un singolo dominio scale-up, più i tre componenti di piattaforma che DeepSeek non ha spedito.
+
+<Callout type="tip" items={[
+  "Questa è la risposta pratica a \"dovrei passare?\" per il 99% dei lettori: non puoi, e va bene. Il valore trasferibile di questo rilascio sono le tre idee qui sotto, ciascuna delle quali si applica al motore che esegui davvero.",
+  "Se vuoi DeepSeek V4.1-Flash su hardware tuo, i percorsi di serving della nostra guida di campo su V4.1-Flash (vLLM, SGLang, API ospitata) valgono ancora, e il checkpoint -1017 è una revisione successiva ai pesi del lancio di settembre, quindi ricontrolla la sua scheda invece di assumere la parità.",
+]} />
+
+## Batch invariance: perché temperature 0 non è mai stato deterministico
+
+Questa è la parte di DeepInfer che merita la tua attenzione anche se non lo eseguirai mai.
+
+Imposta `temperature=0`, invia due volte lo stesso prompt, ottieni due risposte diverse. Tutti l'hanno visto. La spiegazione che hai probabilmente letto, anche [nella nostra lezione sui controlli di campionamento](/docs/foundations/sampling-controls), che questa pagina precisa, è "batching e non-determinismo della virgola mobile lato server". È il vicinato giusto e il meccanismo sbagliato, e la distinzione è ciò che rende il bug correggibile.
+
+### La metà sbagliata della spiegazione
+
+"Le GPU sono parallele e l'addizione in virgola mobile non è associativa, quindi i risultati oscillano" implica che l'oscillazione sia *intrinseca*. Non lo è. Esegui la stessa moltiplicazione di matrici sugli stessi dati sulla stessa GPU quante volte vuoi e ottieni ogni volta risultati **bit a bit identici**. Il kernel è deterministico. La concorrenza non è la colpevole.
+
+### Il meccanismo reale
+
+La colpevole è la **batch invariance**, o meglio la sua assenza. Un kernel GPU sceglie la propria strategia di riduzione in base alla forma del lavoro che riceve. Moltiplica una singola riga (batch di 1) e l'accumulo avviene in un ordine; moltiplica la stessa riga come parte di un batch da 32 righe e il kernel divide la riduzione diversamente, quindi le addizioni in virgola mobile si dispongono in un ordine diverso, quindi il risultato differisce negli ultimi bit. Ogni esecuzione è deterministica. La *forma* no.
+
+Poi viene la parte che la fa sembrare infestata: **la dimensione del tuo batch è decisa dal traffico degli altri.** Un server di inferenza condiviso mette in batch la tua richiesta con qualunque altra sia arrivata nella stessa finestra. Tu non hai cambiato nulla; è cambiato il carico; i tuoi numeri si sono mossi. Il forward pass è deterministico e la tua esperienza di esso no.
+
+Nei transformer, tre operazioni basate su riduzione vanno corrette: **RMSNorm, moltiplicazione di matrici e attenzione**. La ricetta è tenere ogni riduzione dentro un solo core dove possibile, rifiutare le riduzioni divise la cui forma dipende dalla dimensione del batch, e usare un'unica configurazione di kernel anche quando lascia prestazioni sul tavolo.
+
+### Il numero che dovrebbe disturbarti
+
+Thinking Machines Lab lo ha misurato su `Qwen3-235B-A22B-Instruct-2507`: stesso prompt ("Tell me about Richard Feynman"), temperature 0, 1.000 token, **1.000 esecuzioni**.
+
+Risultato: **80 completamenti unici.** Il più frequente è comparso 78 volte. E la forma della divergenza è la parte istruttiva: tutti i 1.000 completamenti sono *identici per i primi 102 token*, poi si dividono al token 103, dove 992 esecuzioni dicono "Queens, New York" e 8 dicono "New York City."
+
+Ecco perché le asserzioni di uguaglianza nelle suite di test per LLM sono così insidiose. Un breve smoke test passa mille volte e non ti dice nulla; la divergenza aspettava al token 103.
+
+Correggerlo non è gratis. Su Qwen-8B su 1.000 sequenze, Thinking Machines ha misurato il default di vLLM a **26 s**, una build deterministica ingenua a **55 s**, e **42 s** una volta migliorato il kernel di attenzione: quindi circa **1,6× più lento** per la riproducibilità bit a bit.
+
+<VerifyNote lastVerified="2026-10-21" source="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/">
+Il risultato degli 80 completamenti, la divergenza al token 103 e le cifre 26 s / 55 s / 42 s sono misurazioni di Thinking Machines Lab sul loro hardware e sui loro kernel, non di DeepInfer. DeepSeek non pubblica un costo prima/dopo comparabile per il proprio percorso batch-invariant. Considera ~1,6× come l'ordine di grandezza da mettere a budget, non un numero da citare su DeepInfer.
+</VerifyNote>
+
+### Perché qualcuno paga 1,6× per averlo
+
+Quattro ragioni, grosso modo in ordine di quanto denaro rappresentano:
+
+- **L'RL on-policy smette di essere una bugia.** Se il tuo sampler e il tuo trainer calcolano numeri diversi, il tuo apprendimento per rinforzo "on-policy" è in silenzio off-policy. Thinking Machines ha mostrato che senza inferenza deterministica serve una correzione off-policy per evitare il collasso della ricompensa; con risultati bit a bit identici ottieni vero RL on-policy e divergenza KL zero tra le policy di campionamento e di addestramento. Per chiunque faccia RL su un modello grande, questo è il titolo, non una nota a piè di pagina.
+- **I test di regressione possono asserire l'uguaglianza.** DeepInfer ci punta molto: `tests/models/offline_decode_ppl.json` memorizza baseline di perplexity per piattaforma confrontate **esattamente, campione per campione**. Quel disegno di test è possibile solo su un motore deterministico.
+- **Fare il debug di un'esecuzione dell'agente diventa trattabile.** Un fallimento che puoi riprodurre bit per bit è un bug; uno che non puoi è una storia di fantasmi.
+- **Audit e conformità.** "Stesso input, stesso output, dimostrabilmente" è un requisito in alcuni contesti regolamentati e un'impossibilità senza questo.
+
+### La ricetta, e il suo prezzo
+
+<Steps items={[
+  {title: "Attiva la batch invariance", body: "Imposta DEEPINFER_BATCH_INVARIANT=1. Questo mantiene il risultato di ogni token bit a bit identico indipendentemente da cos'altro condivide il suo batch. Solo NVIDIA: il percorso Ascend non la offre."},
+  {title: "Disattiva il percorso MTP a lunghezza variabile", body: "Imposta DEEPINFER_ENABLE_MTP_VARLEN=0. È lo stesso flag che imposti a 1 per abilitare la decodifica speculativa DSpark, quindi per la documentazione stessa di DeepSeek le due funzionalità sono mutuamente esclusive."},
+  {title: "Fissa il seed del sampler per sequenza", body: "Passa un seq_seed fisso in SamplingParams. Token di input identici più parametri di campionamento identici producono allora output identici."},
+  {title: "Decidi quale ti serve davvero, per carico di lavoro", body: "Determinismo per eval, baseline di regressione e rollout RL; DSpark per il throughput su tutto il resto. Eseguire un cluster per ciascuna modalità è un disegno legittimo, e meno costoso che fingere che una sola configurazione serva entrambe."},
+]} />
+
+<PromptCard title="DeepInfer: campionamento deterministico (ambiente)">{`# Deterministic sampling — NVIDIA only.
+# Note that MTP_VARLEN=0 is the same switch that disables DSpark,
+# so this configuration is deliberately the slow one.
+export DEEPINFER_ACCELERATOR=nvidia
+export DEEPINFER_BATCH_INVARIANT=1
+export DEEPINFER_ENABLE_MTP_VARLEN=0
+
+# ...and pass a fixed seq_seed in SamplingParams, e.g.
+#   SamplingParams(temperature=0.0, seq_seed=42)
+
+python examples/offline_inference.py --ep 8`}</PromptCard>
+
+<PromptCard title="DeepInfer: decodifica speculativa DSpark (l'altra modalità)">{`# Throughput mode: draft tokens plus confidence-scheduled verification.
+# DEEPINFER_USE_NEXTN_DECODE sets the maximum draft length (default 5).
+export DEEPINFER_ACCELERATOR=nvidia
+export DEEPINFER_ENABLE_MTP_VARLEN=1
+export DEEPINFER_USE_NEXTN_DECODE=5
+
+# Explicitly disable speculative decoding instead:
+#   export DEEPINFER_USE_NEXTN_DECODE=0
+
+python examples/benchmark.py`}</PromptCard>
+
+La seconda modalità è dove vive l'idea più intelligente di DeepInfer. La decodifica speculativa semplice produce *n* token di bozza e li verifica tutti. La **verifica schedulata per confidenza** usa le stime di confidenza del modello stesso per decidere quanto budget di verifica spendere: poco dove la bozza è ovviamente giusta, molto dove non lo è. È un'idea di scheduling, non di kernel, e si trasferisce a qualsiasi motore con un percorso di bozza.
+
+## Leggere i numeri di benchmark di DeepInfer stesso
+
+DeepSeek pubblica due curve di Pareto (throughput di prefill vs latenza, throughput di decodifica vs velocità per utente) invece di una cifra di token al secondo in evidenza. Quella sobrietà è ammirevole e significa che **non c'è un unico numero da citare.** Significa anche che la metodologia, documentata in `examples/README.md`, è dove sta la verità. Tre cose in essa cambiano come leggi i grafici.
+
+### 1. Il throughput di decodifica assume che ogni token di bozza sia stato accettato
+
+È la questione grossa. Il throughput di decodifica pubblicato è calcolato come:
+
+```text
+decode_throughput = avg_SPS × decode_num_requests × (1 + nextn) / cp
+```
+
+e la documentazione dichiara chiaramente che questo avviene "under the **full-acceptance accounting** — `1 + nextn` tokens per request per step, **regardless of the true acceptance rate**."
+
+`nextn` ha come default 5. Quindi a ogni richiesta vengono accreditati 6 token per step di decodifica, che le 5 bozze del decoder speculativo siano sopravvissute alla verifica o no. Con le 64 richieste di default, "the 64 requests of one decode step account for 384 tokens in total": 64 × 6.
+
+I tassi di accettazione reali per la multi-token prediction sono ben sotto il 100%. Quindi il throughput di decodifica in quel grafico è un **limite superiore che nessun carico di lavoro reale raggiunge**, e lo scarto tra il grafico e la tua realtà è esattamente il tuo tasso di rifiuto. Niente qui è disonesto, è scritto nel repo, ma non è ciò che assume chi dà un'occhiata a una curva di Pareto, e nessuno degli 856 commenti su Hacker News l'ha menzionato.
+
+### 2. I numeri sono per GPU, a una scala che non hai
+
+Il prefill è stato misurato su **4 GPU SM100**, la decodifica su **64**, "each within one scale-up domain", cioè dentro un singolo fabric NVLink, non attraverso un cluster Ethernet. Entrambe le cifre di throughput sono poi divise per il numero di dispositivi per dare token/s/**GPU**.
+
+La normalizzazione per GPU è il modo giusto di pubblicare questo ed è anche la cosa più facile al mondo da fraintendere. Un numero di decodifica per GPU ottenuto con 64 GPU che condividono un fabric non sopravvive alla moltiplicazione sul tuo nodo da 8 GPU, perché il pattern di comunicazione expert-parallel che l'ha reso possibile era il fabric.
+
+### 3. Le tracce del profiler non sono dati di throughput
+
+Un dettaglio che non ho visto altrove, e un avviso davvero utile per chi profila il proprio motore. Dalla documentazione: i tempi di step dentro una traccia `PROFILE=1` includono un overhead del profiler di "**up to nearly 50% inflation at bsz=1**", e anche dopo l'uscita del profiler c'è un rallentamento residuo del **~7–11%**, ed è per questo che nessuna misurazione può essere schedulata dopo la sezione del profiler. L'istruzione esplicita è usare le tracce per ispezionare la composizione dei kernel e **mai** per ricavare gli step al secondo.
+
+L'harness va oltre la maggior parte: scarta qualsiasi intervallo di misura che collide con un flush delle statistiche del load balancer MoE (un `all_gather` expert-parallel con una dozzina di millisecondi di jitter), ed esegue la finestra di misura due volte: una con il logging attivo per catturare i valori del load balancer, una in silenzio per i numeri veri.
+
+<Callout type="tip" items={[
+  "Copia il disegno di eval a due fasi indipendentemente dal motore. L'harness di eval di DeepInfer separa la generazione dalla valutazione: la generazione scrive gli output grezzi su disco, la valutazione li rilegge. Puoi rivalutare con un grader diverso senza pagare di nuovo l'inferenza, e su un motore deterministico puoi dimostrare che gli output non si sono mossi.",
+]} />
+
+### Cosa misura davvero l'harness di eval
+
+Da sapere prima di citare qualsiasi numero di accuratezza da questo repo. Copre tre benchmark, tutti riportati come Pass@1: **AIME 2026** (30 compiti × 32 campioni, accuratezza media), **HLE** (2.500 domande, 2.158 di testo e 342 con immagini, campione singolo) e **GPQA Diamond** (198 compiti × 8 campioni). Gli script deliberatamente **non scaricano i dataset**; devi recuperarne tu ciascuno e convertirlo in JSONL, e HLE è ad accesso controllato su Hugging Face. Un harness di benchmark che rifiuta di scaricare in automatico i propri test set è un piccolo segno di serietà sulla contaminazione.
+
+## Due valori di configurazione che mordono
+
+**Replay limitato SWA.** DeepInfer riduce il lavoro di prefill del decoder rigiocando solo un suffisso limitato del contesto, configurato con `DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE=compact` e `DEEPINFER_YOCO_PREFILL_KEEP_TOKENS=140` per i default di V4.1. Il vincolo è la parte interessante: il suffisso trattenuto **deve coprire la finestra di sliding-window-attention più la lunghezza massima di backtracking**. Quel `140` stranamente specifico non è una preferenza di tuning, è un minimo derivato dall'architettura. Abbassalo per risparmiare memoria e non stai scambiando qualità per velocità: stai troncando contesto di cui il modello ha ancora bisogno.
+
+**Esperti ridondanti EPLB.** Il bilanciamento del carico expert-parallel si configura tramite `DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS`, default **32**. È solo un *limite inferiore*: il motore arrotonda `num_routed_experts + num_extra_experts` per eccesso finché è divisibile esattamente per `ep_size`, arrotondando separatamente il backbone e DFlash. Quindi il valore che imposti spesso non è il valore in vigore, e i record scritti su disco e i grafici usano la cifra arrotondata che ha effettivamente avuto effetto. Se confronti due esecuzioni, confronta il valore registrato, non il tuo ambiente.
+
+## Se non puoi eseguirlo, prendi queste tre cose
+
+- **Chiedi quale conteggio usa un numero di throughput.** "Token al secondo" con un decoder speculativo nel ciclo è ambiguo finché qualcuno non ti dice se le bozze rifiutate sono contate. Chiedilo a ogni motore, compreso quello che esegui.
+- **Smetti di asserire l'uguaglianza sull'output degli LLM se non ti sei guadagnato il determinismo.** Temperature 0 è quasi deterministico, non deterministico, e la modalità di fallimento è una divergenza un centinaio di token più in là che il tuo smoke test non raggiunge mai. O rendi il motore batch-invariant e asserisci bit a bit, o testa con eval e distribuzioni. La via di mezzo è una suite instabile che insegna al tuo team a ignorare il rosso.
+- **"Ha reso open source il motore" raramente significa "ha reso open source il servizio".** Leggi per le *assenze*: sistema di cache, disaggregazione, bilanciamento del carico. Il divario tra un motore pubblicato e un servizio in esecuzione è dove vive tutto il lavoro di piattaforma, e il README che ti dice onestamente quali pezzi mancano ti sta facendo un favore.
+
+<Flashcards title="DeepInfer: il vocabolario" cards={[
+  {front: "Batch invariance", back: "La proprietà per cui l'output di un dato token è bit a bit identico indipendentemente dalla sua posizione in un batch o da cos'altro condivide il batch. La sua assenza è la vera ragione per cui temperature 0 non è riproducibile. In DeepInfer: DEEPINFER_BATCH_INVARIANT=1, solo NVIDIA."},
+  {front: "Full-acceptance accounting", back: "Come è calcolato il throughput di decodifica pubblicato da DeepInfer: a ogni richiesta sono accreditati (1 + nextn) token per step (6 di default) indipendentemente dal vero tasso di accettazione speculativa. Un limite superiore, non una cifra raggiungibile."},
+  {front: "DSpark + verifica schedulata per confidenza", back: "Il decoder speculativo di DeepInfer. Produce token di bozza, poi usa le stime di confidenza del modello per decidere quanto budget di verifica spendere su di essi. Si abilita con DEEPINFER_ENABLE_MTP_VARLEN=1; lunghezza della bozza tramite DEEPINFER_USE_NEXTN_DECODE (default 5)."},
+  {front: "Replay limitato SWA", back: "Riduce il lavoro di prefill del decoder rigiocando solo un suffisso limitato del contesto. Il suffisso trattenuto deve coprire la finestra di sliding-window-attention più la lunghezza massima di backtracking, da cui il default specifico DEEPINFER_YOCO_PREFILL_KEEP_TOKENS=140 per V4.1."},
+  {front: "EPLB", back: "Bilanciamento del carico expert-parallel per MoE. Aggiunge copie ridondanti degli esperti più richiesti per distribuire uniformemente il traffico. DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS (default 32) è un limite inferiore: il motore arrotonda per eccesso fino a dividere esattamente per ep_size."},
+  {front: "SM100", back: "Compute capability CUDA 10.0: Blackwell da datacenter (B100/B200). Non SM90 (H100/H200) e non SM120 (serie RTX 50): i kernel SM100 richiedono tcgen05 e TMEM, che il Blackwell consumer non ha affatto, quindi non sono compatibili a livello binario."},
+  {front: "FlashMLA / DeepGEMM / DeepEP / DeepSelect", back: "Le librerie di kernel di DeepSeek, tutte aperte molto prima di DeepInfer: attenzione latente multi-testa, GEMM, comunicazione expert-parallel, e top-k per attenzione sparsa e sampler. DeepInfer è il runtime che finalmente le schedula."},
+  {front: "Attention DP / balanced CP / MoE EP", back: "Il parallelismo a tre vie di DeepInfer: data parallelism sull'attenzione, context parallelism bilanciato per le sequenze lunghe, expert parallelism per i layer MoE. ep_size = WORLD_SIZE × dispositivi visibili, e --cp deve dividere ep_size."},
+  {front: "Cosa DeepInfer NON spedisce", back: "Un sistema di KV cache, l'orchestrazione di disaggregazione VE/prefill/decode e il bilanciamento del carico tra repliche data-parallel. Non c'è un server compatibile OpenAI: è un motore batch offline."},
+]} />
+
+<Quiz title="Verifica la comprensione" questions={[
+  {
+    q: "Perché temperature 0 non produce output identici su un server di inferenza condiviso?",
+    options: [
+      "Il parallelismo della GPU rende genuinamente casuale l'aritmetica in virgola mobile",
+      "I kernel cambiano l'ordine di riduzione in base alla forma del batch, e la dimensione del tuo batch dipende dal traffico degli altri utenti",
+      "Temperature 0 campiona comunque dalla distribuzione top-k",
+      "I pesi del modello vengono aggiornati continuamente durante il serving"
+    ],
+    answer: 1,
+    explain: "Eseguire la stessa matmul sugli stessi dati dà ogni volta risultati bit a bit identici: il kernel è deterministico. Ciò che varia è la forma del batch che riceve, che cambia il modo in cui la riduzione viene divisa e quindi l'ordine di accumulo in virgola mobile. Poiché il traffico dei co-tenant fissa la dimensione del tuo batch, i tuoi numeri si muovono anche se non hai cambiato nulla."
+  },
+  {
+    q: "Il throughput di decodifica pubblicato da DeepInfer è calcolato come avg_SPS × decode_num_requests × (1 + nextn) / cp. Cosa implica?",
+    options: [
+      "È misurato dopo aver sottratto i token di bozza rifiutati",
+      "Accredita (1 + nextn) token per richiesta per step indipendentemente dal vero tasso di accettazione, quindi è un limite superiore",
+      "Si applica solo quando la decodifica speculativa è disabilitata",
+      "Sottostima il throughput perché nextn ha come default 0"
+    ],
+    answer: 1,
+    explain: "La documentazione lo chiama 'full-acceptance accounting' e dichiara che vale 'regardless of the true acceptance rate'. Con nextn che di default vale 5, a ogni richiesta sono accreditati 6 token per step che le 5 bozze siano sopravvissute alla verifica o no: il grafico è un tetto, e il tuo scarto è il tuo tasso di rifiuto."
+  },
+  {
+    q: "Hai un nodo 8× H100 e vuoi servire DeepSeek-V4.1-Flash con DeepInfer. Qual è il problema?",
+    options: [
+      "Nessuno: H100 è supportata, ti serve solo CUDA 13",
+      "H100 è SM90 e il README elenca solo SM100 (Blackwell da datacenter); inoltre ~763 GB di pesi FP8 non stanno in 640 GB",
+      "DeepInfer richiede NPU Ascend per i layer MoE",
+      "Solo il percorso batch-invariant funziona su H100"
+    ],
+    answer: 1,
+    explain: "Due blocchi indipendenti. SM100 è la compute capability 10.0, Blackwell da datacenter, e SM90 Hopper non è elencata. E il checkpoint -1017 di default ha circa 763B parametri in FP8, che supera 8 × 80 GB prima ancora di allocare qualsiasi KV cache."
+  },
+  {
+    q: "Cosa ti costa la ricetta di campionamento deterministico?",
+    options: [
+      "Niente: è un guadagno puro senza compromessi",
+      "Gli output strutturati smettono di funzionare",
+      "DEEPINFER_ENABLE_MTP_VARLEN=0 è lo stesso flag che abilita DSpark, quindi rinunci alla decodifica speculativa",
+      "Ti limita a una dimensione di batch di 1"
+    ],
+    answer: 2,
+    explain: "Il README abilita DSpark con DEEPINFER_ENABLE_MTP_VARLEN=1 e richiede DEEPINFER_ENABLE_MTP_VARLEN=0 per il campionamento deterministico. Per la sua stessa documentazione le due cose sono mutuamente esclusive: riproducibilità e accelerazione speculativa sono un aut-aut, che è una ragione per eseguire configurazioni separate per eval e per serving."
+  },
+  {
+    q: "Quale affermazione sulle origini di DeepInfer è accurata?",
+    options: [
+      "È un motore clean-room scritto da zero per sostituire vLLM",
+      "È un fork di SGLang con kernel TensorRT-LLM",
+      "Per i suoi stessi ringraziamenti è stato costruito principalmente su vLLM, con ispirazione da SGLang e TensorRT-LLM",
+      "È un livello di binding Python sopra TensorRT-LLM"
+    ],
+    answer: 2,
+    explain: "I ringraziamenti dicono che 'was originally built primarily on vLLM, with additional inspiration from SGLang and TensorRT-LLM'. L'inquadratura molto ripetuta 'DeepSeek ha costruito un proprio motore invece di usare l'open source' inverte ciò che è accaduto davvero: hanno specializzato un motore open source e rilasciato il risultato sotto Apache 2.0."
+  },
+  {
+    q: "Perché l'harness di eval di DeepInfer separa la generazione dalla valutazione?",
+    options: [
+      "Per permetterti di rivalutare output esistenti con un giudice diverso senza pagare di nuovo l'inferenza",
+      "Perché la valutazione richiede una GPU e la generazione no",
+      "Per nascondere al grader gli output grezzi del modello",
+      "Perché Pass@1 si può calcolare solo offline"
+    ],
+    answer: 0,
+    explain: "La generazione scrive gli output grezzi su disco; la valutazione li rilegge. Questo rende la rivalutazione economica e ripetibile, e su un motore batch-invariant puoi inoltre dimostrare che le generazioni stesse non sono derivate, ed è ciò che rende praticabili le baseline di perplexity esatte campione per campione nella suite di test."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "DeepInfer è un derivato di vLLM fortemente specializzato per un solo modello su Blackwell da datacenter o Ascend 950: non un motore generale e non un server drop-in. La maggior parte dei lettori non può eseguirlo, ed è la risposta onesta a \"dovrei passare?\"",
+  "Trattiene per scelta il sistema di KV cache, la disaggregazione prefill/decode e il bilanciamento del carico DP. Leggi i rilasci per ciò che è assente, non solo per ciò che è annunciato.",
+  "È la batch invariance, non la casualità della virgola mobile, a far derivare temperature 0: i kernel scelgono gli ordini di riduzione in base alla forma del batch, e il traffico dei co-tenant sceglie la forma del tuo batch. 1.000 esecuzioni a temperature 0 hanno prodotto 80 completamenti unici, identici per 102 token e poi no.",
+  "La riproducibilità costa circa 1,6× di throughput nelle misurazioni pubblicate, e in DeepInfer ti costa anche DSpark: il flag che abilita l'uno disabilita l'altro. Esegui configurazioni separate per eval/RL e per serving.",
+  "Il full-acceptance accounting significa che il throughput di decodifica pubblicato conta i token di bozza che siano stati accettati o no. Chiedi a ogni motore quale conteggio usano i suoi token al secondo.",
+  "DEEPINFER_YOCO_PREFILL_KEEP_TOKENS=140 è un minimo architetturale, non una manopola di tuning; DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS=32 è un limite inferiore che il motore arrotonda per eccesso. Registra i valori effettivi prima di confrontare le esecuzioni.",
+]} />
+
+## Fonti e approfondimenti
+
+- [deepseek-ai/DeepInfer](https://github.com/deepseek-ai/DeepInfer) — Apache 2.0, creato il 16 ottobre 2026, 16.337 stelle / 1.620 fork / 172 issue aperte al 21 ottobre 2026. Fonte primaria per l'elenco delle funzionalità, le variabili d'ambiente, la sezione "not included in this release", i target hardware, il `requirements-nvidia.txt` fissato e il ringraziamento a vLLM/SGLang/TensorRT-LLM.
+- [DeepInfer `examples/README.md`](https://github.com/deepseek-ai/DeepInfer/blob/main/examples/README.md) — la metodologia che conta: il conteggio di decodifica a piena accettazione, le tre metriche di regime stazionario, gli avvisi sull'overhead del profiler (~50% a bsz=1, 7–11% residuo), l'esclusione del flush del load balancer MoE, la derivazione di `ep_size` e la regola di arrotondamento di `DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS`.
+- [DeepInfer `eval/README.md`](https://github.com/deepseek-ai/DeepInfer/blob/main/eval/README.md) — conteggi di compiti e campioni di AIME 2026 / HLE / GPQA Diamond, definizioni di Pass@1, il disegno a due fasi generazione-poi-valutazione e il rifiuto deliberato di scaricare automaticamente i dataset.
+- [Defeating Nondeterminism in LLM Inference](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/) — Thinking Machines Lab. Fonte per l'esperimento da 1.000 esecuzioni / 80 completamenti su Qwen3-235B-A22B-Instruct-2507, la divergenza al token 103, la confutazione "concorrenza + virgola mobile", la ricetta RMSNorm/matmul/attenzione, il costo 26 s → 55 s → 42 s e l'argomento sull'RL on-policy.
+- [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) — MIT, FP8, pubblicato il 17 ottobre 2026, 48 shard safetensors, ~763B parametri. Il checkpoint di default di DeepInfer.
+- Librerie di kernel DeepSeek, tutte verificate dal vivo: [FlashMLA](https://github.com/deepseek-ai/FlashMLA) (13,1k stelle, feb 2025) · [DeepGEMM](https://github.com/deepseek-ai/DeepGEMM) (9,1k, feb 2025) · [DeepEP](https://github.com/deepseek-ai/DeepEP) (10,3k, feb 2025) · [TileKernels](https://github.com/deepseek-ai/TileKernels) (2,0k, apr 2026) · [DeepSelect](https://github.com/deepseek-ai/DeepSelect) (510, set 2026)
+- [NVIDIA Blackwell Compatibility Guide](https://docs.nvidia.com/cuda/blackwell-compatibility-guide/) e il [riferimento SM100 vs SM120](https://0xsero.github.io/blackwell-gpu-wiki/blackwell/sm100-vs-sm120/) — compute capability 10.0 vs 12.0, `tcgen05`/TMEM e l'assenza di compatibilità binaria tra i due Blackwell.
+- [Discussione su Hacker News, 20 ottobre 2026](https://news.ycombinator.com/item?id=50163277) — 2.251 punti, 856 commenti. Citata qui come prova del divario informativo: il thread è una discussione sulla redditività dell'economia dell'inferenza e non contiene alcuna discussione sostanziale sull'implementazione.
+- [vLLM](https://github.com/vllm-project/vllm) · [SGLang](https://github.com/sgl-project/sglang) · [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) — i progetti a monte nominati nei ringraziamenti.
+- Compagni AILmanac: [Guida di campo a DeepSeek-V4.1-Flash](/docs/models/deepseek-v4-1-flash-open-weight-1m) · [Controlli di campionamento](/docs/foundations/sampling-controls) · [DwarfStar e i motori di inferenza overfit](/docs/models/ds4-overfit-inference-engines)
+
+## Prossimi passi
+
+- [DeepSeek-V4.1-Flash: il modello che DeepInfer esegue](/docs/models/deepseek-v4-1-flash-open-weight-1m) — l'architettura, la manopola dello sforzo, i prezzi e i percorsi di serving disponibili a chi non ha un rack Blackwell
+- [DwarfStar (ds4) e l'ascesa dei motori di inferenza overfit](/docs/models/ds4-overfit-inference-engines) — la stessa scommessa di specializzare a fondo ed eliminare la generalità, rivolta a una singola macchina invece che a un datacenter
+- [Reading AI benchmarks](/docs/models/reading-ai-benchmarks) — l'abilità generale dietro la sezione sul full-acceptance accounting: trovare la frase nella metodologia che riformula il grafico

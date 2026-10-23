@@ -1,0 +1,82 @@
+# Streaming & Konversationen über mehrere Runden
+
+> Source: https://derob98.github.io/ailmanac/de/docs/api/streaming · AILmanac (CC BY 4.0)
+
+Antworten streamen und den Verlauf bei einer zustandslosen API selbst verwalten.
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Antworten Token für Token streamen, damit Nutzer die Ausgabe sofort sehen", "Verstehen, warum die API zustandslos ist und wie du den Konversationsverlauf selbst mitführst", "Eine Konversation über mehrere Runden fortsetzen, indem du den vollständigen vorherigen Austausch erneut sendest", "Verhindern, dass lange Konversationen das Kontextfenster und die Kosten sprengen"]} />
+
+Chat-ähnliche Erlebnisse auf der API zu bauen, läuft auf zwei praktische Realitäten hinaus: **streame**, damit Nutzer die Ausgabe sofort sehen, und **verwalte den Verlauf selbst**, weil die API zustandslos ist. Beherrsche beides, und deine Chat-UX fühlt sich schnell an und merkt sich alles.
+
+## Streaming
+
+Ohne Streaming wartet der Nutzer auf die gesamte Antwort. Mit Streaming treffen die Token ein, sobald sie generiert werden — eine weitaus bessere wahrgenommene Geschwindigkeit.
+
+<Callout type="tip" items={["Nutze den Streaming-Helfer des SDK, anstatt rohe Events von Hand zu parsen — er verwaltet den Event-Lebenszyklus für dich."]} />
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+with client.messages.stream(
+    model="claude-sonnet-5", max_tokens=1024,
+    messages=[{"role": "user", "content": "Explain RAG in two sentences."}],
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="", flush=True)
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+const stream = client.messages.stream({
+  model: "claude-sonnet-5", max_tokens: 1024,
+  messages: [{ role: "user", content: "Explain RAG in two sentences." }],
+});
+for await (const event of stream) {
+  if (event.type === "content_block_delta") process.stdout.write(event.delta.text ?? "");
+}
+```
+
+</TabItem>
+</Tabs>
+
+## Mehrere Runden: du führst den Verlauf
+
+Die API hat **kein Gedächtnis** zwischen Aufrufen ([warum](/docs/foundations/tokens-and-context)). Um eine Konversation fortzusetzen, sende jedes Mal den **gesamten vorherigen Austausch** zurück.
+
+<Steps items={[{title: "Starte die Konversation", body: "Sende die erste Nutzernachricht in der messages-Liste."}, {title: "Fange die Antwort ab", body: "Lies den Antworttext des Assistenten aus dem Ergebnis aus."}, {title: "Hänge beide Runden an", body: "Füge die Assistentenantwort und die nächste Nutzernachricht derselben messages-Liste hinzu."}, {title: "Sende die vollständige Liste erneut", body: "Sende die komplette messages-Liste erneut — so 'erinnert' sich Claude an den Austausch."}]} />
+
+```python
+messages = [{"role": "user", "content": "Hi, I'm planning a trip."}]
+# ... get assistant reply, then append both turns:
+messages.append({"role": "assistant", "content": assistant_text})
+messages.append({"role": "user", "content": "Make it 3 days."})
+# send the full `messages` list again
+```
+
+## Lange Konversationen füllen das Fenster
+
+Während der Verlauf wächst, frisst er das [Kontextfenster](/docs/foundations/tokens-and-context) und die Kosten steigen. Strategien, um das im Griff zu behalten:
+
+- **Fasse zusammen/komprimiere** ältere Runden zu einer kurzen Rekapitulation, die du mitführst.
+- **Kürze** irrelevante frühere Runden.
+- Kombiniere mit **[Prompt-Caching](/docs/api/prompt-caching)**, um nicht erneut für einen stabilen Präfix zu zahlen.
+
+<Callout type="warning" items={["Jeder Aufruf sendet den gesamten Verlauf erneut — lange Konversationen kosten mehr und können das Kontextfenster irgendwann überschreiten, wenn du nie komprimierst oder kürzt."]} />
+
+<Callout type="takeaways" items={["Streame Token für schnelle wahrgenommene Geschwindigkeit; der SDK-Helfer kümmert sich um den Event-Lebenszyklus.", "Die API ist zustandslos — sie hat kein Gedächtnis zwischen Aufrufen.", "Setze eine Konversation fort, indem du jede Runde anhängst und die vollständige messages-Liste erneut sendest.", "Komprimiere, kürze und cache, um Kosten und Größe langer Konversationen zu steuern."]} />
+
+<Quiz title="Überprüfe dich selbst" questions={[{q: "Warum verbessert Streaming das Chat-Erlebnis?", options: ["Es verbraucht insgesamt weniger Token", "Token treffen ein, sobald sie generiert werden, was die wahrgenommene Geschwindigkeit verbessert", "Es gibt dem Modell ein Gedächtnis zwischen Aufrufen", "Es umgeht die Grenze des Kontextfensters"], answer: 1, explain: "Ohne Streaming wartet der Nutzer auf die gesamte Antwort; mit Streaming treffen die Token ein, sobald sie generiert werden — eine weitaus bessere wahrgenommene Geschwindigkeit."}, {q: "Wie setzt du auf dieser API eine Konversation über mehrere Runden fort?", options: ["Die API speichert die Session-ID für dich", "Sende nur die neueste Nutzernachricht", "Sende jedes Mal den gesamten vorherigen Austausch erneut", "Aktiviere ein 'memory'-Flag in der Anfrage"], answer: 2, explain: "Die API hat kein Gedächtnis zwischen Aufrufen, also musst du jedes Mal den gesamten vorherigen Austausch zurücksenden — und dabei sowohl die Assistentenantwort als auch die nächste Nutzerrunde anhängen."}, {q: "Welche Strategie wird NICHT empfohlen, um zu verhindern, dass lange Konversationen das Kontextfenster füllen?", options: ["Ältere Runden zusammenfassen/komprimieren", "Irrelevante frühere Runden kürzen", "Mit Prompt-Caching für einen stabilen Präfix kombinieren", "max_tokens bei jeder Anfrage erhöhen"], answer: 3, explain: "Die Seite empfiehlt Zusammenfassen/Komprimieren, Kürzen und Prompt-Caching. Das Erhöhen von max_tokens reduziert nicht den Verlauf, der das Fenster füllt."}]} />
+
+## Weiter
+
+- [Tool Use / Function Calling](/docs/api/tool-use)
+- [Prompt-Caching](/docs/api/prompt-caching)
+- [Fehler, Rate-Limits & Zuverlässigkeit](/docs/api/errors-and-rate-limits)
