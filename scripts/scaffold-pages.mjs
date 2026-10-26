@@ -136,7 +136,7 @@ draft: false
 
 <LevelBadge level="${level}" />
 
-:::info Planned page — help us write it
+:::info[Planned page — help us write it]
 This page is on the AILmanac roadmap but isn't written yet. Its outline lives in our design plan. **${description}**
 
 Writing it is a great [first contribution](/docs/contribute/contribute-in-10-minutes) — open a PR and claim it.
