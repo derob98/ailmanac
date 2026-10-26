@@ -7,7 +7,7 @@
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [日本語](./README.ja.md) · [Español](./README.es.md) · [Italiano](./README.it.md)
 
 <!-- stats:start -->
-**321 pages** · **276 interactive lessons** · **12 languages** · **69 pages re-verified in the last 30 days**
+**322 pages** · **279 interactive lessons** · **12 languages** · **69 pages re-verified in the last 30 days**
 <!-- stats:end -->
 
 <p>
@@ -80,6 +80,7 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 ## Recently added
 
 <!-- fresh:start -->
+- 2026-10-26 — [Cloud Sessions: the VM Claude Code runs in when it isn't your laptop](https://derob98.github.io/ailmanac/docs/claude-code/cloud-sessions)
 - 2026-10-22 — [API Version 2026-10-21 — The First Breaking Version in Three Years](https://derob98.github.io/ailmanac/docs/api/api-version-2026-10-21)
 - 2026-10-22 — [The .pth Backdoor: LiteLLM 1.107.0 and Code That Runs Before Your Import](https://derob98.github.io/ailmanac/docs/security/pth-backdoor-litellm-supply-chain)
 - 2026-10-21 — [Agent SDK Permissions: the Six-Step Order](https://derob98.github.io/ailmanac/docs/claude-code/agent-sdk-permissions)
@@ -87,7 +88,6 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 - 2026-10-21 — [DeepInfer: DeepSeek's Own Inference Engine, Read Honestly](https://derob98.github.io/ailmanac/docs/models/deepinfer-deepseek-inference-engine)
 - 2026-10-20 — [Backdoored Open Weights: The Abliterated-Model Supply Chain](https://derob98.github.io/ailmanac/docs/security/backdoored-open-weights)
 - 2026-10-20 — [Claude Dashboards & Claude Motion](https://derob98.github.io/ailmanac/docs/claude-app/dashboards-and-motion)
-- 2026-10-20 — [The Web Your Agent Reads Isn't the Web You Read](https://derob98.github.io/ailmanac/docs/security/the-web-your-agent-reads)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).

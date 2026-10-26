@@ -1,49 +1,244 @@
 ---
 sidebar_position: 9
 title: "Statusline Customization"
-description: "Surface model, cwd, context budget and git state with a custom script."
+description: "The statusline is a shell script that gets the whole session as JSON on stdin — model, context window, cost, rate limits, PR state, and prompt-cache health. Which fields actually earn their place, the update triggers that fire it, and three recipes including a cache-health line that surfaces the quietest cost leak in long sessions."
+keywords: [Claude Code statusline, statusLine settings, /statusline, refreshInterval, context_window used_percentage, prompt_cache hit_ratio, rate_limits five_hour, ccstatusline, status line script, COLUMNS]
 ---
 
 <LevelBadge level="intermediate" />
 
-<VerifyNote lastVerified="2026-09-23" source="https://code.claude.com/docs/en/statusline">
-Configured with a `statusLine` block (`type: "command"` plus a `command` that is a script path or an inline shell command); the script reads session JSON on stdin. Fields used below are `model.display_name` and `context_window.used_percentage`; the official page lists the full set, which can grow between releases.
+<Callout type="objectives" items={[
+  "Understand the contract: Claude Code pipes the whole session as JSON to a script and prints whatever it prints",
+  "Configure it both ways — ask /statusline in natural language, or write the statusLine block yourself",
+  "Pick the handful of fields that actually earn their place, out of the sixty-odd available",
+  "Know the eight events that re-run your script, the 300 ms debounce, and when you need refreshInterval",
+  "Build three recipes: a context bar, a PR-and-rate-limit line, and a prompt-cache health indicator",
+  "Avoid the four gotchas: tput cols doesn't work, null fields before the first API call, in-flight cancellation, and losing the keyboard hints",
+]} />
+
+<VerifyNote lastVerified="2026-10-26" source="https://code.claude.com/docs/en/statusline">
+Verified against the official [Customize your status line](https://code.claude.com/docs/en/statusline) page. Several fields have version floors: `prompt_cache` and `rate_limits.spend_limit` need Claude Code v2.1.251+, `last_miss_cause` and `miss_causes` need v2.1.260+, and `pr.kind` with GitLab merge-request data needs v2.1.234+. The input schema grows between releases — check the official field table before you depend on a key.
 </VerifyNote>
 
-The **statusline** is the persistent strip Claude Code shows about your session. Customizing it keeps the facts you care about — which model, where you are, how much context is left, your git branch — always in view.
+The **statusline** is a strip at the bottom of Claude Code that runs **any shell script you configure**. Claude Code pipes the entire session state to it as JSON on stdin; your script prints something; Claude Code displays that. It runs locally and consumes no API tokens.
 
-## What you can surface
+That contract is the whole feature. Everything below is about what's *in* the JSON and when the script runs.
 
-- **Model** in use (so you don't accidentally run an expensive one for a trivial task).
-- **Current directory / project**.
-- **Context budget** — how full the window is, a cue to [`/compact`](/docs/claude-code/context-management).
-- **Git state** — branch, dirty/clean, and which [worktree](/docs/claude-code/worktrees) you're in.
+It renders in its own row **above** the built-in footer badges rather than replacing them — but configuring one does make Claude Code stop showing most of the footer's keyboard hints, including `esc to interrupt`, the `? for shortcuts` fallback, and the `hold space to speak` dictation hint. Worth knowing before you hand this setup to a teammate who relies on those.
 
-## How it works
+## Set it up
 
-You point the statusline at a **script** (configured in [settings](/docs/claude-code/settings)) that receives session data and prints a line. Because it's just a script, you can show anything you can compute.
+Two paths. The fast one is to describe what you want:
+
+<PromptCard title="Let Claude Code write the script for you">{`/statusline show model name and context percentage with a progress bar`}</PromptCard>
+
+It generates a script in `~/.claude/`, updates your settings, and asks permission for the file edits. Running `/statusline delete` (or `clear`, or "remove it") takes it back out.
+
+The manual path is a `statusLine` block in `~/.claude/settings.json` or [project settings](/docs/claude-code/settings):
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh",
+    "padding": 2,
+    "refreshInterval": 10
+  }
+}
+```
+
+Four fields, three of them optional:
+
+| Field | Meaning |
+| :--- | :--- |
+| `type` | `"command"` |
+| `command` | A script path **or an inline shell command** — it runs in a shell, so a one-liner works |
+| `padding` | Extra horizontal spacing in characters, default `0`. Relative indentation, not absolute distance from the terminal edge |
+| `refreshInterval` | Re-run every N seconds **in addition to** the event triggers. Minimum `1`. Leave unset to run on events only |
+| `hideVimModeIndicator` | Set `true` when your script renders `vim.mode` itself, so the mode isn't shown twice |
+
+Because `command` runs in a shell, the smallest possible useful statusline needs no script file at all — just `jq`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "jq -r '\"[\\(.model.display_name)] \\(.context_window.used_percentage // 0)% context\"'"
+  }
+}
+```
+
+## What's in the JSON
+
+The input is large — model, workspace, cost, context window, rate limits, PR state, worktree, vim mode, prompt cache. The temptation is to display all of it. Resist: a statusline you stop reading is worse than none.
+
+These are the fields that earn their place for most people, grouped by the surprise they prevent:
+
+| Field | Prevents |
+| :--- | :--- |
+| `model.display_name` | Burning Opus on a trivial task |
+| `context_window.used_percentage` | Running out of context mid-task — your cue to [`/compact`](/docs/claude-code/context-management) |
+| `workspace.current_dir`, `workspace.git_worktree` | Editing the wrong checkout when you have several [worktrees](/docs/claude-code/worktrees) open |
+| `rate_limits.five_hour.used_percentage` | Hitting a wall with no warning |
+| `cost.total_cost_usd` | A session quietly becoming expensive (client-side estimate at list price — not your bill) |
+| `effort.level`, `fast_mode` | Forgetting you left effort at `max` |
+| `pr.number`, `pr.review_state` | Context-switching to a browser to check whether review landed |
+| `prompt_cache.hit_ratio`, `prompt_cache.warm` | The quietest cost leak there is — see [the third recipe](#recipe-3-cache-health-the-leak-you-cant-see) |
+
+Three structural notes on the schema that save real debugging time:
+
+- **`cwd` and `workspace.current_dir` hold the same value.** Prefer `workspace.current_dir`, for consistency with `workspace.project_dir` — which is where Claude Code was *launched*, and can differ once the working directory changes mid-session.
+- **`workspace.git_worktree` and `worktree.*` are not the same thing.** `workspace.git_worktree` is populated for *any* linked worktree made with `git worktree add`, and absent in the main tree. The `worktree.*` object only exists while the session is in a Claude Code **worktree session**.
+- **`used_percentage` is input-only.** It's computed from `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` and excludes output tokens. If you compute a percentage yourself from `current_usage`, use the same input-only formula or your number won't match Claude Code's.
+
+<Flashcards cards={[
+  {front: "model.display_name", back: "Human-readable model name, e.g. \"Opus\". model.id has the raw identifier."},
+  {front: "workspace.current_dir vs workspace.project_dir", back: "current_dir is where you are now; project_dir is where Claude Code was launched. They diverge when the working directory changes mid-session. cwd duplicates current_dir."},
+  {front: "workspace.git_worktree vs worktree.name", back: "git_worktree is set for any linked git worktree and absent in the main tree. worktree.* exists only during a Claude Code worktree session."},
+  {front: "context_window.used_percentage", back: "Pre-calculated percent of the window used, from INPUT tokens only (fresh input + cache writes + cache reads). Excludes output tokens."},
+  {front: "context_window.current_usage", back: "The same tokens broken out: input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens. null before the first API call, and again right after /compact until the next call."},
+  {front: "cost.total_cost_usd", back: "Client-side estimate at list price, not a billed amount. Resets to $0 when /clear starts a new session."},
+  {front: "rate_limits.five_hour / .seven_day", back: "used_percentage (0–100) and resets_at (Unix epoch seconds) for each window. Reaching resets_at is itself an update trigger."},
+  {front: "prompt_cache.warm", back: "Whether the cached prefix is still inside its TTL. false when the last response reported no cache tokens — even if caching_observed is true."},
+  {front: "prompt_cache.hit_ratio", back: "Cache read tokens over all input tokens this session, 0–1. Denominator counts cache reads, cache writes, and uncached input. null while all are zero."},
+  {front: "prompt_cache.last_miss_cause.causes", back: "Why the last cache miss happened: tools_changed, system_prompt_changed, ttl_expired_5m, likely_server_side. null until the first miss. Needs v2.1.260+."},
+  {front: "pr.review_state", back: "approved, pending, changes_requested, or draft for the current branch's open PR. Can be absent even when pr is present."},
+  {front: "exceeds_200k_tokens", back: "A FIXED 200k threshold on total tokens from the last response — not relative to your actual context_window_size."},
+]} />
+
+## When your script runs
+
+Once at session start, including on resume. After that, on each of these:
+
+<Steps items={[
+  {title: "A new assistant message arrives", body: "The common case, and why a context percentage stays roughly current without any timer."},
+  {title: "A state change you made", body: "/compact finishing, the permission mode changing, vim mode toggling, or you editing the command in your statusLine settings."},
+  {title: "A deadline in the data you last received", body: "A rate-limit window hitting its resets_at, or a warm prompt cache hitting its expires_at. Claude Code reads those timestamps out of the JSON it already gave you and schedules a re-run."},
+  {title: "A refreshInterval timer, if you set one", body: "The only trigger that fires while nothing is happening — which is exactly when you need it."},
+]} />
+
+Three behaviors follow from that list:
+
+- **Updates are debounced at 300 ms**, so rapid changes batch into one run. Editing the `command` itself skips the debounce and runs immediately.
+- **A new trigger cancels an in-flight script.** Keep it fast. A statusline that shells out to a slow network call will routinely be killed before it prints.
+- **The event triggers go quiet when the main session is idle** — the classic case being a coordinator waiting on background [subagents](/docs/claude-code/subagents) that are changing git state underneath you. That, plus a clock or any externally-sourced segment, is what `refreshInterval` is for.
+
+Your script can print more than one plain line: **each `echo` is a row**, ANSI escape codes give you color (`\033[32m` green, `\033[0m` reset), and OSC 8 sequences make text clickable in iTerm2, Kitty, or WezTerm.
+
+## Three recipes
+
+### Recipe 1: context bar
+
+The highest-value line, and the one worth having even if you add nothing else. Note the `// 0` fallbacks — `current_usage` is `null` before the first API call and again right after `/compact`, so an unguarded `jq` expression prints `null` at exactly the moments you're most likely to be looking.
 
 ```bash
 #!/usr/bin/env bash
-# reads session JSON on stdin; prints a status line
 input=$(cat)
+
 model=$(echo "$input" | jq -r '.model.display_name // "claude"')
-branch=$(git branch --show-current 2>/dev/null)
-printf "%s · %s · %s" "$model" "$(basename "$PWD")" "${branch:-no-git}"
+dir=$(echo "$input" | jq -r '.workspace.current_dir // "."')
+pct=$(echo "$input" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)
+
+# 20-cell bar: fill proportional to pct
+filled=$(( pct / 5 ))
+bar=""
+for ((i = 0; i < 20; i++)); do
+  if (( i < filled )); then bar+="▓"; else bar+="░"; fi
+done
+
+# green under 60%, yellow under 85%, red above
+if   (( pct < 60 )); then color="\033[32m"
+elif (( pct < 85 )); then color="\033[33m"
+else                      color="\033[31m"
+fi
+
+printf "%s · %s · ${color}%s %s%%\033[0m" "$model" "$(basename "$dir")" "$bar" "$pct"
 ```
 
-(The exact input fields are documented — check before relying on a specific key.)
+### Recipe 2: branch, PR state, and your rate-limit headroom
+
+`pr.*` mirrors the footer's PR badge — and in a GitLab repository it's filled from the branch's open **merge request** instead, with `pr.kind` set to `mr` and `pr.number` being the MR number. The rate-limit fields are the ones people wish they'd had after the fact.
+
+```bash
+#!/usr/bin/env bash
+input=$(cat)
+
+branch=$(git branch --show-current 2>/dev/null)
+wt=$(echo "$input" | jq -r '.workspace.git_worktree // empty')
+pr=$(echo "$input" | jq -r '.pr.number // empty')
+state=$(echo "$input" | jq -r '.pr.review_state // empty')
+limit=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
+
+line="${branch:-no-git}"
+[ -n "$wt" ]    && line+=" ⎇ $wt"
+[ -n "$pr" ]    && line+=" · #$pr${state:+ ($state)}"
+[ -n "$limit" ] && line+=" · 5h ${limit%.*}%"
+
+printf "%s" "$line"
+```
+
+### Recipe 3: cache health, the leak you can't see
+
+This is the recipe nobody writes, and it's the one with the highest payoff in long agentic sessions. [Prompt caching](/docs/api/prompt-caching) is what makes a 100-turn session affordable — and a single changing byte near the top of your prompt silently destroys it, re-processing the whole prefix on every turn at full price. Nothing in the default UI tells you this is happening.
+
+`prompt_cache` does. Two fields carry most of the signal — `warm` (is the prefix still inside its TTL) and `hit_ratio` (cache reads over all input tokens, 0–1) — and `last_miss_cause.causes` names the culprit: `tools_changed`, `system_prompt_changed`, `ttl_expired_5m`, or `likely_server_side`.
+
+```bash
+#!/usr/bin/env bash
+input=$(cat)
+
+warm=$(echo "$input" | jq -r '.prompt_cache.warm // empty')
+ratio=$(echo "$input" | jq -r '.prompt_cache.hit_ratio // empty')
+cause=$(echo "$input" | jq -r '.prompt_cache.last_miss_cause.causes[0] // empty')
+misses=$(echo "$input" | jq -r '.prompt_cache.misses // 0')
+
+# prompt_cache is absent until the main conversation's first API response
+[ -z "$warm" ] && { printf "cache: —"; exit 0; }
+
+pct=$(awk "BEGIN{printf \"%d\", ${ratio:-0} * 100}")
+if [ "$warm" = "true" ]; then icon="\033[32m●\033[0m"; else icon="\033[31m○\033[0m"; fi
+
+printf "cache: ${icon} %s%% hit" "$pct"
+(( misses > 0 )) && printf " · %s miss%s%s" "$misses" "$([ "$misses" -eq 1 ] || echo es)" "${cause:+ ($cause)}"
+```
+
+A `system_prompt_changed` cause appearing every turn means something in your prompt prefix is non-deterministic — a timestamp in a [`CLAUDE.md`](/docs/claude-code/claude-md), a hook injecting changing output. `tools_changed` every turn usually means an [MCP server](/docs/claude-code/mcp-token-cost) is registering tools inconsistently. Both are fixable once you can see them. Claude Code shows the same statistics on the `Prompt cache (main)` line of `/usage` if you'd rather check on demand.
+
+Note that these statistics cover the **main conversation only** — subagent requests aren't counted.
+
+## Four gotchas
+
+1. **`tput cols` doesn't work.** Claude Code captures your script's output rather than connecting it to the terminal, so `tput cols` and language-level width detection can't see the terminal size. Read the `COLUMNS` and `LINES` environment variables instead — Claude Code sets both to the current dimensions before each run.
+2. **Guard every field.** `current_usage` is `null` before the first API call and again right after `/compact`; `prompt_cache` and `rate_limits.spend_limit` are absent until the first API response; `pr.review_state` can be absent even when `pr` is present; `effort.level` is absent on models without the parameter. Use `// empty` or `// 0` on everything.
+3. **Slow scripts get cancelled, not queued.** A new trigger kills the in-flight run. If you want external data, cache it to a file from a separate process and have the statusline read the file.
+4. **The spend-limit dollar amounts lag.** Behind a Claude apps gateway, `used_percentage` arrives with every response, but `used_usd`, `limit_usd`, and `period` are fetched separately about every five minutes — so they can briefly disagree with the percentage. Treat them as optional even when `spend_limit` is present.
 
 ## Don't want to script it?
 
-Community tools (e.g. `ccstatusline`) provide ready-made, configurable statuslines you can drop in instead of writing your own. Treat any third-party script as code to [review](/docs/security/reviewing-third-party-code) before trusting.
+Community tools such as `ccstatusline` ship ready-made, configurable statuslines you can drop in. They're a reasonable starting point — and like any third-party script that runs on every assistant message with your privileges, read it before you trust it. See [Reviewing Third-Party Code](/docs/security/reviewing-third-party-code).
 
-:::tip The most useful field
-For most people, **context budget + model** earn their place: they prevent the two most common surprises — running out of context mid-task, and burning the wrong (pricier) model.
-:::
+<Quiz title="Check your understanding" questions={[
+  {q: "Your statusline shows a clock and a git dirty indicator. While a coordinator session waits on background subagents, both freeze. Why, and what fixes it?", options: ["The script crashed; add error handling", "Event triggers go quiet when the main session is idle — set refreshInterval to re-run on a fixed timer", "Claude Code caches statusline output for five minutes"], answer: 1, explain: "The statusline is event-driven: new assistant messages, /compact, mode changes, and data deadlines. An idle main session produces none of those, even while subagents change git state. refreshInterval (minimum 1 second) adds a timer on top of the events."},
+  {q: "Right after you run /compact, your context percentage prints \"null\". What happened?", options: ["used_percentage is unavailable during compaction", "current_usage is null after /compact until the next API call — an unguarded jq expression prints null", "The script was cancelled mid-run"], answer: 1, explain: "current_usage is null before the first API call in a session and again immediately after /compact until the next call repopulates it. Always use a fallback like // 0. The same applies to prompt_cache and rate_limits.spend_limit, which are absent until the first API response."},
+  {q: "You want your statusline to truncate cleanly on a narrow terminal, so you call tput cols. It returns nothing useful. Why?", options: ["tput isn't installed in the statusline's shell", "Claude Code captures the script's output instead of attaching it to the terminal, so width detection fails — read the COLUMNS environment variable instead", "The statusline always renders at a fixed width"], answer: 1, explain: "Because output is captured, the script has no terminal to query. Claude Code sets COLUMNS and LINES to the current dimensions before running your script; read those."},
+  {q: "prompt_cache.last_miss_cause.causes reports system_prompt_changed on nearly every turn. What does that tell you?", options: ["Nothing actionable — cache misses are normal", "Something in your prompt prefix is non-deterministic (a timestamp in CLAUDE.md, a hook injecting changing output), so the cached prefix is invalidated every turn and re-processed at full price", "Your cache TTL is set to 5m instead of 1h"], answer: 1, explain: "A changing prefix destroys the prompt cache every turn, which is one of the quietest cost leaks in long sessions. system_prompt_changed points at the prefix; tools_changed usually points at an MCP server registering tools inconsistently."},
+  {q: "You compute context percentage yourself from current_usage and get a different number than used_percentage. Most likely reason?", options: ["used_percentage is rounded", "You included output_tokens — used_percentage is input-only: input_tokens + cache_creation_input_tokens + cache_read_input_tokens", "You used the wrong context_window_size"], answer: 1, explain: "used_percentage is calculated from input tokens only and excludes output tokens. Match that formula or your number won't agree with Claude Code's."},
+]} />
+
+<Callout type="takeaways" items={[
+  "The statusline is just a script: Claude Code pipes the whole session as JSON on stdin and renders whatever the script prints to stdout. It runs locally and costs no tokens.",
+  "/statusline with a natural-language description writes the script and wires up settings for you. The manual form is a statusLine block with type, command, and the optional padding, refreshInterval, and hideVimModeIndicator.",
+  "Of the sixty-odd fields, a handful earn their place: model.display_name, context_window.used_percentage, the directory or worktree, rate_limits.five_hour.used_percentage, and — in long sessions — prompt_cache.",
+  "Event-driven with a 300 ms debounce. An idle main session fires no events, so time-based or externally-sourced segments need refreshInterval. A new trigger CANCELS an in-flight script, so keep it fast.",
+  "Guard every field with // empty or // 0: current_usage is null before the first API call and right after /compact, and prompt_cache and spend_limit are absent until the first API response.",
+  "used_percentage is input-only (fresh input + cache writes + cache reads). Match that formula if you compute it yourself.",
+  "tput cols cannot see the terminal from inside the script — read COLUMNS and LINES, which Claude Code sets before each run.",
+  "A prompt_cache segment is the highest-leverage unusual addition: warm plus hit_ratio tell you whether your prefix is caching, and last_miss_cause.causes names what broke it.",
+]} />
 
 ## Next
 
-- [Context Management](/docs/claude-code/context-management)
-- [settings.json](/docs/claude-code/settings)
-- [Git Worktrees](/docs/claude-code/worktrees)
+- [Context Management](/docs/claude-code/context-management) — what the percentage you just put on screen actually means, and how to act on it
+- [Prompt Caching](/docs/api/prompt-caching) — why `hit_ratio` is worth watching, and what destroys a cached prefix
+- [settings.json](/docs/claude-code/settings) — where the `statusLine` block lives, and which layer wins
+- [Git Worktrees](/docs/claude-code/worktrees) — the feature `workspace.git_worktree` and `worktree.*` describe
