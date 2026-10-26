@@ -1,0 +1,273 @@
+# Ragionamento latente: agenti che pensano senza parole
+
+> Source: https://derob98.github.io/ailmanac/it/docs/models/latent-reasoning-hybrid-agents · AILmanac (CC BY 4.0) · last verified 2026-10-19
+
+HybridAgent è il primo agente open-weight che fa la maggior parte del suo pensiero come stati nascosti invece che come token: 170-183 passi latenti per compito contro ~300 token di testo, 35,5-54,7% di token in meno, 2,7-3,7x più economico. Il meccanismo (un adapter da ~10M parametri), il motivo per cui va in loop infinito se lo carichi in llama.cpp e perché 'i pensieri latenti ispezionabili' è l'affermazione più contestata del paper.
+
+<LevelBadge level="advanced" />
+
+Ogni modello di ragionamento che hai usato pensa scrivendo. Extended thinking, blocchi `<thinking>`, scratchpad, tracce ReAct: la deliberazione del modello è un flusso di token, il che significa che puoi leggerla, e significa che paghi ogni singola parola.
+
+Il **ragionamento latente** chiede cosa succede se si tolgono le parole. Invece di campionare un token dall'ultimo stato nascosto e reinserire l'embedding del token, reinserisci lo *stato nascosto stesso*. Nessuna proiezione sul vocabolario, nessun campionamento, nessun testo. Il modello continua a pensare; il pensiero ora è un vettore.
+
+È stata una curiosità di ricerca dai tempi di Coconut di Meta, a fine 2024. Il **13 ottobre 2026** è diventata qualcosa che puoi scaricare: [HybridAgent](https://arxiv.org/abs/2610.18861) di Together AI è il primo *agente* a ragionamento latente: pensa in stati nascosti, chiama un interprete Python e un motore di ricerca tramite testo, ed è distribuito come checkpoint 8B e 14B con licenza MIT. È arrivato in prima pagina su Hacker News con 396 punti e 192 commenti, e i commenti si sono divisi quasi esattamente a metà tra "questa è la strada" e "hai appena cancellato l'unica cosa che potevamo verificare".
+
+Entrambi i campi hanno ragione su qualcosa. Questa pagina copre il meccanismo, i numeri, il motivo per cui diversi tester hanno ottenuto un loop infinito invece di una risposta, e l'unica affermazione del paper che non dovresti prendere per buona.
+
+<Callout type="objectives" items={[
+  "Spiegare il ragionamento latente in una frase: reinserire lo stato nascosto come prossimo embedding di input invece di proiettarlo su un token",
+  "Leggere la formula di HybridLink e capire perché un adapter da ~10M parametri è tutto ciò che separa un modello di testo da uno latente",
+  "Citare la vera suddivisione: 170-183 passi latenti per istanza contro ~302 token di testo, dove un agente solo testo ne spende ~596",
+  "Sapere perché caricare questi pesi in llama.cpp o in Transformers semplice dà un modello di testo in loop, non un agente latente",
+  "Sostenere entrambi i lati dell'affermazione sull'ispezionabilità, incluso il test causale del paper stesso che mostra che i pensieri latenti portano il 44,9-51,3% dell'accuratezza",
+  "Collocare HybridAgent rispetto a Coconut e Soft Thinking, e sapere quale dei tre non richiede alcun addestramento"
+]} />
+
+<VerifyNote lastVerified="2026-10-19" source="https://arxiv.org/abs/2610.18861">
+HybridAgent è stato inviato il 13 ottobre 2026 e il repository ha pochi giorni (216 stelle, 28 fork al momento della scrittura). Numeri di benchmark, nomi dei checkpoint, conteggi dei download e la storia del serving si muoveranno tutti. Il **meccanismo** (stati nascosti come mezzo di ragionamento, un piccolo adapter come ponte e il compromesso sulla monitorabilità che impone) è la parte duratura. Ricontrolla il repo prima di basarti su un comando specifico.
+</VerifyNote>
+
+## Il meccanismo: un passaggio saltato
+
+Prendi un decoder standard. Al passo `t` produce uno stato nascosto dell'ultimo layer `h_t`, lo proietta attraverso la matrice di unembedding in logit sul vocabolario, campiona un token, cerca quel token nella tabella degli embedding e reinserisce l'embedding come input `t+1`.
+
+Quel viaggio di andata e ritorno attraverso il vocabolario è un collo di bottiglia in senso letteralmente informazionale. Uno stato nascosto in un moderno modello 8B è qualche migliaio di numeri in virgola mobile. Un token è una scelta tra ~150.000 opzioni, circa 17 bit. **Campionare un token butta via quasi tutto ciò che lo stato nascosto conteneva** e conserva il solo simbolo discreto che un umano può leggere.
+
+Il ragionamento latente salta il viaggio. Reinserisci `h_t` direttamente. Il successivo forward pass del modello dipende dall'intero stato continuo e non dal riassunto a 17 bit di esso.
+
+Il problema è che `h_t` vive nello spazio di *output* e il modello si aspetta qualcosa dallo spazio degli *embedding di input*. Le distribuzioni non coincidono, e inserire l'una nell'altra ingenuamente produce spazzatura. HybridLink è la correzione, ed è quasi imbarazzantemente piccola:
+
+```
+e_{t+1} = h_t + W_2 · σ(W_1 · h_t)
+```
+
+Una MLP a due layer con connessione residua. Il residuo è la parte portante: porta `h_t` invariato così che la semantica sopravviva, mentre il ramo MLP lo spinge nella distribuzione di input. Il paper lo stima in circa `2 · d_h²` parametri, cioè circa **10M per un backbone da 4B**. Tre ordini di grandezza più piccolo del modello che governa.
+
+<Callout type="key" items={[
+  "Un token è ~17 bit. Uno stato nascosto è migliaia di float. Campionare è una compressione con perdita del pensiero stesso del modello, eseguita a ogni passo.",
+  "HybridLink è e_{t+1} = h_t + W_2·σ(W_1·h_t): una MLP residua a due layer, ~10M parametri per un modello da 4B. Quell'adapter è l'intero ponte.",
+  "La connessione residua non è decorazione. L'ablazione degli autori mostra che il disegno residuo dà guadagni costanti su tutti e tre i benchmark a valle."
+]} />
+
+## Cosa ne fa un *agente*, non solo un ragionatore
+
+Coconut e Soft Thinking fanno entrambi ragionamento latente. Nessuno dei due può chiamare un tool, perché i tool sono un'interfaccia di testo: emetti una chiamata di funzione, qualcosa gira, torna del testo. Un modello nel mezzo di un pensiero latente non ha token da emettere e nessun posto dove mettere il risultato.
+
+HybridAgent lo risolve con due pezzi.
+
+<Steps items={[
+  {
+    title: "I token àncora segnano il confine di modalità",
+    body: "Il tokenizer acquisisce <latent> e </latent>. Il modello emette <latent> in modalità testo per entrare in modalità latente; HybridLink poi reinserisce in ciclo gli stati nascosti. La modalità latente si chiude quando il token più vicino allo stato corrente (proiettato) è </latent>: è la geometria stessa del modello a decidere quando ha pensato abbastanza. Non c'è un budget latente fisso. Coconut, al contrario, ha scelto un numero costante di pensieri latenti perché lasciar decidere a un classificatore non andava meglio."
+  },
+  {
+    title: "Una memoria di lavoro continua porta tutto attraverso i turni",
+    body: "Invece di serializzare il turno in testo e ricodificarlo, HybridAgent accoda voci KV (M⁽¹⁾ = M⁽⁰⁾ ⊕ [K≤t, V≤t]), così span di testo, span latenti e output dei tool si accumulano in un'unica cache. I pensieri latenti non hanno forma testuale, quindi non ci sarebbe nulla da ricodificare: la KV cache È la trascrizione. Per questo il paper chiama il contesto ibrido 'lossless' tra i turni."
+  },
+  {
+    title: "Due fasi di addestramento insegnano il cambio di modalità",
+    body: "HybridSFT insegna al backbone a coordinarsi con HybridLink su sequenze ibride integrate con tool. Poi HybridRL lo fa scalare con la ricompensa r(τ) = r_correct + r_format + r_tool. Nota cosa manca: NON c'è alcun termine di ricompensa per l'uso della modalità latente. L'equilibrio testo/latente è emergente, non incentivato."
+  },
+  {
+    title: "I tool restano ordinari",
+    body: "Un interprete Python in sandbox e un motore di ricerca dal vivo (Tavily nella configurazione del paper), limitati a 10 chiamate per traiettoria con i primi 10 snippet per query. Niente nel livello dei tool è esotico: l'agente torna al testo per chiamarli, esattamente come farebbe ReAct."
+  }
+]} />
+
+Il dettaglio di addestramento da rubare è la **supervisione auto-condizionata**. Il teacher forcing ingenuo inserisce embedding latenti ground-truth durante l'addestramento, così in inferenza il modello incontra per la prima volta i propri output di HybridLink e deriva. La correzione è uno schema a due passaggi: il primo passaggio fa teacher forcing sulla sequenza ibrida ground-truth, il secondo rigioca la sequenza identica con gli embedding latenti *generati dal modello stesso* sostituiti. La Tabella 3 la riporta come valore **30,5% in media** su AIME25/26 e MATH500 rispetto all'attivare HybridLink senza di essa. È lo stesso problema di exposure bias che lo scheduled sampling affronta nei modelli di sequenza, e la stessa forma di correzione.
+
+## I numeri
+
+<Callout type="warning" items={[
+  "Questi sono i numeri degli autori stessi sul loro harness, vecchi di pochi giorni, senza replica indipendente. Leggili come un'affermazione, non come una misurazione su cui contare.",
+  "Il titolo '10,4% di miglioramento' è una media su 3 scale di modello e 11 benchmark contro un mix di baseline. Per benchmark va da +1,8 punti a +42,5."
+]} />
+
+| Affermazione | Cifra |
+| --- | --- |
+| Guadagno medio di prestazioni | **+10,4%** su 3 scale, 11 benchmark |
+| Riduzione dei token | **35,5-54,7%** |
+| Velocità di inferenza | **1,8x-2,6x** più veloce |
+| Costo | **2,7x-3,7x** più economico |
+| Token di testo per istanza (8B) | **~302**, contro i **~596** di un agente di testo |
+| Passi latenti per istanza | **170-183** |
+
+Le ultime due righe sono quelle che spiegano davvero l'architettura. HybridAgent emette circa metà del testo di un agente solo testo, ed esegue 170-183 forward pass aggiuntivi che non producono alcun testo. **Non pensa di meno. Pensa in un mezzo che non fattura a parola.**
+
+Questo dice anche da dove viene il risparmio di costo, e da dove no. Un passo latente è comunque un intero forward pass: stessi FLOP, stessa latenza, stesso traffico di memoria della generazione di un token. Il risparmio non è calcolo gratuito. Viene da (a) non pagare l'overhead di decode-and-re-embed, (b) una sequenza KV molto più corta perché gli span latenti sono densi invece che esplicitati, e (c) meno passi totali per arrivare a una risposta. Se la tua fattura è dominata dal prefill di un grande contesto statico, il ragionamento latente non fa nulla per te.
+
+Contro le baseline latenti i divari sono grandi: su GAIA Level 1 il paper riporta **+39,8% su Coconut** e **+28,2% su Soft Thinking**, e circa +41-42% su WebWalker per entrambi. È meno una conferma del ragionamento di HybridAgent che un promemoria che Coconut e Soft Thinking non sono mai stati costruiti per tenere insieme un ciclo di tool a più turni. Contro le baseline *testuali* i margini sono modesti e onesti: AIME25 39,2% contro il 37,1% di ARPO, MATH500 84,6% contro 82,8%, MuSiQue 32,0% contro 28,5%.
+
+## Il tranello che ha morso tutti il primo giorno
+
+Diverse persone nel thread di lancio hanno riferito lo stesso fallimento: chiedi all'8B "chi è il papa?" e va in loop all'infinito. Un tester ha visto lo stesso loop con il 14B in llama.cpp sia a 8 bit sia a 16 bit, e ha concluso che il problema fosse llama.cpp e non il modello.
+
+Quella diagnosi è quasi certamente giusta, e la model card dice perché in una riga: **il caricamento standard con Transformers produce una variante solo testo**, perché il comportamento ibrido vive in `adapter.pt` / `adapter_config.json` (i pesi di HybridLink) più il motore di generazione personalizzato nel repo.
+
+Pensa a cosa fa un runtime generico con questi pesi. Il tokenizer ha `<latent>` e `</latent>`. Il backbone addestrato ha imparato a emettere `<latent>` e poi ad aspettarsi che HybridLink prenda il controllo. In llama.cpp o in `AutoModelForCausalLM` semplice, nulla prende il controllo. Non c'è alcun componente che reinserisca gli stati nascosti e nessun componente che valuti la condizione di chiusura basata sul vicino più prossimo. Il modello entra in una modalità che non esiste e non ne trova mai l'uscita.
+
+<Callout type="warning" items={[
+  "Questo è un modello a forma di stack di inferenza, non a forma di pesi. Conversione GGUF, vLLM, Ollama e Transformers semplice non riprodurranno il comportamento del paper: non possono, perché HybridLink non è nel grafo.",
+  "La generazione infinita su una domanda banale è la firma di un HybridLink mancante, non di un checkpoint rotto.",
+  "Il README non documenta alcun percorso di serving oltre al motore di inferenza batch del repo. Tratta 'posso servirlo?' come senza risposta, non come un sì."
+]} />
+
+<PromptCard title="L'unico percorso che esegue la vera architettura">
+{`git clone https://github.com/togethercomputer/HybridAgent.git && cd HybridAgent
+conda create -n hybridagent python=3.11 -y && conda activate hybridagent
+pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements.txt && pip install -e .
+cp .env.example .env   # set TAVILY_API_KEY — the search tool needs it
+
+python -m hybrid_inference.run_batch \\
+  --model togethercomputer/HybridAgent-8B-Agentic \\
+  --input examples/questions.jsonl \\
+  --output outputs/results.jsonl --num_samples 4`}
+</PromptCard>
+
+Se vuoi *vedere* i pensieri latenti invece di misurarli con benchmark, il repo include un viewer dedicato che rende un'esecuzione come report HTML con pensieri in pseudo-testo intercalati a chiamate di tool e osservazioni:
+
+<PromptCard title="Rendi i pensieri latenti di una traiettoria come pseudo-testo leggibile">
+{`python -m interpretable_latent_mode \\
+  --model togethercomputer/HybridAgent-14B-Agentic \\
+  --question "Which of these two papers reports a larger token reduction, and by how much?" \\
+  --output report.html`}
+</PromptCard>
+
+L'addestramento è un'altra scala di impegno. HybridSFT richiede **8-16 GPU**; HybridRL richiede **32 GPU su 4 nodi**. Non è un fine-tuning che si esegue su una workstation.
+
+## L'affermazione contestata: i pensieri latenti sono davvero ispezionabili?
+
+La mossa retorica più forte del paper è che il ragionamento latente non ti costa trasparenza. Ogni passo latente può essere letto come pseudo-testo, prendendo lo stato che HybridLink ha prodotto e trovandone il vicino più prossimo nella tabella degli embedding per similarità coseno. La Figura 2 mostra che il risultato è leggibile e specifico del contesto, e resta semanticamente allineato con il ragionamento testuale circostante.
+
+È una capacità reale, e va oltre ciò che offriva Coconut. È anche l'anello più debole dell'argomento, per un motivo che un commentatore ha espresso con precisione: la decodifica per vicino più prossimo **"loses meaning where the model is expressing combinations of tokens in a vector."** L'intera premessa del ragionamento latente è che uno stato nascosto porta più di quanto qualsiasi token singolo possa portare. Leggerlo *come* token singolo scarta necessariamente il surplus: lo stesso surplus che rendeva la tecnica degna di essere fatta.
+
+L'esperimento del paper stesso lo rende concreto ed è il risultato più interessante al suo interno. La Tabella 5 esegue interventi causali: corrompi i pensieri latenti e l'accuratezza cala del **44,9-51,3%**. Il flusso latente non è un canale laterale decorativo. Porta circa metà della risoluzione dei problemi del modello.
+
+Quindi le due affermazioni, *i pensieri latenti sono portanti* e *i pensieri latenti sono leggibili fedelmente come token singoli*, sono in tensione. Una lettura che comprimesse un vettore portante fino alla sua parola più vicina senza perdere nulla significherebbe che il vettore non ha mai avuto bisogno di essere un vettore.
+
+Conta oltre l'estetica dell'interpretabilità, perché leggere la chain of thought è oggi un controllo di sicurezza attivo. Il position paper intra-laboratorio del 2025 **[Chain of Thought Monitorability](https://arxiv.org/abs/2507.11473)**, con 41 autori tra cui Yoshua Bengio, Anca Dragan e Dan Hendrycks, di Anthropic, OpenAI, Google DeepMind e altri, sostiene proprio che i modelli di ragionamento esternalizzano la loro deliberazione in forma leggibile, che monitorarla è una vera opportunità di supervisione, e che l'opportunità è **fragile**: cambi di architettura possono rimuovere il substrato monitorabile come effetto collaterale di una decisione di efficienza. Il ragionamento latente è l'esempio da manuale di quell'effetto collaterale. Il nome informale del punto d'arrivo è **neuralese**: ragionamento senza alcuna traccia leggibile da un umano.
+
+Il thread di lancio ha fatto emergere anche la versione più sottile in fase di addestramento, che i commentatori hanno etichettato con la frase di Zvi Mowshowitz "the Most Forbidden Technique": se *ottimizzi contro* un monitor della chain of thought durante l'RL, non rimuovi il comportamento cattivo, rimuovi la sua visibilità. Il ragionamento latente arriva a una destinazione simile da un'altra strada: non insegnando al modello a nascondere il suo pensiero, ma spostando il pensiero dove non c'è nulla da nascondere.
+
+### La parte che meritava più attenzione di quella ricevuta
+
+L'inquadramento del paper stesso, nella sezione Discussion, è il dettaglio che la maggior parte della copertura ha saltato. I pensieri latenti esistono solo come stati nascosti, leggibili tramite HybridLink, e l'argomento offerto è che questa è una *funzionalità*: un provider che lo distribuisce può eseguire una valutazione di sicurezza sull'intera traccia di ragionamento mentre la traccia non lascia mai la sua infrastruttura, così il ragionamento non può trapelare agli utenti come può il pensiero testuale.
+
+Leggilo due volte. È una posizione coerente: le tracce di ragionamento sono davvero un asset competitivo e una superficie di esfiltrazione, ed è per questo che tanti provider riassumono invece di esporre l'extended thinking. Ma la struttura che descrive è una **trasparenza asimmetrica per costruzione**: il laboratorio che detiene l'adapter può leggere i pensieri, e nessun altro può. Per un checkpoint con licenza MIT che include il proprio adapter, l'asimmetria è irrilevante: la chiave ce l'hai tu. Per un modello di frontiera ospitato e costruito allo stesso modo, non lo sarebbe.
+
+## Dove si colloca nel campo
+
+<Flashcards cards={[
+  { front: "Ragionamento latente, in una frase", back: "Reinserire lo stato nascosto dell'ultimo layer come prossimo embedding di input invece di proiettarlo su logit, campionare un token e ri-embeddare quel token. Il pensiero resta un vettore." },
+  { front: "Coconut (Meta FAIR, dic 2024)", back: "Chain of Continuous Thought: il punto d'origine. arXiv 2412.06769. Ha mostrato un comportamento emergente di ricerca in ampiezza e ha battuto la CoT su compiti logici ricchi di backtracking come ProsQA con meno token di pensiero. Usa un numero costante di pensieri latenti; nessun accesso a tool." },
+  { front: "Soft Thinking (mag 2025)", back: "arXiv 2505.15778. Senza addestramento: il 'concept token' è la miscela pesata per probabilità degli embedding dei token, così ottieni uno stato continuo senza mettere a punto nulla. Aggiunge un meccanismo Cold Stop per fermarsi quando è troppo sicuro. Il modo più economico di provare il ragionamento latente." },
+  { front: "HybridAgent (Together AI, ott 2026)", back: "arXiv 2610.18861. Primo AGENTE a ragionamento latente: pensiero latente più chiamate a tool in testo in un'unica generazione, una memoria di lavoro KV continua tra i turni, checkpoint MIT 8B/14B su Qwen3-Base, addestrati con HybridSFT poi HybridRL." },
+  { front: "HybridLink", back: "e_{t+1} = h_t + W_2·σ(W_1·h_t). Una MLP residua a due layer che mappa gli stati nascosti di output nello spazio degli embedding di input. ~2·d_h² parametri (~10M per un modello da 4B). Distribuito come adapter.pt: senza di esso il checkpoint è un modello di testo che va in loop." },
+  { front: "Token àncora", back: "<latent> e </latent>. Il modello emette <latent> per entrare in modalità latente. La modalità latente si chiude quando il token più vicino allo stato corrente è </latent>, quindi il modello decide il proprio budget di pensiero per ogni span." },
+  { front: "Memoria di lavoro continua", back: "M⁽¹⁾ = M⁽⁰⁾ ⊕ [K≤t, V≤t]. Le voci KV per span di testo, latenti e di tool si accumulano direttamente, senza passaggio di serializzazione e ricodifica. Necessario perché i pensieri latenti non hanno forma testuale da ricodificare." },
+  { front: "Supervisione auto-condizionata", back: "Addestramento a due passaggi: il primo fa teacher forcing sui latenti ground-truth, il secondo rigioca la stessa sequenza con i latenti generati dal modello stesso. Chiude il divario di esposizione. Vale il 30,5% in media rispetto alla sola attivazione di HybridLink (Tabella 3)." },
+  { front: "Ricompensa di HybridRL", back: "r(τ) = r_correct + r_format + r_tool. Nessun termine di ricompensa per l'uso latente: l'equilibrio testo/latente emerge e non è incentivato." },
+  { front: "Il numero dell'intervento causale", back: "Corrompere i pensieri latenti costa il 44,9-51,3% di accuratezza (Tabella 5). Prova che il flusso latente è portante, e il motivo per cui la lettura per vicino più prossimo non può essere lossless." },
+  { front: "Neuralese", back: "Termine informale per il ragionamento svolto in spazio latente continuo o con calcolo ricorrente senza alcuna traccia di token leggibile da un umano. Il punto d'arrivo verso cui indica il ragionamento latente, e ciò che preoccupa la ricerca sulla monitorabilità della CoT." },
+  { front: "Il sintomo llama.cpp", back: "Generazione infinita su una domanda banale. Il backbone emette <latent>, il runtime non ha HybridLink che prenda il controllo e niente può soddisfare la condizione di chiusura. Non un checkpoint rotto: un componente mancante." },
+]} />
+
+## Dovresti già occupartene?
+
+Risposta onesta per tre lettori diversi.
+
+| Se sei… | Allora |
+| --- | --- |
+| **Chi rilascia un agente su un'API** | Niente da fare oggi. Non esiste un endpoint ospitato di ragionamento latente. La lezione trasferibile è la diagnosi, non la cura: misura quanta parte della tua fattura sono token di *deliberazione* rispetto ai token di input e di azione. Se la deliberazione domina, questa linea di lavoro punta a te. |
+| **Chi esegue pesi aperti** | Vale un pomeriggio, su una macchina con GPU, tramite il motore del repo stesso, e solo quello. Aspettati un artefatto di ricerca: 8B/14B su Qwen3-Base non è competitivo a livello di frontiera nella chat generale, e i benchmark che contano qui sono ricerca agentica e matematica. |
+| **Chi fa lavoro di interpretabilità o sicurezza** | È la cosa più utile dell'elenco. Un agente latente rilasciato, con licenza MIT, che usa tool, con uno strumento di lettura incluso e un risultato di intervento causale pubblicato, è un oggetto di studio molto migliore di un'affermazione interna di un laboratorio sul proprio ragionamento nascosto. |
+
+Gli scettici nel thread di lancio avevano un altro punto da conservare: la chain-of-thought continua non è nuova, le architetture di transformer in loop puntano a qualcosa di simile, e i laboratori di frontiera potrebbero benissimo già eseguire in privato varianti di questo. Niente dell'esistenza di HybridAgent ti dice se qualche prodotto in commercio pensi nello spazio latente. Ciò che dice è che **l'ingegneria non è più difficile**: un adapter da ~10M parametri più due fasi di addestramento, ed è proprio per questo che la questione della monitorabilità smette di essere ipotetica.
+
+<Quiz questions={[
+  {
+    q: "Cosa fa davvero HybridLink?",
+    options: [
+      "Comprime la KV cache così gli span latenti occupano meno memoria",
+      "Mappa gli stati nascosti dell'ultimo layer nello spazio degli embedding di input tramite una MLP residua a due layer, così uno stato nascosto può essere reinserito come prossimo input",
+      "Instrada tra un piccolo modello latente e un grande modello di testo a seconda della difficoltà del compito",
+      "Traduce i vettori latenti in spiegazioni in linguaggio naturale per l'utente"
+    ],
+    answer: 1,
+    explain: "e_{t+1} = h_t + W_2·σ(W_1·h_t). Gli stati nello spazio di output e gli embedding nello spazio di input hanno distribuzioni diverse; HybridLink li collega, con il residuo che porta avanti la semantica. ~10M parametri per un backbone da 4B."
+  },
+  {
+    q: "Perché caricare HybridAgent-8B in llama.cpp o in Transformers semplice produce generazione infinita?",
+    options: [
+      "I checkpoint sono corrotti e vanno riscaricati",
+      "La quantizzazione a 8 bit rompe gli embedding dei token àncora",
+      "HybridLink vive in un adapter separato più codice di generazione personalizzato, quindi il backbone emette <latent> e non esiste nulla che reinserisca gli stati nascosti o valuti la condizione di chiusura",
+      "Il modello richiede una chiave API Tavily prima di poter generare qualsiasi testo"
+    ],
+    answer: 2,
+    explain: "La model card afferma chiaramente che il caricamento standard con Transformers produce una variante solo testo. Il comportamento ibrido sta in adapter.pt e nel motore di generazione del repo. Il modello entra in una modalità che il runtime non può implementare e non ne esce mai."
+  },
+  {
+    q: "Un agente solo testo spende ~596 token di testo su un compito; HybridAgent-8B ne spende ~302. Cos'altro sta facendo?",
+    options: [
+      "Niente: ragiona semplicemente in modo più conciso, ed è da lì che viene tutto il risparmio",
+      "170-183 forward pass latenti aggiuntivi che non producono alcun testo",
+      "Mette in cache il turno precedente così da saltare un nuovo ragionamento",
+      "Delega il ragionamento restante a un modello più grande"
+    ],
+    answer: 1,
+    explain: "Non pensa di meno: pensa in un mezzo non fatturato a parola. Un passo latente è comunque un intero forward pass, quindi il risparmio viene dal saltare decode-and-re-embed, da una sequenza KV più corta e da meno passi totali, non da calcolo gratuito."
+  },
+  {
+    q: "Quale risultato mina di più l'affermazione che i pensieri latenti siano ispezionabili fedelmente come pseudo-testo?",
+    options: [
+      "La lettura funziona solo sul checkpoint 14B",
+      "Corrompere i pensieri latenti costa il 44,9-51,3% di accuratezza, quindi i vettori portano molto più di quanto il loro singolo token più vicino possa rappresentare",
+      "Gli autori non hanno mai pubblicato lo strumento di lettura",
+      "La modalità latente è usata solo sui benchmark di matematica"
+    ],
+    answer: 1,
+    explain: "L'intervento causale prova che il flusso latente è portante. Una lettura per vicino più prossimo che comprimesse un vettore portante in una parola senza perdere nulla significherebbe che il vettore non ha mai avuto bisogno di essere continuo. Le due affermazioni non possono essere entrambe pienamente vere."
+  },
+  {
+    q: "Quale dei tre approcci di ragionamento latente non richiede alcun addestramento?",
+    options: [
+      "Coconut: riordina solo tracce CoT esistenti",
+      "HybridAgent: HybridLink è congelato all'inizializzazione",
+      "Soft Thinking: il concept token è una miscela pesata per probabilità di embedding di token esistenti",
+      "Tutti e tre richiedono fine-tuning supervisionato"
+    ],
+    answer: 2,
+    explain: "Soft Thinking (arXiv 2505.15778) è esplicitamente training-free: costruisce lo stato continuo dalla distribuzione di output del modello stesso sul vocabolario. Coconut richiede addestramento a curriculum; HybridAgent richiede HybridSFT più HybridRL su 8-32 GPU."
+  },
+  {
+    q: "La ricompensa di HybridRL è r_correct + r_format + r_tool. Cosa c'è di notevole in quell'elenco?",
+    options: [
+      "Penalizza la modalità latente, quindi il modello la usa con parsimonia",
+      "Non c'è alcun termine di ricompensa per l'uso latente: l'equilibrio testo/latente è emergente",
+      "Premia direttamente output più brevi, ed è da lì che viene la riduzione dei token",
+      "Include un termine di monitorabilità che mantiene i pensieri leggibili"
+    ],
+    answer: 1,
+    explain: "Nessuna ricompensa sull'uso della modalità. Gli autori lasciano che l'equilibrio nasca dall'ottimizzazione di correttezza, formato e uso dei tool, il che significa anche che la riduzione dei token è un effetto collaterale della policy appresa e non qualcosa su cui si è addestrato direttamente."
+  }
+]} />
+
+## Fonti e approfondimenti
+
+- [Hybrid Reasoning Agents (arXiv 2610.18861)](https://arxiv.org/abs/2610.18861) — Zou, Qi, Chen, Bianchi, Zhu, Lu, He, Zou; inviato il 13 ottobre 2026. La formula di HybridLink, la memoria di lavoro continua, HybridSFT/HybridRL, gli 11 benchmark, l'ablazione dell'auto-condizionamento (Tabella 3) e gli interventi causali (Tabella 5).
+- [togethercomputer/HybridAgent](https://github.com/togethercomputer/HybridAgent) — MIT. Motore di inferenza, pipeline SFT e RL, il viewer `interpretable_latent_mode` e i requisiti GPU (8-16 per SFT, 32 su 4 nodi per RL).
+- [togethercomputer/HybridAgent-8B-Agentic](https://huggingface.co/togethercomputer/HybridAgent-8B-Agentic) e [-14B-Agentic](https://huggingface.co/togethercomputer/HybridAgent-14B-Agentic) — i checkpoint, su Qwen3-8B-Base e Qwen3-14B-Base. La model card è dove vive l'avviso "standard Transformers loading yields a text-only variant".
+- [Pagina del paper su Hugging Face](https://huggingface.co/papers/2610.18861) — artefatti collegati, inclusi i dataset di addestramento `HybridAgent-HybridSFT-v1/-v2` e `HybridAgent-HybridRL`.
+- [Training Large Language Models to Reason in a Continuous Latent Space (arXiv 2412.06769)](https://arxiv.org/abs/2412.06769) — Coconut, Meta FAIR. L'origine della chain-of-continuous-thought, il risultato di BFS emergente e il risultato che un classificatore appreso per il cambio di modalità non andava meglio di un budget latente fisso.
+- [Soft Thinking: Unlocking the Reasoning Potential of LLMs in Continuous Concept Space (arXiv 2505.15778)](https://arxiv.org/abs/2505.15778) — l'alternativa training-free: miscele di embedding pesate per probabilità come concept token, più Cold Stop.
+- [Chain of Thought Monitorability: A New and Fragile Opportunity for AI Safety (arXiv 2507.11473)](https://arxiv.org/abs/2507.11473) — il position paper intra-laboratorio (41 autori; tra loro Bengio, Dragan, Hendrycks) sul perché il ragionamento leggibile è un'opportunità di supervisione e perché le scelte di architettura possono distruggerla in silenzio.
+- [Discussione su Hacker News, 19 ottobre 2026](https://news.ycombinator.com/item?id=50145337) — 396 punti, 192 commenti. Fonte per le segnalazioni pratiche di fallimento (loop su "who is the pope?", llama.cpp a 8 e 16 bit), l'obiezione sulla lettura per vicino più prossimo e l'inquadramento "Most Forbidden Technique".
+- Compagni AILmanac: [Why AI agents burn tokens](/docs/models/why-agents-burn-tokens) · [Reasoning models compared](/docs/models/reasoning-models-compared) · [Reward hacking in coding agents](/docs/frontiers/reward-hacking-in-coding-agents)
+
+## Prossimi passi
+
+- [Why AI agents burn tokens (and how to cap the bill)](/docs/models/why-agents-burn-tokens) — il problema che il ragionamento latente attacca, misurato su modelli che puoi davvero chiamare oggi
+- [Diffusion LLMs: the models that don't write left to right](/docs/models/diffusion-llms-parallel-text) — l'altro tentativo attuale di cambiare il ciclo di decodifica stesso invece del modello al suo interno
+- [Reward hacking in coding agents](/docs/frontiers/reward-hacking-in-coding-agents) — cosa va storto quando ottimizzi contro ciò che puoi osservare, che è la metà in fase di addestramento del problema della monitorabilità

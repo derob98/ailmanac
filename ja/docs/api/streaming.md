@@ -1,0 +1,82 @@
+# ストリーミング & マルチターン会話
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/api/streaming · AILmanac (CC BY 4.0)
+
+レスポンスをストリーミングし、ステートレスな API で履歴を管理する。
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["レスポンスをトークンごとにストリーミングし、ユーザーがすぐ出力を見られるようにする", "API がなぜステートレスなのか、そして会話履歴を自分で持ち運ぶ方法を理解する", "直前のやり取り全体を再送してマルチターン会話を続ける", "長い会話がコンテキストウィンドウとコストを膨張させないようにする"]} />
+
+API でチャットのような体験を構築することは、2つの実務的な現実に集約されます：ユーザーがすぐ出力を見られるよう**ストリーミング**すること、そして API がステートレスなので**履歴を自分で管理**すること。両方を使いこなせば、チャットの UX は速く感じられ、すべてを覚えてくれます。
+
+## ストリーミング
+
+ストリーミングなしでは、ユーザーは返信全体を待ちます。ストリーミングありなら、生成されるそばからトークンが届きます——体感速度がはるかに良くなります。
+
+<Callout type="tip" items={["生のイベントを手で解析する代わりに、SDK のストリーミングヘルパーを使ってください——イベントのライフサイクルを代わりに管理してくれます。"]} />
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+with client.messages.stream(
+    model="claude-sonnet-5", max_tokens=1024,
+    messages=[{"role": "user", "content": "Explain RAG in two sentences."}],
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="", flush=True)
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+const stream = client.messages.stream({
+  model: "claude-sonnet-5", max_tokens: 1024,
+  messages: [{ role: "user", content: "Explain RAG in two sentences." }],
+});
+for await (const event of stream) {
+  if (event.type === "content_block_delta") process.stdout.write(event.delta.text ?? "");
+}
+```
+
+</TabItem>
+</Tabs>
+
+## マルチターン：履歴はあなたが持つ
+
+API は呼び出し間で**記憶を持ちません**（[なぜか](/docs/foundations/tokens-and-context)）。会話を続けるには、毎回**直前のやり取り全体**を送り返します。
+
+<Steps items={[{title: "会話を始める", body: "最初のユーザーメッセージを messages リストに入れて送ります。"}, {title: "返信を取り込む", body: "結果からアシスタントの応答テキストを読みます。"}, {title: "両方のターンを追加する", body: "アシスタントの返信と次のユーザーメッセージを同じ messages リストに追加します。"}, {title: "リスト全体を再送する", body: "完全な messages リストを再び送ります——これが Claude がやり取りを「覚えている」仕組みです。"}]} />
+
+```python
+messages = [{"role": "user", "content": "Hi, I'm planning a trip."}]
+# ... get assistant reply, then append both turns:
+messages.append({"role": "assistant", "content": assistant_text})
+messages.append({"role": "user", "content": "Make it 3 days."})
+# send the full `messages` list again
+```
+
+## 長い会話はウィンドウを満たす
+
+履歴が増えると[コンテキストウィンドウ](/docs/foundations/tokens-and-context)を食い、コストが上がります。抑えるための戦略：
+
+- 古いターンを短い要約に**要約/圧縮**して持ち越す。
+- 無関係な以前のターンを**切り詰める**。
+- 安定したプレフィックスを再び払わずに済むよう、**[プロンプトキャッシュ](/docs/api/prompt-caching)**と組み合わせる。
+
+<Callout type="warning" items={["毎回の呼び出しが履歴全体を再送します——長い会話はコストが増え、圧縮や切り詰めをしなければ最終的にコンテキストウィンドウを超える可能性があります。"]} />
+
+<Callout type="takeaways" items={["体感速度のためにトークンをストリーミングする；SDK ヘルパーがイベントのライフサイクルを処理する。", "API はステートレス——呼び出し間で記憶を持たない。", "各ターンを追加し messages リスト全体を再送することで会話を続ける。", "圧縮、切り詰め、キャッシュで長い会話のコストとサイズを制御する。"]} />
+
+<Quiz title="理解度チェック" questions={[{q: "ストリーミングがチャット体験を改善するのはなぜですか？", options: ["全体として使うトークンが少なくなる", "生成されるそばからトークンが届き、体感速度が向上する", "呼び出し間でモデルに記憶を与える", "コンテキストウィンドウの上限を回避する"], answer: 1, explain: "ストリーミングなしではユーザーは返信全体を待ちます。ストリーミングありなら生成されるそばからトークンが届く——体感速度がはるかに良くなります。"}, {q: "この API でマルチターン会話をどう続けますか？", options: ["API がセッション ID を保存してくれる", "最新のユーザーメッセージだけを送る", "毎回、直前のやり取り全体を再送する", "リクエストで「メモリ」フラグを有効にする"], answer: 2, explain: "API は呼び出し間で記憶を持たないので、毎回、直前のやり取り全体を送り返す必要があります——アシスタントの返信と次のユーザーターンの両方を追加して。"}, {q: "長い会話がコンテキストウィンドウを満たすのを防ぐ戦略として推奨されて「いない」のはどれですか？", options: ["古いターンを要約/圧縮する", "無関係な以前のターンを切り詰める", "安定したプレフィックスのためプロンプトキャッシュと組み合わせる", "毎回のリクエストで max_tokens を増やす"], answer: 3, explain: "このページは要約/圧縮、切り詰め、プロンプトキャッシュを推奨しています。max_tokens を上げてもウィンドウを満たす履歴は減りません。"}]} />
+
+## 次へ
+
+- [ツール利用 / 関数呼び出し](/docs/api/tool-use)
+- [プロンプトキャッシュ](/docs/api/prompt-caching)
+- [エラー、レート制限 & 信頼性](/docs/api/errors-and-rate-limits)

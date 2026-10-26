@@ -1,0 +1,58 @@
+# Bienvenue et pourquoi ce site existe
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/start-here/welcome · AILmanac (CC BY 4.0)
+
+Ce qu'est AILmanac, à qui il s'adresse, et ce qu'il ne cherche délibérément pas à remplacer.
+
+<LevelBadge level="all" />
+
+**AILmanac** est un **almanach** gratuit et construit par la communauté pour **tirer le meilleur de Claude — et de n'importe quelle IA**. Un almanach est une référence sur laquelle on revient : complète, dite en langage clair, et tenue à jour. C'est l'objectif ici.
+
+<Callout type="objectives" items={["Comprendre ce qu'est AILmanac — et ce qu'il n'est délibérément pas", "Trouver le niveau qui vous correspond : débutant, intermédiaire ou avancé", "Choisir votre porte d'entrée la plus rapide et commencer à lire en moins d'une minute"]} />
+
+## À qui cela s'adresse
+
+À tout le monde, volontairement — et nous vous indiquons le niveau de chaque page pour que vous ne vous sentiez jamais perdu ou pris de haut :
+
+| Niveau | C'est vous si... |
+| --- | --- |
+| <LevelBadge level="beginner" /> | Vous avez à peine utilisé l'IA et voulez une première victoire garantie. |
+| <LevelBadge level="intermediate" /> | Vous utilisez déjà Claude et voulez des résultats nettement meilleurs. |
+| <LevelBadge level="advanced" /> | Vous construisez avec Claude Code, l'API, les agents et MCP. |
+
+## Ce qui rend ce site différent
+
+D'excellentes ressources existent déjà (voir [la carte du paysage](/docs/start-here/landscape-map)). AILmanac n'est **pas** une décharge de liens ni une copie de la documentation officielle. C'est :
+
+- **Argumenté** — nous vous indiquons la *seule méthode recommandée*, puis les alternatives.
+- **Balisé par niveau** — chaque page porte un badge afin que vous lisiez ce qui vous convient.
+- **Riche en modèles** — des [points de départ à copier-coller](/docs/templates) utilisables en 30 secondes.
+- **Honnête sur l'actualité** — les faits qui changent (noms de modèles, prix, fonctionnalités) portent une date de « dernière vérification » et un lien vers la source.
+
+## Ce que ce n'est PAS
+
+:::warning[La documentation officielle est la source de vérité]
+Lorsque AILmanac et la [documentation officielle d'Anthropic](https://platform.claude.com/docs) se contredisent, **c'est la documentation officielle qui l'emporte**. Les outils d'IA évoluent vite ; nous travaillons dur pour rester à jour, mais vérifiez toujours tout élément critique auprès de la source que nous indiquons.
+:::
+
+Nous ne stockons pas non plus vos données, ne pouvons pas voir votre compte, et ne prendrons pas de décisions à votre place sur des travaux à fort enjeu — voir [Usage responsable](/docs/security).
+
+## Trois portes d'entrée
+
+Choisissez la porte qui correspond à votre situation actuelle :
+
+<Steps items={[{title: "Tout nouveau ?", body: "Commencez par Vos 5 premières minutes pour une première victoire garantie — /docs/start-here/your-first-5-minutes."}, {title: "Vous voulez un plan ?", body: "Choisissez un parcours d'apprentissage pour suivre un itinéraire structuré — /docs/start-here/learning-paths."}, {title: "Un terme vous échappe ?", body: "Rendez-vous au Glossaire pour des définitions en langage clair — /docs/start-here/glossary."}]} />
+
+- **Tout nouveau ?** → [Vos 5 premières minutes](/docs/start-here/your-first-5-minutes)
+- **Vous voulez un plan ?** → [Choisir un parcours d'apprentissage](/docs/start-here/learning-paths)
+- **Un terme vous échappe ?** → [Glossaire](/docs/start-here/glossary)
+
+## Aidez-le à grandir
+
+AILmanac reste complet parce que des gens l'enrichissent. Vous avez trouvé une lacune, une erreur, ou une nouveauté récente ? [Contribuer prend 10 minutes](/docs/contribute/contribute-in-10-minutes).
+
+<Quiz title="Vérifiez vos acquis" questions={[{q: "Lorsque AILmanac et la documentation officielle d'Anthropic se contredisent, laquelle l'emporte ?", options: ["AILmanac, parce qu'il est argumenté", "La documentation officielle d'Anthropic", "Celle qui a été mise à jour en premier"], answer: 1, explain: "La documentation officielle est la source de vérité. AILmanac s'efforce de rester à jour, mais vérifiez toujours les faits critiques auprès de la source indiquée."}, {q: "Vous êtes tout nouveau dans l'IA. Quelle porte devriez-vous emprunter en premier ?", options: ["Vos 5 premières minutes", "Choisir un parcours d'apprentissage", "Le Glossaire"], answer: 0, explain: "Vos 5 premières minutes est conçu pour offrir aux nouveaux venus une première victoire garantie."}, {q: "Que fait AILmanac de vos données et de votre compte ?", options: ["Il stocke vos données pour personnaliser les pages", "Il peut voir votre compte pour donner des conseils", "Il ne stocke rien et ne peut pas voir votre compte"], answer: 2, explain: "AILmanac ne stocke pas vos données, ne peut pas voir votre compte, et ne prendra pas de décisions à fort enjeu à votre place — voir Usage responsable."}]} />
+
+<Callout type="takeaways" items={["AILmanac est une référence gratuite, construite par la communauté, argumentée et balisée par niveau, pour tirer le meilleur de Claude et de n'importe quelle IA", "Chaque page porte un badge débutant, intermédiaire ou avancé pour que vous lisiez ce qui vous convient", "La documentation officielle d'Anthropic est toujours la source de vérité", "Trois portes d'entrée : Vos 5 premières minutes, un parcours d'apprentissage, ou le Glossaire"]} />
+
+**Suite :** [Vos 5 premières minutes](/docs/start-here/your-first-5-minutes) · [Choisir un parcours d'apprentissage](/docs/start-here/learning-paths) · [Glossaire](/docs/start-here/glossary)

@@ -1,0 +1,93 @@
+# وصفات الخطافات و settings.json
+
+> Source: https://derob98.github.io/ailmanac/ar/docs/templates/hooks-settings · AILmanac (CC BY 4.0) · last verified 2026-08-03
+
+خطافات جاهزة للنسخ واللصق للتنسيق وبوابات الجودة وحراسة الأمان مع إعدادات أولية.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-03" source="https://code.claude.com/docs/en/hooks">
+تتطور مفاتيح الإعدادات والخطافات — تحقّق من المخطط الحالي في المستندات الرسمية لإعدادات وخطافات Claude Code.
+</VerifyNote>
+
+وصفات جاهزة للإسقاط لأجل [`settings.json`](/docs/claude-code/settings) و[الأذونات](/docs/claude-code/permissions) و[الخطافات](/docs/claude-code/hooks). كيّف الأوامر لتناسب بنيتك التقنية.
+
+## ملف `settings.json` أولي للمشروع
+
+`.claude/settings.json` (مُلتزَم به، على مستوى الفريق):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Bash(npm run test:*)",
+      "Bash(npm run lint)",
+      "Bash(git status)",
+      "Bash(git diff:*)"
+    ],
+    "ask": ["Bash(npm install:*)", "Write"],
+    "deny": ["Read(./.env)", "Read(./**/*.pem)", "Bash(git push --force:*)"]
+  }
+}
+```
+
+ضع التجاوزات الشخصية أو الخاصة بالجهاز في `.claude/settings.local.json` (المتجاهَل من git).
+
+## التنسيق التلقائي بعد التعديلات
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "f=$(jq -r '.tool_input.file_path'); npx prettier --write \"$f\" 2>/dev/null || true" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+## بوابة جودة قبل الإنهاء
+
+امنع حالة "تم" حتى تنجح الاختبارات (مفهومياً — اربطها بحدث `Stop`/ما قبل الإنهاء وفقاً للمستندات):
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "npm test --silent" } ] }
+    ]
+  }
+}
+```
+
+## حراسة أمان (منع تعديل المسارات المحمية)
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "f=$(jq -r '.tool_input.file_path'); case \"$f\" in *secrets*|*.env|*/vendor/*) echo 'blocked: protected path'; exit 1;; esac" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+:::tip[اجعل الخطافات سريعة وقابلة للتكرار دون أثر جانبي]
+إنها تعمل باستمرار. اجعلها سريعة وآمنة لإعادة التشغيل وصاخبة فقط عند المشكلات الحقيقية.
+:::
+
+## التالي
+
+- [الأذونات وأوضاع الأذونات](/docs/claude-code/permissions)
+- [الخطافات: الأتمتة الحتمية](/docs/claude-code/hooks)
+- [مكتبة الأوامر المائلة](/docs/templates/slash-commands)

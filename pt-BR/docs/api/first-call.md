@@ -1,0 +1,140 @@
+# Sua Primeira Chamada à API
+
+> Source: https://derob98.github.io/ailmanac/pt-BR/docs/api/first-call · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+Instale o SDK, autentique-se e faça uma chamada real ao Claude em Python, TypeScript ou cURL.
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/api/getting-started">
+O formato da API abaixo é estável, mas os IDs de modelo e as versões do SDK mudam. Veja a [tabela de modelos atuais](/docs/whats-new/models-and-pricing).
+</VerifyNote>
+
+A API permite que *o seu* programa converse com o Claude. Ao final desta lição, você terá executado uma requisição real e entenderá exatamente o que cada parte dela faz.
+
+<Callout type="objectives" items={["Criar uma chave de API e armazená-la com segurança como uma variável de ambiente", "Instalar o SDK oficial para Python ou TypeScript (ou usar cURL puro)", "Enviar sua primeira requisição messages e ler a resposta do Claude", "Entender os quatro campos principais: model, max_tokens, messages e system"]} />
+
+## Toda a jornada em três passos
+
+Tudo abaixo se encaixa em uma sequência simples. Mantenha este mapa em mente conforme avança.
+
+<Steps items={[{title: "Obtenha uma chave de API", body: "Crie uma chave no Anthropic Console e exporte-a como uma variável de ambiente para que ela nunca fique no seu código."}, {title: "Instale o SDK", body: "Adicione o pacote anthropic para Python ou @anthropic-ai/sdk para TypeScript. Com cURL não há nada para instalar."}, {title: "Faça a chamada", body: "Envie uma lista de mensagens ao modelo e imprima o conteúdo que ele retorna."}]} />
+
+## 1. Obtenha uma chave de API
+
+Crie uma no [Anthropic Console](https://console.anthropic.com). Depois, defina-a como uma variável de ambiente para que ela nunca fique no seu código:
+
+<PromptCard title="Exporte sua chave de API">{`export ANTHROPIC_API_KEY="sk-ant-..."`}</PromptCard>
+
+<Callout type="warning" items={["Nunca faça commit da sua chave. Mantenha as chaves em variáveis de ambiente ou em um gerenciador de segredos, nunca no controle de versão. Veja a página de Segurança (/docs/security)."]} />
+
+## 2. Instale o SDK
+
+Escolha sua linguagem. O SDK lê a chave automaticamente da variável de ambiente que você acabou de definir.
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+<PromptCard title="Instalação (Python)">{`pip install anthropic`}</PromptCard>
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+<PromptCard title="Instalação (TypeScript)">{`npm install @anthropic-ai/sdk`}</PromptCard>
+
+</TabItem>
+<TabItem value="curl" label="cURL">
+
+Nada para instalar — você só precisa do `curl`.
+
+</TabItem>
+</Tabs>
+
+## 3. Faça a chamada
+
+Toda requisição é uma lista de `messages`. O modelo responde com `content`. Execute o trecho de código para a sua linguagem e você verá o Claude responder à pergunta.
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+
+message = client.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=1024,
+    messages=[
+        {"role": "user", "content": "In one sentence, what is an API?"}
+    ],
+)
+
+print(message.content[0].text)
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic(); // reads ANTHROPIC_API_KEY from the environment
+
+const message = await client.messages.create({
+  model: "claude-sonnet-5",
+  max_tokens: 1024,
+  messages: [
+    { role: "user", content: "In one sentence, what is an API?" },
+  ],
+});
+
+console.log(message.content[0].text);
+```
+
+</TabItem>
+<TabItem value="curl" label="cURL">
+
+```bash
+curl https://api.anthropic.com/v1/messages \
+  --header "x-api-key: $ANTHROPIC_API_KEY" \
+  --header "anthropic-version: 2023-06-01" \
+  --header "content-type: application/json" \
+  --data '{
+    "model": "claude-sonnet-5",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "In one sentence, what is an API?"}
+    ]
+  }'
+```
+
+</TabItem>
+</Tabs>
+
+## O que acabou de acontecer
+
+Você enviou quatro informações. Veja o que cada uma controla:
+
+- **`model`** — qual Claude usar. Não codifique de forma fixa às cegas; veja [Escolhendo um Modelo](/docs/api/choosing-a-model).
+- **`max_tokens`** — um limite para o tamanho da resposta (em [tokens](/docs/foundations)). Ele *não* define a janela de contexto.
+- **`messages`** — a conversa até o momento. A API é **stateless**: para continuar um chat, reenvie todo o histórico a cada vez.
+- **`system`** (opcional) — uma instrução de nível superior que define o papel do Claude para a chamada.
+
+<Flashcards title="Os quatro campos principais" cards={[{front: "model", back: "Qual Claude usar. Escolha-o deliberadamente, em vez de codificar de forma fixa às cegas."}, {front: "max_tokens", back: "Um limite para o tamanho da resposta, em tokens. Ele NÃO define a janela de contexto."}, {front: "messages", back: "A conversa até o momento. A API é stateless, então você reenvia todo o histórico a cada turno."}, {front: "system", back: "Instrução opcional de nível superior que define o papel do Claude para a chamada."}]} />
+
+<Callout type="tip" items={["Como a API é stateless, um chat de múltiplos turnos é apenas um array de mensagens que cresce: adicione cada resposta e reenvie a lista completa na próxima chamada."]} />
+
+<Quiz title="Teste-se" questions={[{q: "O que o max_tokens controla?", options: ["O tamanho da janela de contexto", "Um limite para o tamanho da resposta do Claude", "Quantas mensagens você pode enviar"], answer: 1, explain: "max_tokens limita o tamanho da resposta em tokens. Ele não define a janela de contexto."}, {q: "Como você continua uma conversa de múltiplos turnos com a API?", options: ["O servidor lembra suas mensagens anteriores automaticamente", "Você reenvia todo o histórico de mensagens a cada vez, porque a API é stateless", "Você define um cabeçalho com ID de sessão"], answer: 1, explain: "A Messages API é stateless: para continuar um chat, você envia todo o histórico da conversa de volta em cada requisição."}, {q: "Onde sua chave de API deve ficar?", options: ["Em uma variável de ambiente ou gerenciador de segredos", "Codificada de forma fixa no seu arquivo de código-fonte", "Comitada no seu repositório por conveniência"], answer: 0, explain: "Mantenha as chaves em variáveis de ambiente ou em um gerenciador de segredos, nunca no controle de versão."}]} />
+
+<Callout type="takeaways" items={["Três passos: obtenha uma chave, instale o SDK, envie uma requisição messages.", "Armazene a chave em ANTHROPIC_API_KEY para que o SDK a leia automaticamente e ela nunca entre no seu código.", "Uma requisição é uma lista de mensagens; a resposta volta em content.", "A API é stateless: reenvie todo o histórico da conversa para continuar um chat.", "model, max_tokens, messages e system são os campos que você usará primeiro."]} />
+
+## Próximo
+
+- Escolha o modelo certo e estime o custo → [Escolhendo um Modelo](/docs/api/choosing-a-model) · [Tokens e Preços](/docs/api)
+- Faça streaming das respostas e mantenha uma conversa → [Streaming e Multi-Turno](/docs/api)
+- Deixe o Claude chamar suas funções → [Uso de Ferramentas](/docs/api)
+- Trechos prontos para produção → [Trechos de API](/docs/templates)

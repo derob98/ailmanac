@@ -1,0 +1,70 @@
+# Les bases du prompting
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/prompting/basics · AILmanac (CC BY 4.0)
+
+Le cadre « clair et direct » qui vous mène à 80 % du résultat, sur n'importe quelle IA.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={[
+  "Le cadre « clair et direct » — objectif, public, contexte, format, ton",
+  "Pourquoi la plupart des mauvais résultats viennent de prompts sous-spécifiés, pas d'un modèle faible",
+  "Comment transformer une demande vague en une demande précise, avec un avant/après",
+]} />
+
+La plupart des « mauvais résultats d'IA » sont en réalité des **prompts sous-spécifiés**. Corrigez le prompt et la sortie se transforme — sans aucune astuce. C'est la fondation ; tout dans [Prompting](/docs/prompting) s'appuie dessus, et cela se transfère à n'importe quelle IA.
+
+## L'unique habitude : être clair et direct
+
+Traitez le modèle comme un nouveau collègue brillant et littéral qui ne peut pas lire dans vos pensées. Dites-lui cinq choses :
+
+| Élément | Demandez-vous | Exemple |
+|---|---|---|
+| **Objectif** | Que veux-je vraiment ? | « Écris un e-mail à froid… » |
+| **Public** | Pour qui est-ce ? | « …à un responsable achats d'hôpital débordé » |
+| **Contexte** | Que doit-il savoir ? | « Nous vendons un logiciel de planification ; nous leur faisons gagner ~6 h/semaine » |
+| **Format** | Quelle forme doit prendre la sortie ? | « Moins de 120 mots, 3 courts paragraphes, un seul CTA » |
+| **Ton** | Comment cela doit-il sonner ? | « Professionnel, chaleureux, pas insistant » |
+
+Mis bout à bout :
+
+> « Écris un e-mail à froid à un responsable achats d'hôpital débordé. Nous vendons un logiciel de planification qui leur fait gagner environ 6 heures par semaine. Moins de 120 mots, trois courts paragraphes, professionnel et chaleureux mais pas insistant, se terminant par un seul appel à l'action clair. »
+
+<PromptCard title="E-mail à froid — clair & direct">{`Write a cold email to a busy hospital procurement manager. We sell scheduling software that saves them about 6 hours a week. Under 120 words, three short paragraphs, professional and warm but not pushy, ending with a single clear call to action.`}</PromptCard>
+
+Ce prompt surpassera « écris un e-mail à froid » à tous les coups.
+
+## Cinq améliorations qui pèsent plus que leur poids
+
+1. **Montrez un exemple.** Un seul échantillon du style ou du format voulu (« reprends la voix de ceci : … ») enseigne plus vite qu'une description. C'est le prompting *few-shot* — voir [Le few-shot bien fait](/docs/prompting).
+2. **Donnez-lui un rôle.** « Tu es un relecteur méticuleux » amorce le bon comportement.
+3. **Demandez le raisonnement sur les problèmes difficiles.** « Procède étape par étape avant de donner la réponse finale » améliore le raisonnement (*chaîne de pensée*).
+4. **Contraignez la sortie.** « Réponds uniquement avec le JSON, sans préambule. » « Exactement 5 puces. » Des formes précises sont plus faciles à utiliser.
+5. **Itérez.** Votre premier prompt est un brouillon. Affinez en langage clair : « plus court », « plus technique », « ajoute un contre-argument ».
+
+## Anti-patterns à abandonner
+
+- ❌ **Le style mots-clés** (« e-mail client remise ») — vous n'utilisez pas un moteur de recherche. Écrivez des phrases complètes.
+- ❌ **Enterrer la demande** dans un mur de contexte. Mettez l'instruction en haut *et* répétez-la à la fin pour les longues entrées.
+- ❌ **Les mots de qualité vagues** (« rends ça bien/professionnel ») sans dire ce que cela signifie pour vous.
+- ❌ **Supposer qu'il se souvient** des conversations précédentes. Par défaut, il ne le fait pas — voir [Tokens, contexte & mémoire](/docs/foundations).
+
+## Essayez maintenant
+
+Construisez un prompt structuré ci-dessous, puis copiez-le dans Claude. Remarquez comment nommer le rôle, l'objectif, le format et le ton change tout :
+
+<PromptBuilder />
+
+Prenez ensuite un prompt que vous taperiez normalement, reconstruisez-le ici, et comparez les deux sorties côte à côte. Ce contraste, c'est toute la leçon.
+
+<Quiz title="Testez-vous" questions={[
+  {q: "Qu'est-ce qui cause généralement de mauvais résultats d'IA ?", options: ["Le modèle est trop petit", "Un prompt sous-spécifié", "Pas assez de puissance de calcul"], answer: 1, explain: "La plupart des mauvais résultats sont des prompts sous-spécifiés — corrigez le prompt et la sortie se transforme."},
+  {q: "Lequel n'est PAS l'une des cinq choses à spécifier ?", options: ["Objectif", "Public", "Température du modèle", "Format"], answer: 2, explain: "Objectif, public, contexte, format et ton. La température est un réglage d'API, pas un élément du prompting clair et direct."},
+  {q: "Comment devez-vous traiter le modèle quand vous rédigez un prompt ?", options: ["Comme un télépathe", "Comme un nouveau collègue brillant mais littéral", "Comme un moteur de recherche"], answer: 1, explain: "Il ne peut pas lire dans vos pensées — précisez ce qu'un nouveau collègue littéral aurait besoin de savoir."},
+]} />
+
+## Suite
+
+- La boîte à outils réutilisable → [Bibliothèque de patterns de prompts](/docs/prompting)
+- Ce qui est vraiment différent avec Claude → [Rédiger des prompts spécifiquement pour Claude](/docs/prompting)
+- Prêt à l'emploi → [Modèles de prompts réutilisables](/docs/templates)

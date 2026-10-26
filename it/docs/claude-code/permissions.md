@@ -1,0 +1,96 @@
+# Permessi e modalità di permesso
+
+> Source: https://derob98.github.io/ailmanac/it/docs/claude-code/permissions · AILmanac (CC BY 4.0) · last verified 2026-08-18
+
+Regole allow/ask/deny e modalità: meno richieste di conferma senza perdere sicurezza.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-18" source="https://code.claude.com/docs/en/whats-new/2026-w32">
+La sintassi esatta delle regole e i nomi delle modalità evolvono — verifica sulla documentazione ufficiale di Claude Code su permessi e modalità di permesso. **Dalla v2.1.283:** `auto` è la modalità iniziale predefinita per le sessioni interattive da terminale e VS Code, su ogni piano e provider (vedi sotto).
+</VerifyNote>
+
+<Callout type="objectives" items={["Cosa significano i tre verdetti di permesso (allow / ask / deny)", "Come le regole di permesso abbinano uno strumento a un pattern", "Le sei modalità di permesso e quando usare ciascuna", "Perché auto è ora la modalità iniziale delle sessioni interattive — e come disattivarla", "Come la modalità auto sostituisce le richieste con un classificatore di sicurezza", "Come costruire una allowlist iniziale sensata che riduce le richieste senza perdere sicurezza", "Dove salvare le regole di permesso di progetto e quelle personali"]} />
+
+I permessi decidono **cosa Claude Code può fare senza fermarsi a chiederti conferma**. Se li regoli bene ottieni flusso senza perdere il controllo; se li regoli male o approvi tutto a occhi chiusi, o affoghi nelle richieste.
+
+## I tre verdetti
+
+Ogni azione possibile si risolve in uno di questi:
+
+<Flashcards cards={[{front: "allow", back: "Eseguila, senza chiedere."}, {front: "ask", back: "Fermati e chiedi a te — il comportamento predefinito per tutto ciò che non è esplicitamente consentito o negato."}, {front: "deny", back: "Mai, nemmeno se glielo chiedi."}]} />
+
+Le regole abbinano di solito uno strumento a un pattern, ad esempio allow `Bash(npm run test:*)` o deny `Read(./.env)`.
+
+<PromptCard title="Consenti uno strumento + pattern">{`Bash(npm run test:*)`}</PromptCard>
+
+<PromptCard title="Nega uno strumento + pattern">{`Read(./.env)`}</PromptCard>
+
+## Modalità di permesso
+
+Una modalità definisce l'atteggiamento generale di una sessione. Ce ne sono sei. Passa in rassegna quelle più comuni con `Shift+Tab`, oppure imposta `permissions.defaultMode` nelle impostazioni.
+
+| Modalità | Esegue senza chiedere | Quando usarla |
+|---|---|---|
+| **`default`** (mostrata come **Manual**) | Solo letture | Lavoro quotidiano, modifiche delicate |
+| **`acceptEdits`** | Letture, modifiche ai file, comandi comuni del filesystem | Una sessione di editing fidata e ben delimitata |
+| **`plan`** | Letture, più i comandi approvati dal classificatore quando la modalità auto è disponibile; non modifica mai il tuo codice sorgente | Task grandi o rischiosi — vedi [Plan Mode](/docs/claude-code/plan-mode) |
+| **`auto`** *(la modalità iniziale delle sessioni interattive dalla v2.1.283)* | Tutto, filtrato da un classificatore di sicurezza | Task lunghi in cui il vero rischio è la stanchezza da conferme |
+| **`dontAsk`** | Letture di file nelle tue directory di lavoro e strumenti pre-approvati; tutto ciò che richiederebbe conferma viene negato | CI e script blindati |
+| **`bypassPermissions`** | Tutto, senza controlli | Solo sandbox/container — **mai** su una macchina con segreti |
+
+### La modalità auto ora è quella predefinita di Claude Code
+
+Dalla versione **v2.1.283** di Claude Code, `auto` è la modalità iniziale integrata per le sessioni interattive da terminale e VS Code su **ogni piano e provider**. Nelle versioni precedenti era il default per le nuove sessioni solo sui piani Pro, Max e Team, dal 14 agosto 2026. La motivazione di Anthropic (dai suoi test su oltre 1.000 utenti paganti): il classificatore ha intercettato l'**89%** delle azioni dannose contro il **13,6%** della revisione manuale — perché gli utenti, ormai abituati, accettavano circa il 97% delle richieste manuali senza leggerle.
+
+Due eccezioni preservano l'intenzione:
+
+- Se **tu** imposti `permissions.defaultMode` nelle tue impostazioni utente, resta com'è a meno che tu non accetti una singola richiesta di passaggio nell'app.
+- Se **la tua organizzazione** gestisce il default (impostazioni gestite Team/Enterprise), non cambia nulla in automatico.
+
+Puoi sempre cambiare modalità durante la sessione con `Shift+Tab`. Una modifica correlata già in vigore su quei piani: le chiamate al classificatore effettuate dalla modalità auto **non contano più nei tuoi limiti d'uso**.
+
+<PromptCard title="Attivala in anticipo (prima del 14 ago) — imposta auto come predefinita">{`~/.claude/settings.json
+{
+  "permissions": {
+    "defaultMode": "auto"
+  }
+}`}</PromptCard>
+
+<PromptCard title="Mantieni il vecchio comportamento con le conferme dopo il 14 ago">{`~/.claude/settings.json
+{
+  "permissions": {
+    "defaultMode": "default"
+  }
+}`}</PromptCard>
+
+### Come funziona davvero la modalità auto
+
+`auto` è la via di mezzo tra chiedere conferma per tutto e disattivare la sicurezza. Invece di chiedere a te, un **modello classificatore** separato esamina ogni azione prima che venga eseguita e blocca tutto ciò che va oltre quanto hai chiesto, tocca infrastrutture che non riconosce o sembra guidato da contenuti ostili che Claude ha appena letto. Le regole `ask` esplicite continuano a fermarsi e a chiederti conferma.
+
+Blocca cose come `curl | bash`, force push, deploy e migrazioni in produzione, `rm -rf` su variabili non risolte, manomissioni della trascrizione, comandi git distruttivi che scartano lavoro non committato e l'invio di segreti a endpoint esterni — lasciando passare il lavoro di routine (modifiche locali, installazione di dipendenze dichiarate, HTTP in sola lettura, push sul tuo branch). Se blocca la stessa azione ripetutamente, la modalità auto si ferma e ti restituisce la gestione delle richieste.
+
+La modalità auto non è una garanzia di sicurezza: riduce le richieste, ma non elimina la necessità di rivedere le operazioni delicate. La disponibilità dipende dal piano, dal modello e (su Team/Enterprise) da un interruttore dell'amministratore. Se lavori in modo davvero non presidiato (cron, sessioni cloud, CI), abbinala a [Hardening Autonomous Runs](/docs/security/hardening-autonomous-runs) — auto non equivale comunque a `bypassPermissions`.
+
+<Callout type="warning" items={["bypassPermissions va usato in una sandbox. Lavorare con tutte le richieste disattivate sulla tua macchina reale è il modo in cui un agente finisce per toccare qualcosa che non doveva. Riservalo ad ambienti usa e getta — se quello che vuoi davvero è meno richieste, usa invece la modalità auto. Vedi Hardening Autonomous Runs su /docs/security/hardening-autonomous-runs."]} />
+
+## Una allowlist iniziale sensata
+
+L'obiettivo: pre-autorizzare le cose sicure e ripetitive; lasciare quelle distruttive su **ask** o **deny**.
+
+<Steps items={[{title: "Consenti ciò che è sicuro e ripetitivo", body: "Leggere file, eseguire i tuoi comandi di test/lint/build, git status/diff."}, {title: "Chiedi prima per il rischio medio", body: "Installare dipendenze, scrivere file fuori dal progetto, chiamate di rete."}, {title: "Nega ciò che è distruttivo", body: "Leggere file segreti (.env, file di chiavi), force-push, rm -rf."}]} />
+
+Salva le regole di progetto in [`settings.json`](/docs/claude-code/settings) (condiviso) e le preferenze personali in `settings.local.json`.
+
+<Callout type="tip" items={["Lascia che impari dalle tue richieste: approva lo stesso comando sicuro un paio di volte e saprai esattamente cosa aggiungere alla tua allowlist — trasformando le conferme ripetute in una regola una tantum."]} />
+
+<Callout type="takeaways" items={["Tre verdetti: allow (nessuna richiesta), ask (predefinito — fermati e conferma), deny (mai).", "Le regole abbinano uno strumento a un pattern, come Bash(npm run test:*) o Read(./.env).", "Sei modalità definiscono l'atteggiamento della sessione: default (Manual), acceptEdits, plan, auto, dontAsk, bypassPermissions.", "Dalla v2.1.283, auto è la modalità iniziale delle sessioni interattive da terminale e VS Code su ogni piano; un defaultMode impostato da te resta al suo posto e i default gestiti dall'organizzazione non vengono toccati.", "La modalità auto filtra ogni azione con un classificatore di sicurezza invece di chiederti conferma — è lo strumento contro la stanchezza da richieste, non bypassPermissions.", "Costruisci una allowlist: allow per ciò che è sicuro e ripetitivo, ask per il rischio medio, deny per il distruttivo.", "Le regole condivise vanno in settings.json; le preferenze personali in settings.local.json."]} />
+
+<Quiz title="Verifica te stesso" questions={[{q: "Cosa fa il verdetto predefinito 'ask' per un'azione non esplicitamente consentita né negata?", options: ["La esegue in silenzio", "Si ferma e ti chiede di confermare", "La blocca per sempre"], answer: 1, explain: "ask è il comportamento predefinito per tutto ciò che non è esplicitamente consentito o negato — si ferma e ti chiede conferma."}, {q: "Quale modalità di permesso è sicura SOLO in sandbox o container, mai su una macchina con segreti?", options: ["plan", "acceptEdits", "bypassPermissions"], answer: 2, explain: "bypassPermissions salta del tutto le richieste e i controlli di sicurezza; riservala ad ambienti usa e getta — mai su una macchina con segreti."}, {q: "Vuoi molte meno richieste di permesso in un task lungo, ma vuoi comunque una rete di sicurezza. Quale modalità?", options: ["bypassPermissions — salta ogni richiesta", "auto — un classificatore filtra ogni azione e blocca quelle rischiose", "dontAsk — non ti interrompe mai"], answer: 1, explain: "La modalità auto sostituisce le richieste con un classificatore che blocca escalation come curl | bash, force push e deploy in produzione. bypassPermissions elimina la rete di sicurezza; dontAsk nega semplicemente tutto ciò che non è pre-approvato."}, {q: "Dove vanno salvate le regole di permesso condivise di progetto rispetto alle preferenze personali?", options: ["Entrambe in settings.local.json", "Regole di progetto in settings.json; preferenze personali in settings.local.json", "Regole di progetto in settings.local.json; preferenze personali in settings.json"], answer: 1, explain: "Le regole di progetto vanno in settings.json (condiviso); le preferenze personali vanno in settings.local.json."}, {q: "Quale di queste va nella lista 'deny' di una allowlist iniziale sensata?", options: ["git status / diff", "rm -rf e la lettura di .env", "Eseguire i tuoi comandi di test/lint/build"], answer: 1, explain: "Nega le cose distruttive: leggere file segreti (.env, file di chiavi), force-push e rm -rf."}, {q: "Il 14 agosto 2026, cosa succede su un piano Pro se avevi già impostato permissions.defaultMode su 'default' nelle tue impostazioni utente?", options: ["Viene sovrascritto automaticamente con 'auto'", "Resta 'default' a meno che tu non accetti una singola richiesta di passaggio nell'app", "La modalità auto viene comunque applicata in silenzio a ogni nuova sessione"], answer: 1, explain: "Un defaultMode che hai impostato tu nelle impostazioni utente viene preservato; Claude Code propone una singola richiesta di passaggio ma non sovrascrive la tua scelta. Anche i default gestiti dall'organizzazione restano intatti."}]} />
+
+## Prossimo
+
+- [settings.json: il sistema di configurazione](/docs/claude-code/settings)
+- [Hooks](/docs/claude-code/hooks) — applica le regole in modo deterministico, oltre allow/deny
+- [Sandbox Credential Masking](/docs/claude-code/sandbox-credential-masking) — lascia che `gh`, `npm` e `aws` si autentichino senza che il comando in sandbox tenga mai il vero segreto
+- [Sicurezza e uso responsabile](/docs/security/responsible-use)

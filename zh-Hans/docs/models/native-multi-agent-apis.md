@@ -1,0 +1,206 @@
+# 原生多智能体 API：OpenAI 的 Responses 多智能体 Beta 与自己动手搭建
+
+> Source: https://derob98.github.io/ailmanac/zh-Hans/docs/models/native-multi-agent-apis · AILmanac (CC BY 4.0) · last verified 2026-08-01
+
+2026 年 7 月 9 日，OpenAI 发布了 Responses API 多智能体 Beta 和 Sol Ultra Mode——这是第一家把“模型在一次 HTTP 请求内生成并综合 N 个子智能体”做成一等原语的前沿厂商。实际发布了什么、API 的形态、成本核算、Anthropic 的做法，以及原生原语何时胜过自己搭建的并行扇出。
+
+<LevelBadge level="advanced" />
+
+过去十八个月里，“多智能体”意味着扇出（fan-out）要*你自己*写：你写协调者提示词，你并行发起 N 个调用，你合并它们的 JSON，你处理重试。**2026 年 7 月 9 日**，OpenAI 把这一切压缩成了一个请求参数：Responses API 上的 **`multi_agent.enabled: true`**，并包装成一个名为 **Sol Ultra Mode** 的消费级功能。模型自己决定生成多少个子智能体，并行运行它们，再综合结果——全部在一次 HTTP 调用之内。目前没有其他前沿厂商发布过对等的原语。本页梳理实际发布了什么、背后的数字、Anthropic 提供的替代方案，以及最关键的部分：原生原语物有所值的三类工作负载，和自己搭建扇出仍然更优的两类。
+
+<Callout type="objectives" items={[
+  "读懂 Responses API 多智能体请求体的确切形态，并知道 max_concurrent_subagents 究竟限制了什么",
+  "做成本核算：按 Sol 的价格，“模型生成 4 个子智能体”实际要收你多少钱",
+  "在 Anthropic 一侧画出同样的版图——Cowork、Managed Agents 和 Claude Code 子智能体——并看清原语上的差距",
+  "按工作负载选对原语：原生多智能体、自建扇出、A2A，还是单次长回合",
+  "避开四种会让 4 智能体 Ultra 调用变成 4 倍账单却没有准确率提升的失败模式"
+]} />
+
+<VerifyNote lastVerified="2026-08-01" source="https://developers.openai.com/api/docs/guides/responses-multi-agent">
+Responses API 的多智能体接口仍处于 Beta 阶段（请求头 <code>OpenAI-Beta: responses_multi_agent=v1</code>）。自 2026 年 7 月 9 日发布以来，字段名称、<code>max_concurrent_subagents</code> 的默认值，以及哪些参数与多智能体模式互斥，都已发生变化。上线前请对照链接的文档重新核实请求形态和不兼容清单。
+</VerifyNote>
+
+## 一句话版本
+
+**Ultra Mode 是 Responses API 上 `multi_agent.enabled: true` 之上的一层消费级外壳**——一个原生原语，让模型在一次请求内并行生成子智能体、综合它们的输出，并返回单一响应。它在可并行的任务上能换来虽小但真实的准确率提升（Terminal-Bench 2.1：**88.8% → 91.9%**），而 token 账单大致与模型选择生成的子智能体数量成线性增长。
+
+## 2026 年 7 月 9 日实际发布了什么
+
+同一次发布里落地了两样东西，值得分开看：
+
+- **Ultra Mode**——ChatGPT 和 Codex 内的*产品*开关。在旗舰档（Sol）上可用。开启后，困难任务会先被拆解成并行的子智能体运行，再做综合。宣传为“生成 4 个以上智能体”；OpenAI 自己的一些 GA 基准图表在 BrowseComp 和 SEC-Bench Pro 上也展示了 16 智能体的配置，但实际默认值是四个。
+- **Responses API 多智能体 Beta**——*开发者*原语。同样的底层能力，以 `client.beta.responses.create()` 上的 `multi_agent.enabled: true` 暴露出来。想自己搭一个类 Ultra 的体验，就用这个。
+
+营销留下的困惑是真实的：开发者不断在问“我怎么从 API 调用 Ultra Mode？”答案是：你不能——你启用的是多智能体 Beta，它正是产品功能底下的那个原语。
+
+## Responses API 多智能体请求
+
+具体来说，形态如下（Python SDK）：
+
+<PromptCard title="最简多智能体 Responses API 调用">
+{`from openai import OpenAI
+
+client = OpenAI()
+
+resp = client.beta.responses.create(
+    model="gpt-5.6-sol",
+    input="Audit this repo for auth-bypass patterns and write a report.",
+    multi_agent={
+        "enabled": True,
+        "max_concurrent_subagents": 3,
+    },
+    tools=[...],  # your MCP tools, function tools, etc.
+    extra_headers={"OpenAI-Beta": "responses_multi_agent=v1"},
+)`}
+</PromptCard>
+
+这个形态有四点并不显而易见：
+
+- **`max_concurrent_subagents` 不是总预算。** 它限制的是整棵树在任意时刻*活跃*的子智能体回合数——根加上所有后代。模型在请求的生命周期内可以生成多得多的*总*子智能体；只是同一时刻运行的不能超过 N 个。
+- **深度没有上限。** 子智能体自己也可以再生成子智能体。树的深度和每次运行的子智能体总数都没有固定上限。你的成本面不是“N 次调用”，而是一棵由模型在运行时塑形的树。
+- **根负责综合。** 根智能体负责把子智能体的响应合并为最终答案。你拿不到结构化的 `{subagents: [...]}` 对象；你得到的是一个响应，中间的智能体回合对你的代码是不透明的。
+- **有些参数会被静默禁用。** 启用多智能体后，`reasoning.summary` 和 `max_tool_calls` 不被支持，而且多智能体响应不支持 compaction 端点。如果你依赖推理摘要做可观测性，一旦打开它就会失去这些。
+
+## 营销页不会印出来的成本核算
+
+按 Sol 的 GA 定价**每百万 token 输入 $5 / 输出 $30**，这笔账毫不留情。以下来自对真实 Ultra 运行做逆向分析的开发者文章：
+
+- **Ultra 拆成 2 个子智能体的任务** ≈ 单次 Sol 调用输出 token 成本的 2 倍——因为两个子智能体都要生成输出，根还要在其上生成综合内容。
+- **Ultra 生成 5 个子智能体的任务** ≈ 5 倍——理由相同，再加上整棵树上按比例增多的输入 token 重放。
+- **展示 16 智能体配置的 BrowseComp / SEC-Bench 图表**不是免费的午餐：它们是研究级的演示，不是默认值。在 Sol 上并发 16 个子智能体时，单单输出 token 一项，每个困难查询就是两位数美元的中段。
+
+可以这样理解：**你付的是一次 Sol 调用的蒙特卡洛，外加最上面一次综合。** 有时它换来的准确率足够重要；有时它只是为一个单次调用就能解决的任务付了 4 倍账单。
+
+## 准确率到底换来了什么
+
+在可并行评测——即 Ultra Mode 的目标工作负载——上公布的提升是真实的，但幅度不大：
+
+| 基准 | Sol（单次） | Sol Ultra | 差值 | 评测衡量什么 |
+| --- | --- | --- | --- | --- |
+| Terminal-Bench 2.1 | 88.8% | 91.9% | +3.1 | 多步命令行规划、工具协同 |
+| BrowseComp | 87.5% | 92.2% | +4.7 | 多来源网络调研与综合 |
+| SEC-Bench Pro | — | 74.3% | （未公布单模式数字） | 跨大型语料库的监管文件推理 |
+
+关于这张表有三点：
+
+- +3–5 个点的区间，与并行采样（best-of-N、self-consistency）在其他前沿上历来能换来的提升一致。这个原语确实有用；这个提升并不是阶跃式的飞跃。
+- 这些是*最好情形*——专门挑出来展示该模式的评测。在顺序任务（线性的代码编辑、单文件重写、简短聊天）上，Ultra 只会增加综合延迟和成本，而不会提升准确率。
+- 在同一张 Terminal-Bench 2.1 图表上，Anthropic 的 Opus 4.8 得分为 78.9%——也就是说，Sol Ultra 的领先来自*更好的基础模型*与叠加其上的*多智能体增益*两者。如果你从 Opus 迁移到 Sol Ultra，不要把全部差距都归功于多智能体原语。
+
+## Anthropic 的做法
+
+Anthropic 尚未发布对等的 API 原语。最接近的几个类比各自解决同一问题的不同切片：
+
+- **[Cowork](/docs/api/cowork-and-agent-teams)**——一个*产品*界面。一个智能体式桌面工作区，智能体在其中与用户并肩完成持续的多步工作。作为*功能*可与 Ultra Mode 相比，但不是 API 原语。
+- **[Managed Agents](/docs/api/managed-agents) 与 [managed-agents memory stores](/docs/api/managed-agents-memory-stores)**——带持久状态和调度的托管智能体循环。填补的是“长时间运行的后台智能体”这个位置，而不是“并行生成 4 个再合并”那个位置。
+- **[Claude Code 子智能体](/docs/claude-code/subagents)与[子智能体集群限制](/docs/claude-code/subagent-fleet-limits)**——一等的子智能体原语，但范围限定在 Claude Code CLI。有文档、可并行生成，是 `multi_agent.enabled` *最接近*的类比——重要区别在于协调者提示词要你自己写。
+- **Messages API 上的[构建智能体](/docs/api/building-agents)**——自己动手的路径。你并行扇出 N 个 `messages.create` 调用，自己写综合提示词，自己处理重试。结果相同，代码更多。
+
+差距在于：**目前没有任何 Anthropic API 接口能让你拨一个布尔开关，就由模型自己决定生成多少个子智能体并合并它们的工作。** 如果你想在 Claude 上得到这种行为，就得自己搭——产品侧的情况见 [Cowork 与 Agent Teams](/docs/api/cowork-and-agent-teams)，托管循环原语见 [Managed Agents](/docs/api/managed-agents)。
+
+## 按工作负载选对原语
+
+<Steps items={[
+  {title: "任务真的可以并行吗？", body: "如果子任务可以在不等待彼此结果的情况下运行——审计一个仓库、跨多个来源调研一个主题、彼此独立地重构 N 个文件——扇出的形态就值回成本。如果任务是顺序的（编辑 A，读取 A 的结果，再编辑 B），任何多智能体原语都只会增加综合开销而没有收益。"},
+  {title: "你需要查看中间回合吗？", body: "原生多智能体（Ultra、Responses 多智能体 Beta）会把子智能体的回合对你的代码隐藏起来。如果你需要审计轨迹、按子智能体归集成本，或能在运行中途注入——就自己搭扇出。Claude Code 的子智能体让你可见；Responses API 多智能体 Beta 则不行。"},
+  {title: "子智能体是否跨越了信任边界？", body: "如果子任务属于不同的组织、云或厂商，你就超出了任何单一厂商原语的范围。请使用 A2A——见 /docs/models/a2a-protocol-agent-to-agent。原生多智能体是模型内部的；A2A 是智能体之间的。"},
+  {title: "成本是有界的还是开放的？", body: "原生多智能体的树是在运行时成形的：你无法从请求预测 token 账单。如果你的应用有按请求的成本 SLA，宁可选择自己控制扇出宽度的自建扇出——或者在根上设置一个硬性的 max_output_tokens 上限。"},
+  {title: "你需要那 +3–5 个准确率点吗？", body: "如果你的评测显示单次调用能解决 85% 的任务，而 90% 是能否上线的分水岭，那么原生多智能体是买下这差距的低摩擦方式。如果单次 Sol 或 Opus 调用已经能解决任务，Ultra 就是为 0 点提升付 4 倍账单。"}
+]} />
+
+## 四种让 Ultra 变成白付 4 倍账单的失败模式
+
+- **在顺序任务上打开它。** 即使任务无法并行，模型仍会拆解并综合。你为本不需要的工作付了协调开销。经验法则：如果你说不出在第一个子智能体运行时第二个要做什么，就不要启用多智能体。
+- **让推理摘要的可观测性留在你的仪表盘上。** 多智能体下 `reasoning.summary` 被静默地不支持。如果你的监控依赖它，你会看到空字段，还以为模型没在思考。在拨动开关*之前*先发布 schema 变更。
+- **把 `max_tool_calls` 当作安全限制。** 多智能体下它同样被静默禁用。你以为拥有的安全保障——“每个请求最多 20 次工具调用”——没了。应在工具适配器层强制工具调用上限，而不是通过请求参数。
+- **以为 `max_concurrent_subagents` 是成本上限。** 它限制的是某一时刻的*活跃*子智能体，而不是整个请求期间生成的总数。一次 Ultra 调用可以依次生成几十个子智能体，同时仍遵守 `max_concurrent_subagents: 3` 的限制。如果成本是你的天花板，请加上请求级的 max_output_tokens。
+
+## “原生多智能体”不是什么
+
+有两个相邻的原语常被与它混淆：
+
+- **不是 `n > 1` 采样。** OpenAI 较早的 `n` 参数会采样多个补全并全部返回，由你挑一个。多智能体则是让不同的子智能体*做不同的工作*，并综合它们的输出。前者是温度采样；后者是任务分解。
+- **不是批量推理。** [批处理 API](/docs/api/message-batches) 在后台处理大量彼此独立的请求。多智能体是在*一次*交互式请求内的许多*相互协调*的子智能体。批处理面向吞吐量，多智能体面向结果。
+
+## 走向何方
+
+A2A 协议（见 [A2A：智能体到智能体协议](/docs/models/a2a-protocol-agent-to-agent)）涵盖*跨厂商*的多智能体。`multi_agent.enabled: true` 涵盖*模型内部*的多智能体。尚未填补的空位是**跨厂商**原语——厂商 A 的模型在厂商 B 上生成一个子智能体并合并结果——目前还没有公开规范。它出现时，会以 A2A + 一个原生移交动词的形式出现，而不是任何一方的新 API。请关注这个方向。
+
+<Quiz questions={[
+  {
+    q: "max_concurrent_subagents 在 Responses 多智能体 Beta 上限制的是什么？",
+    options: [
+      "请求总共可生成的子智能体总数",
+      "整棵树在任意时刻的活跃子智能体回合数，不含根",
+      "树的深度（子智能体能多深地生成自己的子智能体）",
+      "每个子智能体可进行的工具调用次数"
+    ],
+    answer: 1,
+    explain: "它是整棵树在某一时刻活跃子智能体回合的并发上限，并且不含根。每个请求的子智能体总数和树的深度都没有固定上限——树由模型在运行时塑形。"
+  },
+  {
+    q: "你启用了多智能体，监控仪表盘上的推理摘要字段突然变空。发生了什么？",
+    options: [
+      "模型静默失败了——重试请求",
+      "启用 multi_agent 时 reasoning.summary 不被支持；API 会静默丢弃它",
+      "子智能体运行了，但综合阶段超时了",
+      "你的 Beta 请求头不对"
+    ],
+    answer: 1,
+    explain: "启用多智能体时，reasoning.summary 和 max_tool_calls 被静默禁用，并且不支持 compaction。如果可观测性或安全依赖这些参数，请在拨动开关之前先发布 schema 变更。"
+  },
+  {
+    q: "你需要在跨两家厂商、不同客户账户中运行的并行子智能体。哪种原语是正确的？",
+    options: [
+      "OpenAI Responses API 多智能体 Beta，max_concurrent_subagents: 2",
+      "Claude Code 子智能体",
+      "A2A 协议，每家厂商公开一张 Agent Card",
+      "通过 ChatGPT 使用 GPT-5.6 Ultra Mode"
+    ],
+    answer: 2,
+    explain: "原生多智能体（Ultra、Responses Beta、Claude Code 子智能体）是模型内部或运行时内部的。当子智能体跨越组织、云或厂商边界时，你需要 A2A——见 /docs/models/a2a-protocol-agent-to-agent。"
+  },
+  {
+    q: "下列哪一项不适合使用 Ultra Mode / multi_agent.enabled？",
+    options: [
+      "跨许多文件审计大型代码库中的某一类漏洞",
+      "每个来源都可独立阅读的多来源网络调研",
+      "单文件代码重写，每次编辑都依赖上一次",
+      "比较许多公司的监管文件"
+    ],
+    answer: 2,
+    explain: "顺序任务——步骤 B 需要步骤 A 的输出——无法并行。多智能体仍会拆解并综合，增加延迟和 2 倍以上的 token 而没有准确率收益。经验法则：如果你说不出第一个子智能体运行时第二个要做什么，就不要启用它。"
+  }
+]} />
+
+<Flashcards items={[
+  {front: "原生多智能体（本页的定义）", back: "一种一等 API 原语：模型自己在一次 HTTP 请求内并行生成并综合 N 个子智能体。截至 2026 年 8 月，OpenAI 是唯一发布此类原语的前沿厂商——通过 Responses API Beta 上的 multi_agent.enabled。"},
+  {front: "Ultra Mode 与 multi_agent Beta", back: "同一个底层原语，两个界面。Ultra Mode 是 ChatGPT/Codex 里的消费级开关；多智能体 Beta 是开发者 API。你不会在代码里调用“Ultra”——你启用的是多智能体。"},
+  {front: "max_concurrent_subagents", back: "限制整棵树（不含根）在同一时刻可活跃的子智能体回合数。它不是总数上限，也不是深度上限。模型在请求的生命周期内可以生成多得多的子智能体。"},
+  {front: "静默的参数不兼容", back: "启用 multi_agent.enabled 时：不支持 reasoning.summary，不支持 max_tool_calls，也不支持 compaction 端点。三者都是静默的——API 接受请求，却丢掉了这些约束。"},
+  {front: "Sol Ultra 在 Terminal-Bench 2.1 上的提升", back: "88.8%（单次）→ 91.9%（Ultra），提升 3.1 个点。与并行采样历来换来的 best-of-N 增益一致。真实但有限。"},
+  {front: "成本扩展规律", back: "原生多智能体的计费大致与模型生成的子智能体数量成线性关系，外加一次综合。两个子智能体 ≈ 2 倍输出 token；五个 ≈ 5 倍。当准确率提升值得这个倍数时才启用，而不是默认开启。"},
+  {front: "Anthropic 对同一领域的回答", back: "没有单一的对等 API。Cowork 是产品界面，Managed Agents 是托管循环，Claude Code 子智能体是 CLI 内的一等原语，Messages API 上的自建扇出是灵活的后备。全部都要你自己写协调者提示词。"},
+  {front: "何时改用 A2A", back: "当子智能体跨越厂商、云或组织边界时。原生多智能体是模型内部的；A2A 是智能体之间的。它们可以组合——你可以有一个 A2A 端点，其实现内部用多智能体来回答被委派的任务。"}
+]} />
+
+## 来源与延伸阅读
+
+- [Multi-agent — OpenAI API guide](https://developers.openai.com/api/docs/guides/responses-multi-agent) — 官方的 Responses 多智能体 Beta 参考：请求形态、`max_concurrent_subagents` 的语义、不支持的参数清单，以及 Beta 请求头。
+- [GPT-5.6: Frontier intelligence that scales with your ambition — OpenAI](https://openai.com/index/gpt-5-6/) — Sol、Terra、Luna 和 Ultra Mode 的发布文章，含该系列的定位。
+- [Previewing GPT-5.6 Sol — OpenAI](https://openai.com/index/previewing-gpt-5-6-sol/) — 较早的预览页，对了解基准方法有帮助。
+- [GPT-5.6 Sol Ultra Mode: 64 Subagents on One Problem — Digital Applied](https://www.digitalapplied.com/blog/gpt-5-6-sol-ultra-mode-64-subagents-2026) — 2x/5x 数字背后的线性成本核算（“N 个智能体最多可烧掉相同每 token 价格下单智能体运行 N 倍的 token”），以及 4 智能体的实际默认值及其“最高 4 倍基线”的 token 上限。
+- [How to Use GPT-5.6 Ultra Mode: Multi-Agent Coordination for Complex Tasks — MindStudio](https://www.mindstudio.ai/blog/gpt-5-6-ultra-mode-multi-agent-coordination) — 默认 4 智能体，以及部分图表中出现 16 智能体的细节。
+- [OpenAI Releases GPT-5.6 (Sol, Terra, Luna) — MarkTechPost](https://www.marktechpost.com/2026/07/09/openai-releases-gpt-5-6-a-three-tier-model-family-with-programmatic-tool-calling/) — 对发布的报道，以及与多智能体一同发布的 Programmatic Tool Calling 原语。
+- [面向 Claude 用户的 GPT-5.6 与 ChatGPT Work](/docs/models/gpt-5-6-sol-terra-luna) — 关于该模型系列本身的 AILmanac 姊妹页面。
+- [Cowork 与 Agent Teams](/docs/api/cowork-and-agent-teams) — Anthropic 的产品界面类比。
+- [Managed Agents](/docs/api/managed-agents) — Claude 上的托管循环原语。
+- [Claude Code 子智能体](/docs/claude-code/subagents)与[子智能体集群限制](/docs/claude-code/subagent-fleet-limits) — CLI 内的一等子智能体原语。
+- [A2A：智能体到智能体协议](/docs/models/a2a-protocol-agent-to-agent) — 跨厂商的姊妹方案；当子智能体跨越信任边界时使用。
+- [Programmatic Tool Calling](/docs/api/programmatic-tool-calling) — 在同一次 OpenAI 发布中一并推出的另一种原语（他们基于 JS 的版本），以及 Claude 的 Python 沙盒版本。
+
+
+## 下一步
+
+- [OpenAI Agents API 与 Claude Managed Agents](/docs/models/openai-agents-api-vs-managed-agents) — 本页之上的 2026 年 9 月那一层：持久会话和沙盒，与 Anthropic 的托管循环对比
+- [A2A：智能体到智能体协议](/docs/models/a2a-protocol-agent-to-agent)

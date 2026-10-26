@@ -1,0 +1,67 @@
+# XML タグでプロンプトを構造化する
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/prompting/xml-tags · AILmanac (CC BY 4.0)
+
+入力・指示・例を区切るための、Claude が好む慣習。
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["なぜ XML 風のタグが、プロンプトの各部分の間に明快な境界を Claude に与えるのか", "指示・ドキュメント・例・形式ルールを名前付きタグで囲む方法", "確実に解析できるタグ付き出力を Claude に求める方法", "いつタグを付け — そしていつ付けすぎないか"]} />
+
+プロンプトが指示・ドキュメント・例・質問を混ぜていると、モデルはそれらを混同しかねません。**XML 風のタグ**は各部分にラベルを付けるきれいな方法で — Claude は特にこれによく応えます。
+
+## 考え方
+
+各セクションを名前付きタグで囲んで、何が何なのかを明白にします:
+
+<PromptCard title="Tagged prompt structure">{`<instructions>
+Summarize the document for a busy executive. Use only the document; if a fact
+isn't there, say so.
+</instructions>
+
+<document>
+{paste the long document here}
+</document>
+
+<format>
+3 bullet points, then a one-line "decision needed".
+</format>`}</PromptCard>
+
+タグはあなたが考案するただのテキストです — `<document>`、`<example>`、`<context>`、`<rules>` — が、モデルに明快な境界を与えます。
+
+## なぜ役立つのか
+
+<Callout type="tip" items={["データと指示を分ける — モデルが、貼り付けたドキュメント内の紛れ込んだテキストに従う可能性が下がる（プロンプトインジェクションに対する穏やかな防御 — /docs/security/prompt-injection を参照）。", "「プロンプトの一部を無視された」を減らす。各部分が明確に区切られる。", "出力を解析しやすくする — Claude に答えを <answer> タグに入れるよう頼んで、確実に抽出できる。", "フューショット（/docs/prompting/few-shot）と組み合わせられる — 各例を <example> で囲む。"]} />
+
+4 つの利点を詳しく:
+
+- **データと指示を分ける** — モデルが、貼り付けたドキュメント内の紛れ込んだテキストに従う可能性が下がる（[プロンプトインジェクション](/docs/security/prompt-injection)に対する穏やかな防御）。
+- **「プロンプトの一部を無視された」を減らす。** 各部分が明確に区切られる。
+- **出力を解析しやすくする** — Claude に答えを `<answer>` タグに入れるよう頼んで、確実に抽出できる。
+- **[フューショット](/docs/prompting/few-shot)と組み合わせられる** — 各例を `<example>` で囲む。
+
+## タグ付き出力を求める
+
+<Steps items={[{title: "Claude に出力をタグで囲むよう頼む", body: "推論用と最終的な答え用に、どのタグを使うかをモデルに正確に伝える。"}, {title: "必要な部分だけ抽出する", body: "コードは <answer> の内容だけを取り出し、推論を無視できる。"}, {title: "構造化出力と組み合わせる", body: "機械可読な結果が必要なときは、構造化出力（/docs/api/structured-output）とよく合う。"}]} />
+
+<PromptCard title="Request tagged output">{`Put your reasoning in <thinking> tags and your final answer in <answer> tags.`}</PromptCard>
+
+そうすればコードは `<answer>` の内容だけを取り出せます。機械可読な結果が必要なときは、[構造化出力](/docs/api/structured-output)とよく合います。
+
+## ヒント
+
+<Callout type="takeaways" items={["一貫させる — すべてのタグを開いて閉じ、同じ名前を再利用する。", "タグに意味のある名前を付ける（<x> ではなく <contract>）。", "ささいなプロンプトにタグを付けすぎない — 本当に複数の異なる部分があるときに使う。"]} />
+
+- **一貫させる** — すべてのタグを開いて閉じ、同じ名前を再利用する。
+- **意味のある名前を付ける**（`<x>` ではなく `<contract>`）。
+- **付けすぎない** — ささいなプロンプトには使わず、本当に複数の異なる部分があるときに使う。
+
+## 理解度チェック
+
+<Quiz title="理解度チェック" questions={[{q: "プロンプトが指示・ドキュメント・質問を混ぜているとき、XML 風のタグが役立つ主な理由は何ですか?", options: ["トークンを節約するためにプロンプトを圧縮する", "部分の間に明快で明白な境界をモデルに与える", "Claude が動作するのに必須の構文である", "プロンプトを構造化された API 呼び出しに翻訳する"], answer: 1, explain: "タグはあなたが考案するただのテキストだが、各セクションにラベルを付けて何が何なのかを明白にし — モデルに明快な境界を与える。"}, {q: "なぜタグはプロンプトインジェクションに対する穏やかな防御になるのですか?", options: ["貼り付けたドキュメントを暗号化する", "明確に区切られたドキュメント内の紛れ込んだテキストに、モデルが従う可能性が下がる", "悪意ある指示を自動で取り除く", "ドキュメントを別のモデルに送る"], answer: 1, explain: "データと指示を分けることで、貼り付けたドキュメント内の紛れ込んだテキストにモデルが従う可能性が下がる。"}, {q: "タグ付き応答から Claude の最終的な答えだけを確実に抽出するにはどうしますか?", options: ["推論を <thinking> タグに、答えを <answer> タグに求め、<answer> の内容を取り出す", "Claude に推論を削除するよう頼む", "常にすべてを単一のタグで使う", "タグなしで応答全体を解析する"], answer: 0, explain: "推論を <thinking> に、最終的な答えを <answer> に入れることで、コードは <answer> の内容だけを取り出せる。"}, {q: "タグの命名のベストプラクティスはどれですか?", options: ["スペース節約のため <x> のような短い暗号的な名前を使う", "意味のある名前を付ける、例: <x> ではなく <contract>", "プロンプトを短く保つためタグを決して閉じない", "同じセクションに毎回違う名前を使う"], answer: 1, explain: "意味のある名前を付け（<x> ではなく <contract>）、一貫させる — すべてのタグを開いて閉じ、同じ名前を再利用する。"}, {q: "XML タグに手を伸ばすべきでないのはいつですか?", options: ["プロンプトに複数の異なる部分があるとき", "機械可読な出力が必要なとき", "本当に異なる部分のない、ささいなプロンプトのとき", "フューショットの例を囲むとき"], answer: 2, explain: "ささいなプロンプトにタグを付けすぎない — 本当に複数の異なる部分があるときだけタグを使う。"}]} />
+
+## 次へ
+
+- [Claude 固有のプロンプティング](/docs/prompting/prompting-claude)
+- [フューショットの例を正しく使う](/docs/prompting/few-shot)
+- [構造化出力](/docs/api/structured-output)

@@ -1,0 +1,69 @@
+# 弃用与迁移观察
+
+> Source: https://derob98.github.io/ailmanac/zh-Hans/docs/whats-new/deprecations · AILmanac (CC BY 4.0) · last verified 2026-10-25
+
+已退役的模型、被重命名的标志，以及附带迁移说明的破坏性变更。
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-10-25" source="https://platform.claude.com/docs/en/about-claude/model-deprecations">
+弃用时间表和迁移细节来自 Anthropic 且会发生变化——在迁移之前，请务必在官方文档中确认日期和替代方案。
+</VerifyNote>
+
+模型会被退役，参数会被重命名，行为会发生变化。本页追踪 **破坏性变更**，让升级不会让你措手不及。如果你基于 API 进行构建，请定期浏览本页。
+
+## 为什么这很重要
+
+一个被固定的模型 ID 终将被 **弃用**，进而被 **移除**。硬编码该 ID 的代码会出问题。一点点保养就能避免凌晨两点的意外。
+
+## 生存法则
+
+- **从配置中读取模型 ID**，绝不要在整个代码库中散布字面量——这样迁移就只是改动一行。
+- **关注公告**，留意弃用日期和推荐的替代方案。
+- 切换模型时，**重新运行你的 [评估](/docs/foundations/evals)**——即使是在“更新、更好”的模型上，行为也可能发生变化。
+- **在截止日期之前测试**，而不是在移除之后。
+
+## 常见的变更类型
+
+| 变更 | 示例 | 应对方式 |
+|---|---|---|
+| 模型退役 | 某个较旧的模型 ID 停止工作 | 迁移到推荐的后继模型；重新评估 |
+| 参数被取代 | 某个推理/预算旋钮被 `effort` 取代 | 更新调用；参阅 [思考与 Effort](/docs/api/thinking-and-effort) |
+| 默认值变更 | 新的默认模型/行为 | 有意识地固定版本；验证你的提示词是否仍然有效 |
+| 端点/SDK 更新 | 新的 SDK 主版本 | 阅读迁移指南；谨慎升级 |
+
+## 当前观察
+
+权威的时间表位于[官方模型弃用页面](https://platform.claude.com/docs/en/about-claude/model-deprecations)——在迁移之前，请在那里确认日期。Anthropic 会在退役某个公开发布的模型之前提供至少 60 天的提前通知。
+
+### 已弃用的模型
+
+目前有一个公开发布的 Claude 模型处于“已弃用但尚未退役”的窗口期（2026年10月25日核对）：**`claude-sonnet-4-5-20250929`（Sonnet 4.5）已于 2026年9月30日弃用，并将于 2026年11月30日退役。** Anthropic 推荐的替代模型是 `claude-sonnet-5-5`。调用在退役日期之前照常工作，之后就会失败——如果你的代码里还固定着这个 ID，这就是你要做的迁移，现在这个窗口大约还剩五周。
+
+同样已弃用：仅限邀请的 `claude-mythos-preview`（2026年6月9日弃用，退役日期待公布）——请迁移到当前需要通过验证才能使用的模型 `claude-mythos-5-1`。（`claude-mythos-5` 仍为 Active，但它有自己的迁移指南，指向 5.1，所以迁移两次是白费功夫。）
+
+`claude-haiku-4-5-20251001` 是下一个要留意的 ID，它现在是产品线中唯一一个**已经越过**最早可能退役日期的模型：那个下限是 **2026年10月15日**，现已过去（下一个是 Opus 4.5 的，在 2026年11月24日）。它还被列在模型概览的**旧版（legacy）模型**之中，直接后继是 `claude-haiku-5-5`（2026年10月7日发布）。截至 2026年10月25日，官方状态表仍将其列为 **Active**，且尚未宣布弃用，所以这两种说法并不矛盾：在 Anthropic 自己的生命周期术语里，“legacy”的意思是*不再接收更新，未来可能被弃用*，比“已弃用”低一档。“不早于”的日期到达只是提示你该做规划，而不是故障——Anthropic 承诺至少提前 60 天通知，而这 60 天是从通知发出时开始算的，不是从下限日期越过时开始算。Sonnet 4.5 就是现成的例子：它的下限日期是 2026年9月29日，弃用通知在9月30日发出，而真正的退役在那之后两个月。如果你固定使用这个 ID，现在这次迁移值得排进日程，而不只是观望——而且它不只是换个 ID：请参阅 [Claude Haiku 5.5：100K 价格悬崖](/docs/models/haiku-5-5-the-100k-price-cliff)，了解会返回 400 的五项变更和仍返回 200 的六项变更。迁移前请在[官方模型状态表](https://platform.claude.com/docs/en/about-claude/model-deprecations#model-status)中确认。
+
+### 近期已退役
+
+- `claude-opus-4-1-20250805`（Opus 4.1）已于 **2026年8月5日退役**——请迁移到 `claude-opus-4-8`（或直接迁移到 `claude-opus-5`）。
+- `claude-opus-4-20250514`（Opus 4）和 `claude-sonnet-4-20250514`（Sonnet 4）已于 **2026年6月15日退役**——Anthropic 列出的替代模型分别是 `claude-opus-4-8` 和 `claude-sonnet-4-6`（或直接迁移到 `claude-opus-5` / `claude-sonnet-5`）。
+
+对任何已退役 ID 的调用现在都会返回 API 错误。如果你的代码仍然固定使用其中之一，那就是第一件要修的事。
+
+### 参数弃用
+
+采样旋钮 `temperature`、`top_p` 和 `top_k` 正在被逐步淘汰，而且**现在根据你发送的 API 版本不同，有两套不同的规则。**
+
+- **使用 `anthropic-version: 2023-06-01` 时**（2026年10月21日之前发布的所有 SDK 主版本都发送这个版本）：在 **Claude 4.7 代及更高版本的模型**（Opus 4.7、Opus 4.8、Opus 5、Opus 5.5、Sonnet 5、Sonnet 5.5、Haiku 5.5、Fable 5、Fable 5.1、Mythos 5、Mythos 5.1）**以及 Claude Mythos Preview** 上，将其中任何一个设置为**非默认**值都会返回 **400 错误**。默认值会被接受，较旧的模型仍然接受非默认值。请看版本号而不是名字：**Haiku 5.5 会拒绝**非默认的采样值，而较旧的 **Haiku 4.5 仍然接受**，Opus 4.6 和 Sonnet 4.6 也一样。
+- **使用 `anthropic-version: 2026-10-21` 时**：这三个参数已被**移除**。发送其中任何一个，**在所有模型上都会返回 400，即使取的是该参数的默认值**。最新的 SDK 主版本和 `ant` CLI 已把它们从请求类型和命令行标志中删除。
+
+无论哪种情况，解决办法都一样：三个参数全部省略，改用[提示词](/docs/prompting/prompting-claude)和[思考与 Effort](/docs/api/thinking-and-effort) 来引导行为。唯一没有替代方案的情形，是在仍然遵守该参数的较旧模型上*有意调低*温度——Anthropic 文档给出的选项是停止发送该参数，或让该请求继续使用 `2023-06-01`。关于你当前使用的是哪个版本、以及随之还有哪些变化的完整说明：[API Version 2026-10-21](/docs/api/api-version-2026-10-21)。
+
+请始终对照 [当前模型与定价](/docs/whats-new/models-and-pricing) 表格确认你的模型 ID；如果你仍在使用较旧的 ID，请规划一次迁移。
+
+## 下一步
+
+- [错误、速率限制与可靠性](/docs/api/errors-and-rate-limits)
+- [当前模型与定价](/docs/whats-new/models-and-pricing)
+- [评估 AI 质量（Evals）](/docs/foundations/evals)

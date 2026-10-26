@@ -1,0 +1,114 @@
+# Your First Production API Call (Cost-Aware)
+
+> Source: https://derob98.github.io/ailmanac/docs/walkthroughs/first-production-call · AILmanac (CC BY 4.0)
+
+A real, streamed, error-handled, cost-budgeted call.
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Name the four disciplines that separate a production call from a toy one-liner: secrets, streaming, cost, and error handling", "Write a resilient streamed call that retries transient failures (429/5xx) with backoff — and never retries a 400", "Keep the model ID in config so switching models is a one-line change, not a search-and-replace", "Watch token cost on every call and cap it deliberately"]} />
+
+A toy [API call](/docs/api/first-call) is one line. A *production* call handles errors, streams output, watches cost, and keeps secrets safe. Let's build that, step by step.
+
+## Step 1 — Secrets & model from config
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."   # never in source control
+```
+
+Keep the **model ID in config**, not scattered literals, so migration is trivial ([why](/docs/api/errors-and-rate-limits)). Pick it deliberately — [Choosing a Model](/docs/api/choosing-a-model).
+
+## Step 2 — A resilient, streamed call
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+import os, time, random, anthropic
+client = anthropic.Anthropic()
+MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
+
+def ask_stream(prompt, system=None, max_tokens=1024):
+    for attempt in range(5):
+        try:
+            with client.messages.stream(
+                model=MODEL, max_tokens=max_tokens,
+                system=system or anthropic.NOT_GIVEN,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                for text in stream.text_stream:
+                    print(text, end="", flush=True)
+                final = stream.get_final_message()
+            print()
+            usage = final.usage
+            print(f"\n[tokens in/out: {usage.input_tokens}/{usage.output_tokens}]")
+            return final
+        except (anthropic.RateLimitError, anthropic.APIStatusError):
+            if attempt == 4: raise
+            time.sleep(min(2 ** attempt + random.random(), 30))
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+const client = new Anthropic();
+const MODEL = process.env.CLAUDE_MODEL ?? "claude-sonnet-5";
+
+export async function askStream(prompt: string, system?: string, maxTokens = 1024) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const stream = client.messages.stream({ model: MODEL, max_tokens: maxTokens, system,
+        messages: [{ role: "user", content: prompt }] });
+      for await (const e of stream)
+        if (e.type === "content_block_delta") process.stdout.write(e.delta.text ?? "");
+      const final = await stream.finalMessage();
+      console.error(`\n[tokens in/out: ${final.usage.input_tokens}/${final.usage.output_tokens}]`);
+      return final;
+    } catch (e: any) {
+      if (attempt === 4 || ![429, 500, 529].includes(e?.status)) throw e;
+      await new Promise(r => setTimeout(r, Math.min(2 ** attempt * 1000, 30000)));
+    }
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+Smoke-test it before wiring it into anything — one small call proves the stream, the token line, and your key all work:
+
+<PromptCard title="First smoke test (Python REPL)">{`ask_stream("Say hello in one sentence.", max_tokens=64)`}</PromptCard>
+
+## Step 3 — Mind the cost
+
+- **Log token usage** (above) so you can see what each call costs.
+- **Right-size `max_tokens`** and the model; cap input with focused prompts.
+- For repeated stable prefixes, add [prompt caching](/docs/api/prompt-caching).
+- See [Tokens & Pricing](/docs/api/tokens-and-pricing) and [Cost & Latency](/docs/foundations/cost-and-latency).
+
+## Step 4 — Handle the unhappy paths
+
+- Retry **transient** errors (429/5xx) with backoff (above); don't retry 400s.
+- Handle [refusals](/docs/api/refusals-and-safety) gracefully.
+- Set a **timeout** and a **cost/iteration budget** for anything agentic.
+
+## Verify
+
+Force each path and watch what happens — a production call earns the name by failing well, not just succeeding:
+
+<Steps items={[{title: "Streamed output appears", body: "Text prints incrementally as it's generated, not in one blocking chunk at the end. That's the latency win users feel."}, {title: "The token line prints", body: "After the response you see the [tokens in/out: …] line. That's your per-call cost meter, logged on every call."}, {title: "A bad key fails clean", body: "Set ANTHROPIC_API_KEY to a wrong value and re-run — you should get a clean error, not a stack-trace crash."}, {title: "Transient errors retry, 400s don't", body: "429/5xx errors retry with backoff up to 5 attempts; a malformed 400 request should surface immediately instead of retrying pointlessly."}]} />
+
+<Quiz title="Check yourself" questions={[{q: "Why keep the model ID in config instead of scattering the literal string through your code?", options: ["Config values are encrypted at rest by the SDK", "Migrating to a new model becomes a one-line change instead of hunting scattered literals", "The Anthropic SDK refuses to run without an env var"], answer: 1, explain: "Model IDs change as new versions ship. Keeping the ID in one config value makes migration a single edit; scattered literals mean a search-and-replace across the codebase every time you switch models."}, {q: "The retry loop catches some failures and re-raises others. Which errors should it retry?", options: ["Every error, to maximize the chance of success", "Transient errors like 429 and 5xx, with exponential backoff — but not 400s", "Only 400 errors, since those are the client's fault"], answer: 1, explain: "429 (rate limit) and 5xx (server) are transient — backing off and retrying often succeeds. A 400 means the request itself is malformed; retrying it unchanged just wastes calls and time, so it should surface immediately."}, {q: "What's the cheapest way to see what each call actually costs?", options: ["Call a pricing endpoint before every request", "Log the input/output token counts returned in usage on every call", "Enable prompt caching so cost drops to zero"], answer: 1, explain: "The final message carries a usage object with input and output token counts. Logging it turns every call into its own cost meter for free. Prompt caching lowers cost for repeated prefixes but doesn't measure it."}]} />
+
+<Callout type="takeaways" items={["A production call is four disciplines layered on the one-liner: secrets kept out of source, streamed output, cost watched, errors handled", "Retry transient failures (429/5xx) with exponential backoff plus jitter — and never retry a 400, which is a request bug you must fix", "Keep the model ID in config so switching models is one line, not a codebase-wide search-and-replace", "Log token usage on every call: it's your per-request cost meter and costs nothing to add", "Streaming improves perceived latency; timeouts and a cost/iteration budget keep agentic loops from running away"]} />
+
+## Next
+
+- [Errors, Rate Limits & Reliability](/docs/api/errors-and-rate-limits)
+- [Production API Snippets](/docs/templates/api-snippets)
+- [Building Agents on the API](/docs/api/building-agents)

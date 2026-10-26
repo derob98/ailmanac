@@ -1,0 +1,88 @@
+# Tokens, contexte et tarification
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/api/tokens-and-pricing · AILmanac (CC BY 4.0) · last verified 2026-06-28
+
+Comptez correctement les tokens, max_tokens vs fenêtre de contexte, et l'estimation du coût.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={["Compter correctement les tokens avec l'outillage d'Anthropic (pas le tokeniseur d'un autre modèle)", "Distinguer max_tokens de la fenêtre de contexte — et pourquoi la différence compte", "Estimer le coût de l'API à partir des tokens en entrée + en sortie, aux tarifs par modèle", "Réduire le coût sans perdre en qualité : bien dimensionner, mettre en cache, élaguer, regrouper en lots"]} />
+
+<VerifyNote lastVerified="2026-06-28" source="https://platform.claude.com/docs/en/about-claude/pricing">
+Les prix par token et les limites de contexte changent — lisez toujours les chiffres actuels sur les pages officielles de tarification/modèles. Voir le [tableau des modèles](/docs/whats-new/models-and-pricing).
+</VerifyNote>
+
+Le coût et les limites sur l'API se mesurent tous en **[tokens](/docs/foundations/tokens-and-context)** (~¾ d'un mot). Trois choses à bien faire.
+
+## 1. Compter correctement les tokens
+
+Ne devinez pas, et **n'utilisez pas le tokeniseur d'un autre modèle** (par ex. `tiktoken`) — les décomptes de tokens diffèrent selon la famille de modèles. Utilisez l'endpoint/l'aide du SDK de **comptage de tokens** d'Anthropic pour mesurer une requête *avant* de l'envoyer.
+
+<Callout type="tip" items={["Règle de planification approximative : ~750 mots ≈ ~1 000 tokens (un token vaut environ ¾ d'un mot)."]} />
+
+## 2. `max_tokens` ≠ fenêtre de contexte
+
+Ces deux limites sont faciles à confondre, mais elles régissent des choses différentes.
+
+| Limite | Ce qu'elle plafonne | Quand la modifier |
+| --- | --- | --- |
+| **`max_tokens`** | La longueur de la *réponse* (sortie uniquement) | Augmentez-la si la sortie est tronquée |
+| **Fenêtre de contexte** | Budget total pour **l'entrée + la sortie** | De grosses entrées laissent moins de place à la sortie |
+
+<Callout type="warning" items={["Réglez max_tokens sur ce dont la tâche a besoin. Trop bas tronque la réponse. Inutilement haut ne coûte pas plus cher — vous ne payez que pour les tokens réellement générés — mais cela peut laisser les réponses partir dans tous les sens."]} />
+
+## 3. Estimer le coût
+
+Vous êtes facturé pour les **tokens en entrée + tokens en sortie**, aux tarifs par modèle (Opus > Sonnet > Haiku). Une estimation rapide :
+
+```
+cost ≈ (input_tokens × input_rate) + (output_tokens × output_rate)
+```
+
+Obtenez les tarifs actuels sur la [page officielle de tarification](https://platform.claude.com/docs/en/about-claude/pricing) — nous ne les codons pas en dur ici, volontairement.
+
+## Réduire le coût (sans perdre en qualité)
+
+<Steps items={[
+  {title: "Bien dimensionner le modèle", body: "Commencez avec Sonnet ; réservez Opus pour les parties difficiles. Voir Choisir un modèle (/docs/api/choosing-a-model)."},
+  {title: "Utiliser la mise en cache des prompts", body: "Réutilisez un préfixe de prompt stable d'un appel à l'autre. Voir Mise en cache des prompts (/docs/api/prompt-caching)."},
+  {title: "Élaguer les entrées", body: "N'envoyez que le contexte qui compte. C'est aussi là que le RAG (/docs/foundations/rag) aide."},
+  {title: "Regrouper le travail hors ligne en lots", body: "Regroupez en lots les tâches où la latence n'a pas d'importance."}
+]} />
+
+Plus de stratégie dans [Compromis coût & latence](/docs/foundations/cost-and-latency).
+
+<Quiz title="Vérifiez vos acquis" questions={[
+  {
+    q: "Vous planifiez une requête et voulez connaître son décompte de tokens avant l'envoi. Que devez-vous utiliser ?",
+    options: ["Un tokeniseur généraliste comme tiktoken", "L'endpoint/l'aide du SDK de comptage de tokens d'Anthropic", "Le nombre de mots divisé par 0,75 comme chiffre final", "La taille de la fenêtre de contexte issue du tableau des modèles"],
+    answer: 1,
+    explain: "Les décomptes de tokens diffèrent selon la famille de modèles, donc ne réutilisez pas le tokeniseur d'un autre modèle. Utilisez l'endpoint/l'aide du SDK de comptage de tokens d'Anthropic pour mesurer avant l'envoi."
+  },
+  {
+    q: "Votre réponse est sans cesse tronquée en milieu de phrase. Quel réglage modifiez-vous ?",
+    options: ["Baisser max_tokens", "Augmenter max_tokens", "Réduire la fenêtre de contexte", "Passer à un modèle plus petit"],
+    answer: 1,
+    explain: "max_tokens plafonne la longueur de la réponse. Si la sortie est tronquée, augmentez-le."
+  },
+  {
+    q: "Comment êtes-vous facturé sur l'API ?",
+    options: ["Par requête, à tarif fixe", "Tokens en entrée uniquement", "Tokens en entrée + tokens en sortie, aux tarifs par modèle", "Par mot de sortie"],
+    answer: 2,
+    explain: "cost ≈ (input_tokens × input_rate) + (output_tokens × output_rate), avec des tarifs qui diffèrent selon le modèle (Opus > Sonnet > Haiku)."
+  },
+  {
+    q: "Quel est le meilleur premier geste pour réduire le coût sans perdre en qualité ?",
+    options: ["Toujours utiliser Opus pour tout", "Commencer avec Sonnet et réserver Opus pour les parties difficiles", "Régler max_tokens le plus haut possible", "Utiliser le tokeniseur d'un autre modèle pour économiser des appels"],
+    answer: 1,
+    explain: "Bien dimensionner le modèle : commencez avec Sonnet, réservez Opus pour les parties difficiles. Puis ajoutez la mise en cache des prompts, l'élagage des entrées et le regroupement en lots."
+  }
+]} />
+
+<Callout type="takeaways" items={["Tout se mesure en tokens (~¾ d'un mot) ; ~750 mots ≈ ~1 000 tokens.", "Comptez les tokens avec l'outillage d'Anthropic — jamais le tokeniseur d'un autre modèle.", "max_tokens plafonne la réponse ; la fenêtre de contexte est le budget total entrée + sortie.", "Facturation = tokens en entrée + tokens en sortie aux tarifs par modèle (Opus > Sonnet > Haiku).", "Réduisez le coût en dimensionnant bien le modèle, en mettant en cache les préfixes, en élaguant les entrées et en regroupant en lots."]} />
+
+## Suite
+
+- [Choisir un modèle Claude](/docs/api/choosing-a-model)
+- [Mise en cache des prompts & optimisation des coûts](/docs/api/prompt-caching)
+- [Streaming & multi-tours](/docs/api/streaming)

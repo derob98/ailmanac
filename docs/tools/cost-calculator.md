@@ -1,0 +1,25 @@
+# API Cost Calculator
+
+> Source: https://derob98.github.io/ailmanac/docs/tools/cost-calculator · AILmanac (CC BY 4.0) · last verified 2026-07-22
+
+Estimate your monthly Claude API cost — and see what prompt caching saves.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-07-22" source="https://platform.claude.com/docs/en/about-claude/pricing">
+Enter the current per-million-token prices yourself from the official pricing page — we don't hard-code them because they change.
+</VerifyNote>
+
+Estimate the monthly cost of an API workload, and see how much a stable cached prefix saves. All client-side — nothing leaves your browser.
+
+<CostCalculator />
+
+:::tip[Cut the bill, not the quality]
+The biggest levers: right-size the model, trim input tokens, and reuse a stable prefix with [prompt caching](/docs/api/prompt-caching). Full strategy in [Cost & Latency](/docs/foundations/cost-and-latency).
+:::
+
+## Next
+
+- [Tokens, Context & Pricing](/docs/api/tokens-and-pricing) — how cost is calculated
+- [Prompt Caching & Cost Optimization](/docs/api/prompt-caching)
+- [Current Models & Pricing](/docs/whats-new/models-and-pricing)

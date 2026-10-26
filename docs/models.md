@@ -1,0 +1,122 @@
+# AI Models & Assistants
+
+> Source: https://derob98.github.io/ailmanac/docs/models · AILmanac (CC BY 4.0)
+
+Claude is the core here, but the same skills travel. Start with how to choose, then go as deep as you need on any assistant, on running models locally, or on agents.
+
+<LevelBadge level="all" />
+
+Claude is our core — but the same skills travel. This section widens the lens
+to the whole AI world: the major assistants, how they differ, when to use
+which, and the techniques that transfer across all of them.
+
+<Callout type="objectives" items={["Pick the right model for a job without re-learning the field every time","Move between assistants — ChatGPT, Gemini, Grok, open models — without losing your technique","Run capable models on your own machine, and know when that is worth it","Combine Claude with local models and agent frameworks"]} />
+
+## Start here
+
+If you read one page in this section, read this one. Everything below is a
+branch off it.
+
+- **[How to choose a model](/docs/models/choosing-a-model)** — a durable
+  framework that outlives any particular release.
+
+Then follow whichever thread matches what you are doing.
+
+## The current flagships
+
+The September 2026 releases at the top of both stacks, read side by side.
+
+- [Claude Opus 5.5: the field guide](/docs/models/opus-5-5-field-guide) — Anthropic's new recommended default: $4/$20, cache reads on a 5% tier, four 400-errors and one silent response-shape change
+- [Claude Fable 5.1: what changed and how to migrate](/docs/models/fable-5-1-field-guide) — three breaking changes, five betas, cache reads at a quarter of the price
+- [GPT-6 Astra: the field guide for Claude users](/docs/models/openai-astra-preview) — same list price, different bill, Critical-tier cyber classification
+- [Gemini 4 Argon: the field guide for Claude users](/docs/models/gemini-4-argon-field-guide) — Google's new generation: the 1M is the *output* limit (up from 64K), not the context window; why the independent index puts it five points behind Opus 5.5 despite the "frontier lead" headlines; 62K output tokens per task against Astra's 27K; and the Fairwind terms that mean you probably cannot call it
+
+## The workhorse tier
+
+The cheap tier is where the interesting numbers are. Same lesson every time: match the model to the shape of the work, not to its position in the price list.
+
+- [Claude Sonnet 5.5: the field guide](/docs/models/sonnet-5-5-field-guide) — Sonnet 5's exact prices, up to 30% less per task: five 400-traps, thinking that moves instead of switching off, and the one benchmark row where it beats Opus 5.5
+- [Claude Haiku 5.5: the 100K price cliff](/docs/models/haiku-5-5-the-100k-price-cliff) — the only current Claude model priced by *prompt length*: two rate cards 5x apart, where one token past 100,000 reprices the entire request; why the cliff arrives ~23% earlier in text than you expect; the honest saving (~87% below it, ~35% above, not the 90% on the rate card); and the one lever where trimming 21% of a prompt cuts 84% of the cost
+- [GPT-6.1 Sol: the field guide for Claude users](/docs/models/gpt-6-1-sol-devday-2026) — Sonnet 5.5's exact rate card at half its cached-read price: the 922K input ceiling inside a 1.05M window, the cost cliff at 272K, tool calling on only one of the two APIs, and the benchmark row Claude still wins by 8.7 points
+- [Gemini 3.8 Flash for Claude users](/docs/models/gemini-3-8-flash) — Sonnet-priced, "works harder" by default, ~30% more tokens per task
+- [DeepSeek-V4.1-Flash](/docs/models/deepseek-v4-1-flash-open-weight-1m) — 552B MIT open weight, 1M context, 890-byte KV cache, a 1–100 effort dial, and a routing change that silently replaced `deepseek-v4-pro`
+
+## Coming from another assistant
+
+You already know one tool and want your habits to carry over.
+
+- [ChatGPT for Claude users](/docs/models/chatgpt-for-claude-users)
+- [Gemini for Claude users](/docs/models/gemini-for-claude-users)
+- [Grok for Claude users](/docs/models/grok-for-claude-users)
+- [Porting prompts across models](/docs/models/porting-prompts-across-models) — what transfers, what breaks
+
+## Comparing before you commit
+
+- [How to read an AI benchmark without getting fooled](/docs/models/reading-ai-benchmarks) — read this before any other row in this list: what a SWE-bench score literally measures, the 4.8 points a vendor's own footnote shows come from the *harness* rather than the model, the contamination discount that turns 70%-plus into ~23% on unseen code, and a six-question checklist for any number
+- [Is the model nerfed? How to actually tell](/docs/models/is-the-model-nerfed) — the question that follows every launch: what a pinned snapshot does and does not guarantee, the seven things that change without a new model, why the most-cited "GPT-4 got dumber" result was an eval bug, and a paired-design protocol you can run yourself
+- [Claude vs GPT vs Gemini for coding](/docs/models/claude-gpt-gemini-for-coding)
+- [Reasoning models compared](/docs/models/reasoning-models-compared)
+- [What AI costs across providers](/docs/models/what-ai-costs-across-providers)
+- [Hard spend caps: which providers actually stop the bill](/docs/models/hard-spend-caps) — the control that matters once agents can spend while you sleep: one event, four status codes (a 429 with no `retry-after` on Anthropic's tier cap, a **400** on the limit you set yourself, 429 on OpenAI, 402 on OpenRouter), why no cap can be exact, and the tier where the default safety net disappears
+- [Ember-1: Kimi K3's answers for 40% fewer tokens](/docs/models/ember-1-reasoning-token-efficiency) — identical rate card, materially smaller bill: why turning the effort dial down is not the same as efficiency, what one benchmark run really costs, and the reasoning-token share that caps your own saving
+- [Prompt caching across providers](/docs/models/prompt-caching-across-providers) — explicit vs automatic control, a 512-to-4,096-token eligibility spread, and the break-even rule that says a prefix reused only once can cost you MORE cached than uncached
+- [Diffusion LLMs: the models that don't write left to right](/docs/models/diffusion-llms-parallel-text) — a different decoding algorithm, not better hardware: why the open-weight pioneer's own README says quality peaks at one step per token, the conditional-independence bug that makes aggressive parallelism *wrong* rather than just coarse, how DiffusionGemma converted an autoregressive Gemma 4 for under 10% of its training budget, and the masked-infill jailbreak that reaches 100% on an aligned dLLM
+- [Latent reasoning: agents that think without words](/docs/models/latent-reasoning-hybrid-agents) — the first open-weight agent that does most of its thinking as hidden states instead of tokens: 170-183 latent forward passes against ~302 text tokens where a text agent spends ~596, a ~10M-parameter adapter as the entire bridge, the reason the checkpoint loops forever in llama.cpp, and the causal test (44.9-51.3% accuracy loss) that quietly undermines the paper's own "inspectable thoughts" claim
+- [Optical context compression: sending text as an image](/docs/models/optical-context-compression) — 86.5% fewer counted tokens on Anthropic, 6.95x MORE on Gemini for short inputs, and the accuracy cliff the token counter cannot see
+- [Generative media: image, audio, video](/docs/models/generative-media-image-audio-video)
+- [World models: what you can actually build today](/docs/models/world-models-spatial-intelligence) — AMD is paying ~$8.2B for World Labs, and two opposite things share the name: frame generators where the world lives in the model's context and a session caps at 60 seconds, versus 3D generators that hand you Gaussian splats you own, render for free and cannot collide with
+- [AI explainer videos: the code-driven pipeline](/docs/models/ai-explainer-videos-code-driven) — the model writes a deterministic program, not a video: why `Math.random()` is banned, Remotion's 3-employee licence cliff, the two Manims that share an import name, and the dwell-time formula that makes it watchable
+- [Gemini 3.8 Live and Live Extended Thinking](/docs/models/gemini-3-8-live-voice-agents) — Google's GA voice models for builders: async tools by default, the 15-min/2-min session walls, and why call cost grows faster than call length
+
+## Running models yourself
+
+Local models trade some capability for privacy, cost control, and working
+offline. These pages cover when that trade is worth making.
+
+- [Run models locally with Ollama](/docs/models/run-models-locally-ollama) — the practical starting point
+- [Why a 35 KB system prompt breaks on a local model](/docs/models/large-system-prompts-on-local-models) — context budgets, Ollama's silent middle-of-prompt truncation, and the failure signals to watch
+- [DeepSeek, Qwen & the open models](/docs/models/deepseek-qwen-open-models)
+- [DeepSeek V4-Flash-Vision: first native-vision frontier open weight](/docs/models/deepseek-v4-flash-vision-open-multimodal)
+- [DeepSeek-V4.1-Flash: the 1M-context open weight that replaced it](/docs/models/deepseek-v4-1-flash-open-weight-1m) — serving stacks, sampling defaults, and the effort-dial protocol
+- [Mistral Large 4 (Le Chonk): the 1.05T open weight you can't download yet](/docs/models/mistral-large-4-le-chonk) — why "49B active" still needs ~525 GB at 4-bit, an Intelligence Index of 38 against Opus 5.5's 58, a 50% launch promo that hides the real cost-per-task, a 1M context evaluators measured near 512K, and the staged release where vetted partners get a *less*-moderated build first
+- [Colibrì: run a 744B MoE from your SSD](/docs/models/colibri-stream-frontier-moe-from-ssd) — expert streaming on 16–32 GB machines, and what it really costs in tok/s
+- [Strata: a 125B MoE at 94 tok/s on a 12 GB card](/docs/models/strata-qwen-flash-next-gaming-gpu) — the other end of that hierarchy, at interactive speed: why only 12 of 48 layers grow a KV cache, why a 58 GB download needs just 29.6 GB of RAM, and the quality bill nobody prints — 91.3% of SWE-bench Verified next to 98.7% of LiveCodeBench, a KV default that passes needle tests while losing 8–12% perplexity, and a 3x vision regression on identical weights
+- [DwarfStar (ds4) and the rise of overfit inference engines](/docs/models/ds4-overfit-inference-engines) — a pure-C engine that runs three model families and refuses everything else: asymmetric expert quantization, bounded SSD streaming, KV snapshots that survive a restart, and its numbers read honestly
+- [DeepInfer: DeepSeek's own inference engine, read honestly](/docs/models/deepinfer-deepseek-inference-engine) — 16.3k stars in a day, and four things the coverage missed: it's a vLLM fork, "SM100" excludes every H100 and every consumer card, its decode throughput counts drafted tokens whether or not they were accepted, and batch-invariant inference is mutually exclusive with its own speculative decoder
+- [Ternary quantization in practice: Bonsai 2 27B in 5.95 GB](/docs/models/ternary-quantization-bonsai-2-27b) — why stock llama.cpp loads it and silently emits garbage, why the bigger file is faster on an H100, and what "98.2% retention" hides
+- [MiMo-V2.6: Xiaomi's 1T open-weight omnimodal model](/docs/models/mimo-v2-6-open-weight-omnimodal) — MIT, 42B active, video and audio in; the Terminal-Bench version trap, why Pro wants two nodes, and what the 10x UltraSpeed tier actually sells
+- [Whistle: speech-to-text in 16.9 MB](/docs/models/whistle-on-device-speech-to-text) — on-device ASR that genuinely beats Whisper base on close-mic speech, and is the *worst* of three models on real meeting audio: the benchmark bars the vendor's chart declines to label, the 30-second wall that lives in the encoder, the streaming API the launch thread concluded did not exist, and the one knob that took a tester from 41% to 96%
+- [A private local AI stack](/docs/models/private-local-ai-stack)
+- [Claude plus local models](/docs/models/claude-plus-local-models) — using both, deliberately
+
+## Agents beyond Claude
+
+- [Local AI agents](/docs/models/local-ai-agents)
+- [Open-source agent frameworks](/docs/models/open-source-agent-frameworks)
+- [The third-party memory layer: how claude-mem works](/docs/models/agent-memory-layer-claude-mem) — 103k stars for fixing session amnesia across Claude Code, Cursor and Codex, and what it actually is underneath: a second model in a daemon reading every tool call, whose hosted observer the project's own cost dataset prices as a *DeepSeek* model; plus the exit-code contract that decides whether a broken memory layer blocks your session
+- [Claude, MCP and local tools](/docs/models/claude-mcp-local-tools)
+- [A2A: the agent-to-agent protocol](/docs/models/a2a-protocol-agent-to-agent)
+- [Agent payments: x402, MPP and AgentCore GA](/docs/models/agent-payments-x402-and-agentcore) — how agents actually pay for things now
+- [Commerce agents blueprint](/docs/models/commerce-agents-blueprint) — Anthropic's open-source reference for shopping and merchant agents: the split-agent shape and the staged-write guardrail
+- [OpenAI Agents API vs Claude Managed Agents](/docs/models/openai-agents-api-vs-managed-agents) — the two hosted agent loops side by side: permissions, vaults, budgets, network policy, sandbox cost
+- [OpenAI Dots: the always-on agent](/docs/models/openai-dots-always-on-agents) — a persistent agent with its own cloud computer that works while you are logged off: the five-rung permission ladder, why proactive research is read-only at the *tool* layer rather than the prompt layer, and what the published safety numbers really measure
+- [Open Code Review: Alibaba's hybrid AI reviewer](/docs/models/open-code-review-hybrid-ai-reviewer) — deterministic rails around any model; 4.7x Claude Code's precision on its own benchmark, and a 20% recall ceiling
+- [AX (Agent Executor): Google's open agent runtime](/docs/models/google-ax-agent-executor-runtime) — kubectl-shaped Tasks, Workspaces, Gateways and Models on top of Agent Substrate; what survives a suspend/resume, the runner contract, and why the June docs no longer match the CLI
+- [System One decision models: Jev, Kev and the open clones](/docs/models/system-one-decision-models-jev-kev) — a model that returns calibrated probabilities instead of text; what "cannot hallucinate" really guarantees, the vendor numbers next to the one independent test, and where it sits in a Claude agent loop
+- [Train your own decision model: Jeff, Jeeves and the DIY stack](/docs/models/train-your-own-decision-model) — the recipe is cross-entropy over option letters plus a separately fitted temperature; ~2 hours on one GPU, the benchmark rows where a 0.8B beats the API by 19 points and the rows where it loses by 30, and the boring embeddings baseline you have to beat first
+- [Async-first agent harnesses: what Unreal Agent changes](/docs/models/async-first-agent-harness-unreal) — why turn count, not token count, is what you pay for; 28 turns against 44 for the same score, and the three designs Unreal Labs refused to build
+- [Pi 1.0: the minimal harness and the codemode trick](/docs/models/pi-1-0-minimal-agent-harness) — the most complete published answer to MCP context bloat: a QuickJS/WASM sandbox where tool results never enter the transcript, four exposure modes where the default declares *nothing*, a 3,000-token ceiling on inlined declarations, and a suffix-append trick that keeps your prompt cache alive when a server connects
+- [DeepSeek Harness: the agent loop as a plugin](/docs/models/deepseek-harness-everything-is-a-plugin) — 242k stars and an "everything is a plugin" claim that holds: it runs your Claude Code hooks.json, speaks anthropic-messages, and defaults run_code to codemode
+
+## Everything in this section
+
+The full list, including pages added since this index was written.
+
+import DocCardList from '@theme/DocCardList';
+
+<DocCardList />
+
+## Next
+
+- [Put it to work: Playbooks](/docs/playbooks/productivity)
+- [Go deeper: Power User](/docs/power-user/token-economy)

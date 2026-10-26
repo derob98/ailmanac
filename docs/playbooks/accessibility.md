@@ -1,0 +1,48 @@
+# Accessibility: Claude as an Assistive Tool
+
+> Source: https://derob98.github.io/ailmanac/docs/playbooks/accessibility · AILmanac (CC BY 4.0)
+
+Using Claude for dyslexia, low vision, neurodivergence and language learning.
+
+<LevelBadge level="beginner" />
+
+One of AI's most meaningful uses gets the least attention: as an **assistive tool**. Claude can adapt information to *you* — your pace, your format, your language — which can be genuinely leveling.
+
+## Ways it helps
+
+- **Dyslexia / reading load** — "rewrite this in short, simple sentences," "summarize the key points," "explain this in plain language."
+- **Low vision** — pair with [voice mode](/docs/claude-app/voice-mode) to listen and dictate; ask for clean, well-structured text that screen readers handle well. If you use the CLI, Claude Code has a dedicated [screen reader mode and accessibility settings](/docs/claude-code/accessibility).
+- **Neurodivergence / focus (ADHD, etc.)** — "break this into a checklist," "what's the one next step?", turn a wall of text into a clear plan, draft the email you're stuck on.
+- **Language learners** — translate, simplify, explain idioms, practice conversation, or get the same idea at different difficulty levels.
+- **Anxiety around writing** — get a non-judgmental first draft to react to, lowering the barrier to starting.
+
+## Prompts to try
+
+```text
+Rewrite this so it's easy to read: short sentences, simple words, one idea per
+line. Keep all the meaning. Text: {paste}
+```
+```text
+Turn this into a step-by-step checklist with the single most important step
+marked. {paste}
+```
+```text
+Explain this in {your language}, then give me 3 phrases to practice.
+```
+
+## Keep in mind
+
+- **It's an aid, not a clinician.** For health/medical/legal decisions, consult a professional — verify anything important ([Responsible Use](/docs/security/responsible-use)).
+- **Voice and mobile** make it available wherever you are ([Voice Mode](/docs/claude-app/voice-mode), [Mobile](/docs/claude-app/mobile)).
+- **Your data is yours** — share only what you're comfortable with ([Privacy](/docs/foundations/privacy)).
+
+:::tip[The site itself]
+AILmanac aims to be accessible too — clear language, level badges, keyboard-navigable, good contrast. Found an accessibility issue? [Tell us](/docs/contribute/contribute-in-10-minutes).
+:::
+
+## Next
+
+- [Talking to Claude (Voice Mode)](/docs/claude-app/voice-mode)
+- [Claude Code Accessibility (screen reader mode)](/docs/claude-code/accessibility)
+- [Learning & Studying](/docs/playbooks/learning)
+- [Everyday Productivity](/docs/playbooks/productivity)

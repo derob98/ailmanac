@@ -1,0 +1,68 @@
+# La mappa del panorama
+
+> Source: https://derob98.github.io/ailmanac/it/docs/start-here/landscape-map · AILmanac (CC BY 4.0)
+
+Indice annotato delle risorse IA ufficiali e della community — e quando usare ciascuna.
+
+<LevelBadge level="all" />
+
+AILmanac non esiste nel vuoto, e non pretenderemo di sostituire ogni cosa. Questa lezione è la tua mappa onesta delle migliori risorse dell'ecosistema — e, cosa altrettanto importante, di quando usarle **al posto** nostro.
+
+<Callout type="objectives" items={["Identificare l'unica fonte di verità e perché la documentazione vince sempre quando è in disaccordo con noi", "Riconoscere le risorse ufficiali di Anthropic e a cosa serve ciascuna", "Conoscere le migliori risorse sul prompting della community e neutrali rispetto ai vendor", "Abbinare qualsiasi esigenza alla destinazione giusta usando una semplice tabella decisionale", "Collocare AILmanac nel panorama come la guida sul campo opinionata"]} />
+
+## La fonte di verità
+
+Parti da qui, perché tutto il resto ruota attorno a questa singola regola.
+
+<Callout type="warning" items={["Quando AILmanac e la documentazione ufficiale sono in disaccordo, vince la documentazione. Usala per dettagli esatti e aggiornati; usa noi per una guida opinionata, stratificata e basata sull'imparare facendo."]} />
+
+- **[Documentazione di Anthropic](https://platform.claude.com/docs)** — il riferimento autorevole per Claude, l'API, i modelli e le funzionalità.
+
+## Risorse ufficiali di Anthropic
+
+Queste sono di prima parte. Rivolgiti a esse quando vuoi esempi canonici, codice eseguibile o apprendimento guidato direttamente dalla fonte.
+
+<Flashcards title="Le risorse ufficiali a colpo d'occhio" cards={[{front: "Prompting best practices", back: "Il riferimento di Anthropic sul prompting, con indicazioni per modello. Ha sostituito la vecchia Prompt Library."}, {front: "Anthropic Cookbook", back: "Ricette API eseguibili — tool use, RAG, vision."}, {front: "Documentazione di Claude Code", back: "Il riferimento per CLI/IDE."}, {front: "Anthropic Academy / Learn", back: "Corsi guidati gratuiti."}, {front: "Model Context Protocol", back: "Lo standard aperto MCP più la directory dei server."}]} />
+
+- **[Prompting best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices)** — il riferimento di Anthropic sul prompting, con indicazioni per modello. (Ha sostituito la vecchia Prompt Library di prompt di esempio già pronti, il cui URL ora reindirizza qui.)
+- **[Anthropic Cookbook](https://github.com/anthropics/anthropic-cookbook)** — ricette API eseguibili (tool use, RAG, vision).
+- **[Documentazione di Claude Code](https://code.claude.com/docs/en/overview)** — il riferimento per CLI/IDE.
+- **[Anthropic Academy / Learn](https://www.anthropic.com/learn)** — corsi guidati gratuiti.
+- **[Model Context Protocol](https://modelcontextprotocol.io)** — lo standard aperto MCP + la directory dei server.
+
+## Community e generale
+
+Quando vuoi profondità neutrale rispetto ai vendor o workflow selezionati e testati dalla community, ecco i punti di riferimento.
+
+- **[awesome-claude-code](https://github.com/hesreallyhim/awesome-claude-code)** — comandi, hook e workflow selezionati.
+- **[Prompt Engineering Guide](https://www.promptingguide.ai)** — riferimento approfondito e neutrale sul prompting.
+- **[Learn Prompting](https://learnprompting.org)** — corso di prompting strutturato e adatto ai principianti.
+
+## Quando usare cosa
+
+Il modo più rapido di usare questa mappa: parti da ciò di cui hai bisogno, poi salta alla destinazione corrispondente.
+
+<Steps items={[{title: "Dai un nome alla tua esigenza", body: "Decidi cosa vuoi davvero in questo momento — specifiche esatte, prompt da copia-incolla, codice eseguibile, un percorso di apprendimento, teoria o un corso."}, {title: "Abbinala nella tabella", body: "Trova la tua esigenza nella colonna di sinistra qui sotto e leggi la destinazione consigliata sulla destra."}, {title: "Approfondisci lì, poi torna indietro", body: "Usa quella risorsa per l'approfondimento, e torna ad AILmanac per il percorso opinionato e taggato per livello che lega tutto insieme."}]} />
+
+| Vuoi… | Vai a |
+|---|---|
+| Dettagli esatti e aggiornati su API/funzionalità | Documentazione ufficiale |
+| Prompt di esempio da copia-incolla | Prompt Library / i nostri [template](/docs/templates/prompts) |
+| Codice API eseguibile | Cookbook |
+| Un percorso opinionato e taggato per livello | **AILmanac** |
+| Un riferimento teorico approfondito sul prompting | promptingguide.ai |
+| Un corso guidato | Anthropic Academy |
+
+## Dove si colloca AILmanac
+
+Siamo la **guida sul campo opinionata**: prima un modo consigliato, taggata per livello, ricca di template, onesta sull'attualità e che abbraccia Claude **e** i concetti generali sull'IA. Pensa a noi come alla mappa che ti indica la risorsa approfondita giusta al momento giusto — e che insegna i fondamentali così che tutte abbiano senso.
+
+<Quiz title="Mettiti alla prova" questions={[{q: "AILmanac e la documentazione ufficiale di Anthropic sono in disaccordo su un dettaglio di una funzionalità. A quale dei due ti fidi?", options: ["AILmanac, perché è opinionato", "La documentazione ufficiale, perché è la fonte di verità", "Quella aggiornata per prima"], answer: 1, explain: "Quando AILmanac e la documentazione sono in disaccordo, vince la documentazione. È il riferimento autorevole e aggiornato per i dettagli esatti."}, {q: "Ti serve codice API eseguibile per tool use, RAG o vision. Dove vai?", options: ["L'Anthropic Cookbook", "Learn Prompting", "La Prompt Library"], answer: 0, explain: "L'Anthropic Cookbook fornisce ricette API eseguibili che coprono tool use, RAG e vision."}, {q: "Come descrive AILmanac il proprio ruolo nel panorama?", options: ["Un sostituto della documentazione ufficiale", "La guida sul campo opinionata che ti indica la risorsa approfondita giusta al momento giusto", "Un riferimento teorico sul prompting neutrale rispetto ai vendor"], answer: 1, explain: "AILmanac è la guida sul campo opinionata — prima un modo consigliato, taggato per livello, e la mappa che ti indica la risorsa approfondita giusta."}]} />
+
+<Callout type="takeaways" items={["La documentazione ufficiale di Anthropic è la fonte di verità — nel dubbio, vince lei.", "Usa le risorse ufficiali (Prompt Library, Cookbook, documentazione di Claude Code, Academy, MCP) per esempi canonici, codice e corsi.", "Usa le risorse della community e neutrali rispetto ai vendor (awesome-claude-code, promptingguide.ai, Learn Prompting) per workflow selezionati e profondità sul prompting.", "Abbina la tua esigenza a una destinazione, poi torna ad AILmanac per il percorso opinionato e taggato per livello."]} />
+
+## Avanti
+
+- [Benvenuto e perché esiste questo progetto](/docs/start-here/welcome)
+- [Percorsi di apprendimento](/docs/start-here/learning-paths)
+- [Contribuisci con una risorsa](/docs/contribute/contribute-in-10-minutes)

@@ -1,0 +1,181 @@
+# claude CLI: 결과를 바꾸는 플래그
+
+> Source: https://derob98.github.io/ailmanac/ko/docs/claude-code/cli-flags · AILmanac (CC BY 4.0) · last verified 2026-10-07
+
+Claude Code 명령줄을 관점을 담아 둘러봅니다 — 무인 실행을 위한 5개 플래그 계약, 기록된 시스템 프롬프트의 함정, 그리고 --bare, --safe-mode, --restricted의 차이.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-10-07" source="https://code.claude.com/docs/en/cli-reference">
+아래의 모든 명령, 플래그, 기본값, 최소 버전은 2026-10-07에 확인한 공식 [CLI 레퍼런스](https://code.claude.com/docs/en/cli-reference)를 따랐습니다. 플래그는 릴리스마다 추가되고 바뀌며, 레퍼런스는 `claude --help`가 **모든 플래그를 나열하지 않는다**고 분명히 밝힙니다. 따라서 `--help`에 없는 플래그가 내 빌드에 없다는 뜻은 아닙니다. 도움말 텍스트가 아니라 레퍼런스를 확인하고, `claude -v`로 버전을 확인하세요.
+</VerifyNote>
+
+대부분의 사람은 Claude Code 명령줄에 대해 `claude`, `claude -c`, `claude -p` 세 가지만 배우고 멈춥니다. 늘 화면 앞에 앉아 쓴다면 거기서 멈춰도 괜찮습니다. 하지만 Claude Code를 스크립트, CI 작업, 백그라운드 큐, 혹은 팀원의 손에 넘기는 순간 플래그는 편의 기능이 아니라 1달러짜리 실행과 1시간 동안 멈춰 있는 실행을 가르는 차이가 됩니다.
+
+이 페이지는 레퍼런스 표의 복사본이 아닙니다. **어떤 순서로 배우면 좋은지**, 실제로 동작을 바꾸는 플래그, 그리고 실제로 시간을 잡아먹는 네 가지 함정을 다룹니다.
+
+<Callout type="objectives" items={["시작할 수 있는 여섯 가지 세션 종류와 각각을 고르는 플래그","무인 실행을 제한되고, 응답 가능하며, 파싱 가능하게 만드는 5개 플래그 계약","--append-system-prompt를 고치고 --continue로 다시 실행해도 아무 일도 없는 것처럼 보이는 이유 — 기록된 프롬프트 규칙","--bare, --safe-mode, --restricted의 차이와 언제 무엇을 쓸지","셸에서 백그라운드 세션 다루기: agents, attach, logs, respawn, rm, daemon","헷갈리기 쉬운 플래그 쌍: --tools vs --allowedTools vs --disallowedTools"]} />
+
+## 질문부터 시작하세요: 어떤 종류의 세션인가?
+
+다른 모든 결정은 여기서 따라옵니다. Claude Code는 본질적으로 다른 여섯 가지를 시작할 수 있고, 그중 하나를 고르는 플래그가 보통 가장 먼저 입력하는 것입니다.
+
+| 원하는 것 | 플래그 | 얻는 것 |
+| --- | --- | --- |
+| 지켜보는 대화 | *(없음)* | 이 터미널의 인터랙티브 세션 |
+| 답변 하나 받고 종료 | `-p` / `--print` | 비대화형 실행, 출력은 stdout |
+| 이 터미널보다 오래 가는 작업 | `--bg` / `--background` | 백그라운드 세션. ID와 관리 방법을 출력합니다 |
+| 실험용으로 격리된 브랜치 | `-w` / `--worktree` | `<repo>/.claude/worktrees/<name>` 아래의 git worktree |
+| Anthropic의 머신에서 하는 작업 | `--cloud` | 클라우드 세션, 또는 기존 세션에 대기열로 넣는 후속 작업 |
+| 휴대폰에서 이 세션 조종하기 | `--rc` / `--remote-control` | claude.ai나 Claude 앱에서도 제어할 수 있는 인터랙티브 세션 |
+
+이 중 두 가지는 함께 쓸 수 없습니다. `--bg`와 `-p`는 상호 배타적입니다. 하나는 즉시 반환하고 다른 하나는 답을 기다리기 때문입니다. Claude 세션이 아니라 셸 명령을 백그라운드로 돌리고 싶다면 `--bg`를 `--exec`와 함께 쓰세요.
+
+<PromptCard title="테스트 스위트를 Claude 세션이 아니라 백그라운드 작업으로 실행하기">
+{`claude --bg --exec 'pytest -x'`}
+</PromptCard>
+
+또한 `--bg`는 시작 전에 해당 디렉터리의 작업 공간 신뢰 여부를 확인합니다. 따라서 신뢰하지 않는 저장소의 백그라운드 세션은 중간이 아니라 시작 단계에서 바로 실패합니다.
+
+## 무인 실행을 위한 5개 플래그 계약
+
+이 페이지에서 가장 가치 있는 내용입니다. 무인 `claude -p` 실행에는 인터랙티브 세션에는 없는 세 가지 실패 방식이 있습니다. 아무도 답해 줄 수 없는 권한 프롬프트에서 **멈추거나**, 예상보다 훨씬 오래 **반복하거나**, 스크립트가 데이터를 필요로 하는데 **산문을 내보내는** 경우입니다. 다섯 개의 플래그가 이 세 가지를 모두 막아 줍니다.
+
+<Steps items={[
+  {title: "비대화형으로 실행 — -p", body: "`claude -p \"query\"`는 답을 출력하고 종료합니다. 아래의 모든 것은 print 모드 전용이므로, 이 플래그가 나머지로 들어가는 관문입니다."},
+  {title: "권한 프롬프트에 누가 답할지 결정 — --permission-prompts", body: "기본값은 `host`로, 프롬프트를 Agent SDK 호스트 또는 `--permission-prompt-tool`로 보냅니다. cron 작업이나 CI 단계처럼 아무도 답할 수 없을 때 `--permission-prompts none`을 전달하세요. 실행은 호스트에 문의하거나 기다리기를 멈추고, 프롬프트가 필요했을 모든 동작은 `PermissionRequest` 훅이 허용하지 않는 한 거부되며, Claude에게는 재시도하지 말라고 알려 줍니다. 호스트가 아예 없는 `-p` 실행은 이미 그런 요청을 거부하므로, 그 경우 이 플래그는 주로 재시도를 막는 역할을 합니다. v2.1.259 이상이 필요합니다. 거부가 상시가 아니라 드물게 일어나도록 좁게 한정한 `--allowedTools` 규칙과 함께 쓰세요."},
+  {title: "루프에 상한 두기 — --max-turns", body: "기본적으로 턴 제한은 없습니다. `--max-turns 3`은 한도에 도달하면 오류와 함께 종료합니다. 예산이 아니라 폭주하는 에이전트 루프를 잡는 안전장치로 쓰세요."},
+  {title: "지출에 상한 두기 — --max-budget-usd", body: "`--max-budget-usd 5.00`은 클라이언트 측 비용 추정치가 상한에 도달하면 멈춥니다. 서브에이전트 지출도 포함되며, 상한에 도달하면 다른 서브에이전트를 띄우려는 시도는 `Budget limit reached`와 함께 실패하고 실행 중인 백그라운드 서브에이전트는 중지됩니다. 상한 적용에는 v2.1.217 이상이 필요합니다."},
+  {title: "출력을 파싱 가능하게 — --output-format 또는 --json-schema", body: "`--output-format json`은 구조화된 봉투를 줍니다. `--json-schema '<schema>'`는 한 걸음 더 나아갑니다. Claude Code가 최종 답변을 여러분의 JSON 스키마로 검증하고, 스키마가 유효하지 않으면 처음부터 오류를 내므로 스크립트가 산문을 정규식으로 파헤칠 일이 없습니다."}
+]} />
+
+<PromptCard title="멈추지 않고, 무한 반복하지 않고, 과소비하지 않는 CI 단계">
+{`claude -p "Review the staged diff and list bugs" \\
+  --permission-prompts none \\
+  --allowedTools "Read" "Bash(git diff *)" \\
+  --max-turns 6 \\
+  --max-budget-usd 2.00 \\
+  --output-format json`}
+</PromptCard>
+
+<Callout type="warning" title="--max-budget-usd는 추정치이지 청구서가 아닙니다" items={["Claude Code는 상한을 자체 클라이언트 측 비용 추정치와 비교하며, 이는 실제 청구액과 다를 수 있습니다.","--continue나 --resume으로 대화에 돌아올 때, 이전 실행에서 복원된 합계는 상한에 반영되지 않습니다. 따라서 2달러 상한에서 재개한 세 번의 실행은 합쳐서 2달러를 넘게 쓸 수 있습니다.","한 번의 실행을 위한 차단기로 여기세요. 계정이나 프로젝트 전체의 진짜 상한은 Hard Spend Caps를 참고하세요."]} />
+
+사람 없이 실행을 진행시킬 때의 전체적인 자세 — 무엇을 허용하고, 무엇을 가리고, 무엇을 기록할지 — 는 [자율 실행 강화하기](/docs/security/hardening-autonomous-runs)와 [헤드리스 모드와 Agent SDK](/docs/claude-code/headless-and-agent-sdk)를 참고하세요. 제공자 수준의 상한은 [Hard Spend Caps](/docs/models/hard-spend-caps)를 보세요.
+
+## 시스템 프롬프트 플래그 모음, 그리고 그 안의 함정
+
+다섯 개의 플래그가 시스템 프롬프트를 좌우합니다. 네 개는 텍스트를 정하고, 다섯 번째는 대화가 시작할 때의 텍스트를 계속 유지할지 정합니다.
+
+| 플래그 | 하는 일 |
+| --- | --- |
+| `--system-prompt` | 기본 프롬프트 전체를 여러분의 텍스트로 교체 |
+| `--system-prompt-file` | 파일 내용으로 교체 |
+| `--append-system-prompt` | 기본 프롬프트에 여러분의 텍스트를 덧붙임 |
+| `--append-system-prompt-file` | 기본 프롬프트에 파일 내용을 덧붙임 |
+| `--system-prompt-snapshot` | `off`는 요청마다 프롬프트를 다시 만들고, `on`(기본값)은 기록된 프롬프트를 재사용 |
+
+*덧붙이기*와 *교체* 중 무엇을 고를지는 정체성에 대한 선택입니다. 덧붙이면 Claude Code의 기본 도구 안내, 안전 지침, 코딩 관례가 유지되고 그 위에 여러분의 규칙이 얹힙니다. 실행별 지침, 출력 형식, 프로젝트 맥락에 알맞습니다. 교체하면 도구 안내를 포함한 **그 모든 것**이 사라지므로, 그 표면이 정말 코딩 어시스턴트가 아닐 때, 즉 아무도 지켜보지 않는 파이프라인의 비코딩 에이전트일 때만 맞습니다. 교체한다면 작업에 여전히 필요한 모든 것은 직접 책임져야 합니다.
+
+두 가지를 함께 쓸 수도 있습니다. 덧붙이기 플래그와 교체 플래그를 같이 전달하면 기본값을 교체한 뒤 여러분의 텍스트를 덧붙입니다. v2.1.283부터는 플래그와 그 파일 형태를 함께 전달할 수도 있습니다. `--append-system-prompt` *와* `--append-system-prompt-file`을 쓰면 Claude Code는 둘 다 사용하며, 입력한 순서와 상관없이 파일 내용이 먼저 옵니다.
+
+<Callout type="warning" title="함정: 재개된 대화는 태어날 때의 프롬프트를 재사용합니다" items={["Claude Code는 대화의 첫 요청에서 시스템 프롬프트를 한 번 만들고 세션에 기록합니다.","대화가 컴팩트되기 전까지는 이후의 모든 요청이 --resume이나 --continue 이후에도 그 기록된 프롬프트를 사용합니다.","그래서 --append-system-prompt 텍스트를 고치고 claude --continue를 다시 실행해도 아무것도 바뀌지 않습니다. 플래그가 고장난 것이 아니라 대화가 아직 기록본을 쓰고 있는 것입니다.","새 텍스트는 대화가 컴팩트되거나 완전히 새로운 대화에서 적용됩니다.","--continue 실행들에 걸쳐 문구를 다듬으려면 --system-prompt-snapshot off를 전달하세요. 프롬프트가 요청마다 다시 만들어집니다. v2.1.257 이상이 필요합니다."]} />
+
+고정 지침과 실행별 맥락이 섞인 교체용 프롬프트에서 알아 둘 요령이 하나 더 있습니다. 둘 사이에 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__`만 적은 줄을 넣으세요. Claude Code는 처음 나오는 그런 줄에서 프롬프트를 나누고 그 줄을 제거하므로, 위쪽은 캐시된 채로 유지되고 아래쪽은 바뀝니다. v2.1.275 이상이 필요합니다. 이것이 비용에 왜 중요한지는 [프롬프트 캐싱](/docs/api/prompt-caching)에서 다룹니다.
+
+그리고 여러 사용자가 쓰는 스크립트형 워크로드에서는 `--exclude-dynamic-system-prompt-sections`가 자동 메모리 위치 같은 사용자별 맥락을 시스템 프롬프트에서 첫 번째 사용자 메시지로 옮깁니다. 그래서 서로 다른 머신에서 같은 작업이 하나의 캐시된 접두부를 공유합니다. 이는 기본 프롬프트에만 적용되며 `--system-prompt`나 `--system-prompt-file`을 지정하면 무시됩니다.
+
+## 무언가를 끄는 세 플래그, 그리고 이들은 같지 않습니다
+
+사람들은 이 플래그들을 서로 바꿔 쓰다가 증상이 그대로인 이유를 의아해합니다. 세 플래그는 서로 다른 세 문제를 풉니다.
+
+| | `--bare` | `--safe-mode` | `--restricted` |
+| --- | --- | --- | --- |
+| 해결하는 문제 | 스크립트 호출에 비해 시작이 너무 느리다 | 설정이 깨졌는데 어느 부분인지 모르겠다 | 평가 하네스가 이 공유 머신을 건드리면 안 된다 |
+| CLAUDE.md, 스킬, 명령, 서브에이전트, 플러그인, MCP, 자동 메모리 | 탐색하지 않음 | 로드하지 않음 | 관리형 설정과 `--settings`만 로드 |
+| 기본 제공 도구 | Bash, 파일 읽기, 파일 편집 | 정상 동작 | 명령/코드 실행 도구와 WebFetch는 `--tools`에 개별적으로 지정하지 않는 한 **제거됨** |
+| 파일 접근 | 일반 | 일반 | 작업 디렉터리로 제한 |
+| `bypassPermissions` | 허용 | 허용 | **거부** |
+| 관리형 정책 | 적용 | 정책 훅과 상태 표시줄을 포함해 계속 적용 | 적용 |
+| 부수 효과 | `CLAUDE_CODE_SIMPLE` 설정 | `CLAUDE_CODE_SAFE_MODE` 설정 | 클라우드 세션 생성을 거부 |
+
+이 표는 의도의 진행으로 읽으세요. `--bare`는 **속도**, `--safe-mode`는 **진단**, `--restricted`는 **격리**에 관한 것입니다. 유용한 세부 사항 하나: `--add-dir`로 전달한 디렉터리의 스킬은 `--bare`에서도 여전히 로드되므로, 나머지를 걷어낸 실행에서도 정확히 하나의 기능만 남길 수 있습니다.
+
+무언가 이상하게 동작하는데 Claude Code 때문인지 내 설정 때문인지 알 수 없을 때는 `--safe-mode`를 가장 먼저 시도하세요. 어떤 커스터마이징이 자동 모델 폴백을 유발하는지 알아내려는 경우도 마찬가지입니다. 세션을 아예 시작하지 않고 읽기 전용 설치 및 설정 진단을 출력하는 `claude doctor`와 함께 쓰세요. (세션 안의 `/doctor` 명령은 다릅니다. 수정까지 적용할 수 있습니다.) 증상별 디버깅은 [Claude Code 문제 해결](/docs/claude-code/troubleshooting)에서 더 볼 수 있습니다. `--restricted`는 v2.1.248 이상이 필요합니다.
+
+## 셸에서 백그라운드 세션 다루기
+
+`--bg`로 세션을 시작하면 터미널은 제어 평면이 됩니다. 전체 수명 주기에 명령이 있고, 어느 것도 인터랙티브 UI를 열 필요가 없습니다.
+
+<Steps items={[
+  {title: "무엇이 실행 중인지 보기 — claude agents", body: "병렬 백그라운드 세션을 모니터링하고 배분하는 에이전트 뷰를 엽니다. 스크립트용으로는 `--json`이 활성 세션을 JSON 배열로 출력하고, `--json --all`은 완료된 세션까지 포함합니다. `--cwd <path>`는 해당 디렉터리 아래에서 시작된 세션으로 좁힙니다. 뷰 자체를 여는 데는 인터랙티브 터미널이 필요하지만 JSON 형태는 필요하지 않습니다."},
+  {title: "하나의 내부 들여다보기 — claude logs", body: "`claude logs <id|name>`은 백그라운드 세션의 최근 출력을 보여 줍니다. v2.1.290부터는 ID 대신 실행 중인 세션 이름의 일부를 전달할 수 있어서 `claude logs auth`로 보통 충분합니다."},
+  {title: "넘겨받기 — claude attach", body: "`claude attach <id|name>`은 백그라운드 세션을 이 터미널로 가져옵니다. 부분 이름 일치 역시 v2.1.290 이상이 필요합니다."},
+  {title: "다시 시작 — claude respawn", body: "`claude respawn <id>`는 실행 중이든 중지됐든 대화를 그대로 유지한 채 세션을 다시 시작합니다. `--all`은 실행 중인 모든 세션을 다시 시작합니다. Claude Code 바이너리를 업그레이드한 뒤에 할 일입니다."},
+  {title: "중지와 정리 — claude stop, claude rm", body: "`claude stop <id>`(`claude kill`도 가능)는 세션을 중단합니다. `claude rm <id>`는 목록에서 제거하며, 대화 기록은 여러분의 머신에 남아 `claude --resume`으로 계속 접근할 수 있습니다. 세션의 worktree 때문에 제거가 거부되면, 거부 메시지가 다음에 전달할 정확한 플래그를 알려 줍니다 — `--discard-unpushed`(v2.1.260+) 또는 `--force-remove-worktree`(v2.1.268+)."},
+  {title: "전체가 멈췄을 때 — claude daemon", body: "백그라운드 세션은 감독 프로세스가 호스팅합니다. `claude daemon status`는 상태, 버전, 소켓 디렉터리, 워커 수를 출력하고, 실행 중이 아니면 종료 코드 1로 끝납니다. `claude daemon logs`는 `~/.claude/daemon.log`를 따라갑니다. `claude daemon stop --any --keep-workers`는 세션을 살려 둔 채 감독 프로세스를 재시작하여 다음 감독 프로세스가 다시 연결되게 합니다."}
+]} />
+
+세션 안에서의 대응 개념 — 작업이 어떻게 백그라운드로 가고, 그때 무엇이 이어지는지 — 은 [백그라운드 작업, /loop, 스케줄링](/docs/claude-code/background-tasks)입니다.
+
+## 사람들이 틀리는 플래그 쌍
+
+<Callout type="warning" title="미리 짚어 둘 여섯 가지 혼동" items={["--tools는 어떤 기본 제공 도구가 존재하는지를 제한합니다. --allowedTools는 어떤 호출이 권한 프롬프트를 건너뛰는지 정합니다. --disallowedTools는 호출을 거부합니다. 세 가지는 서로 다른 일이며, 잘못된 것을 전달하는 것이 \"왜 아직도 묻지?\"의 가장 흔한 원인입니다.","--tools는 MCP 도구에는 전혀 영향을 주지 않습니다. 그것들도 제거하려면 --disallowedTools \"mcp__*\"를 추가하세요.","--disallowedTools의 이름만 쓴 항목은 Claude의 컨텍스트에서 도구를 제거합니다. Bash(rm *) 같은 범위 지정 규칙은 도구를 계속 사용할 수 있게 두고 일치하는 호출만 거부합니다.","--dangerously-skip-permissions는 bypassPermissions로 시작합니다. --allow-dangerously-skip-permissions는 그 모드를 Shift+Tab 순환에 추가할 뿐이므로, plan 모드에서 시작해 나중에 전환할 수 있습니다. 실제로 원했던 것은 거의 항상 두 번째입니다.","--add-dir은 파일 접근을 허용하지만, Claude Code는 그 디렉터리의 .claude/ 설정 대부분을 탐색하지 않습니다. 디렉터리를 추가하는 것이 그 설정을 채택하는 것은 아닙니다.","--desktop은 Desktop 앱이 세션을 직접 시작하므로 프롬프트도, --verbose와 --debug 플래그 외의 다른 플래그도 받지 않습니다. v2.1.285 이상이 필요합니다."]} />
+
+사소하지만 편리한 점 하나: 하위 명령을 잘못 입력하면 Claude Code는 가장 가까운 명령을 제안하고 세션을 시작하지 않은 채 종료합니다. `claude udpate`는 원치 않는 대화를 열지 않고 `Did you mean claude update?`를 출력합니다.
+
+## 스스로 점검하기
+
+<Quiz questions={[
+  {
+    q: "야간 작업이 `canUseTool` 콜백이 사람에게 묻는 Agent SDK 앱 안에서 `claude -p`를 실행하는데, 밤에는 타임아웃까지 멈춰 있습니다. 가장 가능성 높게 빠진 플래그는 무엇인가요?",
+    options: [
+      "--max-turns, 에이전트가 반복하고 있으므로",
+      "--permission-prompts none, 권한 프롬프트에 답할 사람이 없으므로",
+      "--output-format json, 파서가 막혀 있으므로",
+      "--bare, 시작이 느리므로"
+    ],
+    answer: 1,
+    explain: "print 모드에서 권한 프롬프트는 기본적으로 호스트로 갑니다. 여기서는 여러분의 SDK 콜백이며, 실행은 그 응답을 기다립니다. `--permission-prompts none`은 호스트에 문의하기를 멈춥니다. 프롬프트가 필요했을 모든 동작은 PermissionRequest 훅이 허용하지 않는 한 거부되고, Claude에게는 재시도하지 말라고 알려 주므로 작업이 끝납니다. 호스트가 아예 없는 일반 `-p` 실행은 이미 그런 요청을 거부합니다. `--max-turns`는 루프에 상한을 두는 것으로, 다른 증상에 대한 것입니다."
+  },
+  {
+    q: "--append-system-prompt 텍스트를 고치고 `claude --continue`를 다시 실행했는데 동작이 그대로입니다. 왜일까요?",
+    options: [
+      "덧붙이기 플래그는 -p에서만 동작한다",
+      "대화는 컴팩트되기 전까지 첫 요청에서 기록된 시스템 프롬프트를 재사용한다",
+      "--continue는 모든 시스템 프롬프트 플래그를 조용히 버린다",
+      "텍스트가 덧붙여지지만 사용자 메시지 뒤에 놓인다"
+    ],
+    answer: 1,
+    explain: "Claude Code는 프롬프트를 대화의 첫 요청에서 한 번 만들고 기록합니다. 이후의 요청은 --continue나 --resume 이후에도 대화가 컴팩트되기 전까지 그 기록본을 재사용합니다. 다듬는 동안 요청마다 다시 만들려면 --system-prompt-snapshot off를 전달하세요."
+  },
+  {
+    q: "어떤 커스터마이징이 세션을 망가뜨리는데 어느 것인지 모릅니다. 도구와 권한은 정상 동작하게 두면서 이를 격리하는 플래그는 무엇인가요?",
+    options: [
+      "--bare",
+      "--restricted",
+      "--safe-mode",
+      "--disable-slash-commands"
+    ],
+    answer: 2,
+    explain: "--safe-mode는 커스터마이징 — CLAUDE.md, 스킬, 플러그인, 훅, MCP 서버, 명령, 에이전트, 출력 스타일, 상태 표시줄, 자동 메모리 — 을 끄고, 인증, 모델 선택, 기본 제공 도구, 권한은 계속 동작합니다. --bare는 시작 속도용이고 --restricted는 공유 머신에서의 격리용입니다."
+  }
+]} />
+
+<Flashcards cards={[
+  {front: "--bg vs -p", back: "상호 배타적입니다. --bg는 세션 ID와 함께 즉시 반환하고, -p는 기다렸다가 답을 출력합니다. Claude 세션 대신 셸 명령을 백그라운드로 돌리려면 --bg를 --exec와 함께 쓰세요."},
+  {front: "--max-budget-usd", back: "청구액이 아니라 Claude Code의 클라이언트 측 비용 추정치와 비교하는 print 모드 상한. 서브에이전트 지출은 포함되고, --continue/--resume으로 복원된 합계는 포함되지 않음. v2.1.217+."},
+  {front: "--system-prompt-snapshot off", back: "대화의 첫 요청에서 기록된 시스템 프롬프트를 재사용하지 않고 요청마다 다시 만듭니다. v2.1.257+."},
+  {front: "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__", back: "이 표지만 적힌 줄은 교체용 시스템 프롬프트를 나누어, 위쪽은 캐시된 채 유지되고 아래쪽은 실행마다 바뀌게 합니다. v2.1.275+."},
+  {front: "--tools vs --allowedTools", back: "--tools는 어떤 기본 제공 도구가 아예 존재하는지를 정합니다. --allowedTools는 어떤 호출이 권한 프롬프트 없이 실행되는지를 정합니다. 둘 다 MCP 도구에는 영향이 없습니다."},
+  {front: "claude doctor vs /doctor", back: "`claude doctor`는 세션을 시작하지 않고 읽기 전용 설치 및 설정 진단을 출력합니다. 세션 안의 `/doctor` 명령은 수정도 적용할 수 있습니다."},
+  {front: "claude respawn --all", back: "실행 중인 모든 백그라운드 세션을 대화를 유지한 채 다시 시작합니다 — Claude Code 바이너리를 업그레이드한 뒤 할 일입니다."},
+  {front: "--add-dir", back: "다른 디렉터리에 대한 파일 읽기/편집 접근을 허용합니다. 그곳의 .claude/ 설정 대부분을 Claude Code가 탐색하게 만들지는 않습니다."}
+]} />
+
+<Callout type="takeaways" items={["먼저 세션 종류를 고르세요 — 그것을 정하는 플래그가 전달할 수 있는 다른 모든 플래그를 제약합니다.","무인 실행에는 하나가 아니라 다섯 개의 플래그가 필요합니다: -p, --permission-prompts none, --max-turns, --max-budget-usd, 그리고 구조화된 출력 형식.","--max-budget-usd는 청구서 상한이 아니라 한 번의 실행을 위한 차단기로 다루세요. 클라이언트 측 추정치이며 재개된 합계는 빠져나갑니다.","대화는 첫 요청에서 시스템 프롬프트를 기록합니다. 프롬프트 수정이 무시되는 것 같다면 그 때문입니다 — 다듬는 동안에는 --system-prompt-snapshot off를 쓰세요.","--bare는 속도, --safe-mode는 진단, --restricted는 격리입니다. 잘못 고르면 오후 한나절을 허비합니다.","--help는 설계상 불완전합니다. CLI 레퍼런스가 기준이며 최소 버전이 중요합니다 — 플래그를 탓하기 전에 claude -v를 확인하세요."]} />
+
+## 다음
+
+- [헤드리스 모드와 Agent SDK](/docs/claude-code/headless-and-agent-sdk) — 일회성 `-p` 호출로 부족해졌을 때 무엇을 만들까
+- [settings.json: 설정 시스템](/docs/claude-code/settings) — 계속 다시 입력하게 되는 플래그의 영구적인 보금자리
+- [Claude Code 문제 해결](/docs/claude-code/troubleshooting) — `--safe-mode`로 시작하는 증상별 디버깅

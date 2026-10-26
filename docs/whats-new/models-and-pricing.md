@@ -1,0 +1,43 @@
+# Current Models & Pricing
+
+> Source: https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing · AILmanac (CC BY 4.0)
+
+The single, verified source of truth for current Claude models — and how we keep it fresh.
+
+<LevelBadge level="all" />
+
+This is the **one page in AILmanac with a hard freshness guarantee**. Every model fact elsewhere on the site links here instead of hard-coding a name or number, so there's a single place to keep current.
+
+## Current Claude models
+
+<ModelTable />
+
+## Why pricing and context limits aren't in the table
+
+They change too often to copy safely — a stale price is worse than no price. We list the **identity** of each model (name, API ID, what it's for) and send you to the official page for **pricing, context windows, and rate limits**, which is always authoritative.
+
+## How we keep this fresh
+
+- The table is rendered from a single data file (`data/models.json`) carrying a **"last verified" date**.
+- Updating it is a one-line change — a perfect [first contribution](/docs/contribute/contribute-in-10-minutes).
+- In a later phase, automation will diff this file against the official models endpoint and open a pull request when something drifts — but a human always reviews before it ships. (See [How Our Automation Works](/docs/contribute).)
+
+## Choosing between them
+
+A quick rule of thumb (full guidance in [Choosing a Model](/docs/api/choosing-a-model)):
+
+- **Start with Opus.** Anthropic's own recommended starting point for most workloads ([models overview](https://platform.claude.com/docs/en/models/overview)).
+- **Drop to Sonnet** when speed and cost matter more than peak quality.
+- **Reach for Fable** when your evals on Opus at higher effort still fall short.
+- **Drop to Haiku** for high-volume, latency-sensitive, or simple tasks.
+
+## See also
+
+- [Choosing a Model](/docs/api/choosing-a-model) — the full decision framework
+- [Tokens & Pricing](/docs/api) — how cost is actually calculated
+- [Deprecation & Migration Watch](/docs/whats-new) — retired models and breaking changes
+
+
+## Next
+
+- [Deprecation & Migration Watch](/docs/whats-new/deprecations)

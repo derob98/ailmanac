@@ -1,0 +1,116 @@
+# Analisi dei dati
+
+> Source: https://derob98.github.io/ailmanac/it/docs/playbooks/data-analysis · AILmanac (CC BY 4.0)
+
+Genera SQL/formule e interpreta i risultati — e verifica contro le statistiche allucinate.
+
+<LevelBadge level="all" />
+
+<Callout type="objectives" items={[
+  "Descrivere un dataset nel modo in cui serve a un modello — colonne, tipi e la granularità",
+  "Eseguire il flusso sicuro in cinque passi: descrivi, chiedi, genera, esegui tu stesso, interpreta",
+  "Trattare come non verificato qualsiasi numero che il modello non ha calcolato",
+  "Dichiarare le quattro assunzioni che cambiano silenziosamente un risultato: valori nulli, deduplica, fusi orari, valuta",
+  "Tenere i dati sensibili fuori da strumenti che non hai verificato"
+]} />
+
+Non devi essere un data scientist per ottenere risposte dai dati con l'AI — ma devi tenerla onesta. L'AI scrive la query e spiega il risultato; **tu** confermi che i numeri siano reali.
+
+## In cosa aiuta
+
+- **Scrivere SQL / formule per fogli di calcolo / pandas** a partire da una domanda in linguaggio naturale.
+- **Spiegare** cosa significa una query o un risultato in termini di business.
+- **Pulire e trasformare** dati disordinati (descrivi il disordine, ottieni i passaggi).
+- **Suggerire il grafico giusto** per la domanda.
+- **Interpretare** l'output e proporre la domanda successiva.
+
+## Il flusso di lavoro sicuro
+
+<Steps items={[
+  {title: "Descrivi i tuoi dati", body: "Colonne, tipi, e la GRANULARITÀ — una riga corrisponde esattamente a cosa? Non dare per scontato che il modello indovini i tuoi nomi, o che order_id sia univoco. La maggior parte delle query sbagliate sbaglia sulla granularità, non sull'SQL."},
+  {title: "Formula la domanda a cui l'analisi deve rispondere", body: "In termini di business, con l'intervallo temporale e il filtro espliciti. «Ricavi mensili dagli ordini completati nel 2025» è una domanda a cui si può rispondere; «come vanno le vendite» no."},
+  {title: "Ottieni la query più una spiegazione in una riga di cosa fa e delle sue assunzioni", body: "La spiegazione è la parte che devi rivedere. Se le assunzioni dichiarate non corrispondono ai tuoi dati, la query è sbagliata per quanto pulita possa sembrare."},
+  {title: "Eseguila tu stesso sui dati reali", body: "Questo è il passo irrinunciabile. Un modello che riporta un risultato senza eseguirlo sui tuoi dati sta tirando a indovinare un numero plausibile."},
+  {title: "Riporta i risultati per un'interpretazione in linguaggio naturale e i relativi caveat", body: "Incolla l'output reale. Ora il modello sta leggendo numeri invece di inventarli, che è l'unica cosa in cui qui è affidabilmente bravo."}
+]} />
+
+<PromptCard title="Descrivi la granularità, poi chiedi — SQL con assunzioni dichiarate">{`My table orders has columns: order_id, customer_id, created_at, total_eur,
+status. One row per order. Write SQL for monthly revenue from completed orders in
+2025, and explain any assumptions.`}</PromptCard>
+
+<PromptCard title="Riporta indietro l'output — interpretazione con caveat">{`Here is the result of that query. Interpret it in business terms in under 120
+words, then list anything that could make these numbers misleading — nulls,
+duplicate rows, time zone of created_at, mixed currencies, or partial months.
+Label each as "checked" or "unverified".
+Result:
+[paste the rows]`}</PromptCard>
+
+## Guardrail
+
+:::warning[Non fidarti mai di numeri che non ha calcolato]
+Se l'AI dichiara un risultato senza aver eseguito la query sui tuoi dati, quel numero potrebbe essere **inventato**. Esegui tu stesso le query; tratta come non verificata qualsiasi cifra che non hai calcolato. E ricorda che **correlazione ≠ causalità** — chiedile di segnalare le affermazioni associative. Vedi [Allucinazioni](/docs/foundations/hallucinations).
+:::
+
+- **Verifica la plausibilità degli ordini di grandezza** — risultato implausibile? indaga, non pubblicare.
+- **Dichiara le assunzioni** (valori nulli, deduplica, fusi orari, valuta).
+- **Non incollare dati sensibili/PII** in strumenti che non hai verificato ([Privacy](/docs/foundations/privacy)).
+
+Quelle quattro assunzioni sono elencate in un ordine preciso perché è più o meno la frequenza con cui mordono. I valori nulli riducono silenziosamente un denominatore; le righe duplicate gonfiano silenziosamente una somma; un timestamp salvato in UTC e letto come ora locale sposta i ricavi oltre il confine di un mese; e una colonna `total` che mescola valute produce un numero aritmeticamente corretto ed economicamente privo di senso.
+
+<Callout type="tip" items={["Chiedi la query E una seconda query che la verifichi — un conteggio di righe, un intervallo di date, una somma che puoi controllare a occhio. Due query economiche battono una elegante che non puoi verificare.","Quando un risultato ti sorprende, sospetta della join prima di sospettare del business. Una join fan-out è la causa più comune di un numero improvvisamente 3× troppo grande.","Per il lavoro sui fogli di calcolo, chiedi la formula più una cella di esempio svolta. Se l'esempio è sbagliato, hai trovato il bug senza toccare il file vero."]} />
+
+## Mettiti alla prova
+
+<Quiz questions={[
+  {
+    q: "Qual è la singola cosa più utile da dire a un modello prima di chiedergli dell'SQL?",
+    options: [
+      "Quale dialetto SQL usi",
+      "La granularità — cosa rappresenta davvero una riga della tabella — insieme ai nomi e ai tipi delle colonne",
+      "Quante righe ha la tabella",
+      "Il tuo stile di indentazione preferito"
+    ],
+    answer: 1,
+    explain: "Il dialetto conta, ma la maggior parte delle query sbagliate sbaglia sulla granularità più che sulla sintassi. Se il modello assume una riga per ordine e tu in realtà salvi una riga per riga d'ordine, ogni aggregato che scrive è gonfiato."
+  },
+  {
+    q: "Il modello risponde con una cifra di ricavi mensili senza che tu abbia eseguito nulla. Cos'è quel numero?",
+    options: [
+      "Una buona stima, da riportare con un caveat",
+      "Non verificato — possibilmente inventato, dato che non è stato calcolato sui tuoi dati",
+      "Corretto, se la descrizione dello schema era accurata",
+      "Un risultato della query preso dalla cache"
+    ],
+    answer: 1,
+    explain: "Una cifra che il modello non ha calcolato sui tuoi dati non è una stima, è un'ipotesi a forma di risposta. Esegui la query tu stesso e tratta come non verificato qualsiasi numero che non hai calcolato."
+  },
+  {
+    q: "Il totale dei ricavi triplica improvvisamente dopo che hai aggiunto una tabella clienti alla query. Di cosa dovresti sospettare per prima cosa?",
+    options: [
+      "Un cambiamento reale del business",
+      "Un errore di arrotondamento",
+      "Una join fan-out che duplica le righe degli ordini",
+      "La conversione di valuta"
+    ],
+    answer: 2,
+    explain: "Una join che trova più di una riga corrispondente dall'altro lato moltiplica i tuoi fatti. Controlla il conteggio delle righe prima e dopo la join — quella singola query di verifica spiega la maggior parte delle sorprese del tipo «il numero è improvvisamente enorme»."
+  }
+]} />
+
+## Punti chiave
+
+<Callout type="takeaways" items={[
+  "Descrivi prima colonne, tipi e GRANULARITÀ — gli errori di granularità battono quelli di sintassi in frequenza e in costo",
+  "Chiedi sempre le assunzioni della query, e rivedi quelle prima dell'SQL",
+  "Eseguila tu stesso. Un numero che il modello non ha calcolato è non verificato per definizione",
+  "Riporta indietro l'output reale per l'interpretazione — leggere numeri è la parte in cui l'AI è affidabilmente brava",
+  "Valori nulli, righe duplicate, fusi orari e valute mescolate sono i quattro silenziosi stravolgitori di risultati",
+  "Verifica ordini di grandezza e conteggi di righe; sospetta della join quando un totale salta",
+  "Tieni i dati PII fuori dagli strumenti che non hai verificato"
+]} />
+
+## Avanti
+
+- [Artifact: output dal vivo ed eseguibili](/docs/claude-app/artifacts) — costruisci una dashboard veloce
+- [Skill pack Analista dati](/docs/templates/skills)
+- [Allucinazioni e come ridurle](/docs/foundations/hallucinations)

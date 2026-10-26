@@ -1,0 +1,89 @@
+# Trilhas de Aprendizado (Escolha sua Trilha)
+
+> Source: https://derob98.github.io/ailmanac/pt-BR/docs/start-here/learning-paths · AILmanac (CC BY 4.0)
+
+Ordens de leitura sequenciadas para quatro tipos de leitor, com estimativas de tempo.
+
+<LevelBadge level="all" />
+
+Escolha a trilha que mais parece com você. Cada uma é um caminho ordenado — faça as etapas na ordem, pule o que você já sabe. Os tempos são aproximados.
+
+<Callout type="objectives" items={["Encontre a trilha única que combina com seus objetivos — novato, trabalhador do conhecimento, construtor ou líder de equipe", "Siga um caminho de leitura claro e ordenado em vez de adivinhar por onde começar", "Saiba aproximadamente quanto tempo cada trilha leva (~45 min a ~½ dia)", "Por onde começar se nenhuma das trilhas parecer um encaixe óbvio"]} />
+
+:::tip[Não tem certeza de qual trilha é a sua?]
+Escolha pelo seu **objetivo**, não pelo seu cargo. Quer resultados sem programar? Novato. Trabalho real mais rápido? Trabalhador do Conhecimento. Personalizar o Claude Code ou a API? Construtor. Implantar IA para outras pessoas? Líder de Equipe.
+:::
+
+## 🌱 O Novato Curioso · ~45 min
+
+Você quer usar bem a IA sem se tornar um programador.
+
+<Steps items={[
+  {title: "Seus Primeiros 5 Minutos", body: "Iniciante. Obtenha um resultado real do Claude em cinco minutos. /docs/start-here/your-first-5-minutes"},
+  {title: "Qual Claude eu Devo Usar?", body: "Iniciante. Escolha o modelo certo para o que você está fazendo. /docs/start-here/which-claude"},
+  {title: "Fundamentos de Prompting", body: "Iniciante. Os movimentos essenciais que tornam as respostas melhores. /docs/prompting/basics"},
+  {title: "O que é um LLM?", body: "Iniciante. Um modelo mental em linguagem simples de como o Claude funciona. /docs/foundations"},
+  {title: "Produtividade no Dia a Dia", body: "Iniciante. Aplique-o às tarefas diárias e às pequenas vitórias. /docs/playbooks/productivity"}
+]} />
+
+## 💼 O Trabalhador do Conhecimento · ~2 h
+
+Você quer que a IA torne o seu trabalho real mais rápido — escrita, pesquisa, análise.
+
+<Steps items={[
+  {title: "Comece pela trilha do Novato Curioso", body: "Faça primeiro a trilha de ~45 min acima e depois continue abaixo."},
+  {title: "Biblioteca de Padrões de Prompt", body: "Todos os níveis. Padrões reutilizáveis que você pode incorporar ao trabalho real. /docs/prompting"},
+  {title: "Alucinações & Como Reduzi-las", body: "Intermediário. Produza resultados em que você possa realmente confiar. /docs/foundations"},
+  {title: "Escolha o seu playbook", body: "Escolha Escrita, Pesquisa ou Análise de Dados. /docs/playbooks"},
+  {title: "Projetos + Modelos de Prompt Reutilizáveis", body: "Espaços de trabalho persistentes (/docs/claude-app) e modelos que você reutiliza (/docs/templates)."}
+]} />
+
+## 🛠️ O Construtor / Desenvolvedor · ~½ dia
+
+Você escreve código e quer personalizar o Claude Code e desenvolver com a API.
+
+<Steps items={[
+  {title: "O que é o Claude Code", body: "Iniciante. O que é a CLI e por que ela importa. /docs/claude-code/what-is-claude-code"},
+  {title: "CLAUDE.md, Arquivos de Memória & Modo de Planejamento", body: "Iniciante. Ensine o seu projeto ao Claude e planeje antes de ele agir. /docs/claude-code"},
+  {title: "Permissões & settings.json", body: "Intermediário. Controle o que o Claude pode fazer e como ele se comporta. /docs/claude-code"},
+  {title: "Sua Primeira Chamada de API → Uso de Ferramentas → Construindo Agentes", body: "Avançado. Vá de uma chamada ao uso de ferramentas e a agentes completos. Comece em /docs/api/first-call e depois /docs/api"},
+  {title: "Tutorial: Personalize o Claude Code para um repositório real", body: "Intermediário. Junte tudo em um projeto de verdade. /docs/walkthroughs"},
+  {title: "Segurança & Uso Responsável", body: "Avançado. Entregue com segurança quando estiver construindo para valer. /docs/security"}
+]} />
+
+## 👥 O Líder de Equipe · ~3 h
+
+Você está implantando a IA em uma equipe e se importa com consistência, segurança e custo.
+
+<Steps items={[
+  {title: "O essencial da trilha do Construtor (etapas 1–3)", body: "Cubra os fundamentos do Construtor acima antes de continuar aqui."},
+  {title: "Plugins & Marketplaces", body: "Avançado. Distribua um kit de ferramentas compartilhado para que a equipe trabalhe da mesma forma. /docs/claude-code"},
+  {title: "Compensações entre Custo & Latência + Escolhendo um Modelo", body: "Intermediário. Equilibre velocidade, qualidade e gasto. /docs/foundations e /docs/api/choosing-a-model"},
+  {title: "Protegendo Agentes + Reforçando Execuções Autônomas", body: "Avançado. Torne as execuções autônomas seguras em escala. /docs/security"},
+  {title: "Uso Responsável & Verificação", body: "Todos os níveis. Defina as normas que a equipe deve seguir. /docs/security"}
+]} />
+
+## Trilhas em resumo
+
+| Trilha | Você é… | Tempo | Primeira etapa |
+| --- | --- | --- | --- |
+| 🌱 Novato Curioso | Usando bem a IA, sem programar | ~45 min | [Seus Primeiros 5 Minutos](/docs/start-here/your-first-5-minutes) |
+| 💼 Trabalhador do Conhecimento | Acelerando o trabalho real | ~2 h | [Biblioteca de Padrões de Prompt](/docs/prompting) |
+| 🛠️ Construtor / Desenvolvedor | Personalizando o Claude Code + API | ~½ dia | [O que é o Claude Code](/docs/claude-code/what-is-claude-code) |
+| 👥 Líder de Equipe | Implantando IA em uma equipe | ~3 h | [Plugins & Marketplaces](/docs/claude-code) |
+
+:::note[As trilhas se complementam]
+A trilha do Trabalhador do Conhecimento começa com toda a trilha do Novato. A trilha do Líder de Equipe começa com o essencial do Construtor (etapas 1–3). Se você terminar uma trilha, a próxima já estará quase toda feita.
+:::
+
+<Quiz title="Teste você mesmo" questions={[
+  {q: "Você quer que a IA acelere a sua escrita e pesquisa, mas você não programa. Qual trilha encaixa?", options: ["O Construtor / Desenvolvedor", "O Trabalhador do Conhecimento", "O Líder de Equipe"], answer: 1, explain: "A trilha do Trabalhador do Conhecimento (~2 h) é para tornar o seu trabalho real mais rápido e começa com a trilha do Novato Curioso."},
+  {q: "Aproximadamente, quanto tempo dura a trilha do Novato Curioso?", options: ["~45 min", "~2 h", "~½ dia"], answer: 0, explain: "A trilha do Novato Curioso leva cerca de 45 minutos — o caminho mais curto da página."},
+  {q: "Qual é a primeira etapa da trilha do Construtor / Desenvolvedor?", options: ["Sua Primeira Chamada de API", "O que é o Claude Code", "Permissões & settings.json"], answer: 1, explain: "A trilha do Construtor abre com O que é o Claude Code, depois passa para CLAUDE.md e arquivos de memória antes da API."}
+]} />
+
+<Callout type="takeaways" items={["Quatro trilhas, uma regra: escolha pelo objetivo e siga as etapas na ordem.", "Os tempos variam de ~45 min (Novato) a ~½ dia (Construtor).", "As trilhas se encaixam — o Trabalhador do Conhecimento parte do Novato; o Líder de Equipe parte do Construtor.", "Na dúvida, comece com Seus Primeiros 5 Minutos — vale a pena em qualquer trilha."]} />
+
+---
+
+Não sabe qual encaixa? Comece com [Seus Primeiros 5 Minutos](/docs/start-here/your-first-5-minutes) — é útil não importa onde você termine. E leia [Como Funcionam os Níveis & a Atualidade](/docs/start-here/levels-and-freshness) para que os selos e as datas façam sentido.

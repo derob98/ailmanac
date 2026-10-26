@@ -1,0 +1,43 @@
+# Ce mois-ci dans Claude
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/whats-new/this-month · AILmanac (CC BY 4.0) · last verified 2026-07-01
+
+Un digest en langage clair des récents changements de modèles, de Claude Code et de l'API.
+
+<LevelBadge level="all" />
+
+<VerifyNote lastVerified="2026-06-24" source="https://platform.claude.com/docs">
+Cette page est un digest évolutif, organisé par des humains. Pour la liste complète et faisant autorité des changements, consultez toujours la documentation officielle d'Anthropic et le journal des modifications de Claude Code.
+</VerifyNote>
+
+Un digest en langage clair de ce qui a changé récemment dans tout l'univers de Claude — afin que vous puissiez parcourir « ce qui est nouveau et ce que cela signifie pour moi » sans lire chaque journal des modifications. Les plus récents en premier.
+
+:::info[Comment cette page reste à jour]
+Les entrées sont ajoutées par la communauté et par un [observateur automatisé](/docs/contribute/automation) qui signale les changements en amont afin qu'un humain les rédige. Chaque entrée renvoie à sa source officielle. Il manque quelque chose ? [Ajoutez-le](/docs/contribute/contribute-in-10-minutes).
+:::
+
+## Comment lire une entrée
+
+Chaque mise à jour est étiquetée par **surface** — 🗣️ Apps (chat/voix/mobile), 🛠️ Claude Code, 🔌 API, 🧠 Modèles — et répond à la question « ce que cela signifie pour vous ».
+
+## Mises à jour récentes
+
+- 🧠 **Modèles** — **Claude Sonnet 5** est sorti le 30 juin 2026 et est désormais le **modèle par défaut dans Claude Code**, avec une fenêtre de contexte native de 1M-token et un tarif de lancement jusqu'au 31 août 2026. C'est le nouveau palier Sonnet équilibré « démarrez ici », qui remplace Claude Sonnet 4.6 (désormais un modèle hérité). *Ce que cela signifie :* si vous épinglez un modèle, migrez vers `claude-sonnet-5` ; et consultez toujours le tableau [Modèles et tarifs actuels](/docs/whats-new/models-and-pricing) pour connaître les IDs exacts et les tarifs en direct avant de vous fier à un chiffre issu d'un article de blog. <VerifyNote lastVerified="2026-07-01" source="https://platform.claude.com/docs/en/models/overview">ID d'API `claude-sonnet-5` ; palier Sonnet ; contexte 1M-token ; sortie max de 128k ; date limite de connaissances Jan 2026. Le tarif de lancement de $2 / $10 par MTok s'applique jusqu'au Aug 31, 2026 (standard $3 / $15). Désormais le modèle par défaut de Claude Code selon le [journal des modifications](https://code.claude.com/docs/en/changelog) (v2.1.197, June 30 2026).</VerifyNote>
+- 🛠️ **Claude Code** — Les **workflows dynamiques** sont en aperçu de recherche : demandez-en un (ou définissez `/effort ultracode`) et Claude écrit un script JavaScript qui orchestre des dizaines à des centaines de [sous-agents](/docs/claude-code/subagents) en arrière-plan — pour des audits à l'échelle de la base de code, des migrations importantes et des recherches vérifiées par recoupement. Exécutez `/deep-research` pour voir celui fourni, ou `/workflows` pour observer les exécutions. *Ce que cela signifie :* vous pouvez désormais entreprendre des tâches à l'échelle d'une flotte qu'une seule conversation ne pourrait jamais coordonner, l'orchestration étant enregistrée sous la forme d'une commande réexécutable. Voir [Workflows dynamiques et ultracode](/docs/claude-code/dynamic-workflows). <VerifyNote lastVerified="2026-06-24" source="https://code.claude.com/docs/en/workflows">Nécessite Claude Code v2.1.154+ ; disponible sur les forfaits payants, l'API, Bedrock, Vertex et Foundry.</VerifyNote>
+- 🧠 **Modèles** — Un nouveau modèle haut de gamme, **Claude Fable 5**, est sorti en juin 2026 (Claude Code v2.1.170+). *Ce que cela signifie :* consultez le tableau [Modèles et tarifs actuels](/docs/whats-new/models-and-pricing) pour connaître la gamme en direct et les IDs exacts avant d'épingler un modèle — ne codez jamais en dur des informations sur les modèles issues d'un article de blog.
+- 🛠️ **Claude Code** — Les sous-agents peuvent désormais **engendrer leurs propres sous-agents** (jusqu'à 5 niveaux de profondeur), et `/code-review --fix` applique les conclusions de la revue à votre arbre de travail. *Ce que cela signifie :* la délégation se compose plus en profondeur, et la revue peut boucler la boucle au lieu de simplement rendre compte. Recoupez avec le [journal des modifications officiel](https://code.claude.com/docs/en/changelog) pour connaître le comportement exact.
+- 🔌 **API** — Des capacités comme la sortie structurée, la réflexion étendue et la mise en cache des prompts évoluent. *Ce que cela signifie :* revérifiez la [section API](/docs/api/first-call) avant de vous fier à des paramètres précis.
+
+## Vous voulez tout, sans filtre ?
+
+Ceci est un *digest*, pas un journal complet. Pour tout consulter :
+
+- [Documentation et annonces d'Anthropic](https://platform.claude.com/docs)
+- [Journal des modifications de Claude Code](https://code.claude.com/docs/en/overview)
+- [Veille sur les dépréciations et migrations](/docs/whats-new/deprecations)
+
+## Suite
+
+- [Modèles et tarifs actuels](/docs/whats-new/models-and-pricing)
+- [Veille sur les dépréciations et migrations](/docs/whats-new/deprecations)
+- [Journal des modifications du site](/docs/whats-new/site-changelog)

@@ -1,0 +1,166 @@
+# Estilos de salida
+
+> Source: https://derob98.github.io/ailmanac/es/docs/claude-code/output-styles · AILmanac (CC BY 4.0) · last verified 2026-06-21
+
+Cambia el tono, el nivel de detalle y el comportamiento didáctico de Claude Code.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-06-21" source="https://code.claude.com/docs/en/output-styles">
+Los estilos integrados, el mecanismo exacto para cambiarlos y el formato de archivo de los estilos personalizados pueden cambiar entre versiones. Confírmalo en la documentación oficial (la documentación de Claude Code se movió de `docs.anthropic.com` a `code.claude.com`).
+</VerifyNote>
+
+<Callout type="objectives" items={[
+  "Qué es un estilo de salida — y en qué se diferencia de cambiar lo que Claude sabe",
+  "Los cuatro estilos integrados: Default, Proactive, Explanatory, Learning",
+  "Cómo cambiar de estilo con /config — y por qué el cambio necesita una sesión nueva",
+  "Cómo crear tu propio estilo personalizado como un archivo Markdown",
+  "Cuándo recurrir a un estilo de salida frente a CLAUDE.md frente a las instrucciones personalizadas de Claude.ai"
+]} />
+
+Los **estilos de salida** cambian *cómo* se comunica Claude Code — su rol, tono, nivel de detalle y si explica su razonamiento — modificando directamente el system prompt. Cambian *cómo* responde Claude, no *lo que* sabe. Recurre a uno cuando te encuentres repitiendo el mismo prompt para obtener la misma voz o formato en cada turno.
+
+## Por qué usarlos
+
+- **Adáptalo a tu flujo de trabajo.** Conciso y orientado a la acción cuando vas rápido; explicativo cuando estás aprendiendo.
+- **Modo didáctico.** Algunos estilos añaden comentarios educativos — ideales mientras te familiarizas con una base de código o una técnica.
+- **Consistencia.** Define un estilo preferido una vez para que cada sesión se lea como te gusta.
+
+## Los estilos integrados
+
+Claude Code incluye cuatro:
+
+| Estilo | Qué hace |
+|---|---|
+| **Default** | El system prompt estándar de ingeniería de software — eficiente, orientado a la acción. |
+| **Proactive** | Ejecuta de inmediato y hace suposiciones razonables en lugar de pausar ante decisiones rutinarias. Ofrece una orientación de ejecución autónoma más fuerte que el modo automático, pero aún ves solicitudes de permiso antes de que se ejecuten las herramientas. |
+| **Explanatory** | Añade "Insights" educativos entre pasos, explicando las decisiones de implementación y los patrones de la base de código. |
+| **Learning** | Colaborativo, aprender haciendo: comparte Insights *y* te pide que escribas pequeños fragmentos tú mismo, dejando marcadores `[TODO(human)]` en tu código. |
+
+<Callout type="warning" items={[
+  "Explanatory y Learning producen respuestas más largas por diseño, por lo que cuestan más tokens de salida que Default."
+]} />
+
+<Flashcards cards={[
+  { front: "Default", back: "El system prompt estándar de ingeniería de software — eficiente, orientado a la acción." },
+  { front: "Proactive", back: "Ejecuta de inmediato y hace suposiciones razonables en lugar de pausar ante decisiones rutinarias. Orientación autónoma más fuerte que el modo automático, pero aún ves solicitudes de permiso antes de que se ejecuten las herramientas." },
+  { front: "Explanatory", back: "Añade 'Insights' educativos entre pasos, explicando las decisiones de implementación y los patrones de la base de código." },
+  { front: "Learning", back: "Colaborativo, aprender haciendo: comparte Insights Y te pide que escribas pequeños fragmentos tú mismo, dejando marcadores [TODO(human)] en tu código." }
+]} />
+
+## Cómo cambiar
+
+Ejecuta `/config` y elige un estilo en **Output style**. Tu elección se guarda en `.claude/settings.local.json` a nivel de proyecto. Para configurarlo sin el menú, edita el campo `outputStyle` en cualquier archivo de configuración.
+
+<Steps items={[
+  { title: "Abre el menú de configuración", body: "Ejecuta /config en tu sesión y busca la opción Output style." },
+  { title: "Elige un estilo", body: "Selecciona uno entre Default, Proactive, Explanatory o Learning. Tu elección se guarda en .claude/settings.local.json a nivel de proyecto." },
+  { title: "O configúralo directamente", body: "Salta el menú editando el campo outputStyle en cualquier archivo de configuración (consulta el JSON de abajo)." },
+  { title: "Inicia una sesión nueva", body: "El estilo forma parte del system prompt, que se lee una sola vez al inicio de la sesión — ejecuta /clear o abre una nueva sesión para que surta efecto." }
+]} />
+
+```json
+{
+  "outputStyle": "Explanatory"
+}
+```
+
+:::warning[Los cambios requieren una sesión nueva]
+El estilo de salida forma parte del system prompt, que Claude Code lee **una vez al inicio de la sesión**. Un cambio surte efecto solo después de `/clear` o de una nueva sesión. (El comando independiente `/output-style` se eliminó en v2.1.91 — usa `/config` o la configuración anterior.)
+:::
+
+## Crea un estilo personalizado
+
+Un estilo personalizado es un archivo Markdown: frontmatter, luego las instrucciones que se añaden al system prompt. Guárdalo a nivel de usuario (`~/.claude/output-styles/`) o a nivel de proyecto (`.claude/output-styles/`); el nombre del archivo se convierte en el nombre del estilo a menos que definas `name`.
+
+<PromptCard title="Estilo personalizado de ejemplo — Diagramas primero">{`---
+name: Diagrams first
+description: Lead every explanation with a diagram
+keep-coding-instructions: true
+---
+
+When explaining code, architecture, or data flow, start with a Mermaid
+diagram showing the structure, then explain in prose.`}</PromptCard>
+
+<Callout type="tip" items={[
+  "Define keep-coding-instructions: true cuando solo estés cambiando CÓMO se comunica Claude pero aún quieras que programe normalmente.",
+  "Omítelo (el valor predeterminado) cuando Claude no esté haciendo ingeniería de software en absoluto — por ejemplo, un asistente de pura escritura o análisis de datos — para que se descarten las instrucciones de programación integradas."
+]} />
+
+## Estilos de salida frente a CLAUDE.md frente a otras palancas
+
+- **Estilo de salida** = un preajuste del system prompt para rol, tono y formato — se aplica a *cada* respuesta.
+- **[CLAUDE.md](/docs/claude-code/claude-md)** = hechos y reglas *del proyecto* persistentes (convenciones, salvaguardas), añadidos como un mensaje después del system prompt.
+- **[Instrucciones personalizadas / estilos de respuesta](/docs/claude-app/custom-instructions)** = el equivalente en la app de consumo de Claude.ai.
+
+:::tip[Usa la palanca adecuada]
+¿Quieres que Claude "siempre ejecute las pruebas antes de terminar"? Eso es una **salvaguarda de CLAUDE.md**, no un estilo. ¿Quieres que "explique cada paso a medida que avanza"? Eso es un **estilo de salida**. Mantén las reglas de comportamiento en CLAUDE.md y la presentación en los estilos.
+:::
+
+<Quiz title="Compruébalo tú mismo" questions={[
+  {
+    q: "¿Qué cambia realmente un estilo de salida?",
+    options: [
+      "Lo que Claude sabe sobre tu proyecto",
+      "Cómo se comunica Claude — rol, tono, nivel de detalle — modificando el system prompt",
+      "Qué modelo ejecuta Claude Code",
+      "Las solicitudes de permiso antes de que se ejecuten las herramientas"
+    ],
+    answer: 1,
+    explain: "Los estilos de salida modifican el system prompt para cambiar CÓMO responde Claude, no LO QUE sabe."
+  },
+  {
+    q: "¿Qué estilo integrado deja marcadores [TODO(human)] y te pide que escribas pequeños fragmentos tú mismo?",
+    options: ["Default", "Proactive", "Explanatory", "Learning"],
+    answer: 3,
+    explain: "Learning es el estilo colaborativo de aprender haciendo: comparte Insights y te pide que escribas pequeños fragmentos, dejando marcadores [TODO(human)] en tu código."
+  },
+  {
+    q: "Después de cambiar el estilo de salida, ¿cuándo surte efecto?",
+    options: [
+      "De inmediato, en el siguiente mensaje",
+      "Solo después de /clear o de una nueva sesión, porque el system prompt se lee una vez al inicio de la sesión",
+      "Después de reiniciar el ordenador",
+      "Después de ejecutar /output-style"
+    ],
+    answer: 1,
+    explain: "El estilo forma parte del system prompt, que Claude Code lee una vez al inicio de la sesión — así que un cambio se aplica solo después de /clear o de una nueva sesión. El comando independiente /output-style se eliminó en v2.1.91."
+  },
+  {
+    q: "Quieres que Claude 'siempre ejecute las pruebas antes de terminar.' ¿Qué palanca es esa?",
+    options: [
+      "Un estilo de salida",
+      "Una salvaguarda de CLAUDE.md",
+      "Una instrucción personalizada de Claude.ai",
+      "El estilo integrado Proactive"
+    ],
+    answer: 1,
+    explain: "Las reglas de comportamiento van en CLAUDE.md; la presentación va en los estilos de salida. 'Siempre ejecutar las pruebas' es una salvaguarda."
+  },
+  {
+    q: "¿Cuándo deberías definir keep-coding-instructions: true en un estilo personalizado?",
+    options: [
+      "Cuando Claude no está haciendo ingeniería de software en absoluto",
+      "Cuando solo estás cambiando cómo se comunica Claude pero aún quieres que programe normalmente",
+      "Siempre, en todos los estilos personalizados",
+      "Solo a nivel de proyecto, nunca a nivel de usuario"
+    ],
+    answer: 1,
+    explain: "Mantenlo en true para conservar las instrucciones de programación integradas mientras solo cambias la presentación. Omítelo (el valor predeterminado) para asistentes de pura escritura o análisis de datos."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Los estilos de salida cambian CÓMO se comunica Claude (rol, tono, nivel de detalle), no LO QUE sabe — editan el system prompt.",
+  "Cuatro integrados: Default (orientado a la acción), Proactive (ejecuta con suposiciones), Explanatory (añade Insights), Learning (Insights + marcadores [TODO(human)]).",
+  "Explanatory y Learning cuestan más tokens de salida porque las respuestas son más largas por diseño.",
+  "Cambia mediante /config (guardado en .claude/settings.local.json) o la configuración outputStyle — los cambios requieren /clear o una nueva sesión.",
+  "Los estilos personalizados son archivos Markdown en ~/.claude/output-styles/ o .claude/output-styles/; usa keep-coding-instructions: true para conservar el comportamiento de programación.",
+  "Usa CLAUDE.md para las reglas de comportamiento/salvaguardas y los estilos de salida para la presentación."
+]} />
+
+## Siguiente
+
+- [CLAUDE.md y archivos de memoria](/docs/claude-code/claude-md)
+- [Ajustes y configuración](/docs/claude-code/settings)
+- [Instrucciones y estilos personalizados (Claude.ai)](/docs/claude-app/custom-instructions)

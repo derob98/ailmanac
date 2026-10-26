@@ -1,0 +1,68 @@
+# 全景地图
+
+> Source: https://derob98.github.io/ailmanac/zh-Hans/docs/start-here/landscape-map · AILmanac (CC BY 4.0)
+
+官方与社区 AI 资源的带注释索引——以及各自的适用场景。
+
+<LevelBadge level="all" />
+
+AILmanac 并非孤立存在，我们也不打算取代生态中的一切。这一课是一份坦诚的资源地图，涵盖生态中最好的资源——同样重要的是，告诉你什么时候应该用它们**而不是**我们。
+
+<Callout type="objectives" items={["明确唯一的事实来源，以及为什么文档与我们不一致时总是以文档为准", "认识 Anthropic 的官方资源，以及每一种的用途", "了解最好的社区与厂商中立的提示词资源", "用一张简单的决策表把任何需求匹配到合适的去处", "把 AILmanac 定位为有主见的实战指南"]} />
+
+## 事实来源
+
+从这里开始，因为其他一切都围绕这条规则运转。
+
+<Callout type="warning" items={["当 AILmanac 与官方文档不一致时，以文档为准。需要精确、最新的细节时用文档；需要有主见、分层、边做边学的指导时用我们。"]} />
+
+- **[Anthropic 文档](https://platform.claude.com/docs)** ——关于 Claude、API、模型和功能的权威参考。
+
+## Anthropic 官方资源
+
+这些都是官方一手资源。当你想要权威示例、可运行的代码，或直接来自源头的引导式学习时，就用它们。
+
+<Flashcards title="官方资源一览" cards={[{front: "提示词最佳实践", back: "Anthropic 的提示词参考，按模型给出指导。取代了旧的 Prompt Library。"}, {front: "Anthropic Cookbook", back: "可运行的 API 范例——工具调用、RAG、视觉。"}, {front: "Claude Code 文档", back: "CLI/IDE 参考。"}, {front: "Anthropic Academy / Learn", back: "免费的引导式课程。"}, {front: "Model Context Protocol", back: "开放的 MCP 标准及服务器目录。"}]} />
+
+- **[提示词最佳实践](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices)** ——Anthropic 的提示词参考，按模型给出指导。（它取代了旧的 Prompt Library——一个现成示例提示词的集合，其网址现在会重定向到这里。）
+- **[Anthropic Cookbook](https://github.com/anthropics/anthropic-cookbook)** ——可运行的 API 范例（工具调用、RAG、视觉）。
+- **[Claude Code 文档](https://code.claude.com/docs/en/overview)** ——CLI/IDE 参考。
+- **[Anthropic Academy / Learn](https://www.anthropic.com/learn)** ——免费的引导式课程。
+- **[Model Context Protocol](https://modelcontextprotocol.io)** ——开放的 MCP 标准 + 服务器目录。
+
+## 社区与通用资源
+
+当你需要厂商中立的深度内容，或经社区检验的精选工作流时，这些是其中的佼佼者。
+
+- **[awesome-claude-code](https://github.com/hesreallyhim/awesome-claude-code)** ——精选的命令、hooks 和工作流。
+- **[Prompt Engineering Guide](https://www.promptingguide.ai)** ——深入的、厂商中立的提示词参考。
+- **[Learn Prompting](https://learnprompting.org)** ——结构化、对初学者友好的提示词课程。
+
+## 何时用什么
+
+使用这张地图最快的方法：先从你的需求出发，再跳到对应的去处。
+
+<Steps items={[{title: "说清你的需求", body: "确定你此刻真正想要的是什么——精确的规格、可复制粘贴的提示词、可运行的代码、学习路径、理论，还是课程。"}, {title: "在表格里找到匹配项", body: "在下表左列找到你的需求，再读右列推荐的去处。"}, {title: "在那里深入，然后回来", body: "用那个资源做深度学习，再回到 AILmanac，沿着有主见、带难度标签的路径把它们串联起来。"}]} />
+
+| 你想要… | 去哪里 |
+|---|---|
+| 精确、最新的 API/功能细节 | 官方文档 |
+| 可复制粘贴的示例提示词 | Prompt Library / 我们的[模板](/docs/templates/prompts) |
+| 可运行的 API 代码 | Cookbook |
+| 有主见、带难度标签的路径 | **AILmanac** |
+| 关于提示词的深度理论参考 | promptingguide.ai |
+| 引导式课程 | Anthropic Academy |
+
+## AILmanac 的位置
+
+我们是**有主见的实战指南**：先给出一种推荐做法，按难度分级，模板丰富，对内容时效坦诚相告，并同时涵盖 Claude **和**通用 AI 概念。可以把我们看作一张地图：在合适的时候指向合适的深度资源，并教你基础知识，让这一切都说得通。
+
+<Quiz title="自测一下" questions={[{q: "AILmanac 与 Anthropic 官方文档对某个功能细节说法不一致。你信哪个？", options: ["AILmanac，因为它有主见", "官方文档，因为它是事实来源", "先更新的那个"], answer: 1, explain: "当 AILmanac 与文档不一致时，以文档为准。它们是关于精确细节的权威、最新的参考。"}, {q: "你需要工具调用、RAG 或视觉方面可运行的 API 代码。该去哪里？", options: ["Anthropic Cookbook", "Learn Prompting", "Prompt Library"], answer: 0, explain: "Anthropic Cookbook 提供可运行的 API 范例，涵盖工具调用、RAG 和视觉。"}, {q: "AILmanac 如何描述自己在这张全景中的角色？", options: ["官方文档的替代品", "有主见的实战指南，在合适的时候指向合适的深度资源", "关于提示词的厂商中立理论参考"], answer: 1, explain: "AILmanac 是有主见的实战指南——先给出一种推荐做法、按难度分级，并且是一张指向合适深度资源的地图。"}]} />
+
+<Callout type="takeaways" items={["Anthropic 官方文档是事实来源——有疑问时，以它为准。", "权威示例、代码和课程用官方资源（Prompt Library、Cookbook、Claude Code 文档、Academy、MCP）。", "精选工作流和提示词深度用社区与厂商中立资源（awesome-claude-code、promptingguide.ai、Learn Prompting）。", "把你的需求匹配到一个去处，然后回到 AILmanac，走有主见、带难度标签的路径。"]} />
+
+## 下一步
+
+- [欢迎，以及为什么有这个网站](/docs/start-here/welcome)
+- [学习路径](/docs/start-here/learning-paths)
+- [贡献一个资源](/docs/contribute/contribute-in-10-minutes)

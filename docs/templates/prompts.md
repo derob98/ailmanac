@@ -1,0 +1,79 @@
+# Reusable Prompt Templates
+
+> Source: https://derob98.github.io/ailmanac/docs/templates/prompts · AILmanac (CC BY 4.0)
+
+Task-mapped, XML-structured prompts with expected output and failure notes.
+
+<LevelBadge level="all" />
+
+Grab-and-go prompts for common tasks. They use [XML tags](/docs/prompting/xml-tags) for clean structure and bake in the habits from [Prompting Basics](/docs/prompting/basics). Fill the `{braces}`.
+
+## Summarize (grounded)
+
+```text
+<instructions>
+Summarize the document for {audience} in {N} bullet points. Use ONLY the document;
+if something isn't there, say "not stated." Then list any action items.
+</instructions>
+<document>
+{paste}
+</document>
+```
+*Expected:* tight bullets + action items. *Common failure:* invents facts → the "ONLY the document" clause guards against it.
+
+## Extract structured data
+
+```text
+Extract the following from the text as JSON: {field1, field2, field3}.
+Return ONLY valid JSON, no prose. If a field is missing, use null.
+<text>{paste}</text>
+```
+*Pair with* [structured output](/docs/api/structured-output) for reliability.
+
+## Rewrite / edit
+
+```text
+Rewrite the text to be {clearer/shorter/more formal} without changing meaning.
+Then list the changes you made as bullets.
+<text>{paste}</text>
+```
+
+## Code review
+
+```text
+Review this diff for correctness bugs, missing edge cases, and security issues.
+Report ONLY high-confidence findings as a checklist with file:line. Diff:
+<diff>{paste}</diff>
+```
+
+## Decision helper
+
+```text
+I'm deciding between {A} and {B} for {situation}. Build a trade-off table across
+the criteria that matter, then recommend one and name the biggest risk.
+```
+
+## Meta-prompt (improve a prompt)
+
+```text
+Here's my prompt: "{prompt}". Ask me the 3 questions that would most improve it,
+then rewrite it with sensible defaults.
+```
+
+## Role + guardrail wrapper
+
+```text
+You are {role}. {task}.
+Constraints: {format, length, tone}. If you're unsure or lack info, say so rather
+than guessing.
+```
+
+:::tip[Make them yours]
+Save the ones you use as [slash commands](/docs/templates/slash-commands) or a [Project](/docs/claude-app/projects) so you never retype them.
+:::
+
+## Next
+
+- [Prompt Patterns Library](/docs/prompting/pattern-library)
+- [Structuring Prompts with XML Tags](/docs/prompting/xml-tags)
+- [Production API Snippets](/docs/templates/api-snippets)

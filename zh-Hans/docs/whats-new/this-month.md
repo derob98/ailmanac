@@ -1,0 +1,43 @@
+# 本月 Claude 动态
+
+> Source: https://derob98.github.io/ailmanac/zh-Hans/docs/whats-new/this-month · AILmanac (CC BY 4.0) · last verified 2026-07-01
+
+用通俗易懂的语言总结近期模型、Claude Code 和 API 的变更。
+
+<LevelBadge level="all" />
+
+<VerifyNote lastVerified="2026-06-24" source="https://platform.claude.com/docs">
+本页是一份持续滚动、由人工策划的摘要。如需权威、完整的变更列表，请始终查阅 Anthropic 官方文档和 Claude Code 更新日志。
+</VerifyNote>
+
+用通俗易懂的语言总结 Claude 近期在各方面的变化——让你无需通读每一份更新日志，就能快速浏览"有什么新东西，以及它对我意味着什么"。最新内容在前。
+
+:::info[本页如何保持更新]
+条目由社区添加，也由一个 [自动监测程序](/docs/contribute/automation) 标记上游变更，再交由人工撰写。每个条目都会链接其官方来源。发现有遗漏？[添加它](/docs/contribute/contribute-in-10-minutes)。
+:::
+
+## 如何阅读一个条目
+
+每条更新都按 **领域** 标记——🗣️ 应用（聊天/语音/移动端）、🛠️ Claude Code、🔌 API、🧠 模型——并回答 **"它对你意味着什么"**。
+
+## 近期更新
+
+- 🧠 **模型**——**Claude Sonnet 5** 已于 2026 年 6 月 30 日发布，现在是 **Claude Code 中的默认模型**，具备原生 1M-token 上下文窗口，并在 August 31 2026 之前提供introductory 定价。它是全新的均衡型"从这里开始"Sonnet 层级，取代了 Claude Sonnet 4.6（现已成为旧版模型）。*这意味着什么：* 如果你固定使用某个模型，请迁移到 `claude-sonnet-5`；在依赖某篇博客文章中的数字之前，请始终查阅 [当前模型与定价](/docs/whats-new/models-and-pricing) 表格，以获取确切的 ID 和实时定价。<VerifyNote lastVerified="2026-07-01" source="https://platform.claude.com/docs/en/models/overview">API ID `claude-sonnet-5`；Sonnet 层级；1M-token 上下文；128k 最大输出；2026 年 1 月知识截止。introductory 定价为每 MTok $2 / $10，适用至 Aug 31, 2026（标准价 $3 / $15）。根据[更新日志](https://code.claude.com/docs/en/changelog)（v2.1.197，June 30 2026），现为 Claude Code 默认模型。</VerifyNote>
+- 🛠️ **Claude Code**——**动态工作流（Dynamic workflows）**进入研究预览阶段：请求一个工作流（或设置 `/effort ultracode`），Claude 就会编写一段 JavaScript 脚本，在后台编排数十到数百个 [子代理](/docs/claude-code/subagents)——用于全代码库审计、大型迁移以及交叉核验的研究。运行 `/deep-research` 查看内置示例，或运行 `/workflows` 观察运行情况。*这意味着什么：* 你现在可以承担单次对话永远无法协调的舰队级任务，并将编排过程保存为可重复运行的命令。参见 [动态工作流与 ultracode](/docs/claude-code/dynamic-workflows)。<VerifyNote lastVerified="2026-06-24" source="https://code.claude.com/docs/en/workflows">需要 Claude Code v2.1.154+；在付费计划、API、Bedrock、Vertex 和 Foundry 上均可用。</VerifyNote>
+- 🧠 **模型**——一款全新的顶级模型 **Claude Fable 5** 已于 2026 年 6 月发布（Claude Code v2.1.170+）。*这意味着什么：* 在固定使用某个模型之前，请查阅 [当前模型与定价](/docs/whats-new/models-and-pricing) 表格，了解最新的阵容和确切 ID——切勿硬编码某篇博客文章中的模型信息。
+- 🛠️ **Claude Code**——子代理现在可以**生成它们自己的子代理**（最多 5 层深），并且 `/code-review --fix` 会将审查结果应用到你的工作区。*这意味着什么：* 委派可以组合得更深入，审查也能形成闭环，而不仅仅是给出报告。请对照 [官方更新日志](https://code.claude.com/docs/en/changelog) 核实确切行为。
+- 🔌 **API**——诸如结构化输出、扩展思考和提示缓存等能力在不断演进。*这意味着什么：* 在依赖确切参数之前，请重新查阅 [API 章节](/docs/api/first-call)。
+
+## 想要全部信息？
+
+这是一份*摘要*，并非完整日志。如需了解全部内容：
+
+- [Anthropic 文档与公告](https://platform.claude.com/docs)
+- [Claude Code 更新日志](https://code.claude.com/docs/en/overview)
+- [弃用与迁移观察](/docs/whats-new/deprecations)
+
+## 下一步
+
+- [当前模型与定价](/docs/whats-new/models-and-pricing)
+- [弃用与迁移观察](/docs/whats-new/deprecations)
+- [站点更新日志](/docs/whats-new/site-changelog)

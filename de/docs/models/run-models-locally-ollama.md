@@ -1,0 +1,186 @@
+# KI-Modelle lokal mit Ollama ausführen
+
+> Source: https://derob98.github.io/ailmanac/de/docs/models/run-models-locally-ollama · AILmanac (CC BY 4.0) · last verified 2026-10-21
+
+Open-Weight-Modelle (Llama, Mistral, Qwen …) auf dem eigenen Rechner betreiben – privat, offline, kostenlos im Betrieb – mit Ollama. Einrichtung, CLI und Aufruf aus dem Code.
+
+<LevelBadge level="intermediate" />
+
+Die Frontier-Modelle laufen in der Cloud, aber eine ganze Klasse von **Open-Weight**-Modellen – Llama, Mistral, Qwen, DeepSeek, Gemma – kannst du herunterladen und auf deinem eigenen Laptop oder Server ausführen. [Ollama](https://ollama.com/) ist der einfachste Weg dorthin: eine Installation, ein Befehl, und ein Modell läuft lokal. Diese Seite führt dich von null bis zu einem laufenden Modell, zeigt, wie du es aus dem Code aufrufst, und erklärt die Kompromisse, damit du von einem lokalen 7B-Modell nicht erwartest, sich wie ein Frontier-Modell zu verhalten.
+
+<Callout type="objectives" items={[
+  "Wissen, WARUM man ein Modell lokal betreibt – und die ehrlichen Kompromisse gegenüber Cloud-Frontier-Modellen",
+  "Ollama installieren und das erste Modell mit zwei Befehlen starten",
+  "Die zentrale CLI nutzen: pull, run, list, ps, rm, stop",
+  "Dein lokales Modell über Ollamas OpenAI-kompatible API aus dem Code aufrufen",
+  "RAM-Bedarf, Modellgrößen und Quantisierung verstehen – damit du ein Modell wählst, das deine Maschine wirklich ausführen kann",
+  "Wissen, wann LM Studio (eine GUI) der bessere Einstieg ist",
+]} />
+
+## Warum ein Modell lokal ausführen (und wann nicht)
+
+Ein Modell auf eigener Hardware zu betreiben bringt dir vier Dinge:
+
+- **Datenschutz** — deine Prompts und Daten verlassen nie deinen Rechner. Das ist der Grund, warum Teams in regulierten oder sensiblen Bereichen zu lokalen Modellen greifen. (Siehe die Abzweigung Datenschutz/Self-Hosting in [Ein Modell auswählen](/docs/models/choosing-a-model).)
+- **Offline** — kein Internet, keine API, keine Abhängigkeit von Ausfällen. Das Modell ist eine Datei auf deiner Festplatte.
+- **Kosten** — keine Abrechnung pro Token. Einmal heruntergeladen, ist der Betrieb „kostenlos“ (du zahlst in Strom und Hardware, nicht in API-Ausgaben). Wenn die [Token-Ausgaben](/docs/power-user/token-economy) im großen Maßstab dein Engpass sind, kann lokal gewinnen.
+- **Kontrolle** — eine exakte Version festnageln, das Verhalten anpassen und ohne Rate Limits oder Überraschungen bei den Nutzungsbedingungen integrieren.
+
+Die ehrlichen Kompromisse:
+
+- **Fähigkeitslücke.** Ein Modell, das du auf einem Laptop ausführen kannst (1B–14B Parameter), spielt bei schwierigem Schlussfolgern, langem Kontext oder agentischen Aufgaben **nicht** in derselben Liga wie ein Cloud-Frontier-Modell. Bei vielen Alltagsaufgaben ist die Lücke klein; bei den schwierigsten ist sie groß.
+- **Hardware.** Größere, leistungsfähigere Modelle brauchen mehr RAM/VRAM, als eine typische Maschine hat. Oft wählst du das *größte Modell, das deine Hardware ausführen kann*, nicht das beste, das es gibt.
+- **Du betreibst es selbst.** Keine verwaltete Skalierung, keine automatischen Upgrades – das ist der Preis der Kontrolle.
+
+Ein verbreitetes, langlebiges Muster: **Prototyp bauen und auswählen** mit einer winzigen Evaluation (dieselbe Methode wie bei Cloud-Modellen – siehe [Ein Modell auswählen](/docs/models/choosing-a-model)), lokal für private/offline/im großen Maßstab günstige Arbeit nutzen und zu einer Frontier-API greifen, wenn die Aufgabe die zusätzliche Fähigkeit wirklich braucht.
+
+## Ollama installieren und das erste Modell ausführen
+
+<Steps items={[
+  {title: "Ollama installieren", body: "macOS und Windows: Lade den Installer von ollama.com/download herunter und führe ihn aus. Linux: Nutze das offizielle Installationsskript (unten). Das installiert den Befehl ollama und einen lokalen Hintergrunddienst."},
+  {title: "Ein Modell ausführen", body: "ollama run <model> lädt das Modell bei der ersten Nutzung herunter (das können mehrere GB sein) und öffnet dann einen interaktiven Chat. Der erste Start ist langsam, weil die Gewichte geladen werden; spätere Starts sind sofort da."},
+  {title: "Chatten, dann beenden", body: "Gib einen Prompt ein und drücke Enter. Um die interaktive Sitzung zu verlassen, tippe /bye (oder drücke Strg+D). Das Modell bleibt für das nächste Mal auf der Festplatte im Cache."},
+  {title: "Heruntergeladenes verwalten", body: "Mit ollama list siehst du die installierten Modelle, mit ollama rm <model> löschst du eines und gibst Speicherplatz frei."},
+]} />
+
+Linux-Installation (macOS/Windows nutzen stattdessen den heruntergeladenen Installer):
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+<PromptCard title="Ein kleines Modell laden und ausführen (gute erste Wahl)">{`ollama run gemma4:e2b`}</PromptCard>
+
+Dieser eine Befehl lädt `gemma4:e2b` herunter – das Modell, mit dem Ollamas eigene Quickstart beginnt, eine Gemma-4-Variante in Edge-Größe mit ~2,3B *effektiven* Parametern und einigen GB auf der Festplatte – und startet einen interaktiven Chat. Um nur herunterzuladen, ohne gleich zu chatten, nutze stattdessen `ollama pull`.
+
+<VerifyNote lastVerified="2026-10-21" source="https://docs.ollama.com/quickstart">
+Genaue **Modellnamen, verfügbare Parametergrößen und Tags ändern sich häufig**, sobald neue Releases erscheinen. Die auf dieser Seite verwendeten Namen – `gemma4:e2b`, `qwen3`, `deepseek-r1`, `gemma3`, `mistral`, `llama3.2` – waren zum Prüfdatum in der Ollama-Bibliothek, neben Neuzugängen wie `qwen3.5` und den größeren Tags `12b`/`26b`/`31b` von `gemma4`. Behandle jeden konkreten Namen bzw. jede Größe als verderblich: Die aktuelle Bibliothek mit den heutigen Pull-Namen und Größen findest du unter <a href="https://ollama.com/library">ollama.com/library</a>.
+</VerifyNote>
+
+## Die zentrale CLI
+
+Eine Handvoll Befehle deckt fast alles ab. Mit `ollama --help` siehst du die vollständige Liste.
+
+```bash
+# Download a model without starting a chat
+ollama pull qwen3
+
+# Start an interactive chat (downloads first if needed)
+ollama run qwen3
+
+# One-shot: pass the prompt inline, get the answer, exit
+ollama run qwen3 "Summarize the CAP theorem in two sentences."
+
+# List models you've downloaded
+ollama list
+
+# Show models currently loaded in memory
+ollama ps
+
+# Stop a running/loaded model (frees memory)
+ollama stop qwen3
+
+# Delete a downloaded model to reclaim disk
+ollama rm qwen3
+```
+
+In einer interaktiven `ollama run`-Sitzung beendest du mit `/bye` und siehst mit `/?` die Befehle der Sitzung. Der Hintergrunddienst, der die Modelle tatsächlich bereitstellt, wird mit `ollama serve` gestartet (die Desktop-App startet ihn automatisch für dich).
+
+## Aus dem Code aufrufen (OpenAI-kompatible API)
+
+Das ist der Teil, der lokale Modelle in Apps wirklich nützlich macht. Der Ollama-Hintergrunddienst stellt eine lokale HTTP-API unter **`http://localhost:11434`** bereit, auf dem Standardport **11434**. Sie hat eigene native Endpunkte (`/api/generate`, `/api/chat`) **und** eine **OpenAI-kompatible** Schicht unter `/v1` – so funktioniert der meiste für das OpenAI-SDK geschriebene Code mit deinem lokalen Modell, wenn du zwei Zeilen änderst.
+
+Rohes HTTP mit `curl` (nativer Endpunkt):
+
+```bash
+curl http://localhost:11434/api/chat -d '{
+  "model": "gemma4:e2b",
+  "messages": [
+    { "role": "user", "content": "Why is the sky blue?" }
+  ],
+  "stream": false
+}'
+```
+
+Aus Python mit dem offiziellen OpenAI-SDK – richte einfach `base_url` auf Ollama und übergib einen beliebigen nicht leeren `api_key` (Ollama verlangt das Feld, ignoriert aber seinen Wert):
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:11434/v1",
+    api_key="ollama",  # required by the SDK, ignored by Ollama
+)
+
+response = client.chat.completions.create(
+    model="gemma4:e2b",
+    messages=[
+        {"role": "system", "content": "You are a concise assistant."},
+        {"role": "user", "content": "Explain gradient descent in two sentences."},
+    ],
+)
+
+print(response.choices[0].message.content)
+```
+
+Weil sie OpenAI-kompatibel ist, übertragen sich dieselben Muster, die du gegen eine gehostete API nutzen würdest – einschließlich Streaming und [Tool Use / Function Calling](/docs/api/tool-use), die lokal genauso funktionieren wie in der Cloud (sofern das Modell darin tatsächlich gut ist). Ollamas `/v1`-Schicht deckt `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/models` (und `/v1/models/{model}`) sowie `/v1/embeddings` ab.
+
+## Hardware, Modellgrößen und Quantisierung
+
+Die Zahl, die du an einem Modell siehst – **1B, 7B, 8B, 70B** – ist seine **Parameterzahl** (in Milliarden). Mehr Parameter bedeuten in der Regel leistungsfähiger *und* speicherhungriger. Die praktische Grenze dessen, was du ausführen kannst, ist der **RAM** (und bei einer GPU der **VRAM**).
+
+**Quantisierung** ist der entscheidende Trick, der das auf normalen Maschinen möglich macht. Die Gewichte des Modells liegen ursprünglich in hoher Präzision vor (z. B. 16 Bit), lassen sich aber mit einem kleinen, oft kaum merklichen Qualitätsverlust auf ~4 Bit komprimieren. Ollama liefert die meisten Modelle standardmäßig quantisiert aus – deshalb passt ein Modell mit Milliarden Parametern in ein paar GB. Eine grobe Faustregel (prüfe sie anhand der Seite des jeweiligen Modells):
+
+- **~1B–3B**-Modelle: laufen bequem auf den meisten modernen Laptops (ein paar GB RAM).
+- **~7B–8B**-Modelle: der Sweet Spot zwischen leistungsfähig und ausführbar; plane einige GB freien RAM ein.
+- **~13B–14B**-Modelle: brauchen eine ziemlich gut ausgestattete Maschine.
+- **~70B+**-Modelle: brauchen eine Workstation/einen Server mit viel RAM oder eine starke GPU – kein typisches Laptop-Terrain.
+
+Ein praktisches Rezept: Beginne mit einem kleinen Modell (`gemma4:e2b`), bestätige den Workflow von Anfang bis Ende und gehe dann *nach oben* zum größten Modell, das auf deiner Hardware noch flüssig läuft – nicht zum größten, das es gibt.
+
+<Flashcards title="Vokabular lokaler Modelle" cards={[
+  {front: "Gewichte (Weights)", back: "Die gelernten Zahlen (Parameter), die das Modell SIND. Ein Modell lokal auszuführen bedeutet, seine Gewichtsdatei in den Speicher zu laden und damit zu rechnen."},
+  {front: "Open-Weight-Modell", back: "Ein Modell, dessen Gewichte du herunterladen und selbst ausführen kannst (Llama, Mistral, Qwen, DeepSeek, Gemma) – die Voraussetzung dafür, überhaupt lokal zu laufen."},
+  {front: "Parameter (z. B. 7B)", back: "Die Anzahl der Gewichte in Milliarden. Höher = in der Regel leistungsfähiger und speicherhungriger. Der wichtigste Hebel dafür, ob deine Maschine es ausführen kann."},
+  {front: "Quantisierung", back: "Das Komprimieren der Gewichte auf geringere Präzision (z. B. 16 Bit → 4 Bit), sodass das Modell mit kleinem Qualitätsverlust in deutlich weniger RAM passt. Deshalb passen Modelle mit Milliarden Parametern in ein paar GB."},
+  {front: "Kontextfenster", back: "Wie viele Token (Prompt + Ausgabe) das Modell auf einmal berücksichtigen kann. Lokale Modelle haben oft einen kleineren nutzbaren Kontext als Frontier-Modelle, und mehr Kontext kostet mehr Speicher."},
+  {front: "Quantisierungs-Tag (z. B. q4)", back: "Ein Label an einer Modellvariante, das ihren Kompromiss aus Präzision und Größe angibt – weniger Bit = kleiner und schneller, mehr Bit = näher an voller Qualität."},
+]} />
+
+## LM Studio: eine GUI-Alternative
+
+Wenn die Kommandozeile nichts für dich ist: **[LM Studio](https://lmstudio.ai/)** ist eine Desktop-App (macOS, Windows, Linux), die dieselbe Aufgabe über eine grafische Oberfläche erledigt: offene Modelle durchsuchen und herunterladen, in einer integrierten Oberfläche mit ihnen chatten und – wie Ollama – einen **lokalen OpenAI-kompatiblen Server** starten, mit dem dein Code sprechen kann. Es ist der leichtere Einstieg für Nicht-Entwickler oder alle, die Point-and-Click dem Terminal vorziehen; Ollama gewinnt tendenziell, wenn du eine skriptbare CLI und einen schlanken Hintergrunddienst willst. Beide führen dieselben Arten von Open-Weight-Modellen aus, daher lassen sich die Konzepte dieser Seite direkt übertragen.
+
+<Quiz title="Teste dich selbst" questions={[
+  {q: "Was ist der größte ehrliche Kompromiss beim lokalen Ausführen eines Modells gegenüber einem Cloud-Frontier-Modell?", options: ["Lokale Modelle lassen sich nicht aus dem Code aufrufen", "Ein laptopgroßes lokales Modell ist bei schwierigen Aufgaben weniger leistungsfähig", "Lokale Modelle kosten pro Token mehr"], answer: 1, explain: "Die Fähigkeitslücke ist der eigentliche Kompromiss: Modelle, die klein genug für den lokalen Betrieb sind, liegen bei den schwierigsten Schlussfolgerungs-/Agenten-Aufgaben hinter Cloud-Frontier-Modellen. Zugriff aus dem Code und Kosten pro Token sind tatsächlich Vorteile des lokalen Betriebs."},
+  {q: "Welcher Befehl lädt ein Modell herunter (falls nötig) UND beginnt, mit ihm zu chatten?", options: ["ollama pull gemma4:e2b", "ollama serve gemma4:e2b", "ollama run gemma4:e2b"], answer: 2, explain: "ollama run lädt bei der ersten Nutzung herunter und öffnet dann eine interaktive Sitzung. ollama pull lädt nur herunter; ollama serve startet den Hintergrunddienst."},
+  {q: "Was stellst du ein, um dein lokales Modell aus OpenAI-SDK-Code aufzurufen?", options: ["Einen echten, kostenpflichtigen OpenAI-API-Schlüssel", "base_url auf http://localhost:11434/v1 und einen beliebigen nicht leeren api_key", "Nichts – es funktioniert automatisch gegen api.openai.com"], answer: 1, explain: "Richte base_url auf Ollamas lokalen /v1-Endpunkt und übergib einen beliebigen nicht leeren api_key (Ollama verlangt das Feld, ignoriert aber seinen Wert)."},
+  {q: "Warum kann ein Modell mit Milliarden Parametern in nur wenige GB RAM passen?", options: ["Die Parameter werden aus der Cloud gestreamt", "Quantisierung komprimiert die Gewichte auf geringere Präzision", "Ollama lädt nur einen Teil des Modells"], answer: 1, explain: "Quantisierung speichert die Gewichte mit geringerer Präzision (z. B. 4 Bit statt 16 Bit) und verkleinert so den Speicherbedarf bei kleinem Qualitätsverlust."},
+]} />
+
+<Callout type="takeaways" items={[
+  "Lokal = Datenschutz + offline + keine Kosten pro Token + Kontrolle; der Preis dafür sind eine echte Fähigkeitslücke und Hardware-Grenzen.",
+  "Zwei Befehle genügen: Ollama installieren, dann ollama run gemma4:e2b.",
+  "Zentrale CLI: pull (herunterladen), run (chatten), list, ps, stop, rm – das ist das meiste.",
+  "Aus dem Code über den OpenAI-kompatiblen Endpunkt aufrufen: base_url http://localhost:11434/v1, beliebiger nicht leerer api_key.",
+  "Parameterzahl + Quantisierung entscheiden, ob deine Maschine ein Modell ausführen kann – klein anfangen, dann auf das hochgehen, was flüssig läuft.",
+  "Lieber eine GUI? LM Studio erledigt dieselbe Aufgabe per Point-and-Click und stellt ebenfalls einen lokalen OpenAI-kompatiblen Server bereit.",
+]} />
+
+## Quellen & weiterführende Literatur
+
+- [Ollama](https://ollama.com/) — offizielle Website und Downloads.
+- [Ollama-Modellbibliothek](https://ollama.com/library) — aktuelle Modelle und ihre genauen Pull-Namen/Größen.
+- [Ollama-CLI-Referenz](https://docs.ollama.com/cli) · [Ollama-API-Dokumentation](https://docs.ollama.com/api) — maßgebliche Referenz für Befehle und Endpunkte.
+- [Ollama-Blogbeitrag zur OpenAI-Kompatibilität](https://ollama.com/blog/openai-compatibility) — der `/v1`-Endpunkt und die SDK-Nutzung.
+- [Ollama auf GitHub](https://github.com/ollama/ollama) — Quellcode, Issues und ausführliche Dokumentation.
+- [LM Studio](https://lmstudio.ai/) — GUI-Alternative zum Ausführen lokaler Modelle.
+
+## Weiter
+
+- Bevor du einem heruntergeladenen Modell Tool-Zugriff gibst → [Backdoored Open Weights: Die Lieferkette abliterierter Modelle](/docs/security/backdoored-open-weights) — das GGUF, das du lädst, ist meist Glied 3 einer dreiseitigen Vertrauenskette
+- Einen großen Claude-System-Prompt auf ein lokales Modell verlagern? → [Warum ein 35-KB-System-Prompt bei einem lokalen Modell zerbricht](/docs/models/large-system-prompts-on-local-models)
+- Wie weit unter 4 Bit kann Quantisierung gehen? → [Ternäre Quantisierung in der Praxis: Bonsai 2 27B in 5,95 GB](/docs/models/ternary-quantization-bonsai-2-27b) — 1,75 Bit pro Gewicht, und warum Ollama es nicht laden kann
+- Lokal oder Cloud für eine Aufgabe entscheiden → [Ein Modell auswählen](/docs/models/choosing-a-model)
+- Tools auch lokal zum Laufen bringen → [Tool Use](/docs/api/tool-use)
+- Beobachten, was der Betrieb von Modellen tatsächlich kostet → [Token-Ökonomie](/docs/power-user/token-economy)

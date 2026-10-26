@@ -1,0 +1,67 @@
+# Estruturando Prompts com Tags XML
+
+> Source: https://derob98.github.io/ailmanac/pt-BR/docs/prompting/xml-tags · AILmanac (CC BY 4.0)
+
+A convenção preferida do Claude para delimitar entradas, instruções e exemplos.
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Por que as tags no estilo XML dão ao Claude limites nítidos entre as partes do prompt", "Como envolver instruções, documentos, exemplos e regras de formato em tags nomeadas", "Como pedir ao Claude uma saída com tags que você possa analisar de forma confiável", "Quando usar tags — e quando não exagerar nas tags"]} />
+
+Quando um prompt mistura instruções, um documento, exemplos e uma pergunta, o modelo pode confundir tudo. **Tags no estilo XML** são uma forma limpa de rotular cada parte — e o Claude responde especialmente bem a elas.
+
+## A ideia
+
+Envolva cada seção em uma tag nomeada para que fique inequívoco o que é o quê:
+
+<PromptCard title="Estrutura de prompt com tags">{`<instructions>
+Summarize the document for a busy executive. Use only the document; if a fact
+isn't there, say so.
+</instructions>
+
+<document>
+{paste the long document here}
+</document>
+
+<format>
+3 bullet points, then a one-line "decision needed".
+</format>`}</PromptCard>
+
+As tags são apenas texto que você inventa — `<document>`, `<example>`, `<context>`, `<rules>` — mas elas dão ao modelo limites bem definidos.
+
+## Por que ajuda
+
+<Callout type="tip" items={["Separa dados de instruções — o modelo tem menos chance de obedecer a texto perdido dentro de um documento colado (uma defesa modesta contra injeção de prompt — veja /docs/security/prompt-injection).", "Reduz o \"ele ignorou parte do meu prompt\". Cada parte fica claramente delimitada.", "Facilita a análise dos resultados — você pode pedir ao Claude para colocar a resposta dele em tags <answer> e extraí-la de forma confiável.", "Combina com few-shot (/docs/prompting/few-shot) — envolva cada exemplo em <example>."]} />
+
+Os quatro benefícios em detalhe:
+
+- **Separa dados de instruções** — o modelo tem menos chance de obedecer a texto perdido dentro de um documento colado (uma defesa modesta contra [injeção de prompt](/docs/security/prompt-injection)).
+- **Reduz o "ele ignorou parte do meu prompt".** Cada parte fica claramente delimitada.
+- **Facilita a análise dos resultados** — você pode pedir ao Claude para colocar a resposta dele em tags `<answer>` e extraí-la de forma confiável.
+- **Combina com [few-shot](/docs/prompting/few-shot)** — envolva cada exemplo em `<example>`.
+
+## Pedindo saída com tags
+
+<Steps items={[{title: "Peça ao Claude para envolver a saída dele em tags", body: "Diga ao modelo exatamente quais tags usar para o raciocínio e para a resposta final."}, {title: "Extraia apenas a parte de que você precisa", body: "Seu código pode pegar só o conteúdo de <answer>, ignorando o raciocínio."}, {title: "Combine com saída estruturada", body: "Funciona bem com saída estruturada (/docs/api/structured-output) quando você precisa de resultados legíveis por máquina."}]} />
+
+<PromptCard title="Solicitar saída com tags">{`Put your reasoning in <thinking> tags and your final answer in <answer> tags.`}</PromptCard>
+
+Aí seu código pode pegar só o conteúdo de `<answer>`. Combina bem com [saída estruturada](/docs/api/structured-output) quando você precisa de resultados legíveis por máquina.
+
+## Dicas
+
+<Callout type="takeaways" items={["Seja consistente — abra e feche todas as tags; reutilize os mesmos nomes.", "Nomeie as tags de forma significativa (<contract>, não <x>).", "Não use tags demais em prompts triviais — use isto quando houver genuinamente várias partes distintas."]} />
+
+- **Seja consistente** — abra e feche todas as tags; reutilize os mesmos nomes.
+- **Nomeie as tags de forma significativa** (`<contract>`, não `<x>`).
+- **Não use tags demais** em prompts triviais — use isto quando houver genuinamente várias partes distintas.
+
+## Teste seu conhecimento
+
+<Quiz title="Teste seu conhecimento" questions={[{q: "Qual é a principal razão pela qual as tags no estilo XML ajudam quando um prompt mistura instruções, um documento e uma pergunta?", options: ["Elas comprimem o prompt para economizar tokens", "Elas dão ao modelo limites nítidos e inequívocos entre as partes", "São uma sintaxe obrigatória sem a qual o Claude não funciona", "Elas traduzem o prompt em uma chamada de API estruturada"], answer: 1, explain: "As tags são apenas texto que você inventa, mas rotulam cada seção para que fique inequívoco o que é o quê — dando ao modelo limites nítidos."}, {q: "Por que as tags funcionam como uma defesa modesta contra injeção de prompt?", options: ["Elas criptografam o documento colado", "O modelo tem menos chance de obedecer a texto perdido dentro de um documento claramente delimitado", "Elas removem instruções maliciosas automaticamente", "Elas enviam o documento para um modelo separado"], answer: 1, explain: "Ao separar dados de instruções, o modelo tem menos chance de obedecer a texto perdido dentro de um documento colado."}, {q: "Como você pode extrair de forma confiável apenas a resposta final do Claude de uma resposta com tags?", options: ["Pedir o raciocínio em tags <thinking> e a resposta em tags <answer>, e então pegar o conteúdo de <answer>", "Pedir ao Claude para apagar o raciocínio dele", "Usar sempre uma única tag para tudo", "Analisar a resposta inteira sem tags"], answer: 0, explain: "Colocar o raciocínio em <thinking> e a resposta final em <answer> permite que seu código pegue só o conteúdo de <answer>."}, {q: "Qual é a melhor prática para nomear tags?", options: ["Usar nomes curtos e crípticos como <x> para economizar espaço", "Nomear as tags de forma significativa, por exemplo <contract> em vez de <x>", "Nunca fechar as tags para manter os prompts curtos", "Usar um nome diferente a cada vez para a mesma seção"], answer: 1, explain: "Nomeie as tags de forma significativa (<contract>, não <x>) e seja consistente — abra e feche todas as tags, reutilizando os mesmos nomes."}, {q: "Quando você NÃO deveria recorrer a tags XML?", options: ["Quando o prompt tem várias partes distintas", "Quando você precisa de uma saída legível por máquina", "Quando o prompt é trivial, sem partes genuinamente distintas", "Quando você está envolvendo exemplos few-shot"], answer: 2, explain: "Não use tags demais em prompts triviais — use tags apenas quando houver genuinamente várias partes distintas."}]} />
+
+## Próximos passos
+
+- [Prompting Específico para o Claude](/docs/prompting/prompting-claude)
+- [Exemplos Few-Shot Bem Feitos](/docs/prompting/few-shot)
+- [Saída Estruturada](/docs/api/structured-output)

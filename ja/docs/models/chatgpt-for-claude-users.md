@@ -1,0 +1,196 @@
+# Claude ユーザーのための ChatGPT
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/models/chatgpt-for-claude-users · AILmanac (CC BY 4.0) · last verified 2026-10-07
+
+Claude を使いこなしているけれど ChatGPT を使う必要がある人へ。重要な違い、そのまま通用するもの、そしてどちらをいつ選ぶか——Custom GPTs の廃止と、それを置き換える Plugins も含めて。
+
+<LevelBadge level="beginner" />
+
+あなたはすでに Claude の発想で考えています。そんなとき、同僚が Custom GPT を共有してきたり、クライアントが ChatGPT で仕事をしていたりして、**今日からそこで生産的に動く**必要が出てきます——AI アシスタントの使い方を一から学び直すことなく。朗報です。あなたが知っていることのほぼすべてはそのまま通用します。このページは、あなたの Claude のメンタルモデルを ChatGPT に対応づけ、本当に動きが異なるわずかな点を指摘し、それぞれがどんな場面で輝きやすいかを伝えます。
+
+<Callout type="objectives" items={[
+  "Claude の概念を ChatGPT の対応物に置き換える（Projects、Custom GPTs とそれを置き換える Plugins、カスタム指示／メモリ、canvas、モデルピッカー）",
+  "あなたの Claude のプロンプト習慣のうち、どれがそのまま通用するかを知る（ほとんどがそうです）",
+  "本当に調整しなければならない数少ない点を見極める",
+  "ChatGPT に手を伸ばすべきときと、Claude にとどまるべきときを知る",
+]} />
+
+<VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/docs/models">
+正確なモデル名、モデルピッカーのレイアウト、プラン階層、ファイル／アップロードの上限、価格、どの機能がどのモデルと組み合わさるか——これらは OpenAI 側で**絶えず変わります**。このページは長く通用するメンタルモデルと概念の対応づけを教えるものです。具体的な名前・上限・価格については、ここに書かれた数字を信じるのではなく、OpenAI 自身の最新ドキュメント（Sources にリンク）を確認してください。
+</VerifyNote>
+
+:::warning[Custom GPTs は廃止に向かっています——plugins が置き換えます]
+OpenAI は **custom GPTs を plugins へ移行させており**、custom GPTs は廃止時点で動かなくなります。同僚が今日あなたに Custom GPT を渡してきたとしても、それはまだ動きます。ただし新しいものを Custom GPT 上に作るのはやめてください——投資する前に、下記の **Projects 対 Custom GPTs** を読んでください。
+:::
+
+## 60 秒の概念マップ
+
+ひとつだけ読むならここを読んでください。Claude で知っていることが ChatGPT でどう対応するかを示します。
+
+| Claude での呼び方… | ChatGPT では… | 同じ考え方？ |
+| --- | --- | --- |
+| Claude Projects（ワークスペース＋ファイル＋プロジェクト指示） | **Projects** | はい——ほぼ同じ概念 |
+| Custom Style／再利用する保存済みシステムプロンプト | **Custom GPTs**——**Plugins**（skills ＋ apps）に置き換えられつつある | 近い、ただしひとひねりあり（下記参照） |
+| アカウントレベルの設定／「どう応答してほしいか」 | **Custom instructions** | はい |
+| 過去のチャットに関する Claude のメモリ | **Memory** | はい——同じ考え方、頻繁に進化する |
+| Artifacts（ドキュメント／コード用のサイドパネル） | **Canvas** | はい——同じ考え方 |
+| モデルセレクター（Opus／Sonnet／Haiku） | **モデルピッカー**（速度 対 推論の階層） | はい——同じ考え方、名前が違う |
+| ツール使用／関数呼び出し（API） | **Function calling** | はい——同じ形、JSON の細部が違う |
+
+要点：**新しく学ぶべき概念はほとんどありません**。すでに理解しているものを**名前を変えて置き場所を変えている**だけです。
+
+## Projects 対 Custom GPTs ——正しく押さえておく価値のある唯一の区別
+
+Claude ユーザーが最も混乱しがちな唯一のポイントがこれです。なぜなら ChatGPT には「カスタマイズした Claude」のように感じられるものが**2 つ**あり、それぞれ用途が異なるからです。
+
+- **Projects** は*組織化のため*のもの——ひとつの継続的な取り組みを中心に、多くのチャット、アップロードしたファイル、共有された指示をまとめるワークスペースです。複数の会話をまたぐ継続性が要点です。Claude Project を開くような場面——長い調査スレッド、進化していく文章、参照ドキュメントを伴うワークストリーム——では Project を使ってください。<VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/docs/projects">OpenAI 自身の表現：「関連するチャット、ファイル、指示、ソースをまとめておくために project を使う」（"Use a project to keep related chats, files, instructions, and sources together"）——「時間をかけて続いていく、複数の成果物を生む、あるいは同じファイルやソースに依存する」（"will continue over time, produce more than one output, or depend on the same files and sources"）仕事のために。無料・有料プランをまたいだ利用可否は時とともに変わるので、最新のページを確認してください。</VerifyNote>
+
+- **Custom GPTs** は*パッケージ化されたアシスタント*——保存された構成（システムプロンプト、任意のナレッジファイル、有効化したツール、ときには API アクション）で、固定されたペルソナを持つ新規チャットとして単体で呼び出します。再利用・共有を前提に作られているので、一人が専門知識を組み込み、多くの人がそれを実行します。**そしてこれは廃止されつつあります。**
+
+- **Plugins** が置き換えです。OpenAI の言葉では「skills、apps、あるいはその両方を含みうる、ワークフローのための再利用可能なパッケージ」（"a reusable package for a workflow that can include skills, apps, or both"）——*skills* が仕事のやり方の指示を担い、*apps* が ChatGPT を他のサービスにつなぎます。Custom GPT と同じ発想で、対象範囲がより広いものです。<VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/codex/migrate-custom-gpts">OpenAI：「私たちは custom GPTs を plugins へ移行させています。custom GPTs が廃止される前に、以下のマイルストーンを使って移行を計画してください」（"We're transitioning custom GPTs to plugins. Use the milestones below to plan your migration before custom GPTs are retired."）。公開されているマイルストーンは、管理者への通知 → 移行 → Custom GPT の廃止であり、廃止時点で「custom GPTs は動作を停止し、GPT ディレクトリから消えます」（"custom GPTs stop running and leave the GPT directory"）。元の GPT は「廃止までは使用可能なまま」（"remains usable until retirement"）で、廃止後でももう動かないとはいえ GPT の移行自体は可能です。具体的な日付はワークスペース単位で決まり（このガイドは ChatGPT Enterprise の管理者と GPT 作成者向けに書かれています）、変更される可能性があります——ここに書かれた日付を信じるのではなく、リンク先ページのマイルストーンを読んでください。</VerifyNote>
+
+メンタルショートカット：
+
+- **共有コンテキストを持つ多数のチャットをまたいだ継続性が必要？** → Project。
+- **毎回同じふるまいをする、再利用・共有可能な専門家が必要？** → Plugin（そしてすでに持っている Custom GPT は移行する）。
+
+Claude ユーザーが見落としがちな落とし穴が 2 つあります：
+
+- Custom GPT や Plugin のチャットは毎回、あらかじめ設定された指示とそのときの会話だけを持って**まっさらな状態で**始まる傾向があります——継続的な Project スレッドのように前回のセッションを覚えていると期待しないでください。
+- 移行はロスレス**ではありません**。カスタムアクションは別途作り直す必要があり——サポートされているコネクタか、あなた自身の MCP サーバーに対して——そのため、それらに依存する GPT はワンクリック変換ではなく本当の作業を要します。あなたが作り直す側なら、[Codex Agent Plugins](/docs/models/codex-agent-plugins-catalogs) がパッケージング層を解説しています。
+
+## Custom instructions とメモリ ——同じ考え方、層がわずかに違う
+
+Claude ではグローバル設定をして、文脈を覚えさせます。ChatGPT も同じことをしますが、指示を設定できる層がより明示的になっています。
+
+<Steps items={[
+  {title: "アカウントレベルのカスタム指示", body: "あなたの恒常的な好み——トーン、詳しさのレベル、何に注目すべきか。すべてのチャットに適用され、Claude のアカウント設定に相当します。"},
+  {title: "プロジェクト指示", body: "ひとつの Project の主題に限定された文脈——Claude のプロジェクト指示に相当します。"},
+  {title: "Plugin（または Custom GPT）の指示", body: "パッケージ化されたアシスタントに焼き込まれた「システムプロンプト」——Plugin の skill、あるいはまだ移行していない Custom GPT の指示フィールド。ビルダーがふるまいを完全に制御する場所です。"},
+  {title: "チャット内の一回限り", body: "一メッセージ分の調整が必要なときは、会話の中でそう言うだけ——Claude とまったく同じです。"},
+]} />
+
+**Memory** はそれ自体が進化し続けるシステムです。ChatGPT は別々のチャットをまたいで文脈を引き継げます。*何を*覚え、*どれだけ*覚え、*どこで利用できるか*（例：パッケージ化されたアシスタントの中かどうか）は**変わりやすい**ものとして扱ってください——頻繁に変わるので、前提を置かず現在のふるまいを確認しましょう。<VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/codex/personalize">OpenAI：「好みの応答スタイルなど、チャットをまたいで ChatGPT に従ってほしい好みには custom instructions を使ってください」（"Use custom instructions for preferences you want ChatGPT to follow across chats, such as your preferred response style."）。層構造は実在します——Codex では個人の層はグローバルな `AGENTS.md` にあり、「プロジェクトやリポジトリも独自の指示を提供できます」（"projects and repositories can also provide their own instructions"）。詳細と利用可否は変わるので、最新のページを確認してください。</VerifyNote>
+
+## Canvas は ChatGPT の Artifacts
+
+ドキュメントやコードブロックがライブで編集可能なオブジェクトになるサイドパネル——Claude Artifacts が好きなら、**canvas** でもくつろげるはずです。執筆とコーディングのための専用編集サーフェスが開き、メッセージ全体を再生成するのではなく、その場でモデルと一緒に修正できます。同じ発想、違う名前です。
+
+ひとつ注意点があります（具体的な仕様を決め打ちしない好例です）：**どの編集サーフェスが得られるかは、あなたがどこにいるかによって決まります**——求めたものだけでは決まりません。OpenAI の最新ドキュメントは、プレビューと編集のふるまいをサーフェスごとに異なるものとして説明しています——デスクトップアプリは生成されたドキュメントをチャットの横でプレビューし、CLI にはビジュアルプレビューがまったくなく、IDE 拡張はエディタ内でファイルをレビューします。選択中のモデルも影響し得ます。サイドパネルが出てこないなら、バグを疑う前に、あなたのサーフェスかモデルを疑いましょう。<VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/codex/artifacts-viewer">OpenAI のファイルプレビューのドキュメントは、利用可否をサーフェス単位で枠づけています：デスクトップアプリは「生成されたドキュメント、プレゼンテーション、スプレッドシート、PDF ファイルをチャットの横でプレビューする」（"previews generated documents, presentations, spreadsheets, and PDF files alongside the chat"）、CLI は「ビジュアルなファイルプレビューを含まない」（"doesn't include a visual file preview"）、そして IDE 拡張はエディタ内でテキストとコードのファイルをレビューします。このページはモデルによるゲーティングを主張していないので、モデルに関する注意書きは文書化された規則ではなく予防線として扱ってください。canvas 自体は OpenAI のヘルプセンターで別途ドキュメント化されています（Sources にリンク）。</VerifyNote>
+
+## モデルピッカー ——名前ではなく仕事で選ぶ
+
+Opus 対 Sonnet 対 Haiku を選ぶのと同じように、ChatGPT もモデルを選ばせます——おおむね**速度 ↔ 推論**のスペクトルに沿って（手早いやり取り向けの高速／即時オプション、難問向けの高推論オプション、最上位の階層は有料プランに限定）。*名前や階層の数は頻繁に動きます*が、長く通用するスキルは、あなたがすでに Claude で使っているものと同じです：**タスクの難易度と、あなたのレイテンシ／コスト許容度にモデルを合わせる**こと。
+
+これはまさに [モデルの選び方](/docs/models/choosing-a-model) と [どの Claude を使うべきか？](/docs/start-here/which-claude) のフレームワークです——プロバイダーに依存しません。モデル名を暗記するのではなく、「速い 対 深い」を読み取って選べるようになりましょう。
+
+暗記するためではなく話を具体的にするために書くと、**2026 年 10 月 7 日**時点でピッカーに並んでいるのは **Astra**（最も高性能）、**GPT-6.1 Sol**（「Astra に近い性能を、Astra より低いコストで複雑な仕事に」——Plus、Pro、Business、Enterprise、Edu へ順次展開中）、そして **GPT-6 Luna**（焦点を絞った大量処理向けの効率的なモデル）です——一方で **GPT-5.5 は 2026 年 10 月 14 日に ChatGPT、ChatGPT Work、Codex から廃止され**、API では引き続き利用できます。この日付よりだいぶ後に読んでいるなら、この段落のすべての名前はおそらくもう動いています。それこそが要点です。<VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/docs/models">モデルのラインアップ、プランでの利用可否、GPT-5.5 の廃止日は、OpenAI の最新のモデルページから読み取ったものです。そこに記載されている過去の廃止：GPT-5.3-Codex-Spark は 2026 年 9 月 14 日、GPT-5.4 と GPT-5.4-mini は 2026 年 8 月 31 日。このリストは設計上すぐ古くなります——ここに書かれた内容を信じるのではなく、出典を読み直してください。</VerifyNote>
+
+<Callout type="tip" items={[
+  "定型的な下書き、整形、手早い Q&A には高速／即時の階層に手を伸ばす。",
+  "多段階の論理、込み入ったコード、慎重な分析には高推論の階層に手を伸ばす。",
+  "canvas やツールのような機能が見当たらないときは、バグを疑う前に、自分のサーフェス（デスクトップ 対 Web 対 CLI 対 IDE）か選択中のモデルを疑う。",
+]} />
+
+## Function calling ——同じ形、違う JSON の細部
+
+Claude で [ツール使用](/docs/api/tool-use) をやったことがあるなら、OpenAI の **function calling** はすぐに馴染むはずです。なぜなら*ループが同じ*だからです：
+
+<Steps items={[
+  {title: "ツールを宣言する", body: "各ツールを、名前・説明・パラメータの JSON スキーマ（どれが必須か、その型）で記述します。Claude のツール定義と同じ考え方です。"},
+  {title: "モデルが呼び出しを要求する", body: "プロンプトと利用可能なツールが与えられると、モデルはテキストの代わりに（またはテキストと並んで）構造化されたツール呼び出し——ツール名と引数——を返します。"},
+  {title: "あなたが実行する", body: "あなたのアプリケーションが、それらの引数で実際の関数を実行します。モデル自身は何も実行しません。"},
+  {title: "結果を返す", body: "ツールの出力をモデルに戻します。"},
+  {title: "モデルが答える", body: "その結果を使って最終的な応答を生成します——終える前にさらに呼び出しを要求することもあります。"},
+]} />
+
+同一なもの：記述 → モデルが要求 → あなたが実行 → 結果を返す → 答える、というループ、複数／並列の呼び出し、そして*モデルが提案し、あなたのコードが決定する*という原則。<VerifyNote lastVerified="2026-10-07" source="https://developers.openai.com/api/docs/guides/function-calling">OpenAI のガイドと逐語で照合済みです。そこでは「関数」（"a function"）を「JSON スキーマで定義される特定の種類のツール」（"a specific kind of tool, defined by a JSON schema"）と定義し、`type`、`name`、`description`、`parameters`、`strict` を挙げ、同じ 5 ステップを列挙しています：呼び出し得るツールを添えてモデルにリクエストする → ツール呼び出しを受け取る → アプリケーション側でコードを実行する → ツールの出力を添えて 2 回目のリクエストを行う → 最終的な応答（またはさらなるツール呼び出し）を受け取る。正確なフィールド名やオプションは変わるので、最新の API ガイドを確認してください。</VerifyNote>
+
+**異なる**もので、コピー＆ペーストするとつまずくもの：正確な JSON フィールド名、ツール呼び出しと結果がメッセージリスト内でどう表現されるか、「strict」／構造化出力のオプション、そして具体的な API エンドポイントの形。プロバイダーをまたいだ経験則として、**プロンプトとアーキテクチャは移行できるが、ワイヤーフォーマットの細部は移行できない**——必ずプロバイダーごとのスキーマを再確認してください。
+
+## そのまま通用するもの（ネタバレ：ほぼ全部）
+
+苦労して身につけた Claude の習慣は無駄になりません。これらは本質的にそのまま引き継がれます：
+
+- **プロンプトの構造** ——明確な役割、明示的なタスク、例、要求する出力フォーマット → [プロンプトの基礎](/docs/prompting/basics)
+- **文脈を意図的に与える** ——適切な材料を貼り、範囲を絞り、すべてを投げ込まない
+- **特定の出力フォーマットを要求する** ——表、JSON、ステップ。同じように機能する
+- **その場で反復する** ——フォローアップで磨く（そして今は canvas でも）
+- **ツール使用のループ** ——ツールを記述し、モデルに呼ばせ、結果を返す → [ツール使用](/docs/api/tool-use)
+- **タスクの難易度でモデルを選ぶ** ——速い 対 深い、同じ判断
+
+<PromptCard title="プロバイダー中立のシステムプロンプト —— Custom GPT や Project の指示に貼り付ける">{`You are a {role}.
+Goal: {one clear sentence}.
+Rules:
+- Use ONLY the context I provide; if the answer isn't there, say "I don't know".
+- Be concise. No preamble.
+- Output format: {exact format — e.g. a markdown table with columns X, Y, Z}.
+When you need information you don't have, ask one focused question instead of guessing.`}</PromptCard>
+
+## 本当に調整すべきもの
+
+実際に異なる点の、短く正直なリスト：
+
+- **「カスタマイズ」オブジェクトが 1 つではなく 2 つ。** 最初に決めましょう：継続的なワークスペース（Project）か、再利用可能なパッケージ化されたアシスタント（Plugin——あるいはそれになりつつある Custom GPT）か。間違ったほうを選ぶのが最もよくある初期のミスです。
+- **Custom GPTs は移行の対象であって、落ち着き先ではありません。** OpenAI はそれらを Plugins へ移し、廃止しようとしています。引き継いだものは移行を計画し、新しく始めるのはやめましょう。
+- **機能 ↔ サーフェスの組み合わせ。** ChatGPT では、プレビュー／編集パネル（や特定のツール）が使えるかどうかが、どこで動かしているか——そしてときには選択中のモデル——に依存することがあります。何かが見当たらないときは、他の何よりも先にそれらを確認しましょう。
+- **ツールのワイヤーフォーマット。** function calling の*概念*は同一ですが、JSON の細部は違います——Claude の正確なツール JSON をそのまま再利用しないでください。
+- **変わりやすい具体仕様。** モデル名、階層、上限、価格は速く動きます。Claude でもそうすべきように、出典で確認する習慣をつけましょう。
+
+## それぞれが輝きやすい場面
+
+どちらも優れた汎用アシスタントで、任意のタスクでの差はしばしば小さく、移ろいやすいものです——だからこれは*法則*ではなく*傾向*として扱い、最終的には[あなた自身のデータでの評価](/docs/models/choosing-a-model)に判断させてください：
+
+- **ChatGPT に手を伸ばすのは**、その特有のエコシステムが必要なとき——チームがすでに保守している Custom GPT、共同作業者が設定した Project、あるいはそこで頼りにしている組み込みツール／連携。クライアントや同僚が ChatGPT で生活しているなら、彼らに合わせるほうが摩擦より勝ります。
+- **Claude に手を伸ばすのは**、このサイトが中心に据えている Claude ワークフロー——Projects、Artifacts、そして AILmanac 全体で文書化されているプロンプト／エージェントのパターン——にすでにいて、それを深掘りしたいとき。
+
+たいていの場合の正直な答え：**あなた（またはあなたのチーム）がすでにセットアップしているほう**。スキルは持ち運べます。本当の乗り換えコストはセットアップのコストです。
+
+<Flashcards title="ChatGPT から Claude への語彙対応" cards={[
+  {front: "ChatGPT Projects", back: "ひとつの継続的な取り組みを中心に、多くのチャット・ファイル・共有指示をまとめる組織化ワークスペース。≈ Claude Projects。"},
+  {front: "Custom GPT", back: "パッケージ化され、再利用・共有可能なアシスタント——システムプロンプト＋任意のナレッジ＋ツール——を、固定ペルソナの新規チャットとして呼び出す。廃止されつつある：OpenAI は custom GPTs を Plugins へ移行させている。"},
+  {front: "Plugin", back: "Custom GPTs の置き換え。OpenAI の言葉では「skills、apps、あるいはその両方を含みうる、ワークフローのための再利用可能なパッケージ」——skills が仕事のやり方を伝え、apps が ChatGPT を他のサービスにつなぐ。カスタムアクションは変換されず、作り直す必要がある。"},
+  {front: "Custom instructions", back: "ChatGPT がどう応答するかについてのあなたの恒常的な好みで、チャットをまたいで適用される。プロジェクトやリポジトリのレベルで層を重ねることもできる。≈ Claude のアカウント設定。"},
+  {front: "Canvas", back: "その場で修正できる、執筆・コーディング用のサイドパネル編集サーフェス。≈ Claude Artifacts。"},
+  {front: "Function calling", back: "OpenAI のツール使用：JSON スキーマでツールを記述し、モデルが呼び出しを要求し、あなたが実行して結果を返す。Claude のツール使用と同じループ、違う JSON の細部。"},
+  {front: "持ち運べるスキル", back: "プロンプトの構造、文脈の規律、出力フォーマットの要求、ツールのループ、タスク別のモデル選択——どちらでも通用する。"},
+]} />
+
+<Quiz title="理解度チェック" questions={[
+  {q: "継続的な調査の取り組みのために、関連する多数のチャット、参照ファイル、共有指示をまとめておくワークスペースが欲しい。ChatGPT では何を使う？", options: ["Custom GPT", "Project", "Custom instructions"], answer: 1, explain: "Projects は多数のチャットをまたいだ継続性のための組織化ワークスペースで、Claude Project に最も近い対応物です。Custom GPT は単体のパッケージ化されたアシスタントであって、複数チャットのワークスペースではありません。"},
+  {q: "Claude のツール使用を経験済み。OpenAI の function calling について正しいのは？", options: ["まったく異なる概念で、学び直す必要がある", "同じ 記述→呼び出し→実行→返す ループだが、正確な JSON フィールド名が異なる", "JSON まで同一なので、Claude のツール定義をそのまま貼り付けられる"], answer: 1, explain: "ループとアーキテクチャは直接移行できます。異なるのはワイヤーフォーマットの細部（フィールド名、メッセージの形）だけなので、生の JSON をプロバイダー間でコピーしないこと。"},
+  {q: "期待した場面でサイドパネルのプレビューが出てこない。まず確認すべき最も可能性が高いものは？", options: ["インターネット接続", "自分がどのサーフェスにいるか——OpenAI はプレビューのふるまいが、デスクトップアプリ・Web・CLI・IDE 拡張の間で異なるとドキュメント化している", "メモリを使い切っていないか"], answer: 1, explain: "OpenAI の最新ドキュメントは、プレビューと編集の利用可否をサーフェス単位で枠づけています：デスクトップアプリは生成されたファイルをチャットの横でプレビューし、CLI にはビジュアルプレビューがまったくなく、IDE 拡張はエディタ内でファイルをレビューします。選択中のモデルも影響し得ますが——ドキュメント化された違いはサーフェスです。"},
+  {q: "同僚が、チームが頼りにしている Custom GPT をあなたに渡してきた。正しい動きは？", options: ["それを土台に作り続ける——Claude Project の ChatGPT 版だから", "Plugin への移行を計画し、カスタムアクションのために余分な時間を見込む", "無視する。Custom GPTs はまともに動いたことがない"], answer: 1, explain: "OpenAI は custom GPTs を Plugins へ移行させており、廃止時点で custom GPTs は動作を停止して GPT ディレクトリから消えます。元のものはそれまで使用可能なままなので時間はあります——ただしカスタムアクションは自動では変換されず、サポートされているコネクタかあなた自身の MCP サーバーに対して作り直す必要があります。"},
+]} />
+
+<Callout type="takeaways" items={[
+  "新しい概念はほとんどない——Projects ≈ Claude Projects、Plugin ≈ パッケージ化された再利用可能なアシスタント、canvas ≈ Artifacts、function calling ≈ ツール使用。",
+  "唯一の区別を正しく押さえる：Projects = 多数のチャットを組織化／Plugin = 再利用・共有可能な専門家。",
+  "Custom GPTs は Plugins へ移行されつつあり、やがて廃止される——引き継いだものは移行し、新しく始めず、カスタムアクションには本当の時間を見込む。",
+  "プロンプト、文脈、出力フォーマット、ツールループの習慣はそのまま移行できる——Opus／Sonnet／Haiku と同じく、タスクの難易度でモデルを選ぶ。",
+  "調整するのはわずか：2 つのカスタマイズオブジェクト、機能↔サーフェスの組み合わせ、ツール呼び出しの JSON の細部。",
+  "名前・階層・上限・価格はすぐ古くなる——Claude でもそうすべきように、具体仕様は OpenAI のドキュメントで確認する。",
+]} />
+
+## 出典とさらに読む
+
+- [Models — learn.chatgpt.com](https://learn.chatgpt.com/docs/models) ——現在のモデルピッカー、各モデルがどのプランにあるか、廃止の告知。どのモデル名を信じる前にも確認すべき場所。
+- [Projects — learn.chatgpt.com](https://learn.chatgpt.com/docs/projects) ——Projects とは何か、どう機能するか。
+- [custom GPT のワークフローを plugins へ移す — learn.chatgpt.com](https://learn.chatgpt.com/codex/migrate-custom-gpts) ——移行のマイルストーン、何が変換され、何を作り直さなければならないか。
+- [ChatGPT をパーソナライズする — learn.chatgpt.com](https://learn.chatgpt.com/codex/personalize) ——カスタム指示と、指示の層がどう積み重なるか。
+- [ファイルを扱う — learn.chatgpt.com](https://learn.chatgpt.com/codex/artifacts-viewer) ——プレビューと編集のふるまい、そしてそれがサーフェスごとにどう異なるか。
+- [ChatGPT & Codex changelog — learn.chatgpt.com](https://learn.chatgpt.com/docs/changelog) ——変わりやすい機能／モデルの変更を追う正典の場所。
+- [What is the canvas feature in ChatGPT — OpenAI Help Center](https://help.openai.com/en/articles/9930697-what-is-the-canvas-feature-in-chatgpt-and-how-do-i-use-it) ——canvas 編集サーフェス。
+- [Plugins in ChatGPT and Codex — OpenAI Help Center](https://help.openai.com/en/articles/20001256-plugins-in-chatgpt-and-codex) ——OpenAI 自身の移行ガイドからリンクされている、plugin の概念。
+- [Function calling — OpenAI API docs](https://developers.openai.com/api/docs/guides/function-calling) ——ツール呼び出しの形と要求／応答のループ。
+
+## 次へ
+
+- **現在のフラッグシップ** → [Claude ユーザーのための GPT-6 Astra](/docs/models/openai-astra-preview) ——OpenAI の最上位モデルと、Opus と並べて読んだときの姿
+- **DevDay 2026 のリリース** → [Claude ユーザーのための GPT-6.1 Sol](/docs/models/gpt-6-1-sol-devday-2026) ——Sonnet 5.5 と同じ料金表、272K のコストの崖、そして Sonnet がいまだに勝つベンチマークの行
+- **Custom GPT を置き換える** → [Codex Agent Plugins とカタログのフェデレーション](/docs/models/codex-agent-plugins-catalogs) ——移行したワークフローが着地するパッケージング層
+- **アイデンティティ層** → [Sign in with ChatGPT](/docs/models/sign-in-with-chatgpt) ——OAuth／OIDC プロバイダー、何を共有するか、そして自分のアプリでどう受け入れるか
+- プロバイダー中立な選び方 → [モデルの選び方](/docs/models/choosing-a-model)
+- 他の大手アシスタントからも来ている？ → [Claude ユーザーのための Gemini](/docs/models/gemini-for-claude-users) · [Claude ユーザーのための Grok](/docs/models/grok-for-claude-users)
+- どこでも通用する習慣 → [プロンプトの基礎](/docs/prompting/basics) · [ツール使用](/docs/api/tool-use)
+- 中核を深掘り → [どの Claude を使うべきか？](/docs/start-here/which-claude)

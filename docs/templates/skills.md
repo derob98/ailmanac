@@ -1,0 +1,103 @@
+# Skill Packs & SKILL.md Templates
+
+> Source: https://derob98.github.io/ailmanac/docs/templates/skills · AILmanac (CC BY 4.0) · last verified 2026-07-20
+
+Ready-to-use Agent Skills by user type, plus how to write your own.
+
+<LevelBadge level="all" />
+
+<VerifyNote lastVerified="2026-07-20" source="https://code.claude.com/docs/en/skills">
+Skill file layout and where skills can be used (Claude Code, Claude.ai, Cowork, cloud sessions) evolve — confirm specifics in the official Skills docs. Custom commands are now merged into skills: files under `.claude/commands/` still work but skills are the recommended form.
+</VerifyNote>
+
+A **Skill** gives Claude focused expertise it loads *on demand* when your request
+matches — so you don't re-explain your needs every time. AILmanac ships a set of
+**ready-to-use skill packs**, one per kind of user. Learn the concept in depth on
+the [Skills](/docs/claude-code/skills) page.
+
+## Ready-made packs
+
+They live in the repo's
+[`plugins/ailmanac/skills`](https://github.com/derob98/ailmanac/tree/main/plugins/ailmanac/skills) folder:
+
+| Pack | For | What it does |
+|---|---|---|
+| `ailmanac` | Anyone asking about Claude or other AI tools | Looks the answer up in this guide and cites the page with its verified date |
+| `claude-md-check` | Claude Code users | Checks your `CLAUDE.md` against your repo and against how memory files load |
+| `writing-content-pro` | Writers, marketers, creators | Brief → draft in passes → match your voice → repurpose |
+| `developer-workflow` | Developers | Context-first coding, reviews, tests, clear commits |
+| `research-analyst` | Researchers, analysts | Source-grounded synthesis with citation discipline |
+| `data-analyst` | Data & spreadsheet users | SQL/formulas + plain-language reads + stat sanity checks |
+| `business-marketing` | Founders, SMB owners | Positioning, copy, customer comms, light planning |
+| `student-learning` | Students & learners | Socratic tutoring + teach-back (learn, don't just copy) |
+| `everyday-productivity` | Everyone | Email, summaries, planning, decisions |
+
+Each bakes in the house rules: **give context, iterate, and verify what matters.**
+
+## Install them (Claude Code)
+
+All of them at once, as a plugin:
+
+```bash
+claude plugin marketplace add derob98/ailmanac --sparse .claude-plugin plugins
+claude plugin install ailmanac@ailmanac
+```
+
+Or copy a single pack from a clone of the repo:
+
+```bash
+# personal — available in all your projects
+mkdir -p ~/.claude/skills && cp -r plugins/ailmanac/skills/writing-content-pro ~/.claude/skills/
+
+# or per-project — shareable with your team via the repo
+mkdir -p .claude/skills && cp -r plugins/ailmanac/skills/writing-content-pro .claude/skills/
+```
+
+Claude activates the skill automatically when your request matches its
+`description`. On Claude.ai / Cowork, create a skill and paste the pack's
+`SKILL.md` (availability varies by plan).
+
+## Write your own — the minimal template
+
+A skill is a folder with a `SKILL.md`: YAML frontmatter + instructions. The
+`description` is the **trigger** — write it as "Use when…". Only `description`
+is required; the command name comes from the folder name.
+
+```markdown
+---
+description: Use when the user is doing X — be specific about the trigger so Claude knows when to load this and when not to.
+---
+
+# My Skill
+
+Short statement of the role/goal.
+
+## Workflow
+1. Step one…
+2. Step two…
+
+## Rules
+- The non-negotiables (accuracy, privacy, output format).
+
+## Default output
+What a good response looks like.
+```
+
+### Validity checklist
+
+- [ ] Folder is kebab-case — it becomes the `/command-name`.
+- [ ] `description` says **when to use it** (the trigger), not just what it is. Put the key use case first (the combined `description` + `when_to_use` is truncated at 1,536 characters in the skill listing).
+- [ ] Instructions are specific and bounded — one clear job.
+- [ ] No secrets, credentials, or personal/client data.
+- [ ] States how to handle uncertainty (don't fabricate; verify).
+
+## Related
+
+- [Skills: On-Demand Expertise](/docs/claude-code/skills) — the full concept
+- [Custom Slash Commands](/docs/claude-code/slash-commands) — you trigger these on demand
+- [Subagents](/docs/claude-code/subagents) — delegate whole chunks of work
+
+
+## Next
+
+- [MCP Config & Server Scaffolds](/docs/templates/mcp-config)

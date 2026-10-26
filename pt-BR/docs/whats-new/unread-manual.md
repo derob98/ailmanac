@@ -1,0 +1,92 @@
+# O Claude nunca viu 68% da documentação do Claude Code
+
+> Source: https://derob98.github.io/ailmanac/pt-BR/docs/whats-new/unread-manual · AILmanac (CC BY 4.0) · last verified 2026-10-15
+
+Reproduzimos 15 meses da documentação oficial do Claude Code, uma semana de cada vez. 68% do que ela diz hoje foi escrito depois de junho de 2026, o corte de treinamento de todos os modelos Claude atuais. Veja o que cada modelo perdeu e um plugin que avisa a ele.
+
+import {UnreadHeadline, ModelBars, LearnedSlider, CohortChart, SurvivalChart, NewIdentifiers} from '@site/src/components/DocsDecay';
+
+<VerifyNote lastVerified="2026-10-15" source="https://platform.claude.com/docs/en/about-claude/models/overview">
+Os cortes de treinamento vêm da página de cada modelo na documentação do Claude Platform. O histórico da documentação do Claude Code vem de um espelho da comunidade que copia as páginas oficiais várias vezes por dia. Os números são um retrato de 15 de outubro de 2026; o script que os produz está linkado abaixo, então qualquer pessoa pode rodá-lo de novo.
+</VerifyNote>
+
+Cada modelo Claude aprendeu o Claude Code a partir da documentação como ela estava no corte do seu treinamento. Depois a documentação continuou mudando. Reproduzimos seu histórico, uma semana de cada vez, para medir o quanto as duas coisas se afastaram.
+
+<UnreadHeadline />
+
+Os modelos mais novos, Fable 5.1, Opus 5.5, Sonnet 5.5 e Haiku 5.5, têm um corte de conhecimento confiável em junho de 2026. Entre o fim de junho e 15 de outubro, a documentação passou de 107 para 164 páginas, e a maior parte do que ela diz hoje foi escrita nesses três meses e meio. Contando de forma mais estrita, pelas palavras exatas em vez dos fatos, a fatia sobe para 72%. Sem os exemplos de código, são 70%. Como quer que se conte, o Claude nunca viu a maior parte do próprio manual.
+
+## O que cada modelo nunca viu
+
+Quanto mais antigo o corte, menos da documentação de hoje um modelo poderia ter lido. Todos esses modelos continuam disponíveis pela Claude API.
+
+<ModelBars />
+
+O Claude Haiku 4.5, com corte em fevereiro de 2025, é anterior a quase tudo: o Claude Code foi lançado como prévia de pesquisa naquele mês, e quase toda a documentação atual veio depois.
+
+## Escolha a semana em que você aprendeu o Claude Code
+
+A mesma aritmética vale para as pessoas. Mova o controle deslizante até a semana em que você leu a documentação, ou até a data do tutorial que está seguindo.
+
+<LearnedSlider />
+
+## A documentação é reconstruída, não só ampliada
+
+O crescimento explica a maior parte da diferença, mas não toda. As páginas também são reescritas. Cada faixa abaixo é o texto escrito em um trimestre; a faixa afina conforme suas frases são apagadas ou alteradas.
+
+<CohortChart />
+
+Em julho de 2025 a documentação tinha 29 páginas. Hoje tem 164, e 21 vezes mais frases e linhas de código. Da documentação como ela estava em julho de 2025, 30,5% continua de pé; o resto foi apagado ou reescrito com outro número, flag ou nome. Até a documentação de junho de 2026, que os modelos mais novos viram, perdeu 26,9% dos seus fatos em menos de quatro meses.
+
+## Quanto dura uma frase
+
+Acompanhe cada frase desde a semana em que surgiu até a semana em que sumiu, e metade delas desaparece ou é reformulada em 196 dias. Se uma reformulação só conta quando muda um número, flag, caminho ou nome, metade dos fatos se perde em 266 dias: cerca de nove meses.
+
+<SurvivalChart />
+
+## O que seu modelo nunca ouviu falar
+
+Estes são os identificadores que hoje estão nas tabelas de referência e não estavam lá no corte de um modelo: flags de CLI, comandos com barra, eventos de hook e variáveis de ambiente. Pergunte ao Claude sobre um deles e ele só pode chutar.
+
+<NewIdentifiers />
+
+"Documentado desde" não é "lançado desde": alguns deles já existiam e só chegaram à documentação depois. De qualquer forma, o modelo não tinha uma página da qual aprendê-los.
+
+## Dê a lista ao Claude
+
+O [plugin since-cutoff](https://github.com/derob98/ailmanac/tree/main/plugins/since-cutoff) coloca essas listas diante do Claude. Quando uma sessão começa, um hook lê qual modelo está rodando e adiciona ao contexto dele uma nota curta: as flags, comandos e eventos de hook documentados depois do corte desse modelo, e a instrução de consultar a documentação antes de confiar na memória ou de dizer que um recurso não existe.
+
+```bash
+claude plugin marketplace add derob98/ailmanac --sparse .claude-plugin plugins
+claude plugin install since-cutoff@ailmanac
+```
+
+O hook são poucas linhas de shell POSIX: sem Node, sem rede, cerca de 400 a 750 tokens por sessão. Quando o Claude Code não passa o modelo ao hook, como no nosso teste headless com `-p`, a nota lista o que mudou desde junho de 2026, o que vale para todo modelo Claude. Nesse teste, a sessão recebeu a nota e o Claude a repetiu palavra por palavra.
+
+## O que fazer com isso
+
+- **Não confie na memória do Claude sobre o Claude Code.** Para flags, configurações, hooks e comandos, faça-o ler a página. O Claude Code traz um agente de guia para perguntas sobre si mesmo, e a documentação publica um índice em [code.claude.com/docs/llms.txt](https://code.claude.com/docs/llms.txt).
+- **Date seus tutoriais.** Um guia de seis meses atrás perdeu mais de um terço dos seus fatos. Confira qualquer coisa mais antiga com a documentação antes de copiar comandos dele.
+- **Prefira páginas que dizem quando foram verificadas.** Toda página deste site traz a data da última verificação; o [painel de atualidade](/docs/whats-new/freshness) lista todas, e o [Deprecation & Migration Watch](/docs/whats-new/deprecations) acompanha o que foi removido.
+
+## Como medimos
+
+- **Histórico.** [web3dev1337/claude-code-docs](https://github.com/web3dev1337/claude-code-docs) é um fork de um espelho conhecido da documentação que manteve todo o histórico de sincronizações: 3.604 sincronizações entre julho de 2025 e outubro de 2026. Pegamos a última sincronização de cada semana, 67 retratos no total.
+- **Escopo.** Todas as páginas do Claude Code, exceto o changelog e os resumos semanais, que registram histórico por definição, e as páginas do Agent SDK, que vieram de outro site de documentação em 2026 e, de outro modo, contariam como novas.
+- **Unidades.** Cada página é dividida em frases, linhas de tabela e linhas de código, sem links nem marcação. Uma linha que aparece em cinco ou mais páginas ao mesmo tempo, como um banner ou uma linha de código genérica, é descartada. Sobraram 90.674 unidades distintas para acompanhar.
+- **Mortes.** Uma unidade é dada como extinta quando falta em duas sincronizações semanais seguidas, ou na mais recente, de modo que uma página que falhou em uma sincronização não conta.
+- **Fatos.** Uma frase nova que substitui uma apagada na mesma semana é tratada como o mesmo fato quando pelo menos 60% das palavras coincidem e todo número, flag, caminho e identificador é idêntico. 7.965 reformulações foram ligadas dessa forma.
+- **Cortes.** Cada modelo é comparado com o último retrato semanal em ou antes do último dia do mês do seu corte, a leitura mais generosa. Cortes anteriores a julho de 2025 usam o primeiro retrato, que já contém mais do que esses modelos poderiam ter visto: as parcelas deles são limites inferiores.
+- **Sobrevivência.** Estimativas de Kaplan–Meier sobre todas as unidades nascidas depois do primeiro retrato, com as unidades ainda presentes hoje contadas como censuradas.
+
+O espelho não é oficial: se ele perdeu ou deformou uma página, os números herdam isso. Verificamos as semanas dos cortes em busca de páginas que sumiram por uma sincronização e não encontramos nenhuma. A análise compara texto, não o comportamento do produto.
+
+## Reproduza
+
+O script e sua saída estão no repositório deste site: [scripts/research/docs-decay.mjs](https://github.com/derob98/ailmanac/blob/main/scripts/research/docs-decay.mjs) e [data/research/claude-code-docs-decay.json](https://github.com/derob98/ailmanac/blob/main/data/research/claude-code-docs-decay.json). Ele precisa de Node e git, e roda em cerca de 15 segundos:
+
+```bash
+git clone https://github.com/web3dev1337/claude-code-docs
+git clone https://github.com/derob98/ailmanac
+node ailmanac/scripts/research/docs-decay.mjs claude-code-docs
+```

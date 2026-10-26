@@ -1,0 +1,69 @@
+# Veille sur les dépréciations et migrations
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/whats-new/deprecations · AILmanac (CC BY 4.0) · last verified 2026-10-25
+
+Modèles retirés, indicateurs renommés et changements cassants accompagnés de notes de migration.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-10-25" source="https://platform.claude.com/docs/en/about-claude/model-deprecations">
+Les calendriers de dépréciation et les détails de migration proviennent d'Anthropic et évoluent — confirmez toujours les dates et les remplacements dans la documentation officielle avant de migrer.
+</VerifyNote>
+
+Des modèles sont retirés, des paramètres sont renommés, des comportements changent. Cette page recense les **changements cassants** afin que les mises à niveau ne vous surprennent pas. Si vous développez sur l'API, parcourez-la régulièrement.
+
+## Pourquoi c'est important
+
+Un ID de modèle épinglé finira par être **déprécié** puis **supprimé**. Le code qui le code en dur cesse de fonctionner. Un peu d'hygiène évite les mauvaises surprises à 2 h du matin.
+
+## Règles de survie
+
+- **Lisez les IDs de modèle depuis la configuration**, ne dispersez jamais de valeurs littérales dans la base de code — la migration devient alors une modification d'une seule ligne.
+- **Surveillez les annonces** pour connaître les dates de dépréciation et les remplacements recommandés.
+- **Relancez vos [évaluations](/docs/foundations/evals)** lorsque vous changez de modèle — le comportement peut évoluer même sur un modèle « plus récent et meilleur ».
+- **Testez avant l'échéance**, pas après la suppression.
+
+## Types de changement courants
+
+| Changement | Exemple | Que faire |
+|---|---|---|
+| Modèle retiré | Un ancien ID de modèle cesse de fonctionner | Passez au successeur recommandé ; réévaluez |
+| Paramètre remplacé | Un réglage de raisonnement/budget remplacé par `effort` | Mettez à jour les appels ; voir [Réflexion et effort](/docs/api/thinking-and-effort) |
+| Changement de valeur par défaut | Un nouveau modèle/comportement par défaut | Épinglez intentionnellement ; vérifiez que vos prompts fonctionnent toujours |
+| Mise à jour d'endpoint/SDK | Nouvelle version majeure du SDK | Lisez le guide de migration ; effectuez la mise à niveau délibérément |
+
+## Veille actuelle
+
+Le calendrier faisant autorité figure sur la [page officielle des dépréciations de modèles](https://platform.claude.com/docs/en/about-claude/model-deprecations) — confirmez-y les dates avant de migrer. Anthropic donne un préavis d'au moins 60 jours avant de retirer un modèle publié.
+
+### Modèles dépréciés
+
+Un modèle Claude publié publiquement se trouve dans la fenêtre « déprécié, pas encore retiré » (vérifié le 25 octobre 2026) : **`claude-sonnet-4-5-20250929` (Sonnet 4.5) a été déprécié le 30 septembre 2026 et sera retiré le 30 novembre 2026.** Le remplaçant recommandé par Anthropic est `claude-sonnet-5-5`. Les appels continuent de fonctionner jusqu'à la date de retrait, puis échouent — si vous épinglez encore cet ID, c'est votre migration, et la fenêtre est désormais d'environ cinq semaines.
+
+Également déprécié : `claude-mythos-preview`, sur invitation uniquement (déprécié le 9 juin 2026, date de retrait à annoncer) — passez au modèle actuel à accès vérifié, `claude-mythos-5-1`. (`claude-mythos-5` est toujours Active, mais il a son propre guide de migration qui pointe vers la 5.1 : migrer deux fois serait du travail perdu.)
+
+`claude-haiku-4-5-20251001` est le prochain ID à surveiller, et c'est désormais le seul modèle de la gamme **au-delà** de sa date de retrait au plus tôt : ce plancher était le **15 octobre 2026**, et il est dépassé (le suivant est celui d'Opus 4.5, le 24 novembre 2026). Il figure aussi parmi les **modèles legacy** de la vue d'ensemble des modèles, avec un successeur direct en `claude-haiku-5-5` (publié le 7 octobre 2026). Au 25 octobre 2026, le tableau de statut officiel le liste toujours comme **Active**, sans dépréciation annoncée ; les deux lectures ne sont donc pas en conflit : « legacy » dans le vocabulaire de cycle de vie d'Anthropic signifie *ne reçoit plus de mises à jour et pourra être déprécié à l'avenir*, un cran avant « déprécié ». Une date « pas avant » qui arrive est un signal pour planifier, pas une panne — Anthropic s'engage à un préavis d'au moins 60 jours, et ce compte à rebours démarre quand l'avis est publié, pas quand la date plancher passe. Sonnet 4.5 en est l'exemple : son plancher était le 29 septembre 2026, l'avis de dépréciation a suivi le 30 septembre, et le retrait effectif intervient deux mois plus tard. Si vous épinglez cet ID, la migration mérite maintenant d'être planifiée plutôt que surveillée — et ce n'est pas un simple échange d'ID : voir [Claude Haiku 5.5 : la falaise tarifaire des 100K](/docs/models/haiku-5-5-the-100k-price-cliff) pour les cinq changements qui renvoient 400 et les six qui renvoient 200. Confirmez dans le [tableau de statut officiel des modèles](https://platform.claude.com/docs/en/about-claude/model-deprecations#model-status) avant de migrer.
+
+### Récemment retirés
+
+- `claude-opus-4-1-20250805` (Opus 4.1) a été **retiré le 5 août 2026** — passez à `claude-opus-4-8` (ou directement à `claude-opus-5`).
+- `claude-opus-4-20250514` (Opus 4) et `claude-sonnet-4-20250514` (Sonnet 4) ont été **retirés le 15 juin 2026** — les remplacements indiqués par Anthropic sont respectivement `claude-opus-4-8` et `claude-sonnet-4-6` (ou passez directement à `claude-opus-5` / `claude-sonnet-5`).
+
+Les appels vers un ID retiré renvoient désormais une erreur d'API. Si votre code en épingle encore un, c'est la première chose à corriger.
+
+### Dépréciations de paramètres
+
+Les réglages d'échantillonnage `temperature`, `top_p` et `top_k` sont en voie de disparition, et **il existe désormais deux règles différentes selon la version d'API que vous envoyez.**
+
+- **Sous `anthropic-version: 2023-06-01`** (ce qu'envoie toute version majeure du SDK publiée avant le 21 octobre 2026) : sur les **modèles de génération Claude 4.7 et ultérieurs** — Opus 4.7, Opus 4.8, Opus 5, Opus 5.5, Sonnet 5, Sonnet 5.5, Haiku 5.5, Fable 5, Fable 5.1, Mythos 5, Mythos 5.1 — **et sur Claude Mythos Preview**, régler l'un d'eux sur une valeur **non par défaut** renvoie une **erreur 400**. Les valeurs par défaut sont acceptées, et les modèles plus anciens acceptent toujours les valeurs non par défaut. Fiez-vous aux numéros de version plutôt qu'aux noms : **Haiku 5.5 rejette** les valeurs d'échantillonnage non par défaut, alors que l'ancien **Haiku 4.5 les accepte encore**, tout comme Opus 4.6 et Sonnet 4.6.
+- **Sous `anthropic-version: 2026-10-21`** : les trois paramètres sont **supprimés**. En envoyer un renvoie une **400 sur tous les modèles, même à la valeur par défaut du paramètre**. Les dernières versions majeures du SDK et la CLI `ant` les ont retirés de leurs types de requête et de leurs flags.
+
+Dans les deux cas, la solution est la même : omettez les trois et orientez le comportement via le [prompting](/docs/prompting/prompting-claude) et [Réflexion et effort](/docs/api/thinking-and-effort). Le seul cas sans remplacement est une température *volontairement abaissée* sur un modèle plus ancien qui la respecte encore — les options documentées par Anthropic sont alors d'arrêter d'envoyer le paramètre ou de garder cette requête sur `2023-06-01`. Le détail complet de la version que vous utilisez et de ce que change l'autre : [API Version 2026-10-21 — la première version cassante en trois ans](/docs/api/api-version-2026-10-21).
+
+Confirmez toujours vos IDs de modèle par rapport au tableau [Modèles et tarifs actuels](/docs/whats-new/models-and-pricing) ; si vous utilisez un ancien ID, planifiez une migration.
+
+## Suite
+
+- [Erreurs, limites de débit et fiabilité](/docs/api/errors-and-rate-limits)
+- [Modèles et tarifs actuels](/docs/whats-new/models-and-pricing)
+- [Évaluer la qualité de l'IA (Évals)](/docs/foundations/evals)

@@ -1,0 +1,82 @@
+# Cross-AI Prompt Translation
+
+> Source: https://derob98.github.io/ailmanac/docs/prompting/cross-ai-translation · AILmanac (CC BY 4.0) · last verified 2026-09-30
+
+The same concept across Claude, GPT and Gemini — and what transfers.
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Know which prompting fundamentals transfer to every model unchanged", "Spot the handful of surface details that differ when you switch model or vendor", "Run a portable workflow that moves a prompt to a new model without rewriting it", "Avoid the trap of double-prompting a reasoning model to 'think step by step'"]} />
+
+Good news: **the fundamentals of prompting transfer across every model.** If you can prompt Claude well, you can prompt ChatGPT, Gemini, or Llama well. A few surface details differ — here's the Rosetta stone.
+
+## What transfers everywhere
+
+These work on all of them — they're about *communication*, not a vendor:
+
+- **Give context**: goal, audience, format, tone ([Prompting Basics](/docs/prompting/basics)).
+- **Examples** ([few-shot](/docs/prompting/few-shot)).
+- **Ask for reasoning** on hard tasks.
+- **Constrain the output** (length, format, "JSON only").
+- **Iterate** in plain language.
+- **Roles / system prompts** — every major model has the concept ([System Prompts](/docs/prompting/system-prompts)).
+
+Learn these once and you're portable.
+
+## What differs (and what to adjust)
+
+| Aspect | Note when you switch |
+|---|---|
+| **Structure cues** | Claude loves [XML tags](/docs/prompting/xml-tags); other models accept them but may prefer Markdown headings or JSON. |
+| **Tone intensity** | Older models tolerated forceful/ALL-CAPS prompts; newer literal-followers prefer calm, specific instructions. Re-tune per model. |
+| **Reasoning** | "Think step by step" helps some; dedicated reasoning models do it internally — don't double up. |
+| **Prefilling** | Putting words in the assistant's mouth used to be the Claude-style format lever. It's retired: Claude 4.6+ returns a 400 on a prefilled final assistant turn, and support elsewhere varies. Use an output contract or a schema instead. |
+| **System prompt plumbing** | Anthropic: the `system` top-level parameter. OpenAI: the `developer` role or the `instructions` parameter. Gemini: `system_instruction`. Same idea, three request shapes — and how hard each one binds varies, so test ([System Prompts](/docs/prompting/system-prompts)). |
+| **Tool/function calling** | Same concept, different request schemas per provider. |
+
+<VerifyNote lastVerified="2026-09-30" source="https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices">
+Parameter names and the prefill restriction verified against Anthropic's prompting reference, [OpenAI's text-generation guide](https://developers.openai.com/api/docs/guides/text), and [Google's Gemini text-generation guide](https://ai.google.dev/gemini-api/docs/text-generation). Vendor request shapes change independently of each other — confirm at the source for the model you're porting to.
+</VerifyNote>
+
+<Flashcards title="The six surface differences" cards={[{front: "Structure cues", back: "Claude favors XML tags; other models may prefer Markdown headings or JSON. The structure transfers — the delimiter style may not."}, {front: "Tone intensity", back: "Older models tolerated forceful, ALL-CAPS prompts. Newer literal-followers prefer calm, specific instructions. Re-tune when you switch."}, {front: "Reasoning", back: "'Think step by step' helps some models; dedicated reasoning models do it internally — don't double up, or you waste tokens and can hurt quality."}, {front: "Prefilling", back: "Starting the assistant's reply to steer format was a Claude-era lever. It is retired: Claude 4.6+ returns a 400 on a prefilled final assistant turn, and support elsewhere varies. Use an output contract or a schema."}, {front: "System prompt plumbing", back: "Anthropic uses a top-level `system` parameter; OpenAI uses the `developer` role or an `instructions` parameter; Gemini uses `system_instruction`. Same idea, three request shapes — and how hard each binds differs."}, {front: "Tool / function calling", back: "The concept is universal; the request schema is per-provider. Your tool logic ports; the JSON envelope around it does not."}]} />
+
+## A portable workflow
+
+<Steps items={[
+  {title: "Write with universal structure", body: "Draft the prompt with context + format + examples — the parts that transfer to any model. Don't bake in vendor-specific syntax yet."},
+  {title: "Test on your target model", body: "Run a few real inputs through the model you'll actually ship on (/docs/foundations/evals). Judge the outputs, not your intuition about the model."},
+  {title: "Adjust only the surface details", body: "If something's off, change one surface lever at a time — delimiter style, tone intensity, whether you ask for reasoning — not the whole prompt."},
+  {title: "Keep prompts in version control", body: "Store prompts as files so switching models is a small, reviewable diff instead of a rewrite."}
+]} />
+
+Because only the *surface* changes, a single well-structured prompt usually ports with a one-line tweak. Here's one written the universal way — context, explicit format, and a clear task, with no vendor-specific syntax to strip out:
+
+<PromptCard title="A portable, vendor-neutral prompt">{`You are a technical editor. Rewrite the text below to be clearer and more concise.
+
+Constraints:
+- Keep every fact unchanged.
+- Target a general professional audience.
+- Return only the rewritten text, no preamble.
+
+Text:
+"""
+[paste the draft here]
+"""`}</PromptCard>
+
+That prompt runs as-is on Claude, GPT, Gemini, or an open model. If a model ignores "return only the rewritten text," that's your one surface tweak — tighten the constraint, move it into the [system prompt](/docs/prompting/system-prompts), or bind the shape with [structured outputs](/docs/api/structured-output).
+
+:::tip[Don't rewrite from scratch]
+Moving to a new model rarely needs a new prompt — usually just a tone/format tweak. Your structure and examples carry over.
+:::
+
+<Quiz title="Check yourself" questions={[{q: "Which of these does NOT transfer across models and needs re-tuning when you switch?", options: ["Giving context: goal, audience, format, tone", "Providing few-shot examples", "The exact tone intensity — forceful vs. calm phrasing", "Constraining the output length and format"], answer: 2, explain: "Context, examples, and output constraints all transfer. Tone intensity is a surface detail: older models tolerated forceful prompts, newer literal-followers prefer calm, specific ones."}, {q: "You move a prompt to a dedicated reasoning model. What should you do with your 'think step by step' instruction?", options: ["Repeat it twice to be safe", "Remove it — the model reasons internally, so don't double up", "Convert it to ALL-CAPS for emphasis", "Wrap it in XML tags"], answer: 1, explain: "Dedicated reasoning models do step-by-step internally. Adding an explicit 'think step by step' on top is redundant — don't double up."}, {q: "What is the recommended way to switch a prompt to a new model?", options: ["Rewrite it from scratch for that vendor", "Keep the universal structure, test on the target, and adjust only surface details", "Always convert XML tags to JSON first", "Assume it works identically and skip testing"], answer: 1, explain: "The portable workflow: write with universal structure, test on the target model with real inputs, then adjust only the surface details that differ."}]} />
+
+<Callout type="takeaways" items={["Fundamentals — context, examples, reasoning, output constraints, roles — transfer to every model unchanged.", "Only six surface details differ: structure cues, tone intensity, reasoning prompts, prefilling, system-prompt plumbing, and tool schemas.", "Switching models is a tweak, not a rewrite: keep universal structure, test on the target, adjust one surface lever at a time.", "Version-control your prompts so moving between models is a small, reviewable diff."]} />
+
+## Next
+
+- [System Prompts](/docs/prompting/system-prompts)
+- [Prompting Claude Specifically](/docs/prompting/prompting-claude)
+- [Claude vs ChatGPT, Gemini & Copilot](/docs/foundations/claude-vs-others)
+- [Choosing a Model & Provider](/docs/foundations/choosing-a-model-provider)
+- [Named Techniques, Judged](/docs/prompting/named-techniques) — which classic techniques survived the reasoning-model shift

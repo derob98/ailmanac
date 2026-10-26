@@ -1,0 +1,31 @@
+# Freshness Dashboard
+
+> Source: https://derob98.github.io/ailmanac/docs/whats-new/freshness · AILmanac (CC BY 4.0)
+
+A live, self-auditing ledger of every AILmanac page — what's fresh, what's aging, and what needs a human to re-verify. Pick a page and contribute a fix.
+
+<LevelBadge level="all" />
+
+# Freshness Dashboard
+
+AILmanac's one promise is to be **honest about freshness**. Most docs sites say they're current; this page *proves* it. Every page below is scored against its last verification date — computed against **your** clock, right now, so this dashboard can never quietly go stale itself.
+
+:::tip[This is the easiest way to contribute]
+See a page marked 🔴 **Stale** or ⚪ **Unverified**? That's an open invitation. Click **Verify**, check the page against its official source, and add (or bump) its <code>&lt;VerifyNote lastVerified="YYYY-MM-DD" /&gt;</code>. One date is a complete, welcome contribution — see [Contribute in 10 Minutes](/docs/contribute/contribute-in-10-minutes).
+:::
+
+<FreshnessDashboard />
+
+## How the scoring works
+
+- 🟢 **Fresh** — verified within the last **90 days**.
+- 🟡 **Aging** — verified 90–180 days ago; worth a glance.
+- 🔴 **Stale** — verified over **180 days** ago; likely drifted from the source.
+- ⚪ **Unverified** — no <code>&lt;VerifyNote&gt;</code> yet. Volatile pages (model names, prices, limits, UI labels) should always carry one.
+
+The data is rebuilt from the docs on every site build by `scripts/build-freshness.mjs`, which reads each page's most recent `<VerifyNote lastVerified="…">` stamp. Nothing to maintain by hand — add a stamp to a page and it shows up here automatically.
+
+
+## Next
+
+- [This Month in Claude](/docs/whats-new/this-month)

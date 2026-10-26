@@ -1,0 +1,65 @@
+# La scala della fiducia
+
+> Source: https://derob98.github.io/ailmanac/it/docs/frontiers/the-trust-ladder · AILmanac (CC BY 4.0)
+
+Cinque pioli di autonomia che puoi concedere a un agente IA, legati a quanto sia reversibile e quanto grande sarebbe un errore — e al guardrail che rende sicuro ciascun piolo.
+
+<LevelBadge level="intermediate" />
+
+# La scala della fiducia
+
+<Callout type="objectives" items={["Perché l'autonomia è una scala — un piolo alla volta — non un interruttore on/off","I cinque pioli, mappati per raggio d'impatto e reversibilità (non per quanto sia intelligente il modello)","Tre regole per scegliere il piolo giusto: parti basso, dimensiona sul caso peggiore, scegli per task","Come la scala si mappa sulle modalità di permesso di Claude Code","Dove si colloca CLAUDE.md — il file che trasforma 'guardrail che ho in testa' in guardrail che l'agente può davvero seguire"]} />
+
+"Quanto dovrei lasciare che l'IA *faccia* da sola?" è la domanda dietro quasi ogni decisione sugli agenti — permessi di Claude Code, impostazioni di auto-approvazione, se lasciare che uno script giri incustodito. Le persone tendono a rispondere con un singolo interruttore on/off: o supervisioni tutto, o lo scateni.
+
+Ecco invece una lente che usa AILmanac:
+
+> **L'autonomia non è un interruttore, è una scala. La sali un piolo alla volta, e il piolo su cui stai dovrebbe essere impostato da quanto grave sarebbe un errore — non da quanto ti fidi del modello.**
+
+L'intuizione chiave è che la giusta quantità di autonomia non ha quasi nulla a che vedere con quanto sia "intelligente" l'IA. Riguarda il **raggio d'impatto** (quanto danno fa un'azione sbagliata) e la **reversibilità** (quanto facilmente puoi annullarla). Un modello brillante che fa senza supervisione una cosa irreversibile è un setup peggiore di un modello mediocre che ne fa una reversibile.
+
+## I cinque pioli
+
+Un modello che troviamo utile è pensare a cinque pioli distinti, dalla minore alla maggiore autonomia:
+
+| Piolo | Cosa fa l'IA | Quando è appropriato | Cosa lo rende sicuro |
+| --- | --- | --- | --- |
+| **1. Solo suggerire** | Ti dice cosa *farebbe*; non compie azioni | Lavoro ad alto rischio o irreversibile; un dominio in cui non ti fidi ancora; stai ancora imparando in cosa è brava | Sei tu l'esecutore. Nulla accade senza che tu lo faccia a mano. |
+| **2. Bozza da revisionare** | Produce l'artefatto vero (codice, email, query) ma si ferma prima di applicarlo | L'output è concreto e puoi controllarlo a occhio più velocemente di quanto lo scriveresti | Un umano vero legge prima che qualcosa abbia effetto. Un diff che guardi davvero, non a volo. |
+| **3. Agire su cose reversibili** | Esegue direttamente, ma solo su azioni a basso rischio e facilmente annullabili | L'azione ha un undo pulito: modifiche in version control, scritture su un branch di scarto, qualsiasi cosa che un singolo comando ripristini | **La reversibilità è il guardrail.** Il costo di un errore è "annullalo", non "spiegalo al legale." |
+| **4. Agire e poi riportare** | Fa il lavoro in autonomia, poi ti mostra esattamente cosa ha fatto | Task ripetitivi e ben delimitati in cui revisionare *dopo* costa meno che sbarrare *prima* | Un audit trail completo e onesto — un log, un diff, un riepilogo — che leggi davvero dopo. |
+| **5. Agire in autonomia dentro guardrail** | Gira incustodito dentro limiti rigidi | Loop stretti e ben compresi che hai visto riuscire molte volte | **I guardrail fanno la supervisione.** Confini rigidi che l'IA non può oltrepassare, più un kill switch. |
+
+## Come usare la scala
+
+Tre regole rendono tutto questo pratico:
+
+<Steps items={[{title: "Parti un piolo più in basso di quanto sembri necessario", body: "È economico salire un piolo dopo aver visto qualcosa funzionare; è costoso ripulire dopo aver concesso troppo troppo presto. La prima volta che punti un agente su un nuovo tipo di task, scendi a Solo suggerire o Bozza anche se sospetti che possa gestire di più."}, {title: "Fissa il piolo sul caso peggiore, non su quello medio", body: "Se un task è reversibile nel 95% dei casi ma nel restante 5% tocca dati di produzione, fissi il piolo per il 5%. Il raggio d'impatto dell'azione peggiore plausibile è il tuo tetto."}, {title: "Sali per task, non per strumento", body: "La stessa IA può essere al piolo 4 per 'formatta il mio codice' e al piolo 1 per 'cancella record dal database', nella stessa sessione. La scala riguarda l'azione, non un'impostazione di fiducia globale che ribalti una volta sola."}]} />
+
+## Mapparla su Claude Code
+
+Claude Code è un posto pulito per vedere la scala in azione, perché il suo sistema di permessi è essenzialmente un insieme di manopole per scegliere il tuo piolo:
+
+- **Pioli 1–2** sono la postura cauta di default: Claude propone modifiche e comandi, e tu ne approvi ciascuno. Rivedi ogni diff prima che finisca a segno.
+- **Piolo 3** consiste nel consentire specifiche chiamate a strumenti reversibili — modifiche a file dentro un repo git in cui puoi fare `git restore`, esecuzioni su un branch usa e getta — bloccando comunque qualsiasi cosa distruttiva.
+- **Piolo 4** consiste nell'allow-listare categorie di azioni sicure così Claude procede senza chiedere su quelle, per poi leggere il transcript e i diff dopo.
+- **Piolo 5** è autonomia più piena per un loop stretto e provato — ed è *solo* sicuro quando i guardrail sono reali: permessi limitati, una working directory ristretta, e la possibilità di fermarlo.
+
+Il meccanismo che ti permette di salire in sicurezza è il tuo **[CLAUDE.md](/docs/claude-code/claude-md)**. Quel file è dove metti per iscritto i guardrail: cosa è sempre permesso, cosa non deve mai accadere, quali percorsi sono off-limits, quando fermarsi e chiedere. I guardrail che tieni solo in testa non vincolano un agente — i guardrail scritti in CLAUDE.md sì. Se non sei sicuro come formularli, il [generatore di CLAUDE.md](/docs/tools/claude-md-generator) ti dà un punto di partenza strutturato.
+
+Il riassunto onesto: **non concedere autonomia perché l'IA sembra capace. Concedila perché l'azione è reversibile, il raggio d'impatto è piccolo, e i guardrail sono scritti.** Poi sali un piolo alla volta man mano che arriva l'evidenza.
+
+<Quiz title="Verifica" questions={[{q: "Hai un prompt provato che non ha mai fallito in ~200 esecuzioni di test. Dovresti saltare direttamente al piolo 5 (autonomo)?", options: ["Sì — 200 esecuzioni pulite sono forte evidenza che il modello possa farlo in modo affidabile", "No — il piolo 5 è fissato dal raggio d'impatto e dalla reversibilità, non dal tasso di successo passato", "Sì, purché il modello sia Opus"], answer: 1, explain: "La scala è fissata dall'azione peggiore plausibile, non dall'affidabilità osservata. 200/200 esecuzioni di test ti parlano di capacità, non di cosa accade all'esecuzione 201 su un input nuovo. Il piolo 5 richiede guardrail rigidi più un kill switch — e solo per loop stretti e ben compresi."}, {q: "Un task è reversibile nel 95% dei casi. L'altro 5% tocca dati di fatturazione in produzione. Quale piolo?", options: ["Piolo 4 — la media reversibile domina","Piolo 1 o 2 — fissi il piolo sul caso peggiore del 5%","Piolo 3 — divisi la differenza"], answer: 1, explain: "Fissi il piolo sul caso peggiore, non sulla media. Se qualsiasi percorso plausibile porta a un danno irreversibile, il tetto è 'Solo suggerire' o 'Bozza da revisionare' finché non puoi garantire che il percorso del 5% non possa essere preso (es. un guardrail che blocca in modo rigido le scritture su quella tabella)."}, {q: "Dove vivono davvero i guardrail che ti permettono di salire i pioli in sicurezza?", options: ["Nella tua testa — rivedi ogni azione mentre accade","In CLAUDE.md e nelle impostazioni dei permessi — scritti così che l'agente possa agire di conseguenza","Nel modello — Claude rifiuta naturalmente le azioni rischiose"], answer: 1, explain: "I guardrail che tieni solo in testa non vincolano un agente autonomo — l'agente non può leggerli. Per salire la scala, i confini devono essere codificati dove l'agente li rispetterà davvero: CLAUDE.md, modalità di permesso, liste di allow/deny, accessi a strumenti limitati."}]} />
+
+<Callout type="takeaways" items={["L'autonomia è una scala, non un interruttore — sali un piolo alla volta man mano che si accumula l'evidenza.","Fissa il piolo per raggio d'impatto e reversibilità dell'azione peggiore plausibile, non per quanto intelligente sembri il modello.","La reversibilità è il guardrail sul piolo 3; un vero audit trail è il guardrail sul piolo 4; limiti rigidi + kill switch sono il guardrail sul piolo 5.","Scegli il piolo per task, non per strumento — lo stesso agente può essere al piolo 4 per la formattazione e al piolo 1 per le cancellazioni sul database nella stessa sessione.","I guardrail stanno in CLAUDE.md e nelle impostazioni dei permessi — non nella tua testa."]} />
+
+## Correlati
+
+- [Cos'è CLAUDE.md?](/docs/claude-code/claude-md)
+- [Generatore di CLAUDE.md](/docs/tools/claude-md-generator)
+- [L'emivita della freschezza](/docs/frontiers/freshness-half-life)
+
+
+## Prossimo
+
+- [Context Engineering](/docs/frontiers/context-engineering)

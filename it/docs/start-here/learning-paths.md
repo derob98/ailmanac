@@ -1,0 +1,89 @@
+# Percorsi di apprendimento (scegli il tuo binario)
+
+> Source: https://derob98.github.io/ailmanac/it/docs/start-here/learning-paths · AILmanac (CC BY 4.0)
+
+Ordini di lettura sequenziati per quattro tipi di lettore, con stime di tempo.
+
+<LevelBadge level="all" />
+
+Scegli il binario che ti somiglia di più. Ciascuno è un percorso ordinato — affronta i passi in ordine, salta ciò che già conosci. I tempi sono approssimativi.
+
+<Callout type="objectives" items={["Trova l'unico binario che corrisponde ai tuoi obiettivi — principiante, knowledge worker, builder o team lead", "Segui un percorso di lettura chiaro e ordinato invece di indovinare da dove partire", "Sapere all'incirca quanto tempo richiede ogni binario (da ~45 min a ~½ giornata)", "Da dove iniziare se nessuno dei binari ti sembra una scelta ovvia"]} />
+
+:::tip[Non sai quale sia il tuo binario?]
+Scegli in base al tuo **obiettivo**, non al tuo ruolo. Vuoi risultati senza scrivere codice? Principiante. Lavoro reale più veloce? Knowledge Worker. Personalizzare Claude Code o l'API? Builder. Distribuire l'IA ad altri? Team Lead.
+:::
+
+## 🌱 Il curioso alle prime armi · ~45 min
+
+Vuoi usare bene l'IA senza diventare un programmatore.
+
+<Steps items={[
+  {title: "I tuoi primi 5 minuti", body: "Principiante. Ottieni un risultato concreto da Claude in cinque minuti. /docs/start-here/your-first-5-minutes"},
+  {title: "Quale Claude dovrei usare?", body: "Principiante. Scegli il modello giusto per ciò che stai facendo. /docs/start-here/which-claude"},
+  {title: "Le basi del prompting", body: "Principiante. Le mosse fondamentali che migliorano le risposte. /docs/prompting/basics"},
+  {title: "Cos'è un LLM?", body: "Principiante. Un modello mentale in parole semplici di come funziona Claude. /docs/foundations"},
+  {title: "Produttività quotidiana", body: "Principiante. Applicalo alle attività di tutti i giorni e ai piccoli successi. /docs/playbooks/productivity"}
+]} />
+
+## 💼 Il knowledge worker · ~2 ore
+
+Vuoi che l'IA renda più veloce il tuo lavoro reale — scrittura, ricerca, analisi.
+
+<Steps items={[
+  {title: "Inizia dal binario del curioso alle prime armi", body: "Fai prima il binario da ~45 min qui sopra, poi continua di seguito."},
+  {title: "Libreria di pattern di prompt", body: "Tutti i livelli. Pattern riutilizzabili che puoi inserire nel lavoro reale. /docs/prompting"},
+  {title: "Allucinazioni e come ridurle", body: "Intermedio. Crea output di cui puoi davvero fidarti. /docs/foundations"},
+  {title: "Scegli il tuo playbook", body: "Scegli Scrittura, Ricerca o Analisi dei dati. /docs/playbooks"},
+  {title: "Progetti + template di prompt riutilizzabili", body: "Spazi di lavoro persistenti (/docs/claude-app) e template che riutilizzi (/docs/templates)."}
+]} />
+
+## 🛠️ Il builder / sviluppatore · ~½ giornata
+
+Scrivi codice e vuoi personalizzare Claude Code e costruire sull'API.
+
+<Steps items={[
+  {title: "Cos'è Claude Code", body: "Principiante. Cos'è la CLI e perché conta. /docs/claude-code/what-is-claude-code"},
+  {title: "CLAUDE.md, file di memoria e Plan Mode", body: "Principiante. Insegna a Claude il tuo progetto e pianifica prima che agisca. /docs/claude-code"},
+  {title: "Permessi e settings.json", body: "Intermedio. Controlla cosa può fare Claude e come si comporta. /docs/claude-code"},
+  {title: "La tua prima chiamata API → Tool Use → Costruire agenti", body: "Avanzato. Passa da una singola chiamata al tool use fino agli agenti completi. Inizia da /docs/api/first-call poi /docs/api"},
+  {title: "Walkthrough: personalizza Claude Code per un repo reale", body: "Intermedio. Metti tutto insieme su un progetto vero. /docs/walkthroughs"},
+  {title: "Sicurezza e uso responsabile", body: "Avanzato. Rilascia in sicurezza una volta che costruisci sul serio. /docs/security"}
+]} />
+
+## 👥 Il team lead · ~3 ore
+
+Stai distribuendo l'IA a un team e ti interessano coerenza, sicurezza e costi.
+
+<Steps items={[
+  {title: "Elementi essenziali del binario del builder (passi 1–3)", body: "Copri le basi del binario del builder qui sopra prima di continuare qui."},
+  {title: "Plugin e marketplace", body: "Avanzato. Distribuisci un toolkit condiviso così il team lavora allo stesso modo. /docs/claude-code"},
+  {title: "Compromessi tra costo e latenza + Scegliere un modello", body: "Intermedio. Bilancia velocità, qualità e spesa. /docs/foundations e /docs/api/choosing-a-model"},
+  {title: "Mettere in sicurezza gli agenti + irrobustire le esecuzioni autonome", body: "Avanzato. Rendi sicure le esecuzioni autonome su larga scala. /docs/security"},
+  {title: "Uso responsabile e verifica", body: "Tutti i livelli. Definisci le norme a cui il team si attiene. /docs/security"}
+]} />
+
+## I binari in breve
+
+| Binario | Tu sei… | Tempo | Primo passo |
+| --- | --- | --- | --- |
+| 🌱 Curioso alle prime armi | Usi bene l'IA, niente codice | ~45 min | [I tuoi primi 5 minuti](/docs/start-here/your-first-5-minutes) |
+| 💼 Knowledge worker | Velocizzi il lavoro reale | ~2 ore | [Libreria di pattern di prompt](/docs/prompting) |
+| 🛠️ Builder / sviluppatore | Personalizzi Claude Code + API | ~½ giornata | [Cos'è Claude Code](/docs/claude-code/what-is-claude-code) |
+| 👥 Team lead | Distribuisci l'IA a un team | ~3 ore | [Plugin e marketplace](/docs/claude-code) |
+
+:::note[I binari si costruiscono l'uno sull'altro]
+Il binario del knowledge worker parte dall'intero binario del principiante. Il binario del team lead parte dagli elementi essenziali del builder (passi 1–3). Se finisci un binario, quello successivo è in gran parte già fatto.
+:::
+
+<Quiz title="Mettiti alla prova" questions={[
+  {q: "Vuoi che l'IA velocizzi la tua scrittura e la tua ricerca, ma non scrivi codice. Quale binario fa per te?", options: ["Il builder / sviluppatore", "Il knowledge worker", "Il team lead"], answer: 1, explain: "Il binario del knowledge worker (~2 ore) serve a rendere più veloce il tuo lavoro reale e parte dal binario del curioso alle prime armi."},
+  {q: "Quanto dura all'incirca il binario del curioso alle prime armi?", options: ["~45 min", "~2 ore", "~½ giornata"], answer: 0, explain: "Il binario del curioso alle prime armi dura circa 45 minuti — il percorso più breve della pagina."},
+  {q: "Qual è il primo passo del binario del builder / sviluppatore?", options: ["La tua prima chiamata API", "Cos'è Claude Code", "Permessi e settings.json"], answer: 1, explain: "Il binario del builder si apre con Cos'è Claude Code, poi passa a CLAUDE.md e ai file di memoria prima dell'API."}
+]} />
+
+<Callout type="takeaways" items={["Quattro binari, una sola regola: scegli in base all'obiettivo, poi segui i passi in ordine.", "I tempi vanno da ~45 min (principiante) a ~½ giornata (builder).", "I binari si annidano — il knowledge worker si costruisce sul principiante; il team lead si costruisce sul builder.", "Nel dubbio, parti da I tuoi primi 5 minuti — ripaga in qualsiasi binario."]} />
+
+---
+
+Non sai quale faccia per te? Inizia con [I tuoi primi 5 minuti](/docs/start-here/your-first-5-minutes) — è utile a prescindere da dove finirai. E leggi [Come funzionano livelli e attualità](/docs/start-here/levels-and-freshness) così che badge e date abbiano senso.

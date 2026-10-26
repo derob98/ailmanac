@@ -1,0 +1,122 @@
+# Your First 5 Minutes
+
+> Source: https://derob98.github.io/ailmanac/docs/start-here/your-first-5-minutes · AILmanac (CC BY 4.0)
+
+From zero to a genuinely useful answer with Claude — the fastest possible first win.
+
+<LevelBadge level="beginner" />
+
+No setup, no jargon. In five minutes you'll get one genuinely useful result and understand *why* it worked.
+
+<Callout type="objectives" items={[
+  "Open Claude and ask your first real question (no setup needed)",
+  "Write a prompt the way a sharp colleague would want it: goal, length, audience, tone",
+  "Refine an answer with plain-language follow-ups (iterative refinement)",
+  "Adopt the one safety habit that matters: verify before you trust"
+]} />
+
+:::tip[Add a screenshot here]
+This page is the beginner floor — it deserves annotated screenshots or a short GIF. If you can contribute visuals, please [open a PR](/docs/contribute/contribute-in-10-minutes).
+:::
+
+## The 5-minute path
+
+<Steps items={[
+  {title: "Minute 1 — Open Claude", body: "Go to claude.ai and sign in (the free tier is enough to start). You can also use Claude on the mobile app or by voice — see Which Claude Should I Use? for the full map."},
+  {title: "Minute 2 — Ask like you'd ask a sharp colleague", body: "Don't 'search.' Give context and say what you want: name the goal, length, audience, tone, and what 'done' looks like. That's 80% of prompting, and it works on every AI."},
+  {title: "Minute 3 — Read, then refine", body: "You don't have to get it perfect first try. Reply in plain language — 'make it shorter and more casual,' 'add a sentence about the free Q&A.' This back-and-forth is iterative refinement."},
+  {title: "Minute 4 — Try a second, different task", body: "Prove to yourself it's general-purpose: summarize an article, explain a concept simply, or plan a quick dinner from the ingredients you have."},
+  {title: "Minute 5 — Learn the one safety habit", body: "AI can sound confident and still be wrong. For anything that matters, check it. Verify facts, numbers, dates, quotes, and citations."}
+]} />
+
+## Minute 2, up close — the single biggest beginner upgrade
+
+The biggest first-day win: **give context and say what you want**. Compare:
+
+❌ *"marketing email"*
+
+✅ *"Write a friendly 120-word email inviting existing customers to a webinar on June 30 about our new analytics dashboard. Warm but not salesy. End with a clear RSVP call to action."*
+
+The second prompt names the **goal, length, audience, tone, and what 'done' looks like**. That's 80% of prompting, and it works on every AI. (More in [Prompting Basics](/docs/prompting/basics).)
+
+<PromptCard title="Your first prompt to try">{`Write a friendly 120-word email inviting existing customers to a webinar on June 30 about our new analytics dashboard. Warm but not salesy. End with a clear RSVP call to action.`}</PromptCard>
+
+## Minute 3, up close — refine in plain language
+
+You don't have to get it perfect first try. Just reply like you would to a colleague:
+
+- *"Make it shorter and more casual."*
+- *"Add a sentence about the free Q&A at the end."*
+- *"Give me 3 subject-line options."*
+
+This back-and-forth — **iterative refinement** — beats agonizing over one perfect prompt.
+
+## Minute 4, up close — try a second, different task
+
+Pick one to prove it's general-purpose:
+
+- *"Summarise this article in 5 bullet points: [paste text]."*
+- *"Explain compound interest to me like I'm 12, with one example."*
+- *"I have chicken, rice, and spinach. Give me a 20-minute dinner."*
+
+## Minute 5, up close — the one safety habit
+
+:::warning[Verify before you trust]
+AI can sound confident and still be **wrong** — especially about facts, numbers, dates, quotes, and citations. For anything that matters, **check it**. This isn't a flaw you can prompt away; it's how the tool works. See [Hallucinations & How to Reduce Them](/docs/foundations).
+:::
+
+<Callout type="takeaways" items={[
+  "Context beats keywords: state the goal, length, audience, tone, and what 'done' looks like",
+  "Iterative refinement (plain-language follow-ups) beats chasing one perfect prompt",
+  "Claude is general-purpose — try a second, unrelated task to feel it",
+  "Always verify anything that matters; confidence is not correctness"
+]} />
+
+## Check yourself
+
+<Quiz title="Check yourself" questions={[
+  {
+    q: "What is the single biggest beginner upgrade to your prompts?",
+    options: [
+      "Using more keywords, like a search engine",
+      "Giving context and saying what you want (goal, length, audience, tone)",
+      "Always paying for the premium tier first"
+    ],
+    answer: 1,
+    explain: "The page calls this 80% of prompting — name the goal, length, audience, tone, and what 'done' looks like. It works on every AI."
+  },
+  {
+    q: "Your first answer isn't quite right. What does the page recommend?",
+    options: [
+      "Start over and engineer one perfect prompt",
+      "Reply in plain language to refine it (iterative refinement)",
+      "Accept it as-is because you can't change it"
+    ],
+    answer: 1,
+    explain: "Iterative refinement — follow-ups like 'make it shorter and more casual' — beats agonizing over one perfect prompt."
+  },
+  {
+    q: "What is the one safety habit to adopt from minute 5?",
+    options: [
+      "Trust confident-sounding answers",
+      "Verify anything that matters — facts, numbers, dates, quotes, citations",
+      "Only ask questions you already know the answer to"
+    ],
+    answer: 1,
+    explain: "AI can sound confident and still be wrong. For anything that matters, check it — this isn't a flaw you can prompt away."
+  }
+]} />
+
+## You're off the ground 🎉
+
+Where to next:
+
+- Make every answer better → [Prompting Basics](/docs/prompting/basics)
+- Pick a structured plan → [Learning Paths](/docs/start-here/learning-paths)
+- Use AI for real work → [Everyday Productivity](/docs/playbooks/productivity)
+- Something felt off? → [Troubleshooting: "Why did Claude do that?"](/docs/contribute/troubleshooting)
+
+
+## Next
+
+- [Learning Paths (Choose Your Track)](/docs/start-here/learning-paths)

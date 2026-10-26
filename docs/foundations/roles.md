@@ -1,0 +1,102 @@
+# System, User & Assistant Roles
+
+> Source: https://derob98.github.io/ailmanac/docs/foundations/roles · AILmanac (CC BY 4.0) · last verified 2026-09-30
+
+The anatomy of a conversation and why the system prompt is your best lever.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={["The three roles every AI conversation is built from — and what each one is for", "Why the system prompt is the single highest-leverage place to steer behavior", "How the same idea appears in chat apps, Claude Code, and the API", "A common trap: burying rules in a user turn instead of the system message"]} />
+
+Every AI conversation is built from **messages**, and each message has a **role**. Understanding the three roles explains how to steer the model — and why some instructions stick while others don't.
+
+## The three roles
+
+<Steps items={[{title: "system — the standing brief", body: "Top-level setup for the whole conversation: who the model should be, the rules, the output format. Set once, applies to every turn that follows."}, {title: "user — your turn each time", body: "Your questions and inputs, one turn at a time. Keep these focused on the actual task; don't re-paste the standing rules every turn."}, {title: "assistant — the model's reply", body: "The model's responses. You can also put words in the assistant's mouth as few-shot examples (see /docs/prompting/few-shot) — the model treats them as prior turns and continues in that style."}]} />
+
+```mermaid
+flowchart TD
+  S["system: You are a precise financial analyst.
+  Always show your assumptions."] --> C[Conversation]
+  U1[user: Summarize this 10-K] --> C
+  A1[assistant: ...] --> C
+  U2[user: Now flag the risks] --> C
+```
+
+## Why the system prompt is your most powerful lever
+
+The system message frames **everything that follows**. It's where you set the model's role, standards, tone, and hard rules — and the model weights it heavily. If you want consistent behavior across a whole conversation (or app), put it here, not buried in a user turn.
+
+Same idea, three surfaces:
+
+| Surface | What plays the system-prompt role |
+|---|---|
+| **Chat apps** (Claude.ai, ChatGPT, Gemini) | Your account [custom instructions](/docs/claude-app/custom-instructions) |
+| **Claude Code** | [`CLAUDE.md`](/docs/claude-code/claude-md) at the project root |
+| **The API** | The `system` parameter on the request ([first call](/docs/api/first-call), [System Prompts](/docs/prompting/system-prompts)) |
+
+## A worked before/after
+
+The most common mistake is putting the standing rules into every user turn instead of the system message. Watch what changes.
+
+**Before — rules jammed into a user turn, repeated every time:**
+
+<PromptCard title="Rules in the user turn (fragile)">{`user: You are a precise financial analyst. Always show your assumptions.
+Never invent numbers. Now: summarize this 10-K.
+[10-K text]`}</PromptCard>
+
+**After — rules hoisted to the system message, user turns stay clean:**
+
+<PromptCard title="Rules in the system message (durable)">{`system: You are a precise financial analyst. Always show your assumptions.
+Never invent numbers. Cite the section of the filing for each claim.
+
+user: Summarize this 10-K.
+[10-K text]
+
+user: Now flag the risks.`}</PromptCard>
+
+The "after" version keeps behavior stable across turns, halves the tokens you resend each turn, and makes the app easier to change — you edit the standing brief in one place.
+
+## Writing assistant turns yourself
+
+You can write `assistant` turns yourself — but *where* you put them matters, and the rules changed.
+
+**Complete assistant turns, earlier in the conversation, are a [few-shot](/docs/prompting/few-shot) example.** This still works everywhere, and it's the sturdy way to enforce a template: show one finished answer in the shape you want, then ask the real question.
+
+<PromptCard title="A finished example turn, then the real ask">{`system: You are a code reviewer. Answer with exactly these sections: Summary, Risks, Suggested changes.
+
+user: Review this pull request. [example diff]
+
+assistant: ## Summary
+Renames the token helper and adds an expiry guard.
+
+## Risks
+- The guard uses < rather than <=, so a token expiring this second passes.
+
+## Suggested changes
+- Switch the comparison to <=.
+
+user: Review this pull request. [the real diff]`}</PromptCard>
+
+**A half-finished assistant turn at the very end — a "prefill" — is retired on current Claude models.** It used to be the trick for forcing JSON or skipping a preamble; on Claude 4.6 and later, a request whose final message is a prefilled assistant turn returns a 400 error. Put the format rule in the system message instead, or bind it with [structured outputs](/docs/api/structured-output).
+
+<VerifyNote lastVerified="2026-09-30" source="https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices">
+Anthropic's prompting reference states that prefilled responses on the last assistant turn are not supported starting with Claude 4.6 models and that such requests return a 400 error; earlier models still accept them, and assistant messages elsewhere in the conversation are unaffected.
+</VerifyNote>
+
+## Common mistakes
+
+<Callout type="tip" items={["Rules in every user turn — put standing rules once in the system message; use user turns for the actual task.", "Contradicting yourself across turns — a later, explicit user instruction can override a vague system one. Be consistent.", "Treating the assistant role as read-only — you can write complete assistant turns as few-shot examples. Just don't leave a half-finished one at the end: that's a prefill, and it's a 400 on Claude 4.6+.", "Overloading the system prompt with facts that change — put volatile facts (docs, data, current state) into the user turn or retrieval context, not the system message."]} />
+
+## Check yourself
+
+<Quiz title="Check yourself" questions={[{q: "Where should standing rules like tone, format, and role live?", options: ["Repeated in every user turn so the model doesn't forget", "In the system message, set once", "In the assistant's first reply", "In the model configuration, not the prompt"], answer: 1, explain: "The system message frames the whole conversation. Setting rules once there is more durable, cheaper, and easier to change than repeating them in every user turn."}, {q: "In Claude Code, which file plays the same role as the API's system parameter?", options: ["package.json", "CLAUDE.md", "README.md", ".env"], answer: 1, explain: "CLAUDE.md at the project root is Claude Code's standing brief — the equivalent of a system prompt for that project."}, {q: "Can you write assistant turns yourself?", options: ["No — the assistant role is read-only", "Yes — complete assistant turns earlier in the conversation work as few-shot examples, but a half-finished one at the very end is a prefill and returns a 400 on Claude 4.6+", "Only in chat apps, never on the API", "Only if you use fine-tuning"], answer: 1, explain: "Writing finished assistant turns as examples is standard and still supported. Leaving the final assistant turn half-finished — a prefill — is what current Claude models reject with a 400."}, {q: "A user turn now says something that contradicts the system prompt. What tends to happen?", options: ["The system prompt always wins", "A later, explicit user instruction can override a vague system one — be consistent to avoid surprises", "The model refuses to answer", "The model averages the two"], answer: 1, explain: "The system prompt is weighted heavily, but a clear, explicit user instruction can override a vague one. Consistency across roles matters."}]} />
+
+<Callout type="takeaways" items={["Three roles: system sets the brief, user asks per-turn, assistant replies — and you can write finished assistant turns yourself as examples.", "The system prompt is the highest-leverage lever — put standing rules there once.", "Chat custom instructions, CLAUDE.md, and the API `system` field are the same idea on three surfaces.", "Volatile facts belong in user turns or retrieval, not the system message.", "Don't end a request on a half-finished assistant turn: prefills return a 400 on Claude 4.6 and later."]} />
+
+## Next
+
+- [System Prompts](/docs/prompting/system-prompts)
+- [Prompting Basics](/docs/prompting/basics)
+- [Custom Instructions & Styles](/docs/claude-app/custom-instructions)
+- [Tokens, Context & Memory](/docs/foundations/tokens-and-context)

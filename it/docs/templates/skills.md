@@ -1,0 +1,103 @@
+# Pacchetti di Skill e modelli SKILL.md
+
+> Source: https://derob98.github.io/ailmanac/it/docs/templates/skills · AILmanac (CC BY 4.0) · last verified 2026-07-20
+
+Agent Skill pronte all'uso suddivise per tipo di utente, più come scriverne di tue.
+
+<LevelBadge level="all" />
+
+<VerifyNote lastVerified="2026-07-20" source="https://code.claude.com/docs/en/skills">
+La struttura dei file delle skill e i contesti in cui le skill possono essere usate (Claude Code, Claude.ai, Cowork, sessioni cloud) evolvono — verifica i dettagli nella documentazione ufficiale delle Skill. I comandi personalizzati sono ora uniti alle skill: i file in `.claude/commands/` funzionano ancora, ma la forma consigliata sono le skill.
+</VerifyNote>
+
+Una **Skill** fornisce a Claude competenze mirate che carica *su richiesta* quando la tua
+richiesta corrisponde — così non devi rispiegare le tue esigenze ogni volta. AILmanac include una serie di
+**pacchetti di skill pronti all'uso**, uno per ciascun tipo di utente. Approfondisci il concetto nella
+pagina [Skill](/docs/claude-code/skills).
+
+## Pacchetti già pronti
+
+Si trovano nella cartella
+[`plugins/ailmanac/skills`](https://github.com/derob98/ailmanac/tree/main/plugins/ailmanac/skills) del repository:
+
+| Pacchetto | Per | Cosa fa |
+|---|---|---|
+| `ailmanac` | Chiunque faccia domande su Claude o su altri strumenti di IA | Cerca la risposta in questa guida e cita la pagina con la sua data di verifica |
+| `claude-md-check` | Utenti di Claude Code | Controlla il tuo `CLAUDE.md` rispetto al tuo repository e a come vengono caricati i file di memoria |
+| `writing-content-pro` | Scrittori, marketer, creator | Brief → bozza in più passaggi → adatta alla tua voce → riutilizza |
+| `developer-workflow` | Sviluppatori | Coding orientato al contesto, revisioni, test, commit chiari |
+| `research-analyst` | Ricercatori, analisti | Sintesi ancorata alle fonti con disciplina nelle citazioni |
+| `data-analyst` | Utenti di dati e fogli di calcolo | SQL/formule + letture in linguaggio chiaro + controlli di sanità statistica |
+| `business-marketing` | Founder, titolari di PMI | Posizionamento, copy, comunicazioni ai clienti, pianificazione leggera |
+| `student-learning` | Studenti e apprendenti | Tutoraggio socratico + teach-back (impara, non limitarti a copiare) |
+| `everyday-productivity` | Tutti | Email, riassunti, pianificazione, decisioni |
+
+Ciascuno incorpora le regole della casa: **dai contesto, itera e verifica ciò che conta.**
+
+## Installarli (Claude Code)
+
+Tutti insieme, come plugin:
+
+```bash
+claude plugin marketplace add derob98/ailmanac --sparse .claude-plugin plugins
+claude plugin install ailmanac@ailmanac
+```
+
+Oppure copia un singolo pacchetto da un clone del repository:
+
+```bash
+# personal — available in all your projects
+mkdir -p ~/.claude/skills && cp -r plugins/ailmanac/skills/writing-content-pro ~/.claude/skills/
+
+# or per-project — shareable with your team via the repo
+mkdir -p .claude/skills && cp -r plugins/ailmanac/skills/writing-content-pro .claude/skills/
+```
+
+Claude attiva la skill automaticamente quando la tua richiesta corrisponde alla sua
+`description`. Su Claude.ai / Cowork, crea una skill e incolla l'
+`SKILL.md` del pacchetto (la disponibilità varia in base al piano).
+
+## Scrivere la tua — il modello minimo
+
+Una skill è una cartella con un `SKILL.md`: frontmatter YAML + istruzioni. La
+`description` è il **trigger** — scrivila nella forma "Use when…". Solo la `description`
+è obbligatoria; il nome del comando deriva dal nome della cartella.
+
+```markdown
+---
+description: Use when the user is doing X — be specific about the trigger so Claude knows when to load this and when not to.
+---
+
+# My Skill
+
+Short statement of the role/goal.
+
+## Workflow
+1. Step one…
+2. Step two…
+
+## Rules
+- The non-negotiables (accuracy, privacy, output format).
+
+## Default output
+What a good response looks like.
+```
+
+### Checklist di validità
+
+- [ ] La cartella è in kebab-case — diventa il `/command-name`.
+- [ ] `description` indica **quando usarla** (il trigger), non solo cos'è. Metti per primo il caso d'uso principale (la `description` + `when_to_use` combinate vengono troncate a 1.536 caratteri nell'elenco delle skill).
+- [ ] Le istruzioni sono specifiche e delimitate — un solo compito chiaro.
+- [ ] Nessun segreto, credenziale o dato personale/del cliente.
+- [ ] Indica come gestire l'incertezza (non inventare; verifica).
+
+## Correlati
+
+- [Skill: competenze su richiesta](/docs/claude-code/skills) — il concetto completo
+- [Comandi slash personalizzati](/docs/claude-code/slash-commands) — questi li attivi tu su richiesta
+- [Subagent](/docs/claude-code/subagents) — delega interi blocchi di lavoro
+
+
+## Avanti
+
+- [Configurazione MCP e scaffold di server](/docs/templates/mcp-config)

@@ -1,0 +1,147 @@
+# Glossário
+
+> Source: https://derob98.github.io/ailmanac/pt-BR/docs/start-here/glossary · AILmanac (CC BY 4.0)
+
+Mais de 40 termos de IA e do Claude em linguagem simples.
+
+<LevelBadge level="all" />
+
+Definições em linguagem simples, sem pressupor conhecimento prévio. Dê uma olhada geral ou procure por um termo que encontrou em outro lugar.
+
+**Revise o essencial com flashcards** — toque para virar:
+
+<Flashcards title="Termos fundamentais" cards={[
+  {front: "Agente", back: "Uma IA que executa ações em um laço — lê um objetivo, chama ferramentas, vê os resultados e repete até terminar."},
+  {front: "Token", back: "A unidade que os modelos leem e escrevem — aproximadamente ¾ de uma palavra. Limites de contexto e preços são medidos em tokens."},
+  {front: "MCP", back: "Model Context Protocol — um padrão aberto que permite ao Claude se conectar a ferramentas e fontes de dados externas."},
+  {front: "Janela de contexto", back: "O número máximo de tokens (seu prompt mais a resposta) que um modelo consegue considerar de uma vez."},
+  {front: "Prompt de sistema", back: "Instruções que definem o papel e as regras do modelo, separadas da mensagem do usuário."},
+  {front: "RAG", back: "Retrieval-Augmented Generation — busca documentos relevantes no momento da consulta e os fornece ao modelo como contexto."},
+]} />
+
+### Agente (Agent)
+Uma IA configurada para **executar ações em um laço** — ela lê um objetivo, chama ferramentas, vê os resultados e repete até terminar. O Claude Code é um agente para a sua base de código.
+
+### Anthropic
+A empresa que cria o Claude.
+
+### API (Application Programming Interface)
+Uma forma de o *seu* software conversar com o Claude programaticamente, em vez de digitar em uma janela de chat. Veja [Sua Primeira Chamada de API](/docs/api/first-call).
+
+### Artefato (Artifact)
+Uma saída viva e executável (um app, gráfico ou documento) que o Claude renderiza em um painel lateral no claude.ai, separado do chat.
+
+### Cadeia de raciocínio (Chain-of-thought, CoT)
+Pedir ao modelo para **raciocinar passo a passo** antes de responder, o que melhora a precisão em problemas difíceis.
+
+### Claude
+A família de modelos de IA (e aplicativos) feita pela Anthropic. "Claude" pode significar o app de chat, os modelos ou a marca, dependendo do contexto.
+
+### Claude Code
+A **ferramenta agêntica de linha de comando/IDE** da Anthropic, que pode ler e editar sua base de código, executar comandos e usar ferramentas. Veja [O que é o Claude Code](/docs/claude-code/what-is-claude-code).
+
+### CLAUDE.md
+Um arquivo de texto simples no qual você dá ao Claude Code instruções persistentes sobre o seu projeto — sua personalização de maior alavancagem.
+
+### Compactação (Compaction)
+Condensar automaticamente turnos mais antigos da conversa em um resumo curto quando a [janela de contexto](/docs/foundations/tokens-and-context) enche, para que uma sessão longa possa continuar sem perder o fio. Veja [Gerenciamento de Contexto](/docs/claude-code/context-management).
+
+### Engenharia de contexto (Context engineering)
+Decidir deliberadamente o que entra na [janela de contexto](/docs/foundations/tokens-and-context) do modelo — instruções, exemplos, dados recuperados — para obter o melhor resultado. A disciplina por trás de prompting, RAG e memória.
+
+### Janela de contexto (Context window)
+A quantidade máxima de texto (medida em **tokens**) que um modelo consegue considerar de uma vez — seu prompt *mais* a resposta dele. Ultrapasse isso e o conteúdo mais antigo é descartado.
+
+### Effort (esforço)
+Um controle nos modelos Claude mais recentes para definir aproximadamente **quanto o modelo pensa** antes de responder. Ajuste o nível à tarefa em vez de maximizá-lo — você paga pelo pensamento em latência e custo. Veja [Pensamento Estendido & Effort](/docs/api/thinking-and-effort).
+
+### Embedding
+Uma lista de números que representa o *significado* de um trecho de texto, para que o software encontre coisas semelhantes em significado (não apenas com palavras-chave correspondentes). Alimenta a busca semântica e o RAG.
+
+### Eval (avaliação)
+Um teste repetível da qualidade da saída da IA, para que você saiba se uma mudança melhorou ou piorou as coisas.
+
+### Few-shot
+Incluir **alguns exemplos resolvidos** no seu prompt para mostrar ao modelo o padrão que você quer.
+
+### Fine-tuning (ajuste fino)
+Treinar mais um modelo com seus próprios exemplos para especializá-lo. Normalmente é o último recurso — [tente prompting e RAG primeiro](/docs/foundations).
+
+### Grounding (ancoragem)
+Instruir o modelo a responder **apenas a partir do contexto que você fornece** — e a dizer "não sei" quando a resposta não está ali. A principal defesa contra alucinação no nível do prompt. Veja [a Biblioteca de Padrões](/docs/prompting/pattern-library).
+
+### Barreiras de proteção (Guardrails)
+Regras e limites que mantêm o comportamento de uma IA seguro e dentro da tarefa — por exemplo, regras de permissão, "execute os testes antes de concluir" ou aprovação humana para ações arriscadas. Veja [Protegendo Agentes](/docs/security/securing-agents).
+
+### Alucinação (Hallucination)
+Quando um modelo afirma algo **falso, mas com confiança**. A habilidade central é a verificação. Veja [Alucinações](/docs/foundations).
+
+### Hook
+No Claude Code, um comando que é executado **automaticamente** em um evento do ciclo de vida (por exemplo, após cada edição de arquivo) para impor formatação, barreiras de aprovação ou segurança.
+
+### Inferência (Inference)
+O ato de executar um modelo para obter uma saída (em oposição a treiná-lo).
+
+### Latência (Latency)
+Quanto tempo você espera por uma resposta. Modelos maiores costumam ser mais lentos; o [streaming](/docs/api/streaming) melhora a latência *percebida* ao mostrar a saída à medida que ela é gerada.
+
+### LLM (Large Language Model)
+O tipo de IA por trás do Claude: treinado para **prever o próximo trecho de texto**, o que acaba sendo suficiente para escrever, programar, resumir e raciocinar. Veja [O que é um LLM?](/docs/foundations).
+
+### MCP (Model Context Protocol)
+Um **padrão aberto** para conectar IA a ferramentas e dados externos (bancos de dados, GitHub, navegadores). Um "servidor MCP" expõe uma ferramenta; o Claude pode chamá-la. Veja [MCP](/docs/claude-code).
+
+### Multimodal
+Um modelo que lida com **mais do que texto** — por exemplo, imagens e PDFs como entrada.
+
+### Estilo de saída (Output style)
+No Claude Code, um preset que muda **como o Claude se comunica** (por exemplo, conciso, explicativo, didático) sem mudar o que ele pode fazer. Veja [Estilos de Saída](/docs/claude-code/output-styles).
+
+### Modo de permissão (Permission mode)
+No Claude Code, quanto ele pode fazer **sem perguntar** — desde solicitar confirmação a cada ação até aceitar edições automaticamente. O principal botão de velocidade-vs-segurança. Veja [Permissões](/docs/claude-code/permissions).
+
+### Modo de plano (Plan mode)
+Um modo somente leitura do Claude Code que pesquisa e propõe um plano **antes** de tocar em qualquer arquivo — você aprova antes que ele aja. Veja [Modo de Plano](/docs/claude-code/plan-mode).
+
+### Prompt
+O que você envia ao modelo: suas instruções, sua pergunta e qualquer contexto.
+
+### Cache de prompt (Prompt caching)
+Reutilizar a parte inicial inalterada de um prompt entre chamadas para reduzir custo e latência. Veja [Cache de Prompt](/docs/api).
+
+### Injeção de prompt (Prompt injection)
+Um ataque em que **instruções maliciosas escondidas em conteúdo** que a IA lê (uma página da web, um documento) tentam sequestrá-la. Veja [Injeção de Prompt](/docs/security).
+
+### RAG (Retrieval-Augmented Generation)
+Buscar trechos relevantes dos *seus* dados e adicioná-los ao prompt para que o modelo responda sobre eles. Veja [RAG](/docs/foundations).
+
+### Raciocínio / pensamento estendido (Reasoning / extended thinking)
+Um modo em que o modelo gasta computação extra "pensando" antes de responder, para tarefas mais difíceis. Nos modelos mais recentes você o ajusta com [effort](/docs/api/thinking-and-effort).
+
+### Skill
+Uma capacidade empacotada (instruções + scripts opcionais) que o Claude carrega **sob demanda** quando relevante. Veja [Skills](/docs/claude-code).
+
+### Slash command
+Um atalho prefixado por `/` no Claude Code — embutido (como `/clear`) ou seu próprio prompt reutilizável — que dispara uma ação definida. Veja [Slash Commands](/docs/claude-code/slash-commands).
+
+### Saída estruturada (Structured output)
+Obter resultados em um formato estrito e legível por máquina (por exemplo, JSON que segue um schema) em vez de texto livre — para que outros softwares possam confiar neles. Veja [Saída Estruturada](/docs/api/structured-output).
+
+### Subagente (Subagent)
+Uma instância separada do Claude, com seu próprio contexto e ferramentas, usada para **delegar** parte de uma tarefa (por exemplo, pesquisa) para que a sessão principal permaneça focada.
+
+### Prompt de sistema (System prompt)
+As instruções de alto nível que definem o papel e as regras do modelo para uma conversa inteira — sua alavanca de direcionamento mais poderosa.
+
+### Temperatura (Temperature)
+Uma configuração (em alguns modelos) que controla a aleatoriedade: baixa = focada e repetível, alta = variada e criativa.
+
+### Token
+A unidade que os modelos leem e contam — aproximadamente ¾ de uma palavra em inglês. Preços e limites de contexto são medidos em tokens. Veja [Tokens & Contexto](/docs/foundations).
+
+### Uso de ferramentas / chamada de funções (Tool use / function calling)
+Permitir que o modelo chame funções que você define (busca, calculadora, sua API) e use os resultados. Veja [Uso de Ferramentas](/docs/api).
+
+---
+
+Faltando um termo? [Adicione-o](/docs/contribute/contribute-in-10-minutes) — entradas de glossário são uma primeira contribuição perfeita.

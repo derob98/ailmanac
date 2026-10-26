@@ -1,0 +1,60 @@
+# Claude 固有のプロンプティング
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/prompting/prompting-claude · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+本当に Claude 固有なものと、普遍的なものの違い。
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/overview">
+Anthropic のプロンプトエンジニアリングのガイダンスはモデルごとに進化します — 現在のベストプラクティスは公式のプロンプトエンジニアリングのドキュメントを確認してください。
+</VerifyNote>
+
+[プロンプティング](/docs/prompting/basics)のほとんどは普遍的です。しかし、いくつかの手法は特に Claude で効果的であり — そしていくつかの古いモデルの習慣は今や逆効果です。このレッスンは、ノイズから信号を分けます: 何が本当に Claude 固有なのか。
+
+<Callout type="objectives" items={["活かす価値のある Claude 固有の手法を見分ける — XML タグ、明確さ、役割、思考、例、プリフィル", "今や裏目に出る古いモデルの習慣（ALL-CAPS、脅し、過剰に作り込んだ足場）を捨てる", "Claude の特徴として持ち歩くべき 2 つの習慣 — XML タグへの親和性とプリフィル — を知る", "モデルを切り替えたときに何を再確認すべきかを理解する"]} />
+
+## Claude ではこれらを活かす
+
+これらは Claude で最も効果のある動きです。最初の 1 つは、身につけられる最も価値の高い習慣です。
+
+- **[XML タグ](/docs/prompting/xml-tags)。** Claude は、入力・指示・例に名前付きタグを使った構造化プロンプトによく調整されています。これは最も価値の高い Claude の習慣です。
+- **明確かつ率直に。** 目標、制約、そして「完了」がどう見えるかを述べる。Claude は明示的な指示に忠実に従います。
+- **役割を与える** — [システムプロンプト](/docs/foundations/roles)を通じて。
+- **難しい問題では考えさせる** — ステップごとの推論を求めるか、推論モデルでは[拡張思考 / エフォート](/docs/api/thinking-and-effort)を使う（その場合、明示的に CoT を求める必要がないことがよくあります）。
+- **例を使う**（[フューショット](/docs/prompting/few-shot)）— 形式やエッジケースのために。
+- **プリフィル** — Claude の応答の冒頭（API 上）を先に書いて形式を誘導する。
+
+### プリフィルを試す
+
+プリフィルとは、アシスタントのターンを自分で始めて、欲しい形式で Claude に続けさせることです。API 上では、開き文字や見出しでアシスタントのターンを始めます:
+
+<PromptCard title="Prefill to push JSON output">{`{`}</PromptCard>
+
+<PromptCard title="Prefill a heading to push structure">{`## Summary`}</PromptCard>
+
+<Callout type="tip" items={["{ でアシスタントのターンを始めて JSON を押し出すか、見出しで始めて構造化された出力を押し出す。プリフィルは API 限定のレバーで、指示に言葉を費やさずに形式を誘導する。"]} />
+
+## これらの古い習慣を捨てる
+
+新しく、字義どおりに従う Claude モデルはルールを変えます。古いモデルで役立ったトリックは今や邪魔になります。
+
+<Callout type="warning" items={["ALL-CAPS や脅し口調のプロンプト（「YOU MUST… OR ELSE」）を控える。新しい Claude モデルは指示に字義どおり従い、丁寧な言い回しの具体的な指示の方が、怒鳴るよりうまくいく。", "手の込んだ「ジェイルブレイク風」の足場で過剰に作り込まない — 明確で正直な指示がトリックに勝る。", "少ない方がよいことが多い — 引き締まったプロンプトは、頼みごとを埋もれさせる冗長なプロンプトに勝る。"]} />
+
+## Claude 対他のモデル
+
+*原則*は転用できます（[クロス AI プロンプト翻訳](/docs/prompting/cross-ai-translation)を参照）が、Claude 固有として最も覚えておく価値のあるものが 2 つあります。
+
+<Steps items={[{title: "デフォルトで XML タグ", body: "入力、指示、例を名前付きタグで囲む。Claude のタグ親和性により、これが最も信頼できる構造化の習慣になる。"}, {title: "API ではプリフィルに手を伸ばす", body: "アシスタントのターンを仕込んで形式を固定する — JSON には開き波括弧、構造には見出し。"}, {title: "モデルを切り替えたら口調と書式を再確認する", body: "Claude から離れるときは、口調の強さと書式の手がかりを再確認する。ここで字義どおりなものが、きれいに転用されるとは限らない。"}]} />
+
+<Flashcards title="Claude 固有のクイックリファレンス" cards={[{front: "最も価値の高い Claude の習慣", back: "入力・指示・例に名前付き XML タグを使った構造化プロンプト。"}, {front: "プリフィル", back: "API 上で Claude の応答を始めて形式を誘導する — 例: JSON には { で、構造には見出しで始める。"}, {front: "ALL-CAPS / 脅しプロンプト", back: "捨てる。新しい Claude モデルは、怒鳴るより、字義どおりで丁寧な言い回しの具体的な指示によく従う。"}, {front: "過剰に作り込んだ足場", back: "避ける。明確で正直な指示がジェイルブレイク風のトリックに勝る。"}, {front: "拡張思考 / エフォート", back: "推論モデルでは、難しい問題で Claude に考えさせる — 明示的に思考連鎖を求める必要がないことが多い。"}]} />
+
+<Callout type="takeaways" items={["XML タグは最も価値の高い Claude の習慣。プリフィルは最も役立つ Claude 固有の形式レバー。", "新しい Claude モデルは指示に字義どおり従う — 大声や脅しではなく、明確かつ率直に。", "少ない方がよい: 引き締まった正直なプロンプトは、手の込んだ足場に勝る。", "原則はモデル間で転用できるが、切り替えたら口調の強さと書式の手がかりを再確認する。"]} />
+
+<Quiz title="理解度チェック" questions={[{q: "最も価値の高い Claude 固有の習慣として説明されている手法はどれですか?", options: ["ALL-CAPS による強調", "入力・指示・例への名前付き XML タグ", "脅し口調のプロンプティング"], answer: 1, explain: "Claude は名前付き XML タグを使った構造化プロンプトによく調整されている — これが最も価値の高い Claude の習慣として挙げられている。"}, {q: "プリフィルは API 上で Claude の出力形式をどう誘導しますか?", options: ["形式を ALL-CAPS で怒鳴ることで", "アシスタントの応答を始めることで — 例: JSON には { で、構造には見出しで", "ジェイルブレイク風の足場を加えることで"], answer: 1, explain: "Claude の応答の冒頭をプリフィルすること（JSON を押し出すには { で、構造を押し出すには見出しで始める）が形式を誘導する。"}, {q: "新しい Claude モデルで ALL-CAPS や「YOU MUST… OR ELSE」のプロンプトをどうすべきですか?", options: ["もっと強く使う", "控える — 字義どおりで丁寧な言い回しの具体的な指示の方がうまくいく", "手の込んだ足場と組み合わせる"], answer: 1, explain: "新しい Claude モデルは指示に字義どおり従う。具体的で丁寧な指示が、怒鳴ることや脅しに勝る。"}]} />
+
+## 次へ
+
+- [XML タグでプロンプトを構造化する](/docs/prompting/xml-tags)
+- [クロス AI プロンプト翻訳](/docs/prompting/cross-ai-translation)
+- [拡張思考とエフォート](/docs/api/thinking-and-effort)

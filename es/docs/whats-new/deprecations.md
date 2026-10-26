@@ -1,0 +1,69 @@
+# Vigilancia de obsolescencia y migración
+
+> Source: https://derob98.github.io/ailmanac/es/docs/whats-new/deprecations · AILmanac (CC BY 4.0) · last verified 2026-10-25
+
+Modelos retirados, flags renombrados y cambios incompatibles con notas de migración.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-10-25" source="https://platform.claude.com/docs/en/about-claude/model-deprecations">
+Los calendarios de obsolescencia y los detalles de migración provienen de Anthropic y cambian — confirma siempre las fechas y los reemplazos en la documentación oficial antes de migrar.
+</VerifyNote>
+
+Los modelos se retiran, los parámetros se renombran, los comportamientos cambian. Esta página realiza el seguimiento de los **cambios incompatibles** para que las actualizaciones no te sorprendan. Si construyes sobre la API, revísala periódicamente.
+
+## Por qué esto importa
+
+Un ID de modelo fijado acabará quedando **obsoleto** y luego será **eliminado**. El código que lo codifica a mano se rompe. Un poco de higiene evita sorpresas a las 2 de la madrugada.
+
+## Reglas de supervivencia
+
+- **Lee los IDs de modelo desde la configuración**, nunca repartas literales por el código — así migrar es un cambio de una sola línea.
+- **Vigila los anuncios** para conocer las fechas de obsolescencia y los reemplazos recomendados.
+- **Vuelve a ejecutar tus [evals](/docs/foundations/evals)** cuando cambies de modelo — el comportamiento puede variar incluso en un modelo "más nuevo y mejor".
+- **Prueba antes de la fecha límite**, no después de la eliminación.
+
+## Tipos comunes de cambio
+
+| Cambio | Ejemplo | Qué hacer |
+|---|---|---|
+| Modelo retirado | Un ID de modelo antiguo deja de funcionar | Pasa al sucesor recomendado; vuelve a evaluar |
+| Parámetro sustituido | Un control de razonamiento/presupuesto reemplazado por `effort` | Actualiza las llamadas; consulta [Pensamiento y esfuerzo](/docs/api/thinking-and-effort) |
+| Cambio de predeterminado | Un nuevo modelo/comportamiento predeterminado | Fija el modelo de forma intencionada; verifica que tus prompts siguen funcionando |
+| Actualización de endpoint/SDK | Nueva versión mayor del SDK | Lee la guía de migración; actualiza de forma deliberada |
+
+## Vigilancia actual
+
+El calendario autorizado vive en la [página oficial de obsolescencia de modelos](https://platform.claude.com/docs/en/about-claude/model-deprecations) — confirma las fechas ahí antes de migrar. Anthropic da al menos 60 días de aviso antes de retirar un modelo publicado.
+
+### Modelos obsoletos
+
+Un modelo de Claude publicado públicamente está en la ventana «obsoleto, pero aún no retirado» (verificado el 25 de octubre de 2026): **`claude-sonnet-4-5-20250929` (Sonnet 4.5) quedó obsoleto el 30 de septiembre de 2026 y se retira el 30 de noviembre de 2026.** El reemplazo recomendado por Anthropic es `claude-sonnet-5-5`. Las llamadas siguen funcionando hasta la fecha de retiro y después fallan — si todavía tienes ese ID fijado en el código, esa es tu migración, y la ventana es ahora de unas cinco semanas.
+
+También obsoleto: `claude-mythos-preview`, disponible solo por invitación (declarado obsoleto el 9 de junio de 2026, fecha de retiro por anunciar) — migra al modelo actual con verificación previa, `claude-mythos-5-1`. (`claude-mythos-5` sigue Active, pero tiene su propia guía de migración que apunta a 5.1, así que migrar dos veces es trabajo perdido.)
+
+`claude-haiku-4-5-20251001` es el siguiente ID a vigilar y ahora es el único modelo de la gama que ha **superado** su fecha de retiro más temprana posible: ese mínimo era el **15 de octubre de 2026** y ya pasó (el siguiente es el de Opus 4.5, el 24 de noviembre de 2026). También figura entre los **modelos legacy** de la descripción general de modelos, con un sucesor directo en `claude-haiku-5-5` (publicado el 7 de octubre de 2026). A fecha del 25 de octubre de 2026, la tabla de estado oficial lo sigue listando como **Active** sin ninguna obsolescencia anunciada, así que las dos lecturas no entran en conflicto: en el vocabulario de ciclo de vida de Anthropic, «legacy» significa *que ya no recibe actualizaciones y puede quedar obsoleto en el futuro*, un peldaño antes de «obsoleto». Que se cumpla una fecha «no antes de» es una señal para planificar, no una caída: Anthropic se compromete a avisar con al menos 60 días de antelación, y ese plazo empieza a contar cuando llega el aviso, no cuando se cumple la fecha mínima. Sonnet 4.5 es el ejemplo práctico: su fecha mínima era el 29 de septiembre de 2026, el aviso de obsolescencia llegó el 30 de septiembre y el retiro real es dos meses después. Si tienes este ID fijado, ahora conviene programar la migración en lugar de limitarse a vigilarla — y no es un simple cambio de ID: consulta [Claude Haiku 5.5: el precipicio de precio de los 100K](/docs/models/haiku-5-5-the-100k-price-cliff) para ver los cinco cambios que devuelven 400 y los seis que devuelven 200. Confirma en la [tabla de estado oficial de modelos](https://platform.claude.com/docs/en/about-claude/model-deprecations#model-status) antes de migrar.
+
+### Retirados recientemente
+
+- `claude-opus-4-1-20250805` (Opus 4.1) fue **retirado el 5 de agosto de 2026** — migra a `claude-opus-4-8` (o directamente a `claude-opus-5`).
+- `claude-opus-4-20250514` (Opus 4) y `claude-sonnet-4-20250514` (Sonnet 4) fueron **retirados el 15 de junio de 2026** — los reemplazos que indica Anthropic son `claude-opus-4-8` y `claude-sonnet-4-6` respectivamente (o ve directamente a `claude-opus-5` / `claude-sonnet-5`).
+
+Las llamadas a cualquier ID retirado ahora devuelven un error de API. Si tu código todavía fija uno de ellos, eso es lo primero que hay que arreglar.
+
+### Obsolescencia de parámetros
+
+Los controles de muestreo `temperature`, `top_p` y `top_k` están en camino de desaparecer, y **ahora hay dos reglas distintas según la versión de API que envíes.**
+
+- **Con `anthropic-version: 2023-06-01`** (lo que envía cualquier versión mayor del SDK publicada antes del 21 de octubre de 2026): en los **modelos de la generación Claude 4.7 y posteriores** — Opus 4.7, Opus 4.8, Opus 5, Opus 5.5, Sonnet 5, Sonnet 5.5, Haiku 5.5, Fable 5, Fable 5.1, Mythos 5, Mythos 5.1 — **y en Claude Mythos Preview**, asignar a cualquiera de ellos un valor **distinto del predeterminado** devuelve un **error 400**. Los valores predeterminados se aceptan, y los modelos anteriores siguen aceptando valores no predeterminados. Fíjate en los números de versión, no en los nombres: **Haiku 5.5 rechaza** los valores de muestreo no predeterminados, mientras que el anterior **Haiku 4.5 todavía los acepta**, igual que Opus 4.6 y Sonnet 4.6.
+- **Con `anthropic-version: 2026-10-21`**: los tres parámetros están **eliminados**. Enviar uno devuelve un **400 en todos los modelos, incluso con el valor predeterminado del parámetro**. Las versiones mayores más recientes de los SDK y la CLI `ant` los han eliminado de sus tipos de petición y de sus flags.
+
+En ambos casos la solución es la misma: omite los tres y dirige el comportamiento con [prompting](/docs/prompting/prompting-claude) y [Pensamiento y esfuerzo](/docs/api/thinking-and-effort). El único caso sin sustituto es una temperatura *deliberadamente baja* en un modelo anterior que aún la respeta — las opciones documentadas por Anthropic son dejar de enviar el parámetro o mantener esa petición en `2023-06-01`. Desglose completo de en qué versión estás y qué más cambia con ella: [API Version 2026-10-21](/docs/api/api-version-2026-10-21).
+
+Confirma siempre tus IDs de modelo contra la tabla [Modelos y precios actuales](/docs/whats-new/models-and-pricing); si estás en un ID antiguo, planifica una migración.
+
+## Siguiente
+
+- [Errores, límites de tasa y fiabilidad](/docs/api/errors-and-rate-limits)
+- [Modelos y precios actuales](/docs/whats-new/models-and-pricing)
+- [Evaluar la calidad de la IA (Evals)](/docs/foundations/evals)

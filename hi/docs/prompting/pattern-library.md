@@ -1,0 +1,107 @@
+# प्रॉम्प्ट पैटर्न लाइब्रेरी
+
+> Source: https://derob98.github.io/ailmanac/hi/docs/prompting/pattern-library · AILmanac (CC BY 4.0)
+
+कॉपी-पेस्ट पैटर्न कार्ड जो किसी भी AI पर काम करते हैं।
+
+<LevelBadge level="all" />
+
+दोबारा इस्तेमाल होने वाले प्रॉम्प्टिंग पैटर्न का एक टूलबॉक्स। हर कार्ड आपको बताता है कि यह क्या है, इसे कब इस्तेमाल करना है, और एक कॉपी-पेस्ट टेम्पलेट देता है। ये आपस में जुड़ते हैं — इन्हें स्वतंत्र रूप से मिलाएँ। यहाँ नए हैं? पहले [प्रॉम्प्टिंग की बुनियादी बातें](/docs/prompting/basics) से शुरू करें।
+
+<Callout type="objectives" items={["11 मुख्य प्रॉम्प्टिंग पैटर्न और हर एक कब लागू होता है, यह पहचानें","किसी भी कार्य के लिए एक कॉपी-पेस्ट टेम्पलेट लें — zero-shot, few-shot, chain-of-thought, और बहुत कुछ","पैटर्न मिलाएँ (भूमिका + उदाहरण + आउटपुट बाध्यता + टालने की अनुमति) एक मज़बूत प्रॉम्प्ट में","भ्रम (hallucinations) कम करने के लिए grounding का उपयोग करें और कमज़ोर प्रॉम्प्ट ठीक करने के लिए meta-prompting का"]} />
+
+## Zero-shot (बस, स्पष्ट रूप से पूछें)
+
+**कब:** सरल, आम कार्य। **क्यों:** सबसे कम प्रयास, अक्सर पर्याप्त।
+
+<PromptCard title="Zero-shot सारांश">{`Summarize the text below in 5 bullets for a busy manager.
+TEXT: """{paste}"""`}</PromptCard>
+
+## Few-shot (उदाहरण दिखाएँ)
+
+**कब:** आपको कोई विशिष्ट फ़ॉर्मेट या शैली चाहिए। **क्यों:** उदाहरण वर्णन से तेज़ी से सिखाते हैं। देखें [Few-Shot को सही तरीके से करना](/docs/prompting/few-shot)।
+
+<PromptCard title="Few-shot सेंटिमेंट क्लासिफ़ायर">{`Classify the sentiment as positive/negative/neutral.
+Review: "Loved it, shipped fast" → positive
+Review: "Broke on day one" → negative
+Review: "{new review}" →`}</PromptCard>
+
+## Chain-of-thought (चरण-दर-चरण सोचें)
+
+**कब:** गणित, तर्क, बहु-चरणीय तर्कणा। **क्यों:** उत्तर देने से पहले तर्कणा सटीकता बढ़ाती है।
+
+<PromptCard title="Chain-of-thought">{`Work through this step by step, then give the final answer on its own line.
+PROBLEM: {problem}`}</PromptCard>
+
+## Decomposition (इसे टुकड़ों में बाँटें)
+
+**कब:** बड़े, अस्पष्ट कार्य। **क्यों:** छोटे उप-कार्य आसान और अधिक विश्वसनीय होते हैं।
+
+<PromptCard title="Decomposition">{`First, list the sub-tasks needed to {goal}. Then do them one at a time,
+showing each result before moving on.`}</PromptCard>
+
+## Role prompting (एक व्यक्तित्व सौंपें)
+
+**कब:** आप कोई विशिष्ट नज़रिया या मानक चाहते हैं। **क्यों:** प्रासंगिक व्यवहार को प्रेरित करता है।
+
+<PromptCard title="Role prompting">{`You are a meticulous senior copy editor. Edit the text for clarity and concision
+without changing meaning. Show a bullet list of the changes you made.`}</PromptCard>
+
+## आउटपुट-फ़ॉर्मेट बाध्यता
+
+**कब:** परिणाम किसी अन्य टूल में जाता है, या आप संगति चाहते हैं। **क्यों:** अनुमान योग्य आकार उपयोगी होते हैं।
+
+<PromptCard title="आउटपुट-फ़ॉर्मेट बाध्यता">{`Reply with ONLY valid JSON matching: {"title": string, "tags": string[]}.
+No prose, no markdown fences.`}</PromptCard>
+
+## Self-consistency / self-critique
+
+**कब:** सटीकता मायने रखती है। **क्यों:** दूसरा दौर पहले दौर की गलतियाँ पकड़ता है।
+
+<PromptCard title="Self-critique">{`Answer the question. Then, in a section called "Check", critique your own answer
+for errors or missing cases and revise if needed.`}</PromptCard>
+
+## Grounding (केवल दिए गए संदर्भ से उत्तर दें)
+
+**कब:** जब तथ्य मायने रखते हैं — आपके दस्तावेज़ों पर Q&A, RAG, कुछ भी जहाँ गलत उत्तर, कोई उत्तर न होने से बदतर है। **क्यों:** [भ्रम (hallucinations)](/docs/foundations/hallucinations) के ख़िलाफ़ सबसे बड़ा लीवर है मॉडल को कुछ गढ़ने से रोकना और उसे टालने की स्पष्ट अनुमति देना।
+
+<PromptCard title="Grounded Q&A">{`Answer the QUESTION using ONLY the CONTEXT below. Quote the exact sentence(s)
+you relied on. If the context does not contain the answer, reply exactly:
+"Not found in the provided context." Do not use outside knowledge.
+
+CONTEXT: """{paste your sources}"""
+QUESTION: {question}`}</PromptCard>
+
+## Meta-prompting (AI को आपका प्रॉम्प्ट सुधारने दें)
+
+**कब:** आपका प्रॉम्प्ट कमज़ोर प्रदर्शन करता है। **क्यों:** मॉडल यह पहचानने में अच्छा है कि उसमें क्या कमी है।
+
+<PromptCard title="Meta-prompting">{`Here's my prompt: "{prompt}". Ask me the 3 questions that would most improve it,
+then rewrite it incorporating sensible defaults.`}</PromptCard>
+
+## पुनरावृत्त परिष्करण
+
+**कब:** लगभग हमेशा। **क्यों:** पहला आउटपुट एक मसौदा है, मंज़िल नहीं।
+
+<PromptCard title="पुनरावृत्त परिष्करण">{`{after a result} Shorter and more concrete. Keep the second paragraph. Add one
+example. Drop the marketing tone.`}</PromptCard>
+
+:::tip[इन्हें मिलाएँ]
+एक मज़बूत असली प्रॉम्प्ट अक्सर होता है: एक **भूमिका** + एक **उदाहरण** + एक **आउटपुट बाध्यता** + **"मुझे नहीं पता" कहने** की अनुमति। कार्डों को परत-दर-परत लगाएँ।
+:::
+
+## कार्डों को परत-दर-परत कैसे लगाएँ
+
+<Steps items={[{title: "एक भूमिका से शुरू करें", body: "वह व्यक्तित्व या मानक सौंपें जो आप चाहते हैं — जैसे एक सावधान वरिष्ठ कॉपी एडिटर — ताकि प्रासंगिक व्यवहार प्रेरित हो।"},{title: "एक उदाहरण जोड़ें", body: "एक या दो few-shot उदाहरण दिखाएँ ताकि मॉडल आपका फ़ॉर्मेट या शैली किसी वर्णन से तेज़ी से सीख ले।"},{title: "एक आउटपुट बाध्यता जोड़ें", body: "आकार तय करें: केवल वैध JSON, 5 बुलेट, कोई markdown fence नहीं — जो भी अगले चरण को चाहिए।"},{title: "टालने की अनुमति दें", body: "मॉडल को कहने दें मुझे नहीं पता या दिए गए संदर्भ में नहीं मिला, बजाय कोई उत्तर गढ़ने के।"},{title: "पुनरावृत्त रूप से परिष्कृत करें", body: "पहले आउटपुट को मसौदा मानें। और छोटा, अधिक ठोस, यह पैराग्राफ रखें, वह स्वर हटाएँ माँगें — जब तक सही न हो जाए दोहराएँ।"}]} />
+
+<Flashcards title="पैटर्न याद करें" cards={[{front:"Zero-shot",back:"बस, स्पष्ट रूप से पूछें। सरल, आम कार्यों के लिए सबसे अच्छा — सबसे कम प्रयास, अक्सर पर्याप्त।"},{front:"Few-shot",back:"उदाहरण दिखाएँ। तब सबसे अच्छा जब आपको कोई विशिष्ट फ़ॉर्मेट या शैली चाहिए; उदाहरण वर्णन से तेज़ी से सिखाते हैं।"},{front:"Chain-of-thought",back:"चरण-दर-चरण सोचें, फिर अंतिम उत्तर दें। गणित, तर्क, बहु-चरणीय तर्कणा के लिए सबसे अच्छा।"},{front:"Decomposition",back:"पहले उप-कार्यों की सूची बनाएँ, फिर एक-एक करके करें। बड़े, अस्पष्ट कार्यों के लिए सबसे अच्छा।"},{front:"Grounding",back:"केवल दिए गए संदर्भ का उपयोग करके उत्तर दें, स्रोत उद्धृत करें, और न मिलने पर टाल दें। भ्रम के ख़िलाफ़ सबसे बड़ा लीवर।"},{front:"Meta-prompting",back:"AI से वे प्रश्न पुछवाएँ जो आपके प्रॉम्प्ट को सुधारेंगे, फिर उसे फिर से लिखवाएँ। तब सबसे अच्छा जब कोई प्रॉम्प्ट कमज़ोर प्रदर्शन करता है।"}]} />
+
+<Quiz title="ख़ुद को परखें" questions={[{q:"भ्रम (hallucinations) के ख़िलाफ़ सबसे बड़ा अकेला लीवर कौन-सा पैटर्न है?",options:["Role prompting","Grounding","Zero-shot"],answer:1,explain:"Grounding मॉडल को कुछ गढ़ने से रोकता है और उसे टालने की स्पष्ट अनुमति देता है — केवल दिए गए संदर्भ से उत्तर देते हुए।"},{q:"आपको ऐसा आउटपुट चाहिए जो सीधे किसी अन्य टूल में जाए। कौन-सा कार्ड सबसे उपयुक्त है?",options:["आउटपुट-फ़ॉर्मेट बाध्यता","Chain-of-thought","पुनरावृत्त परिष्करण"],answer:0,explain:"एक आउटपुट-फ़ॉर्मेट बाध्यता (जैसे केवल वैध JSON, कोई गद्य नहीं) अनुमान योग्य, उपयोगी आकार बनाती है।"},{q:"पेज के अनुसार, एक मज़बूत असली प्रॉम्प्ट अक्सर किस संयोजन को परत-दर-परत लगाता है?",options:["केवल एक चतुर निर्देश","भूमिका + उदाहरण + आउटपुट बाध्यता + 'मुझे नहीं पता' कहने की अनुमति","केवल Chain-of-thought और decomposition"],answer:1,explain:"टिप कहती है कार्डों को परत-दर-परत लगाएँ: एक भूमिका, एक उदाहरण, एक आउटपुट बाध्यता, और टालने की अनुमति।"}]} />
+
+<Callout type="takeaways" items={["पैटर्न दोबारा इस्तेमाल होने वाले बिल्डिंग ब्लॉक हैं — कार्य के अनुसार चुनें: सरल के लिए zero-shot, फ़ॉर्मेट के लिए few-shot, तर्कणा के लिए chain-of-thought, बड़े कार्यों के लिए decomposition","Grounding (केवल संदर्भ से उत्तर + टालने की अनुमति) भ्रम के ख़िलाफ़ सबसे मज़बूत बचाव है","आउटपुट-फ़ॉर्मेट बाध्यताएँ परिणामों को अनुमान योग्य और टूल-तैयार बनाती हैं","कार्ड आपस में जुड़ते हैं: एक मज़बूत प्रॉम्प्ट आम तौर पर होता है भूमिका + उदाहरण + आउटपुट बाध्यता + 'मुझे नहीं पता' कहने की अनुमति","पहला आउटपुट एक मसौदा है — पुनरावृत्त रूप से परिष्कृत करें, और जब कोई प्रॉम्प्ट कमज़ोर प्रदर्शन करे तो meta-prompting का उपयोग करें"]} />
+
+## आगे
+
+- [Few-Shot उदाहरण सही तरीके से](/docs/prompting/few-shot)
+- [XML टैग के साथ प्रॉम्प्ट की संरचना](/docs/prompting/xml-tags)
+- [दोबारा इस्तेमाल होने वाले प्रॉम्प्ट टेम्पलेट](/docs/templates/prompts)

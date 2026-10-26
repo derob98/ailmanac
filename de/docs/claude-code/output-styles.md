@@ -1,0 +1,166 @@
+# Output-Styles
+
+> Source: https://derob98.github.io/ailmanac/de/docs/claude-code/output-styles · AILmanac (CC BY 4.0) · last verified 2026-06-21
+
+Tonfall, Ausführlichkeit und Lehrverhalten von Claude Code ändern.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-06-21" source="https://code.claude.com/docs/en/output-styles">
+Die eingebauten Styles, der genaue Umschaltmechanismus und das Dateiformat für eigene Styles können sich zwischen Releases ändern. Prüfe es in der offiziellen Dokumentation (die Claude Code-Dokumentation ist von `docs.anthropic.com` zu `code.claude.com` umgezogen).
+</VerifyNote>
+
+<Callout type="objectives" items={[
+  "Was ein Output-Style ist — und wie er sich davon unterscheidet, zu ändern, was Claude weiß",
+  "Die vier eingebauten Styles: Default, Proactive, Explanatory, Learning",
+  "Wie du Styles mit /config umschaltest — und warum die Änderung eine frische Sitzung braucht",
+  "Wie du deinen eigenen Style als Markdown-Datei verfasst",
+  "Wann du zu einem Output-Style greifst vs. CLAUDE.md vs. Claude.ai-Benutzeranweisungen"
+]} />
+
+**Output-Styles** ändern, *wie* Claude Code kommuniziert — seine Rolle, seinen Ton, seine Ausführlichkeit und ob es seine Überlegungen erklärt — indem sie den System-Prompt direkt verändern. Sie ändern, *wie* Claude antwortet, nicht *was* es weiß. Greif zu einem, wenn du in jedem Zug erneut nach derselben Stimme oder demselben Format fragst.
+
+## Warum sie nutzen
+
+- **Passe sie deinem Workflow an.** Knapp und handlungsorientiert, wenn du schnell vorankommst; erklärend, wenn du lernst.
+- **Lehrmodus.** Manche Styles fügen erläuternde Kommentare hinzu — großartig, während du dich in eine Codebasis oder eine Technik einarbeitest.
+- **Konsistenz.** Setze einmal einen bevorzugten Style, damit jede Sitzung so liest, wie du es magst.
+
+## Die eingebauten Styles
+
+Claude Code wird mit vier ausgeliefert:
+
+| Style | Was er macht |
+|---|---|
+| **Default** | Der Standard-System-Prompt für Softwareentwicklung — effizient, handlungsorientiert. |
+| **Proactive** | Führt sofort aus und trifft vernünftige Annahmen, statt bei Routineentscheidungen zu pausieren. Stärkere Anleitung zur autonomen Ausführung als der Auto-Modus, aber du siehst weiterhin Berechtigungsabfragen, bevor Tools laufen. |
+| **Explanatory** | Fügt erläuternde „Insights“ zwischen den Schritten hinzu, die Implementierungsentscheidungen und Codebasis-Muster erklären. |
+| **Learning** | Kollaborativ, learn-by-doing: teilt Insights *und* bittet dich, kleine Teile selbst zu schreiben, und hinterlässt `[TODO(human)]`-Markierungen in deinem Code. |
+
+<Callout type="warning" items={[
+  "Explanatory und Learning erzeugen von Natur aus längere Antworten und kosten daher mehr Output-Tokens als Default."
+]} />
+
+<Flashcards cards={[
+  { front: "Default", back: "Der Standard-System-Prompt für Softwareentwicklung — effizient, handlungsorientiert." },
+  { front: "Proactive", back: "Führt sofort aus und trifft vernünftige Annahmen, statt bei Routineentscheidungen zu pausieren. Stärkere autonome Anleitung als der Auto-Modus, aber du siehst weiterhin Berechtigungsabfragen, bevor Tools laufen." },
+  { front: "Explanatory", back: "Fügt erläuternde „Insights“ zwischen den Schritten hinzu, die Implementierungsentscheidungen und Codebasis-Muster erklären." },
+  { front: "Learning", back: "Kollaborativ, learn-by-doing: teilt Insights UND bittet dich, kleine Teile selbst zu schreiben, und hinterlässt [TODO(human)]-Markierungen in deinem Code." }
+]} />
+
+## Wie du umschaltest
+
+Führe `/config` aus und wähl einen Style unter **Output style**. Deine Wahl wird in `.claude/settings.local.json` auf Projektebene gespeichert. Um ihn ohne Menü zu setzen, bearbeite das Feld `outputStyle` in einer beliebigen Einstellungsdatei.
+
+<Steps items={[
+  { title: "Das Konfigurationsmenü öffnen", body: "Führe /config in deiner Sitzung aus und finde die Option Output style." },
+  { title: "Einen Style wählen", body: "Wähl einen von Default, Proactive, Explanatory oder Learning. Deine Wahl wird in .claude/settings.local.json auf Projektebene gespeichert." },
+  { title: "Oder ihn direkt setzen", body: "Überspring das Menü, indem du das Feld outputStyle in einer beliebigen Einstellungsdatei bearbeitest (siehe das JSON unten)." },
+  { title: "Eine frische Sitzung starten", body: "Der Style ist Teil des System-Prompts, der einmal beim Sitzungsstart gelesen wird — führe /clear aus oder öffne eine neue Sitzung, damit er wirksam wird." }
+]} />
+
+```json
+{
+  "outputStyle": "Explanatory"
+}
+```
+
+:::warning[Änderungen brauchen eine frische Sitzung]
+Der Output-Style ist Teil des System-Prompts, den Claude Code **einmal beim Sitzungsstart** liest. Eine Änderung wird erst nach `/clear` oder einer neuen Sitzung wirksam. (Der eigenständige Befehl `/output-style` wurde in v2.1.91 entfernt — nutze `/config` oder die obige Einstellung.)
+:::
+
+## Einen eigenen Style erstellen
+
+Ein eigener Style ist eine Markdown-Datei: Frontmatter, dann die Anweisungen, die an den System-Prompt angehängt werden. Speicher sie auf Benutzerebene (`~/.claude/output-styles/`) oder Projektebene (`.claude/output-styles/`); der Dateiname wird zum Style-Namen, sofern du nicht `name` setzt.
+
+<PromptCard title="Beispiel für einen eigenen Style — Diagramme zuerst">{`---
+name: Diagrams first
+description: Lead every explanation with a diagram
+keep-coding-instructions: true
+---
+
+When explaining code, architecture, or data flow, start with a Mermaid
+diagram showing the structure, then explain in prose.`}</PromptCard>
+
+<Callout type="tip" items={[
+  "Setze keep-coding-instructions: true, wenn du nur änderst, WIE Claude kommuniziert, es aber weiterhin normal coden soll.",
+  "Lass es weg (Standard), wenn Claude überhaupt keine Softwareentwicklung macht — etwa ein reiner Schreib- oder Datenanalyse-Assistent — damit die eingebauten Coding-Anweisungen entfallen."
+]} />
+
+## Output-Styles vs. CLAUDE.md vs. andere Hebel
+
+- **Output-Style** = ein System-Prompt-Preset für Rolle, Ton und Format — gilt für *jede* Antwort.
+- **[CLAUDE.md](/docs/claude-code/claude-md)** = beständige *Projekt*-Fakten und -Regeln (Konventionen, Leitplanken), als Nachricht nach dem System-Prompt hinzugefügt.
+- **[Benutzeranweisungen / Antwort-Styles](/docs/claude-app/custom-instructions)** = das Pendant der Claude.ai-Verbraucher-App.
+
+:::tip[Nutze den richtigen Hebel]
+Willst du, dass Claude „immer Tests ausführt, bevor es fertig ist“? Das ist eine **CLAUDE.md-Leitplanke**, kein Style. Willst du, dass es „jeden Schritt unterwegs erklärt“? Das ist ein **Output-Style**. Halte Verhaltensregeln in CLAUDE.md und die Präsentation in Styles.
+:::
+
+<Quiz title="Teste dich selbst" questions={[
+  {
+    q: "Was ändert ein Output-Style tatsächlich?",
+    options: [
+      "Was Claude über dein Projekt weiß",
+      "Wie Claude kommuniziert — Rolle, Ton, Ausführlichkeit — indem es den System-Prompt verändert",
+      "Welches Modell Claude Code ausführt",
+      "Die Berechtigungsabfragen, bevor Tools laufen"
+    ],
+    answer: 1,
+    explain: "Output-Styles verändern den System-Prompt, um zu ändern, WIE Claude antwortet, nicht WAS es weiß."
+  },
+  {
+    q: "Welcher eingebaute Style hinterlässt [TODO(human)]-Markierungen und bittet dich, kleine Teile selbst zu schreiben?",
+    options: ["Default", "Proactive", "Explanatory", "Learning"],
+    answer: 3,
+    explain: "Learning ist der kollaborative learn-by-doing-Style: Er teilt Insights und bittet dich, kleine Teile zu schreiben, und hinterlässt [TODO(human)]-Markierungen in deinem Code."
+  },
+  {
+    q: "Wann wird die Änderung des Output-Styles wirksam?",
+    options: [
+      "Sofort, bei der nächsten Nachricht",
+      "Erst nach /clear oder einer neuen Sitzung, weil der System-Prompt einmal beim Sitzungsstart gelesen wird",
+      "Nachdem du deinen Computer neu startest",
+      "Nachdem du /output-style ausführst"
+    ],
+    answer: 1,
+    explain: "Der Style ist Teil des System-Prompts, den Claude Code einmal beim Sitzungsstart liest — eine Änderung gilt also erst nach /clear oder einer neuen Sitzung. Der eigenständige Befehl /output-style wurde in v2.1.91 entfernt."
+  },
+  {
+    q: "Du willst, dass Claude „immer Tests ausführt, bevor es fertig ist“. Welcher Hebel ist das?",
+    options: [
+      "Ein Output-Style",
+      "Eine CLAUDE.md-Leitplanke",
+      "Eine Claude.ai-Benutzeranweisung",
+      "Der eingebaute Proactive-Style"
+    ],
+    answer: 1,
+    explain: "Verhaltensregeln gehören in CLAUDE.md; die Präsentation gehört in Output-Styles. „Immer Tests ausführen“ ist eine Leitplanke."
+  },
+  {
+    q: "Wann solltest du keep-coding-instructions: true in einem eigenen Style setzen?",
+    options: [
+      "Wenn Claude überhaupt keine Softwareentwicklung macht",
+      "Wenn du nur änderst, wie Claude kommuniziert, es aber weiterhin normal coden soll",
+      "Immer, in jedem eigenen Style",
+      "Nur auf Projektebene, nie auf Benutzerebene"
+    ],
+    answer: 1,
+    explain: "Halte es auf true, um die eingebauten Coding-Anweisungen zu bewahren, während du nur die Präsentation änderst. Lass es weg (Standard) für reine Schreib- oder Datenanalyse-Assistenten."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Output-Styles ändern, WIE Claude kommuniziert (Rolle, Ton, Ausführlichkeit), nicht WAS es weiß — sie bearbeiten den System-Prompt.",
+  "Vier eingebaute: Default (handlungsorientiert), Proactive (führt mit Annahmen aus), Explanatory (fügt Insights hinzu), Learning (Insights + [TODO(human)]-Markierungen).",
+  "Explanatory und Learning kosten mehr Output-Tokens, weil Antworten von Natur aus länger sind.",
+  "Schalte über /config um (gespeichert in .claude/settings.local.json) oder die outputStyle-Einstellung — Änderungen brauchen /clear oder eine neue Sitzung.",
+  "Eigene Styles sind Markdown-Dateien in ~/.claude/output-styles/ oder .claude/output-styles/; nutze keep-coding-instructions: true, um das Coding-Verhalten beizubehalten.",
+  "Nutze CLAUDE.md für Verhaltensregeln/Leitplanken und Output-Styles für die Präsentation."
+]} />
+
+## Weiter
+
+- [CLAUDE.md & Memory-Dateien](/docs/claude-code/claude-md)
+- [Einstellungen & Konfiguration](/docs/claude-code/settings)
+- [Benutzeranweisungen & Styles (Claude.ai)](/docs/claude-app/custom-instructions)

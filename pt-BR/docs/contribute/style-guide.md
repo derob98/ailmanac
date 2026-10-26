@@ -1,0 +1,64 @@
+# Guia de Estilo de Conteúdo
+
+> Source: https://derob98.github.io/ailmanac/pt-BR/docs/contribute/style-guide · AILmanac (CC BY 4.0)
+
+Tom de voz, selos de nível, a linha entre opinião e oficial, e a regra de citação.
+
+<LevelBadge level="all" />
+
+A consistência é o que faz uma referência parecer confiável. Siga estas regras e seu PR passará pela revisão sem percalços.
+
+## Tom de voz
+
+- **Claro e direto.** Frases curtas. Comece pelo ponto principal.
+- **Amigável, nunca prolixo.** Corte o "no mundo acelerado de hoje". Respeite o tempo do leitor.
+- **Opinativo, depois honesto.** Apresente primeiro a *única forma recomendada*, depois anote alternativas e trade-offs.
+- **Exemplos em vez de teoria.** Mostre um trecho de código ou um caso concreto; não apenas descreva.
+- **Inglês americano.**
+
+## Estrutura de uma página
+
+```markdown
+---
+sidebar_position: 2
+title: "Your Page Title"
+description: "One sentence for search and previews."
+---
+
+<LevelBadge level="beginner" />
+
+A one or two sentence intro that states what the reader will get.
+
+## Sections with ## headings
+...
+
+## Next
+- 2–4 links to related pages
+```
+
+- **Comece com o selo de nível** (`beginner` | `intermediate` | `advanced` | `all`). Os componentes são globais — não os importe.
+- **Termine com uma lista "Next" / "Related"** de 2 a 4 links internos.
+- **Use admonições** (`:::tip`, `:::warning`, `:::note`, `:::info`) para dar ênfase, com moderação.
+
+## As duas regras rígidas
+
+:::warning[Inegociável]
+1. **Cite fontes para fatos voláteis.** Nomes de modelos, preços, limites, flags exatas, funcionalidades em beta → faça link para a fonte oficial e adicione `<VerifyNote lastVerified="YYYY-MM-DD" source="…">`. **Nunca fixe fatos de modelo no código** — faça link para a [tabela de modelos](/docs/whats-new/models-and-pricing). Detalhes: [Verificação de Fatos](/docs/contribute/fact-verification).
+2. **Não invente.** Nada de estatísticas, citações, APIs ou funcionalidades inventadas. Se não tiver certeza, diga isso ou marque com `[verify]`.
+:::
+
+## Opinião vs. oficial
+
+- Somos **opinativos** — esse é o valor. Recomende, não apenas enumere.
+- Mas a **documentação oficial é a fonte da verdade.** Submeta-se a ela, faça link para ela e nunca a contradiga silenciosamente.
+
+## Pegadinhas do MDX
+
+- Chaves `{like this}` na **prosa** são interpretadas como código pelo MDX — coloque-as em backticks ou blocos de código, ou use `[colchetes]` em exemplos.
+- Teste localmente: `npm run build` deve passar (ele falha em links quebrados).
+
+## Próximo
+
+- [Contribua em 10 Minutos](/docs/contribute/contribute-in-10-minutes)
+- [Verificação de Fatos & Atualização](/docs/contribute/fact-verification)
+- [Código de Conduta & Governança](/docs/contribute/governance)
