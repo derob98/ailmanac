@@ -1,0 +1,318 @@
+---
+sidebar_position: 22.9998
+title: "DeepInfer: DeepSeek 自身の推論エンジンを正直に読む"
+description: "2026 年 10 月 20 日、DeepSeek は自社の本番サービスを支えるエンジン DeepInfer をオープンソース化しました — 1 日で 16.3k スター、Hacker News で 2,251 ポイント。このページは見出しが見落とした 4 点を扱います。これはゼロから作ったエンジンではなく vLLM のフォークであること。「NVIDIA SM100」はあなたが持つすべての H100 とすべてのコンシューマー向け GPU を除外すること。デコードのスループットは、ドラフトトークンを採否にかかわらず数える全受理の集計で公開されていること。そして本当に重要な機能であるバッチ不変の推論が、自社の投機的デコーダーとは排他的であること。"
+keywords: [DeepInfer, DeepSeek inference engine, DeepInfer vs vLLM, batch-invariant inference, deterministic sampling LLM, DEEPINFER_BATCH_INVARIANT, DSpark speculative decoding, SWA bounded replay, EPLB expert parallel load balancing, FlashMLA, DeepGEMM, DeepEP, DeepSelect, TileKernels, DeepSeek V4.1 Flash 1017, SM100 Blackwell B200, full acceptance accounting, temperature 0 not deterministic, reproducible LLM inference, on-policy RL inference mismatch]
+---
+
+<LevelBadge level="advanced" />
+
+**2026 年 10 月 20 日** の 09:08 UTC、*「DeepInfer: High-performance inference framework for DeepSeek models」* というタイトルのリンクが Hacker News に載り、**2,251 ポイント、856 コメント**に落ち着きました — その週のサイトで最大の AI の話題です。リポジトリ `deepseek-ai/DeepInfer` はその 4 日前に作られ、翌朝までに **16,337 スターと 1,620 フォーク**を集めました。Apache 2.0、Python で書かれています。
+
+どこでも見られた枠組みは *「DeepSeek が DeepSeek を動かすエンジンをオープンソース化した」* でした。この枠組みは正しく、ほとんど役に立ちません。856 件のコメントのスレッドは、そのギャップのほぼ完璧な実例です。フロンティアラボにとって推論が儲かるのかをめぐる長い議論で、**コードが何をするかの議論は実質的にありません**。実際に動かしてみたと報告している人もいません。
+
+そこでこのページは、地味な部分を担当します。DeepInfer 自身のドキュメントには、このリリースから何を結論づけるべきかを大きく変える 4 点があり、そのどれも報道には載りませんでした。
+
+1. 自身の謝辞によれば、これは **vLLM のフォーク**であり、クリーンルームで作られたエンジンではありません。
+2. **「NVIDIA SM100」** は、すべての H100 とすべてのコンシューマー向けカードを除外します。読者のほとんどはこれをまったく動かせません。
+3. 見出しのデコードスループットは **全受理の集計(full-acceptance accounting)** で計算されており、*真の受理率にかかわらず*投機的ドラフトトークンを数えます。
+4. 最も長く残る貢献である**バッチ不変の推論**は、DeepInfer 自身の投機的デコーダーを*オフ*にするフラグでオンになります。ここでは速度と再現性は二者択一です。
+
+<Callout type="objectives" items={[
+  "DeepInfer が何を提供し、何を明示的に提供しないのかを正確に説明する — KV キャッシュシステム、prefill/decode の分離、DP のロードバランシングはいずれもなく、これはサーバーではなくエンジンである",
+  "ハードウェアの一行を読み解く: SM100 はデータセンター向け Blackwell を意味し、SM90(H100/H200)と SM120(RTX 50 シリーズ)を除外する。さらに約 763 GB の FP8 重みと組み合わせて、実際のデプロイの規模を見積もる",
+  "temperature 0 が決して決定的ではなかった理由と、よくある「GPU と浮動小数点はランダムだ」という説明が誤りである理由を説明する",
+  "DeepInfer の決定的サンプリングの手順を適用し、そのコストを認識する: 同じフラグが DSpark の土台である可変長 MTP 経路を無効にする",
+  "公開されているプリフィル/デコードの数値を正しく読む。全受理の集計、GPU ごとの正規化、そしてプロファイラーのトレースから秒あたりのステップ数を導いてはいけない理由を含む",
+  "間違えると出力を壊すか容量を無駄にする 2 つの設定値を正しく設定する: SWA リプレイの保持トークン数と EPLB の冗長エキスパート",
+]} />
+
+<VerifyNote lastVerified="2026-10-21" source="https://github.com/deepseek-ai/DeepInfer">
+スター数、対応モデルの一覧(現時点では DeepSeek-V4.1-Flash のみ)、固定された依存関係のバージョン、環境変数の名前は、リポジトリ作成から 4 日後の 2026 年 10 月 21 日にリポジトリから読み取ったものです。作成から 4 日で、未解決の issue が 172 件あり、タグ付きのリリースもないリポジトリは、急速に変化します。どれかにデプロイを預ける前に、README と `examples/README.md` を読み直してください。
+</VerifyNote>
+
+## 一段落で言うと
+
+DeepInfer は、DeepSeek の本番スタックのうち**オフライン推論**の経路を取り出して公開したものです。モデルファミリーは `DeepSeek-V4.1-Flash` の 1 つだけ、ハードウェアは 2 種類で動作し、DeepSeek 自身のカーネルライブラリが組み込まれています。マルチヘッド潜在アテンション用の [FlashMLA](https://github.com/deepseek-ai/FlashMLA)、行列積用の [DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)、エキスパート並列の通信用の [DeepEP](https://github.com/deepseek-ai/DeepEP)、スパースアテンションとサンプラーの top-k 用の [DeepSelect](https://github.com/deepseek-ai/DeepSelect)、そして残りを担う [TileKernels](https://github.com/deepseek-ai/TileKernels) とツリー内の TileLang カーネルです。これら 5 つのリポジトリは新しくありません。FlashMLA、DeepGEMM、DeepEP はいずれも 2025 年 2 月のもので、それぞれ 13.1k、9.1k、10.3k スターを持ち、DeepSelect は 2026 年 9 月のもので 510 スターです。DeepInfer は、ずっと欠けていたもの、つまりそれらを組み立てる**スケジューラーとランタイム**です。
+
+### 誰も引用しなかった系譜
+
+謝辞にはっきり書かれています。DeepInfer は「当初は主に **vLLM** の上に構築され、**SGLang** と **TensorRT-LLM** からも追加の着想を得ました」。
+
+これはじっくり考える価値があります。このリリースの支配的な読み方は、*フロンティアラボがオープンソースのサービングスタックを退け、自前のものを作った*、というものでした。真実はむしろその逆に近いです。DeepSeek は vLLM を取り、1 種類のアクセラレーター上の 1 つのアーキテクチャに向けて徹底的に特化させ、同じ寛容な条件で成果を返しました。すでに vLLM を動かしているなら、DeepInfer は、汎用性をすべて削ぎ落としたときの vLLM 派生物がどうなるかを示す宣言であって、評価しなければならない競合ではありません。
+
+### 意図的に除外されている 3 つの部品
+
+README には、ほとんどの要約が飛ばした節があり、「Required for a complete inference service (not included in this release)」と題されています。
+
+- **KV キャッシュシステム**
+- **VE/prefill/decode の分離**(DeepSeek は、エンジン側の機能の大半は実装されているが、オーケストレーションは含まれていないと述べている)
+- プリフィルとデコードの両方における、**データ並列レプリカ間のロードバランシング**
+
+クライアントを向ける OpenAI 互換の HTTP サーバーはここにありません。すべての例は `python examples/offline_inference.py` です。「vLLM を外して DeepInfer を入れれば、同じエンドポイントで動く」というイメージだったなら、サービングプラットフォームのうち最も難しい 3 つの部品を自分で書くことになります。
+
+<Callout type="warning" items={[
+  "その一文の中で「オフライン推論」は重要な役割を担っています。DeepInfer はサービング層を取り除いたバッチエンジンであり、評価や RL のロールアウトにはまさに望ましい形ですが、数か月のプラットフォーム作業なしに本番 API にするには、まさに間違った形です。",
+]} />
+
+## ハードウェアの一行を読み解く
+
+README は 2 つの対象を挙げています。**NVIDIA SM100 GPU** と **Huawei Ascend 950 NPU** です。たった一行で、ほとんどの人を静かに除外しています。
+
+`SM100` は CUDA の演算能力 **10.0** で、*データセンター向け* Blackwell、B100/B200 クラスです。次のものではありません。
+
+| お使いのハードウェア | アーキテクチャ | 記載あり? |
+|---|---|---|
+| H100 / H200 | SM90(Hopper) | **なし** |
+| RTX 5090 / 50 シリーズ | SM120(コンシューマー向け Blackwell、cc 12.0) | **なし** |
+| B200 / B100 | SM100 | あり |
+| Ascend 950 | CANN 9.2 | あり |
+
+そして 2 つの Blackwell は互換ではありません。`sm_100` と `sm_120` のあいだにバイナリ互換性はなく、データセンター向け Blackwell のカーネルは `tcgen05` 命令と TMEM(コンシューマー向け Blackwell にはまったくない専用のテンソルメモリ)を使うからです。SM100 向けに書かれたカーネルは RTX 5090 で「遅く動く」のではなく、動きません。
+
+固定された依存関係のリストも、別の言い方で同じことを語っています。`requirements-nvidia.txt` は 3 行で、`torch==2.13.0+cu132`、`flash-attn-4==4.0.0b34`、開発用の要件です。そして `build.sh` は Torch に付属してきたものの上から `nvidia-nccl-cu13==2.32.3` を強制的に再インストールします。ベータ版の FlashAttention-4、CUDA 13.2、手作業でパッチを当てた NCCL。DeepSeek 自身のラックにある正確なマシンに固定されたスタックです。
+
+### そこに重みを加える
+
+DeepInfer のデフォルトのチェックポイントは `deepseek-ai/DeepSeek-V4.1-Flash-1017` — MIT ライセンス、FP8、**2026 年 10 月 17 日**公開、48 個の safetensors シャードに分割されています。Hugging Face はこれを約 **7,630 億パラメーター**と報告しています。FP8 なら、KV キャッシュを除いても重みだけで **763 GB** のオーダーです。例が `--ep 8` で書かれ、デコードのベンチマークが 64 GPU で動くのはそのためです。
+
+80 GB のカード 8 枚(640 GB)では収まりません。単一のスケールアップドメイン内の B200 クラスの GPU 8 枚が下限で、さらに DeepSeek が提供しなかった 3 つのプラットフォーム部品が必要です。
+
+<Callout type="tip" items={[
+  "「乗り換えるべきか?」への実際的な答えは、読者の 99% にとって、できない、それで構わない、です。このリリースの応用できる価値は以下の 3 つのアイデアで、どれも実際に使っているエンジンに当てはまります。",
+  "自分の所有するハードウェアで DeepSeek V4.1-Flash を動かしたい場合、V4.1-Flash フィールドガイドのサービング手段(vLLM、SGLang、ホスト型 API)が引き続き使えます。ただし -1017 のチェックポイントは 9 月のローンチ時の重みより後のリビジョンなので、同等と決めつけず、そのカードを確認し直してください。",
+]} />
+
+## バッチ不変性: temperature 0 が決して決定的でなかった理由
+
+DeepInfer のうち、実際には使わなくても注目する価値があるのがここです。
+
+`temperature=0` に設定して、同じプロンプトを 2 回送ると、異なる答えが返ってくる。誰もが目にしています。おそらく読んだことのある説明、つまり[この記事のサンプリング制御のレッスン](/docs/foundations/sampling-controls)(このページはそれを補強します)でも、「サーバー側のバッチ処理と浮動小数点の非決定性」とされています。それは近いところを指していますが、メカニズムは誤りで、その違いこそがバグを直せるものにします。
+
+### 説明の誤った半分
+
+「GPU は並列で、浮動小数点の加算は結合則を満たさないから、結果が揺れる」というのは、揺れが*本質的*であることを意味します。そうではありません。同じ GPU で、同じデータに対して同じ行列積を何度実行しても、**ビット単位で同一**の結果が毎回得られます。カーネルは決定的です。並行性は犯人ではありません。
+
+### 実際のメカニズム
+
+犯人は**バッチ不変性**、より正確にはその欠如です。GPU カーネルは、与えられた作業の形に基づいてリダクションの戦略を選びます。1 行(バッチ 1)を掛けると加算は 1 つの順序で行われ、同じ行を 32 行のバッチの一部として掛けると、カーネルはリダクションを別の分け方にするので、浮動小数点の加算が別の順序で行われ、結果が最後の数ビットで異なります。各実行は決定的です。*形*が決定的ではないのです。
+
+そして不気味に感じられる部分が来ます。**バッチサイズは他人のトラフィックによって決まります。** 共有の推論サーバーは、あなたのリクエストを同じ時間枠に届いた他のものと一緒にバッチ化します。あなたは何も変えていません。負荷が変わり、あなたの数値が動いたのです。順伝播は決定的で、それをあなたが体験する結果は決定的ではありません。
+
+Transformer では、リダクションに基づく 3 つの演算を修正する必要があります。**RMSNorm、行列積、アテンション**です。手順は、可能な限り各リダクションを 1 つのコア内に収め、形がバッチサイズに依存するリダクションの分割を拒否し、性能を犠牲にしてでも単一のカーネル構成を使う、というものです。
+
+### 気になるはずの数字
+
+Thinking Machines Lab は、`Qwen3-235B-A22B-Instruct-2507` でこれを測定しました。同じプロンプト(「Tell me about Richard Feynman」)、temperature 0、1,000 トークン、**1,000 回の実行**です。
+
+結果: **80 通りの異なる出力**。最も多かったものは 78 回現れました。そして分岐の形が示唆に富みます。1,000 件すべてが*最初の 102 トークンまでは同一*で、103 トークン目で分かれ、992 回が「Queens, New York」、8 回が「New York City」と言いました。
+
+LLM のテストスイートで等価性のアサーションが非常に危険なのはそのためです。短いスモークテストは千回通っても何も教えてくれません。分岐は 103 トークン目で待っていたのです。
+
+直すのはタダではありません。Qwen-8B で 1,000 シーケンスを処理したとき、Thinking Machines は vLLM のデフォルトで **26 秒**、素朴な決定的ビルドで **55 秒**、アテンションカーネルを改良した後で **42 秒**と測定しました。ビット単位の再現性に、およそ **1.6 倍の遅さ**です。
+
+<VerifyNote lastVerified="2026-10-21" source="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/">
+80 通りの出力という結果、103 トークン目での分岐、26 秒 / 55 秒 / 42 秒という数値は、Thinking Machines Lab が自社のハードウェアとカーネルで測定したもので、DeepInfer のものではありません。DeepSeek は自社のバッチ不変の経路について、比較可能な前後のコストを公開していません。約 1.6 倍は、見込むべきオーダーとして扱い、DeepInfer について引用する数値としては扱わないでください。
+</VerifyNote>
+
+### なぜ 1.6 倍を払う人がいるのか
+
+4 つの理由があり、金額の大きさの順におおよそ並べています。
+
+- **オンポリシーの RL が嘘でなくなる。** サンプラーとトレーナーが異なる数値を計算するなら、「オンポリシー」の強化学習は静かにオフポリシーになっています。Thinking Machines は、決定的な推論がなければ、報酬の崩壊を避けるためにオフポリシーの補正が必要になり、ビット単位で同一の結果があれば、真のオンポリシー RL が得られ、サンプリングと学習のポリシー間の KL ダイバージェンスがゼロになることを示しました。大きなモデルで RL を行う人にとって、これは脚注ではなく主役です。
+- **回帰テストで等価性をアサートできる。** DeepInfer はこれに強く依拠しています。`tests/models/offline_decode_ppl.json` はプラットフォームごとのパープレキシティのベースラインを保存し、それが**サンプルごとに厳密に**比較されます。このテスト設計は、決定的なエンジンでのみ可能です。
+- **エージェントの実行のデバッグが扱いやすくなる。** ビット単位で再現できる失敗はバグで、できないものは怪談です。
+- **監査とコンプライアンス。** 「同じ入力、同じ出力、証明可能」は、一部の規制対象の環境では要件であり、これがなければ不可能です。
+
+### 手順と、その代償
+
+<Steps items={[
+  {title: "バッチ不変性をオンにする", body: "DEEPINFER_BATCH_INVARIANT=1 を設定します。これにより、各トークンの結果は、同じバッチに何が入っていてもビット単位で同一に保たれます。NVIDIA のみ — Ascend の経路では提供されません。"},
+  {title: "可変長 MTP の経路をオフにする", body: "DEEPINFER_ENABLE_MTP_VARLEN=0 を設定します。これは DSpark の投機的デコードを有効にするために 1 に設定するのと同じフラグなので、DeepSeek 自身のドキュメントによれば 2 つの機能は排他的です。"},
+  {title: "シーケンスごとにサンプラーのシードを固定する", body: "SamplingParams に固定の seq_seed を渡します。すると、同一の入力トークンと同一のサンプリングパラメーターから同一の出力が得られます。"},
+  {title: "ワークロードごとに、本当に必要な方を決める", body: "評価、回帰のベースライン、RL のロールアウトには決定性。それ以外のすべてにはスループットのための DSpark。それぞれのモードでクラスターを 1 つずつ運用するのは正当な設計で、1 つの構成で両方を賄うふりをするより安上がりです。"},
+]} />
+
+<PromptCard title="DeepInfer: deterministic sampling (environment)">{`# Deterministic sampling — NVIDIA only.
+# Note that MTP_VARLEN=0 is the same switch that disables DSpark,
+# so this configuration is deliberately the slow one.
+export DEEPINFER_ACCELERATOR=nvidia
+export DEEPINFER_BATCH_INVARIANT=1
+export DEEPINFER_ENABLE_MTP_VARLEN=0
+
+# ...and pass a fixed seq_seed in SamplingParams, e.g.
+#   SamplingParams(temperature=0.0, seq_seed=42)
+
+python examples/offline_inference.py --ep 8`}</PromptCard>
+
+<PromptCard title="DeepInfer: DSpark speculative decoding (the other mode)">{`# Throughput mode: draft tokens plus confidence-scheduled verification.
+# DEEPINFER_USE_NEXTN_DECODE sets the maximum draft length (default 5).
+export DEEPINFER_ACCELERATOR=nvidia
+export DEEPINFER_ENABLE_MTP_VARLEN=1
+export DEEPINFER_USE_NEXTN_DECODE=5
+
+# Explicitly disable speculative decoding instead:
+#   export DEEPINFER_USE_NEXTN_DECODE=0
+
+python examples/benchmark.py`}</PromptCard>
+
+2 つ目のモードに、DeepInfer の最も巧妙なアイデアがあります。通常の投機的デコードは *n* 個のトークンをドラフトして、すべてを検証します。**信頼度スケジューリングによる検証**は、モデル自身の信頼度の推定を使って、どれだけの検証予算を使うかを決めます — ドラフトが明らかに正しいところは安く、そうでないところは高く。これはカーネルのアイデアではなくスケジューリングのアイデアで、ドラフトの経路を持つあらゆるエンジンに転用できます。
+
+## DeepInfer 自身のベンチマーク数値を読む
+
+DeepSeek は、見出しの秒あたりトークン数ではなく、2 本のパレート曲線を公開しています。プリフィルのスループット対レイテンシ、デコードのスループット対ユーザーごとの速度です。その抑制は称賛に値しますが、**引用できる単一の数字がない**ということでもあります。また、真実は `examples/README.md` に書かれた方法論の中にあるということでもあります。その中の 3 点が、グラフの読み方を変えます。
+
+### 1. デコードのスループットは、すべてのドラフトトークンが受理されたと仮定している
+
+これが最大の点です。公開されているデコードのスループットは次のように計算されます。
+
+```text
+decode_throughput = avg_SPS × decode_num_requests × (1 + nextn) / cp
+```
+
+そしてドキュメントは、これが「**full-acceptance accounting** — 真の受理率にかかわらず、リクエストあたりステップあたり `1 + nextn` トークン」のもとにあると、はっきり述べています。
+
+`nextn` のデフォルトは 5 です。したがって、投機的デコーダーの 5 つのドラフトが検証を通ったかどうかにかかわらず、各リクエストはデコードの 1 ステップあたり 6 トークンとして計上されます。デフォルトの 64 リクエストでは、「デコードの 1 ステップの 64 リクエストは合計 384 トークンになります」— 64 × 6 です。
+
+マルチトークン予測の実際の受理率は 100% をかなり下回ります。したがって、そのグラフのデコードのスループットは、**どの実ワークロードも到達しない上限**で、グラフと現実のギャップは、まさにあなたの棄却率です。ここに不誠実なものはなく、リポジトリに書かれています。しかしパレート曲線をちらっと見た読者が想定するものではなく、856 件の Hacker News のコメントの誰も触れませんでした。
+
+### 2. 数値は GPU ごとで、あなたが持たない規模のもの
+
+プリフィルは **SM100 GPU 4 枚**、デコードは **64 枚**で測定され、「それぞれ 1 つのスケールアップドメイン内」、つまりイーサネットのクラスターをまたぐのではなく、単一の NVLink ファブリック内です。どちらのスループットも、デバイス数で割って、トークン/秒/**GPU** にされます。
+
+GPU ごとの正規化は公開の仕方として正しく、同時に誤読しやすさでもこの上ありません。64 GPU が 1 つのファブリックを共有して得られた GPU ごとのデコードの数値は、あなたの 8 GPU ノードに掛け戻しても成り立ちません。それを可能にしたエキスパート並列の通信パターンが、ファブリックそのものだったからです。
+
+### 3. プロファイラーのトレースはスループットのデータではない
+
+ほかでは見たことがなく、自分のエンジンをプロファイルする人には本当に役立つ警告です。ドキュメントによると、`PROFILE=1` のトレース内のステップ時間にはプロファイラーのオーバーヘッドが含まれ、「**bsz=1 でほぼ 50% の水増し**」があり、プロファイラーが終了した後も約 **7〜11%** の残存する遅延があります。そのため、プロファイラーの区間の後に測定をスケジュールすることは許されません。明示的な指示は、トレースはカーネル構成の確認に使い、秒あたりのステップ数の導出には**決して**使わない、というものです。
+
+ハーネスは多くのものより徹底しています。MoE のロードバランサーの統計フラッシュ(数ミリ秒のジッターを伴うエキスパート並列の `all_gather`)と重なる測定区間はすべて捨て、測定ウィンドウを 2 回実行します。1 回目はロードバランサーの値を取得するためにログをオンにし、2 回目は実際の数値のためにログなしで。
+
+<Callout type="tip" items={[
+  "エンジンを問わず、2 段階の評価設計は盗むべきです。DeepInfer の評価ハーネスは生成と採点を分離しています。生成が生の出力をディスクに書き、採点がそれを読み戻します。別の採点者で再評価でき、推論の費用をもう一度払う必要がありません — そして決定的なエンジンなら、出力が動いていないことを証明できます。",
+]} />
+
+### 評価ハーネスが実際に測るもの
+
+このリポジトリの精度の数値を引用する前に知っておく価値があります。3 つのベンチマークを扱い、すべて Pass@1 で報告されます。**AIME 2026**(30 問 × 32 サンプル、平均精度)、**HLE**(2,500 問 — テキスト 2,158 問と画像 342 問 — 単一サンプル)、**GPQA Diamond**(198 問 × 8 サンプル)です。スクリプトは意図的に**データセットをダウンロードしません**。それぞれを自分で取得して JSONL に変換する必要があり、HLE は Hugging Face でゲート付きです。自前のテストセットを自動ダウンロードしないベンチマークのハーネスは、汚染への真剣さの小さな現れです。
+
+## 痛い目に遭う 2 つの設定値
+
+**SWA のバウンデッドリプレイ。** DeepInfer は、コンテキストの有限な末尾だけを再生することで、デコーダーのプリフィルの作業量を減らします。V4.1 のデフォルトでは `DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE=compact` と `DEEPINFER_YOCO_PREFILL_KEEP_TOKENS=140` で設定されます。制約が興味深い部分です。保持される末尾は、**スライディングウィンドウアテンションのウィンドウに最大のバックトラック長を足した範囲を覆わなければなりません**。この妙に具体的な `140` はチューニングの好みではなく、アーキテクチャから導かれる下限です。メモリを節約しようと下げれば、品質と速度のトレードオフではなく、モデルがまだ必要とするコンテキストを切り捨てることになります。
+
+**EPLB の冗長エキスパート。** エキスパート並列のロードバランシングは `DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS` で設定され、デフォルトは **32** です。これは*下限*にすぎません。エンジンは `num_routed_experts + num_extra_experts` を `ep_size` で割り切れるまで切り上げ、バックボーンと DFlash を別々に丸めます。そのため、設定した値が実際に有効な値とは限らず、ディスクに書かれる記録やプロットでは、実際に有効になった丸め後の値が使われます。2 つの実行を比較するなら、環境の値ではなく、ログに出た値を比較してください。
+
+## 動かせなくても、この 3 つは持ち帰れる
+
+- **スループットの数値がどんな集計を使っているか尋ねる。** 投機的デコーダーが介在する「秒あたりトークン数」は、棄却されたドラフトが数えられているかどうかを誰かが教えてくれるまで曖昧です。使っているエンジンも含め、すべてのエンジンに尋ねてください。
+- **決定性を勝ち取っていない限り、LLM の出力で等価性をアサートするのをやめる。** temperature 0 はほぼ決定的であって、決定的ではありません。失敗のモードは、スモークテストが到達しない、100 トークン先の分岐です。エンジンをバッチ不変にしてビット単位でアサートするか、評価と分布でテストするかのどちらかです。中間は、チームに赤を無視させる不安定なスイートです。
+- **「エンジンをオープンソース化した」は、めったに「サービスをオープンソース化した」を意味しない。** *欠けているもの*、つまりキャッシュシステム、分離、ロードバランシングを読んでください。公開されたエンジンと動いているサービスのギャップに、プラットフォームの作業のすべてがあり、どの部品が欠けているかを正直に伝える README は、あなたに親切にしてくれています。
+
+<Flashcards title="DeepInfer: 用語集" cards={[
+  {front: "Batch invariance", back: "あるトークンの出力が、バッチ内の位置や、同じバッチに何が入っているかにかかわらずビット単位で同一であるという性質。その欠如が temperature 0 が再現できない本当の理由です。DeepInfer では DEEPINFER_BATCH_INVARIANT=1、NVIDIA のみ。"},
+  {front: "Full-acceptance accounting", back: "DeepInfer の公開デコードスループットの計算方法: 真の投機的受理率にかかわらず、各リクエストがステップあたり (1 + nextn) トークン — デフォルトでは 6 — として計上されます。達成可能な値ではなく上限です。"},
+  {front: "DSpark + confidence-scheduled verification", back: "DeepInfer の投機的デコーダー。トークンをドラフトし、モデル自身の信頼度の推定で、それらの検証にどれだけの予算を使うかを決めます。DEEPINFER_ENABLE_MTP_VARLEN=1 で有効になり、ドラフト長は DEEPINFER_USE_NEXTN_DECODE(デフォルト 5)で指定します。"},
+  {front: "SWA bounded replay", back: "コンテキストの有限な末尾だけを再生してデコーダーのプリフィルの作業量を減らします。保持される末尾は、スライディングウィンドウアテンションのウィンドウに最大のバックトラック長を足した範囲を覆う必要があります — V4.1 のデフォルトが DEEPINFER_YOCO_PREFILL_KEEP_TOKENS=140 と具体的なのはそのためです。"},
+  {front: "EPLB", back: "MoE のエキスパート並列ロードバランシング。よく使われるエキスパートの冗長なコピーを追加してトラフィックを均等に分散します。DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS(デフォルト 32)は下限で、エンジンは ep_size で割り切れるように切り上げます。"},
+  {front: "SM100", back: "CUDA の演算能力 10.0: データセンター向け Blackwell(B100/B200)。SM90(H100/H200)でも SM120(RTX 50 シリーズ)でもありません — SM100 のカーネルには tcgen05 と TMEM が必要で、コンシューマー向け Blackwell にはまったくないため、バイナリ互換ではありません。"},
+  {front: "FlashMLA / DeepGEMM / DeepEP / DeepSelect", back: "DeepSeek のカーネルライブラリで、いずれも DeepInfer よりずっと前から公開されています: マルチヘッド潜在アテンション、GEMM、エキスパート並列の通信、スパースアテンションとサンプラーの top-k。DeepInfer は、それらをようやくスケジューリングするランタイムです。"},
+  {front: "Attention DP / balanced CP / MoE EP", back: "DeepInfer の 3 種類の並列化: アテンションに対するデータ並列、長いシーケンス向けのバランスの取れたコンテキスト並列、MoE 層に対するエキスパート並列。ep_size = WORLD_SIZE × 見えているデバイス数 で、--cp は ep_size を割り切る必要があります。"},
+  {front: "What DeepInfer does NOT ship", back: "KV キャッシュシステム、VE/prefill/decode の分離のオーケストレーション、データ並列レプリカ間のロードバランシング。OpenAI 互換サーバーはありません — オフラインのバッチエンジンです。"},
+]} />
+
+<Quiz title="理解度チェック" questions={[
+  {
+    q: "共有の推論サーバーで temperature 0 が同一の出力を生まないのはなぜですか?",
+    options: [
+      "GPU の並列性が浮動小数点演算を本当にランダムにするから",
+      "カーネルがバッチの形に応じてリダクションの順序を変え、バッチサイズは他のユーザーのトラフィックに依存するから",
+      "temperature 0 でも top-k の分布からサンプリングするから",
+      "サービング中にモデルの重みが継続的に更新されるから"
+    ],
+    answer: 1,
+    explain: "同じデータに対して同じ行列積を実行すれば、毎回ビット単位で同一の結果が得られます — カーネルは決定的です。変わるのは、渡されるバッチの形で、それがリダクションの分割、ひいては浮動小数点の累積の順序を変えます。同居するトラフィックがバッチサイズを決めるため、あなたが何も変えなくても数値は動きます。"
+  },
+  {
+    q: "DeepInfer の公開デコードスループットは avg_SPS × decode_num_requests × (1 + nextn) / cp で計算されます。これは何を意味しますか?",
+    options: [
+      "棄却されたドラフトトークンを引いた後で測定される",
+      "実際の受理率にかかわらず、リクエストあたりステップあたり (1 + nextn) トークンを計上するので、上限である",
+      "投機的デコードが無効のときにのみ適用される",
+      "nextn のデフォルトが 0 なので、スループットを過小評価している"
+    ],
+    answer: 1,
+    explain: "ドキュメントはこれを「full-acceptance accounting」と呼び、「真の受理率にかかわらず」成り立つと述べています。nextn のデフォルトは 5 なので、5 つのドラフトが検証を通ったかどうかにかかわらず、各リクエストはステップあたり 6 トークンとして計上されます。したがってグラフは天井で、あなたの不足分は棄却率に等しくなります。"
+  },
+  {
+    q: "H100 を 8 枚積んだノードで、DeepInfer を使って DeepSeek-V4.1-Flash をサービングしたいとします。何が問題ですか?",
+    options: [
+      "問題なし — H100 は対応しており、CUDA 13 が必要なだけ",
+      "H100 は SM90 で、README が挙げているのは SM100(データセンター向け Blackwell)のみ。さらに別の問題として、約 763 GB の FP8 の重みは 640 GB に収まらない",
+      "DeepInfer は MoE 層に Ascend NPU を必要とする",
+      "H100 で動くのはバッチ不変の経路だけ"
+    ],
+    answer: 1,
+    explain: "独立した 2 つの障害があります。SM100 は演算能力 10.0、つまりデータセンター向け Blackwell で、SM90 の Hopper は記載がありません。そしてデフォルトの -1017 チェックポイントは FP8 で約 763B パラメーターあり、KV キャッシュを一切確保する前に 8 × 80 GB を超えます。"
+  },
+  {
+    q: "決定的サンプリングの手順は、何を犠牲にしますか?",
+    options: [
+      "何も — トレードオフのない純粋な利点",
+      "構造化出力が動かなくなる",
+      "DEEPINFER_ENABLE_MTP_VARLEN=0 は DSpark を有効にするのと同じフラグなので、投機的デコードを諦めることになる",
+      "バッチサイズが 1 に制限される"
+    ],
+    answer: 2,
+    explain: "README は DSpark を DEEPINFER_ENABLE_MTP_VARLEN=1 で有効にし、決定的サンプリングには DEEPINFER_ENABLE_MTP_VARLEN=0 を要求します。自身のドキュメントによれば両者は排他的で、再現性と投機的デコードによる高速化は二者択一です。評価用とサービング用で別の構成を運用する理由になります。"
+  },
+  {
+    q: "DeepInfer の成り立ちについて、正しい主張はどれですか?",
+    options: [
+      "vLLM を置き換えるためにゼロから書かれたクリーンルームのエンジンである",
+      "TensorRT-LLM のカーネルを使った SGLang のフォークである",
+      "自身の謝辞によれば、主に vLLM の上に構築され、SGLang と TensorRT-LLM からも着想を得ている",
+      "TensorRT-LLM の上の Python バインディング層である"
+    ],
+    answer: 2,
+    explain: "謝辞には「当初は主に vLLM の上に構築され、SGLang と TensorRT-LLM からも追加の着想を得ました」とあります。広く繰り返される「DeepSeek はオープンソースを使わず自前のエンジンを作った」という枠組みは、実際に起きたことを反転させています。彼らはオープンソースのエンジンを特化させ、その成果を Apache 2.0 で公開したのです。"
+  },
+  {
+    q: "DeepInfer の評価ハーネスが生成と採点を分離しているのはなぜですか?",
+    options: [
+      "推論の費用をもう一度払わずに、別の採点者で既存の出力を再採点できるようにするため",
+      "採点には GPU が必要で、生成には不要だから",
+      "モデルの生の出力を採点者から隠すため",
+      "Pass@1 はオフラインでしか計算できないから"
+    ],
+    answer: 0,
+    explain: "生成は生の出力をディスクに書き、採点がそれを読み戻します。これにより再評価が安く、再現可能になります — そしてバッチ不変のエンジンでは、生成そのものがずれていないことも証明でき、それがテストスイートのサンプルごとの厳密なパープレキシティのベースラインを成り立たせています。"
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "DeepInfer は、データセンター向け Blackwell または Ascend 950 上の 1 つのモデルに徹底的に特化した vLLM の派生物で、汎用のエンジンでもそのまま置き換えられるサーバーでもありません。読者のほとんどは動かせず、それが「乗り換えるべきか?」への正直な答えです。",
+  "KV キャッシュシステム、prefill/decode の分離、DP のロードバランシングは、設計上除外されています。リリースは、発表されたものだけでなく、欠けているものを読んでください。",
+  "temperature 0 がずれるのは、浮動小数点のランダムさではなくバッチ不変性のせいです。カーネルはバッチの形でリダクションの順序を選び、同居するトラフィックがあなたのバッチの形を選びます。temperature 0 の 1,000 回の実行から 80 通りの出力が生まれ、102 トークンまでは同一で、その先は違いました。",
+  "再現性は、公開された測定でスループットおよそ 1.6 倍のコストがかかり、DeepInfer では DSpark も失います — 一方を有効にするフラグがもう一方を無効にします。評価/RL 用とサービング用で別の構成を運用してください。",
+  "Full-acceptance accounting とは、公開されたデコードのスループットが、ドラフトトークンを受理されたかどうかにかかわらず数えるということです。すべてのエンジンに、秒あたりトークン数がどの集計を使っているか尋ねてください。",
+  "DEEPINFER_YOCO_PREFILL_KEEP_TOKENS=140 はチューニングのつまみではなくアーキテクチャ上の下限であり、DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS=32 はエンジンが切り上げる下限です。実行を比較する前に、有効な値をログに出してください。",
+]} />
+
+## 情報源とさらなる読み物
+
+- [deepseek-ai/DeepInfer](https://github.com/deepseek-ai/DeepInfer) — Apache 2.0、2026 年 10 月 16 日作成、2026 年 10 月 21 日時点で 16,337 スター / 1,620 フォーク / 172 件の未解決 issue。機能一覧、環境変数、「not included in this release」の節、ハードウェア対象、固定された `requirements-nvidia.txt`、vLLM/SGLang/TensorRT-LLM への謝辞の一次情報源。
+- [DeepInfer `examples/README.md`](https://github.com/deepseek-ai/DeepInfer/blob/main/examples/README.md) — 重要な方法論: 全受理のデコード集計、3 つの定常状態の指標、プロファイラーのオーバーヘッドの警告(bsz=1 で約 50%、残存 7〜11%)、MoE ロードバランサーのフラッシュの除外、`ep_size` の導出、`DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS` の丸めのルール。
+- [DeepInfer `eval/README.md`](https://github.com/deepseek-ai/DeepInfer/blob/main/eval/README.md) — AIME 2026 / HLE / GPQA Diamond のタスク数とサンプル数、Pass@1 の定義、生成から採点への 2 段階の設計、データセットの自動ダウンロードを意図的に行わないこと。
+- [Defeating Nondeterminism in LLM Inference](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/) — Thinking Machines Lab。Qwen3-235B-A22B-Instruct-2507 での 1,000 回 / 80 通りの出力の実験、103 トークン目での分岐、「並行性 + 浮動小数点」への反論、RMSNorm/行列積/アテンションの手順、26 秒 → 55 秒 → 42 秒のコスト、オンポリシー RL の議論の出典。
+- [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) — MIT、FP8、2026 年 10 月 17 日公開、48 個の safetensors シャード、約 763B パラメーター。DeepInfer のデフォルトのチェックポイント。
+- DeepSeek のカーネルライブラリ(いずれも稼働を確認済み): [FlashMLA](https://github.com/deepseek-ai/FlashMLA)(13.1k スター、2025 年 2 月) · [DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)(9.1k、2025 年 2 月) · [DeepEP](https://github.com/deepseek-ai/DeepEP)(10.3k、2025 年 2 月) · [TileKernels](https://github.com/deepseek-ai/TileKernels)(2.0k、2026 年 4 月) · [DeepSelect](https://github.com/deepseek-ai/DeepSelect)(510、2026 年 9 月)
+- [NVIDIA Blackwell Compatibility Guide](https://docs.nvidia.com/cuda/blackwell-compatibility-guide/) と [SM100 vs SM120 reference](https://0xsero.github.io/blackwell-gpu-wiki/blackwell/sm100-vs-sm120/) — 演算能力 10.0 と 12.0、`tcgen05`/TMEM、2 つの Blackwell のあいだにバイナリ互換性がないこと。
+- [Hacker News の議論、2026 年 10 月 20 日](https://news.ycombinator.com/item?id=50163277) — 2,251 ポイント、856 コメント。情報ギャップの証拠として引用しています。スレッドは推論の収益性をめぐる議論で、実装についての実質的な議論は含まれていません。
+- [vLLM](https://github.com/vllm-project/vllm) · [SGLang](https://github.com/sgl-project/sglang) · [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) — 謝辞で名前の挙がっている上流のプロジェクト。
+- AILmanac の関連ページ: [DeepSeek-V4.1-Flash フィールドガイド](/docs/models/deepseek-v4-1-flash-open-weight-1m) · [サンプリング制御](/docs/foundations/sampling-controls) · [DwarfStar と過剰適合した推論エンジン](/docs/models/ds4-overfit-inference-engines)
+
+## 次へ
+
+- [DeepSeek-V4.1-Flash: DeepInfer が動かすモデル](/docs/models/deepseek-v4-1-flash-open-weight-1m) — アーキテクチャ、effort のつまみ、価格、そして Blackwell のラックを持たない人が使えるサービング手段
+- [DwarfStar (ds4) と過剰適合した推論エンジンの台頭](/docs/models/ds4-overfit-inference-engines) — 徹底的に特化し、汎用性を削ぎ落とすという同じ賭けを、データセンターではなく 1 台のマシンに向けたもの
+- [AI ベンチマークの読み方](/docs/models/reading-ai-benchmarks) — 全受理の集計の節の背後にある一般的なスキル: グラフの意味づけを変える一文を、方法論の中から見つけること
