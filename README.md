@@ -80,14 +80,14 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 ## Recently added
 
 <!-- fresh:start -->
+- 2026-11-02 — [Desktop Agents Without Pixels](https://derob98.github.io/ailmanac/docs/models/desktop-agents-accessibility-tree)
 - 2026-11-02 — [The Usage & Cost Analytics API: Attribute Every Dollar](https://derob98.github.io/ailmanac/docs/api/usage-cost-analytics)
 - 2026-11-02 — [User Profiles & Enforcement: Don't Let One Customer Ban Your Whole Org](https://derob98.github.io/ailmanac/docs/api/user-profiles-and-enforcement)
+- 2026-11-02 — [Your Stack Choice Is an Agent Cost Lever](https://derob98.github.io/ailmanac/docs/playbooks/framework-choice-agent-cost)
 - 2026-10-26 — [Capability Redaction: What Kimi K3.1 Pro's Cyber Cut Actually Bought](https://derob98.github.io/ailmanac/docs/security/capability-redaction-open-weights)
 - 2026-10-26 — [Cloud Sessions: the VM Claude Code runs in when it isn't your laptop](https://derob98.github.io/ailmanac/docs/claude-code/cloud-sessions)
 - 2026-10-26 — [The Third-Party Memory Layer: How claude-mem Actually Works](https://derob98.github.io/ailmanac/docs/models/agent-memory-layer-claude-mem)
 - 2026-10-22 — [API Version 2026-10-21 — The First Breaking Version in Three Years](https://derob98.github.io/ailmanac/docs/api/api-version-2026-10-21)
-- 2026-10-22 — [The .pth Backdoor: LiteLLM 1.107.0 and Code That Runs Before Your Import](https://derob98.github.io/ailmanac/docs/security/pth-backdoor-litellm-supply-chain)
-- 2026-10-21 — [Agent SDK Permissions: the Six-Step Order](https://derob98.github.io/ailmanac/docs/claude-code/agent-sdk-permissions)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).
