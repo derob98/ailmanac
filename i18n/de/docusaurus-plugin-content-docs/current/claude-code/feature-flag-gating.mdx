@@ -1,0 +1,177 @@
+---
+sidebar_position: 21.5
+title: "Feature-Flags: Warum dein Claude Code nicht meins ist"
+description: "Claude Code schaltet Funktionen mit Flags frei, die es von Anthropic abruft. Datenschutz-Umgebungsvariablen, Bedrock, Gateways und frische Installationen schalten diesen Abruf stillschweigend ab — hier steht genau, was du dann verlierst und wie du das Verhalten stattdessen festnagelst."
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-09-24" source="https://code.claude.com/docs/en/env-vars#features-that-need-feature-flag-fetching">
+Welche Funktionen hinter einem abgerufenen Flag stehen, ändert sich mit fast jedem Claude-Code-Release — Funktionen werden freigeschaltet, sobald ein Rollout abgeschlossen ist. Verstehe die Feature-Liste unten als Gestalt des Problems und prüfe die aktuelle Dokumentation auf die heutige genaue Zusammensetzung.
+</VerifyNote>
+
+Zwei Entwickler installieren dieselbe Claude-Code-Version, auf demselben Betriebssystem, im selben Repo. Einer von beiden hat eine Funktion, die der andere nicht hat, und keiner bekommt eine Fehlermeldung. Das ist keine Folklore — es ist das dokumentierte Design. Claude Code schaltet einige Funktionen über **Feature-Flags** frei, **die es beim Start von Anthropic abruft**, und mehrere gewöhnliche, gut gemeinte Konfigurationen schalten diesen Abruf vollständig ab.
+
+Die Folge, die Leute überrascht: **Eine rein lokale Operation kann von einem Netzwerkaufruf abhängen.** Im September 2026 wurde daraus ein Hacker-News-Thread mit 437 Punkten, weil sich zeigte, dass schon das Lesen einer Markdown-Datei von deiner eigenen Festplatte einen solchen brauchte.
+
+<Callout type="objectives" items={["Wie die Remote-Feature-Flags von Claude Code abgerufen, zwischengespeichert und ausgewertet werden", "Die vier Konfigurationen, die den Flag-Abruf stillschweigend abschalten", "Warum DISABLE_TELEMETRY=0 dich trotzdem abmeldet — und DO_NOT_TRACK=0 nicht", "Die fünfzehn Funktionen, die du bei abgeschaltetem Abruf verlierst", "Wie du Gating in zwei Minuten erkennst und das Verhalten festnagelst, damit es dich nicht erwischt"]} />
+
+## Der Mechanismus
+
+Claude Code wird mit einem **Code-Standardwert für jedes Flag** ausgeliefert und versucht dann, die echten Werte abzurufen. Der Anbieter ist GrowthBook — es gibt eine eigene Umgebungsvariable `DISABLE_GROWTHBOOK`, und das Changelog enthält Einträge wie einen Absturz-Fix für „when a GrowthBook feature evaluates to null“ (v2.1.214).
+
+Vier Eigenschaften dieses Systems erklären fast jeden seltsamen Fall, auf den du stoßen wirst:
+
+<Steps items={[{title: "Flags werden abgerufen, nicht mitgeliefert", body: "Das Binary kennt die Flag-Namen und für jedes einen Fallback-Wert. Die Werte, die entscheiden, was deine Sitzung kann, kommen über das Netzwerk von Anthropic. Ohne Abruf fällt jedes Flag auf seinen Code-Standard zurück — der bei einer Funktion mitten im Rollout meistens „aus“ ist."}, {title: "Flags werden auf der Festplatte zwischengespeichert", body: "Abgerufene Werte bleiben zwischen Sitzungen erhalten, weshalb eine Funktion einen Lauf später auftauchen kann, als du erwartet hast. Das Changelog dokumentiert, wie das schiefging: v2.1.70 behob, dass beim frühen Start gelesene Flags ihren Festplatten-Cache nie auffrischten, sodass veraltete Werte sitzungsübergreifend überlebten."}, {title: "Flags werden gegen deine Identität und Version ausgewertet", body: "Die Auswertung berücksichtigt deine Claude-Code-Version und deine Abo-Stufe. v2.1.227 behob, dass Flags ohne die Stufe des Benutzers ausgewertet wurden, wenn eine Sitzung mit einem abgelaufenen Login-Token startete — was Max-Tarif-Nutzer fälschlich aufforderte, Nutzungs-Credits zu aktivieren. v2.1.261 behob, dass an eine neuere Version gebundene Flags gelegentlich für ein älteres Claude Code auf derselben Maschine galten."}, {title: "Flags können mitten in der Sitzung veralten", body: "v2.1.214 behob, dass Feature-Flags in lang laufenden Sitzungen veralteten, nachdem das OAuth-Token rotiert war. Eine Sitzung, die stundenlang läuft, hat nicht garantiert denselben Funktionsumfang wie beim Start."}]} />
+
+## Die vier Wege, auf denen der Abruf ausfällt
+
+Die Dokumentation ist hier eindeutig. Claude Code überspringt den Flag-Abruf in diesen Sitzungen:
+
+- **Du hast eine von vier Umgebungsvariablen gesetzt**: `DISABLE_GROWTHBOOK`, `DISABLE_TELEMETRY`, `DO_NOT_TRACK` oder `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`.
+- **Du nutzt einen Drittanbieter**: Amazon Bedrock, Claude Platform on AWS, die Agent Platform von Google Cloud oder Microsoft Foundry — es sei denn, eine Host-Plattform, die Claude Code einbettet, setzt `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`.
+- **Du bist in einer Sitzung über ein Claude-Apps-Gateway.**
+- **Es ist deine erste Sitzung nach einer frischen Installation oder einem Upgrade** — die Flags sind noch nicht angekommen. Mehr dazu weiter unten.
+
+Beachte, was die ersten beiden gemeinsam haben: Es sind die Konfigurationen, die ein **sicherheitsbewusstes Unternehmen** wählt. Genau die Gruppe, die am ehesten Telemetrie abschaltet und über Bedrock routet, bekommt stillschweigend den kleinsten Funktionsumfang.
+
+<Callout type="warning" items={["Telemetrie abzuschalten ist nicht nur eine Datenschutzentscheidung — es ist auch ein Funktionsschalter. Die Dokumentation sagt, DISABLE_TELEMETRY „also disables feature-flag fetching with the same effect as DISABLE_GROWTHBOOK“.", "Wenn du Datenschutz willst, ohne Funktionen zu verlieren, gibt es keine Kombination, die beides liefert: Jeder dokumentierte Weg, die Telemetrie zu stoppen, stoppt auch den Flag-Abruf.", "CI-Runner mit flüchtigem HOME sind bei jedem Lauf eine frische Installation und landen deshalb jedes einzelne Mal im Fall ohne Flags."]} />
+
+## Die Wertefalle: drei Variablen, drei Parsing-Regeln
+
+Das ist der Teil, der Leute einen Nachmittag kostet. Diese Variablen gehören zur selben Familie, lesen sich, als täten sie dasselbe, und parsen ihre Werte nach **drei verschiedenen Regeln**.
+
+| Variable | Wie sie den Wert liest | `=0` bedeutet also |
+| --- | --- | --- |
+| `DISABLE_TELEMETRY` | Jeder nicht leere Wert schaltet es ein | **Meldet dich trotzdem ab.** Zum Wiedereinschalten die Variable entfernen |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Jeder nicht leere Wert schaltet es ein | **Deaktiviert den Traffic trotzdem.** Zum Wiedereinschalten die Variable entfernen |
+| `DISABLE_ERROR_REPORTING` | Jeder nicht leere Wert schaltet es ein | **Meldet dich trotzdem ab.** Zum Wiedereinschalten die Variable entfernen |
+| `DISABLE_GROWTHBOOK` | Standard-Boolean — auf `1` oder `true` setzen | Lässt den Abruf **an** |
+| `DO_NOT_TRACK` | Standard-Boolean — auf `1` setzen | Lässt die Telemetrie **an** |
+
+Lies diese Tabelle zweimal. `DISABLE_TELEMETRY=0` deaktiviert die Telemetrie. `DO_NOT_TRACK=0` tut es nicht. Beides ist dokumentiert, beabsichtigt und gegensätzlich.
+
+<Callout type="info" items={["Die Dokumentation nennt die Regel direkt: Manche Variablen „read only whether you set them at all, so any non-empty value including 0 turns the behavior on“.", "Um eine davon rückgängig zu machen, musst du die Variable entfernen oder auf einen leeren Wert setzen — 0 oder false zuzuweisen ist kein Ausschalter.", "Am härtesten trifft das in einem Dockerfile oder einer CI-Konfiguration, in der jemand es „abgeschaltet“ hat, indem er 1 in 0 geändert hat."]} />
+
+## Was du tatsächlich verlierst
+
+Bei abgeschaltetem Flag-Abruf entfallen fünfzehn dokumentierte Fähigkeiten. Gruppiert danach, was sie dich kosten:
+
+**Berechtigungen und Start**
+- Sitzungen können in den Tarifen Pro, Max und Team standardmäßig nicht im Auto-Modus starten
+- Die VS-Code-Erweiterung kann keine Einstellungsdateien für den Start-Berechtigungsmodus lesen
+- `/auto-mode-setup` kann keine `autoMode.environment`-Einträge entwerfen
+
+**Alles, was über die lokale Sitzung hinausreicht**
+- Remote Control
+- Nachrichten an Sitzungen auf anderen Maschinen (Nachrichten auf derselben Maschine funktionieren weiter)
+- Das Synchronisieren der für dein claude.ai-Konto aktivierten Skills und Plugins in Terminalsitzungen
+- Kommentare zu einem Artefakt lesen oder beantworten
+- Das Advisor-Tool
+
+**Befehle und Diagnose**
+- `claude import` und der Befehl `/import`
+- `/skill-doctor` und sein Bericht im Reiter „Stats“ von `/plugin`
+
+**Stille Verhaltensänderungen — die gefährliche Gruppe**
+- MCP: Claude Code schließt MCP-Tools nicht mehr aus, deren Eingabeschema die API ablehnen würde. Es sendet das Schema trotzdem, und die Anfrage scheitert mit einem 400, der das Tool nach seiner Position benennt
+- MCP: kein Abtasten von claude.ai-Connector-Servern auf Protokollrevision 2026-07-28, es sei denn, du setzt `MCP_PROTOCOL_NEGOTIATION=auto`
+- Große Einfügungen werden nicht mehr als eingefügter, sondern als getippter Text behandelt — der Inhalt hinter einem `[Pasted text #N]`-Platzhalter erreicht Claude ohne Markierung
+- Unter Windows mit installiertem Git Bash bekommen claude.ai- und Console-Konten das PowerShell-Tool nicht standardmäßig; setze `CLAUDE_CODE_USE_POWERSHELL_TOOL=1`
+- Von Claude entworfenes Feedback ist aus
+
+Die letzte Gruppe ist die, die du verinnerlichen solltest. Ein fehlender Slash-Befehl macht sich bemerkbar. Ein 400-Fehler, der ein Tool **nach seiner Position im Array** benennt, sieht nicht nach einer Telemetrie-Einstellung aus, und du debuggst deinen MCP-Server eine Stunde lang, bevor du auf die Idee kommst, eine Umgebungsvariable zu prüfen.
+
+### Der Wirkungsradius hat Präzedenzfälle
+
+Flag- und Telemetrie-Einstellungen sind an Stellen durchgesickert, die niemand erwartet hätte. Zwei behobene, aber lehrreiche Beispiele aus dem Changelog:
+
+- **v2.1.108** behob, dass Abonnenten, die `DISABLE_TELEMETRY` gesetzt hatten, auf eine **Prompt-Cache-TTL von 5 Minuten statt 1 Stunde** zurückfielen. Eine Datenschutzvariable kostete bei jeder langen Sitzung unbemerkt Geld — ein 12-mal kürzeres Cache-Fenster.
+- **v2.1.105** behob, dass `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, in den Einstellungen *eines* Projekts gesetzt, die Nutzungsmetriken dauerhaft für **alle Projekte auf der Maschine** abschaltete.
+
+Beides ist behoben. Beides zeigt die Gestalt des Risikos: Diese Schalter greifen durch Subsysteme hindurch, die scheinbar nichts miteinander zu tun haben.
+
+## Die erste Sitzung nach einer Installation oder einem Upgrade
+
+Das verdient eine eigene Überschrift, weil es den klassischen nicht reproduzierbaren Fehlerbericht hervorbringt.
+
+In deiner ersten Sitzung nach der Installation von Claude Code — oder nach einem Upgrade auf eine Version, die eine Funktion hinzufügt — **kann eine flaggebundene Funktion schlicht fehlen**, und die Sitzung kann im Manual-Modus starten, in einem Tarif, der sonst im Auto-Modus startet. Claude Code ruft die Flags während dieser Sitzung ab, sodass beim nächsten Mal beides vorhanden ist.
+
+Zwei Folgerungen:
+
+- **Es behebt sich von selbst**, und genau deshalb ist es schwer zu melden. Bis jemand nachsieht, hat die zweite Sitzung die Flags.
+- **In flüchtigen Umgebungen behebt es sich nie.** Ein CI-Runner, ein frischer Container oder jedes Setup mit einem Wegwerf-Home-Verzeichnis befindet sich jedes Mal in seiner ersten Sitzung.
+
+Die Dokumentation nennt eine Abhilfe: Nach einer frischen Installation kann eine nicht interaktive Sitzung wie `claude -p`, das Agent SDK oder die VS-Code-Erweiterung die Flags trotzdem aufnehmen, bevor sie den Start-Berechtigungsmodus wählt.
+
+## Fallstudie: AGENTS.md, eine lokale Datei hinter einem Remote-Schalter
+
+Das klarste Beispiel für das ganze Muster, und das, das es auf die Startseite schaffte.
+
+<Steps items={[{title: "v2.1.277 bringt native AGENTS.md-Unterstützung", body: "Der Changelog-Eintrag: In einem Projekt ohne CLAUDE.md liest Claude Code stattdessen AGENTS.md; änderbar unter „Project instructions“ in /config. Der Eintrag selbst weist darauf hin, dass es auf Bedrock, Vertex oder Foundry noch nicht verfügbar ist."}, {title: "Die Funktion wird hinter einem abgerufenen Flag ausgeliefert", body: "Weil der Rollout flaggebunden war, fielen Sitzungen, die den Abruf überspringen, auf den Code-Standard zurück — aus. Das Lesen einer Markdown-Datei aus dem aktuellen Verzeichnis, eine Operation ohne jeden Netzwerkanteil, wurde von einem Netzwerkaufruf abhängig."}, {title: "Es scheitert stillschweigend", body: "Keine Warnung, keine Logzeile, kein Fehler. Die Anweisungen erreichen das Modell schlicht nie, das Symptom liest sich also als „Claude ignoriert meine AGENTS.md“ — was dich dazu bringt, die Datei umzuschreiben, statt eine Umgebungsvariable zu prüfen."}, {title: "Issue #95690, 2026-09-20", body: "Eingereicht als „Claude Code's AGENTS.md Support: A Local Feature Locked Behind a Remote Switch“. Melder reproduzierten es auf 2.1.278 und 2.1.280 und bestätigten, dass DISABLE_TELEMETRY, DISABLE_GROWTHBOOK und das Abschalten des nicht essenziellen Traffics es alle blockieren, ebenso die allererste Sitzung nach einer frischen Installation."}, {title: "Behoben in v2.1.281", body: "Die Memory-Dokumentation sagt es jetzt unmissverständlich: „Before v2.1.281, some sessions, such as those on Amazon Bedrock or with telemetry disabled, read CLAUDE.md files only. On those versions, update Claude Code.“ Wenn du unter 2.1.281 festgenagelt bist, hast du das noch."}]} />
+
+Die Lehre geht über diesen einen Fehler hinaus. Frage bei jeder neuen Claude-Code-Funktion: *Ist sie gegated?* Wenn ja, werden deine Telemetrie-Haltung, dein Anbieter und wie kürzlich du installiert hast alle zu Eingaben dafür, ob sie funktioniert.
+
+## In zwei Minuten diagnostizieren
+
+Du musst nicht raten. Drei Prüfungen, die günstigste zuerst.
+
+**1. Frage, ob die Einstellung überhaupt existiert.** Wenn die AGENTS.md-Unterstützung nicht verfügbar ist, erscheint die Zeile **Project instructions** im `/config`-Panel gar nicht. Eine fehlende Einstellung ist selbst die Diagnose — die Funktion ist nicht aus, sie ist nicht vorhanden.
+
+**2. Sieh nach, was dir eine interaktive Sitzung sagt.** Wenn es funktioniert, gibt Claude Code in der Unterhaltung eine Zeile aus wie `no CLAUDE.md found; AGENTS.md loaded: /home/you/repo/AGENTS.md`. Keine Zeile, kein Laden.
+
+**3. Führe einen Canary aus.** Die Technik, die den ursprünglichen Bericht geknackt hat: Schreibe ein Wort in die Datei, das sonst nirgends vorkommt, und frage dann in einer sauberen, nicht interaktiven Sitzung danach. Kommt das Wort zurück, hat die Datei das Modell erreicht. Das funktioniert für jede Anweisungsdatei, auf jeder Version.
+
+<PromptCard title="Canary-Test — wurde die Anweisungsdatei tatsächlich geladen?">{`mkdir -p /tmp/canary && cd /tmp/canary
+echo 'The project codeword is PERIWINKLE.' > AGENTS.md
+claude -p 'What is the project codeword? Answer with one word.'`}</PromptCard>
+
+Führe ihn einmal mit deiner normalen Umgebung aus, dann einmal mit gelöschten Datenschutzvariablen, und vergleiche. Beachte die Zuweisung mit leerem String — denk daran, dass `DISABLE_TELEMETRY=0` sie **nicht** löschen würde.
+
+<PromptCard title="Derselbe Test mit erlaubtem Flag-Abruf — beachte die leeren Werte, keine Nullen">{`cd /tmp/canary
+env DISABLE_TELEMETRY= CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC= DISABLE_GROWTHBOOK=false \\
+  claude -p 'What is the project codeword? Answer with one word.'`}</PromptCard>
+
+**4. Wenn du Details brauchst, schalte das Debug-Logging ein.** Starte mit `--debug` oder `/debug`, und die Logs landen in `~/.claude/debug/<session-id>.txt`. Ein Haken: Die Umgebungsvariable `DEBUG` akzeptiert nur die Wahrheitswerte `1`, `true`, `yes` und `on` — ein Namespace-Muster wie `DEBUG=express:*`, das von einem anderen Tool übrig ist, schaltet es nicht ein.
+
+## Verhalten festnageln, statt sich auf ein Flag zu verlassen
+
+Die dauerhafte Lösung ist, nicht mehr vom Gate abzuhängen. Zwei Muster.
+
+**Die Einstellung explizit festnageln.** Bei Anweisungsdateien kann der Wert **Project instructions** in einer Einstellungsdatei unter der ID des eingebauten Plugins stehen, statt dem Standard überlassen zu bleiben. Eine wichtige Grenze: Claude Code **ignoriert diesen Schlüssel in Projekt- und lokalen Einstellungsdateien** — es liest ihn nur aus `~/.claude/settings.json`, einer `--settings`-Datei oder verwalteten Einstellungen. Ihn in die `.claude/settings.json` deines Repos zu legen, bewirkt nichts.
+
+<PromptCard title="CLAUDE.md und AGENTS.md gemeinsam laden — nur Benutzer- oder verwaltete Einstellungen">{`{
+  "pluginConfigs": {
+    "agents-md@builtin": {
+      "options": { "instructionFiles": "claude-md-and-agents-md" }
+    }
+  }
+}`}</PromptCard>
+
+**Einen Pfad nutzen, der nie gegated war.** Eine `CLAUDE.md`, die `AGENTS.md` importiert, hat auf jeder Version, bei jedem Anbieter und mit abgeschalteter Telemetrie funktioniert — weil es gewöhnliche `@path`-Import-Expansion ist, kein geflaggter Codepfad. Das ist die Empfehlung, die die Dokumentation selbst für Bedrock-, Vertex- und Foundry-Sitzungen gibt.
+
+<PromptCard title="Die einzeilige CLAUDE.md, die nie ein Flag brauchte">{`@AGENTS.md`}</PromptCard>
+
+Eine Feinheit, wenn du diesen Weg gehst: Eine `AGENTS.md`, die über die *Einstellung* gelesen wird, verhält sich etwas anders als eine, die per *Import* eingezogen wird. `InstructionsLoaded`-Hooks **feuern nicht** für den einstellungsbasierten Pfad, wohl aber wie gewohnt für eine `AGENTS.md`, die eine `CLAUDE.md` importiert oder auf die sie per Symlink verweist. Wenn du Hooks auf dem Laden von Anweisungen hast, ist der Import der sicherere Weg.
+
+<Flashcards title="Flag-Gating auf einen Blick" cards={[{front: "Wer liefert die Feature-Flags von Claude Code?", back: "GrowthBook. Es gibt eine eigene Variable DISABLE_GROWTHBOOK, und Changelog-Einträge verweisen direkt auf die GrowthBook-Feature-Auswertung."}, {front: "Vier Umgebungsvariablen, die den Flag-Abruf stoppen", back: "DISABLE_GROWTHBOOK, DISABLE_TELEMETRY, DO_NOT_TRACK, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC."}, {front: "Was bewirkt DISABLE_TELEMETRY=0?", back: "Meldet dich trotzdem ab. Es liest nur, ob die Variable überhaupt gesetzt ist, daher zählt jeder nicht leere Wert. Entferne sie oder setze sie leer."}, {front: "Was bewirkt DO_NOT_TRACK=0?", back: "Lässt die Telemetrie an. Es wird als Standard-Boolean geparst — die gegenteilige Regel von DISABLE_TELEMETRY."}, {front: "Welche Anbieter überspringen den Abruf?", back: "Amazon Bedrock, Claude Platform on AWS, die Agent Platform von Google Cloud, Microsoft Foundry — es sei denn, der Host setzt CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST. Ebenso Sitzungen über ein Claude-Apps-Gateway."}, {front: "Der fieseste stille Verlust", back: "Claude Code hört auf, MCP-Tools mit API-ungültigen Eingabeschemas zu filtern, sodass Anfragen mit einem 400 scheitern, der das Tool nur nach seiner Position benennt."}, {front: "Warum erscheint eine Funktion erst beim zweiten Lauf?", back: "Die erste Sitzung nach einer Installation oder einem Upgrade hat die Flags noch nicht abgerufen. Sie ruft sie während dieser Sitzung ab und speichert sie auf der Festplatte."}, {front: "Der nie gegatete Weg, AGENTS.md zu laden", back: "Eine CLAUDE.md mit @AGENTS.md — schlichte Import-Expansion, funktioniert bei jedem Anbieter und jeder Version."}]} />
+
+## Teste dich selbst
+
+<Quiz title="Teste dich selbst" questions={[{q: "Dein Dockerfile hat ENV DISABLE_TELEMETRY=0, weil ein Kollege „die Telemetrie wieder eingeschaltet“ hat. Was passiert tatsächlich?", options: ["Die Telemetrie ist an und Flags werden normal abgerufen", "Die Telemetrie ist aus und der Flag-Abruf ist deaktiviert", "Die Variable wird ignoriert, weil 0 kein gültiger Wert ist"], answer: 1, explain: "DISABLE_TELEMETRY liest nur, ob die Variable überhaupt gesetzt ist, daher meldet jeder nicht leere Wert — auch 0 — dich ab, und das deaktiviert zugleich den Feature-Flag-Abruf. Rückgängig machen kannst du es nur, indem du die Variable entfernst oder auf einen leeren Wert setzt."}, {q: "Ein CI-Job meldet, dass Claude Code die AGENTS.md des Repos nie aufnimmt, während es auf jedem Entwickler-Laptop einwandfrei funktioniert. Was ist die wahrscheinlichste Ursache?", options: ["Die AGENTS.md hat einen Syntaxfehler", "Der Runner hat ein flüchtiges Home-Verzeichnis, daher ist jeder Lauf eine erste Sitzung nach der Installation, in der noch keine Flags abgerufen wurden", "CI-Runner können keine Markdown-Dateien lesen"], answer: 1, explain: "Flags werden in der ersten Sitzung abgerufen und auf der Festplatte zwischengespeichert. Ein Wegwerf-Home-Verzeichnis bedeutet, dass der Cache nie überlebt, der Runner also dauerhaft im Zustand ohne Flags ist, den Entwicklermaschinen nur ein einziges Mal durchlaufen."}, {q: "Welcher Fehler ist bei abgeschaltetem Flag-Abruf am schwersten auf die Flag-Einstellung zurückzuführen?", options: ["Remote Control ist nicht verfügbar", "Eine Anfrage scheitert mit einem 400, der ein MCP-Tool nach seiner Position benennt", "Der Befehl /import fehlt"], answer: 1, explain: "Claude Code schließt normalerweise MCP-Tools aus, deren Eingabeschema die API ablehnen würde. Bei abgeschaltetem Abruf sendet es sie trotzdem, und der resultierende 400 sieht nach einem MCP-Server-Fehler aus, nicht nach der Folge einer Umgebungsvariable. Ein fehlender Befehl oder eine fehlende Funktion macht sich wenigstens bemerkbar."}, {q: "Du willst, dass AGENTS.md auf Amazon Bedrock zuverlässig lädt, auf jeder Version. Was ist der robuste Weg?", options: ["DISABLE_GROWTHBOOK=0 setzen, um den Abruf zu erzwingen", "instructionFiles in die .claude/settings.json des Repos schreiben", "Eine CLAUDE.md behalten, die @AGENTS.md enthält"], answer: 2, explain: "Der Importpfad ist schlichte @path-Expansion und war nie flaggebunden, weshalb die Dokumentation ihn genau für diese Sitzungen empfiehlt. Den Abruf zu erzwingen hilft nicht, weil Drittanbieter ihn ohnehin überspringen, und der Schlüssel instructionFiles wird in Projekt- und lokalen Einstellungsdateien ignoriert."}]} />
+
+<Callout type="takeaways" items={["Claude Code ruft Feature-Flags von Anthropic ab (GrowthBook), speichert sie auf der Festplatte zwischen und wertet sie gegen deine Version und Abo-Stufe aus — zwei identische Installationen können sich also legitim unterschiedlich verhalten.", "Vier Umgebungsvariablen, drei Drittanbieter, Apps-Gateway-Sitzungen und die erste Sitzung nach einer Installation überspringen alle diesen Abruf und kosten dich fünfzehn dokumentierte Funktionen.", "DISABLE_TELEMETRY, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC und DISABLE_ERROR_REPORTING behandeln jeden nicht leeren Wert als an — auch 0. DO_NOT_TRACK und DISABLE_GROWTHBOOK sind echte Booleans. Entfernen, nicht auf null setzen.", "Die schlimmsten Verluste sind still: ungefilterte MCP-Schemas, die positionsbezogene 400er auslösen, und nicht markierter eingefügter Text.", "AGENTS.md war die Fallstudie — nativ ab v2.1.277, gegated, behoben in v2.1.281. Eine CLAUDE.md mit @AGENTS.md brauchte das Flag nie."]} />
+
+## Weiter
+
+- [AGENTS.md & Interoperabilität zwischen Tools](/docs/claude-code/agents-md) — die Funktion, die diese Seite als Fallstudie nutzte, und die Sync-Muster, die nicht von einem Flag abhängen
+- [Einstellungen & Konfiguration](/docs/claude-code/settings) — wo `pluginConfigs` und der Schlüssel `env` liegen und welche Einstellungsdateien gelesen werden
+- [Selbst gehostete & Enterprise-Umgebungen](/docs/claude-code/self-hosted-environments) — Bedrock-, Vertex- und Gateway-Setups, genau die Sitzungen, die den Abruf überspringen
+
+## Quellen & weiterführende Links
+
+- [Claude-Code-Umgebungsvariablen — Features that need feature-flag fetching](https://code.claude.com/docs/en/env-vars#features-that-need-feature-flag-fetching) — die maßgebliche Liste samt der Wertsemantik pro Variable
+- [Claude-Code-Memory-Dokumentation — AGENTS.md](https://code.claude.com/docs/en/memory#agents-md) — Vorrangtabelle, die Einstellung Project instructions und wann die Unterstützung nicht verfügbar ist
+- [Claude Code CHANGELOG](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md) — v2.1.277 (AGENTS.md-Unterstützung), v2.1.281 und die Fixes am Flag-System in v2.1.70, v2.1.108, v2.1.214, v2.1.227 und v2.1.261
+- [anthropics/claude-code Issue #95690](https://github.com/anthropics/claude-code/issues/95690) — der ursprüngliche Bericht, mit Community-Reproduktionen auf 2.1.278 und 2.1.280
+- [Claude Code reads AGENTS.md only when telemetry is on](https://blog.szypowi.cz/p/claude-code-reads-agents.md-only-when-telemetry-is-on/) — der Beitrag, der es ans Licht brachte, und die Canary-Wort-Methode

@@ -1,0 +1,311 @@
+---
+sidebar_position: 17.2
+title: "Parallele Agents beim Merge: Intent-Konflikte und die CI-Wand (2026)"
+description: "Worktrees verhindern, dass Agents gegenseitig ihre Dateien überschreiben. Sie verhindern nicht, dass zwei Pläne, die nicht beide wahr sein können, sauber zusammengeführt werden. Die Koordinationsschicht über Git (das Protokoll von Foremerge, entschlüsselt) plus der CI-Umbau, den Linear vornahm, als Agents anfingen, 2.000 Tests pro Woche hinzuzufügen — mit allen Zahlen."
+keywords: [parallel coding agents, intent conflicts, foremerge, coordination protocol, git worktrees, merge conflicts, CI bottleneck, Linear CI, test sharding, tsgo, oxlint, vitest isolate, merge queue, multi-agent coding, claude code parallel sessions, agent fleet, MCP coordination]
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-09-22" source="Linear engineering post 'AI coding has made CI a bottleneck, so we reworked ours to keep up' by Mufeez Amjad, Sept 21 2026 (linear.app/now/ci-bottleneck-reworked) and its Hacker News thread (item 49792067); github.com/naw103/foremerge — README, docs/protocol.md, docs/conflict-detection.md — Apache-2.0, Rust, repo created Aug 21 2026, v0.4.3 released Sept 18 2026, 491 stars on Sept 22 2026 per the GitHub API; Show HN thread item 49789356. Star counts, version numbers and one company's CI timings all decay fast — the mechanisms and the ratios are the durable part." />
+
+<Callout type="objectives" items={[
+  "Die drei Fehlermodi benennen, die die Worktree-Isolation überleben — und warum ein sauberer Git-Merge kein Beleg dafür ist, dass zwei Agent-Pläne miteinander vereinbar sind",
+  "Die tatsächlichen Regeln eines Koordinationsprotokolls lesen: semantische Scopes, erhaltende vs. nicht erhaltende Operationen und die fünf Konfliktregeln, die Foremerge mitliefert",
+  "Verstehen, warum der Erkennungspfad bewusst deterministisch ist, ohne Modell darin, und warum Claims beratende Leases statt Locks sind",
+  "Den echten kritischen Pfad in deiner CI finden — die kurzen Gating-Jobs, nicht die langen Test-Shards — anhand von Lineares gemessenen Vorher-nachher-Zahlen",
+  "Die Sharding-Steuer kennen: warum eine Verdopplung der Shards die Laufzeit nicht halbiert und was zuerst billig werden muss"
+]} />
+
+Am 21. und 22. September 2026 landeten zwei Geschichten innerhalb eines Tages auf der Hacker-News-Startseite. Die eine war ein Engineering-Beitrag von Linear mit dem Titel *„AI coding has made CI a bottleneck, so we reworked ours to keep up.“* Die andere war ein Show HN für **Foremerge**, ein Tool mit dem Versprechen „catch intent conflicts before code conflicts“.
+
+Sie beschreiben dasselbe von entgegengesetzten Enden. Agents haben es fast kostenlos gemacht, einen Diff zu erzeugen. Alles, was nach dem Diff kommt — beweisen, dass er korrekt ist, beweisen, dass er mit den vier anderen Diffs vereinbar ist, die deine anderen Agents gerade schreiben —, kostet weiterhin, was es immer gekostet hat. Dort bildet sich also die Warteschlange.
+
+AILmanac behandelt die menschliche Hälfte davon bereits in [Der Verifikations-Engpass](/docs/frontiers/the-verification-bottleneck) und die Isolation auf Dateiebene in [Git-Worktrees](/docs/claude-code/worktrees). Diese Seite ist die Mechanik dazwischen: was kaputtgeht, wenn mehrere Agents gleichzeitig ein Repo bearbeiten, und was du tatsächlich dagegen tun kannst.
+
+---
+
+## Teil 1 — Git vergleicht Diffs. Es kann keine Pläne vergleichen.
+
+Ein Worktree gibt jeder Sitzung ihr eigenes Verzeichnis und ihren eigenen Branch. Das löst genau ein Problem: zwei Prozesse, die gleichzeitig dieselbe Datei schreiben. Es tut nichts gegen den teureren Fehler, nämlich zwei *Pläne*, die nicht beide wahr sein können.
+
+Das kanonische Beispiel des Foremerge-Autors: Eine Sitzung ersetzte `PaymentService` durch eine Stripe-spezifische Implementierung, während eine andere Sitzung PayPal-Unterstützung auf der ursprünglichen Abstraktion ergänzte. Git führte beide Branches sauber zusammen. Die zweite Änderung hing nun von einem Erweiterungspunkt ab, den die erste gelöscht hatte.
+
+Nichts in der Merge-Maschinerie hätte das erkennen können, denn nichts in der Merge-Maschinerie weiß, was beide Agents *vorhatten*.
+
+| Fehlermodus | Wie er aussieht | Warum Isolation nicht hilft |
+| --- | --- | --- |
+| **Destruktiv vs. additiv** | Agent A ersetzt oder entfernt das, was Agent B erweitert | Beide Diffs berühren unterschiedliche Zeilen oder sogar unterschiedliche Dateien — der Merge ist sauber, das Design ist kaputt |
+| **Doppelte Arbeit** | Zwei Agents lösen dasselbe Problem aus verschiedenen Winkeln | Kein Branch kollidiert; du zahlst doppelt und dann noch einmal fürs Abgleichen |
+| **Vertragsdrift** | Ein Agent ändert eine API, ein Schema oder eine Konfiguration; ein anderer programmiert gegen die alte Form | Es kompiliert. Es wird ausgeliefert. Es scheitert zur Laufzeit |
+
+Der Autor berichtet von einem Produktionsfall, in dem zwei Jobs „started rearranging the same matching schema from opposite ends“, und der Datenverlust trat drei Tage später in Produktion zutage. Das ist die Gestalt dieser Fehlerklasse: beim Merge still, später teuer.
+
+<Callout type="key" items={["Worktrees isolieren Dateien. Merge-Queues serialisieren die Integration. Keine der beiden Schichten hat irgendeine Darstellung von Absicht, daher kann keine einen Konflikt erkennen, der nur zwischen zwei Plänen besteht."]} />
+
+---
+
+## Teil 2 — Was eine Koordinationsschicht tatsächlich tut
+
+**[Foremerge](https://github.com/naw103/foremerge)** ist die konkrete Instanz, die zu studieren sich lohnt, nicht weil du sie einsetzen musst, sondern weil ihre Designentscheidungen genau die sind, auf die jedes Team stößt, wenn es das intern lösen will. Apache-2.0, in Rust geschrieben, Repo am 21. August 2026 eröffnet, am 18. September bei v0.4.3 und am 22. September bei 491 Sternen.
+
+Die Idee: Agents **erklären, was sie tun werden, bevor sie es tun**, in maschinell vergleichbarer Form. Zwei Pläne, die nicht beide wahr sein können, kollidieren dann in einem abfragbaren Speicher statt in deinem Merge.
+
+### Semantische Scopes, keine Dateipfade
+
+Ein Scope ist ein kleines strukturiertes Objekt — eine Art, ein Schlüssel und eine Operation — statt eines Pfades:
+
+```json
+{ "kind": "symbol", "key": "PaymentService", "operation": "replace" }
+```
+
+Erkannte Arten: `symbol`, `api`, `schema`, `config`, `infra`, `test`, `migration`, `env`, `file`, `component`, `contract`, `domain`. Sowohl Art als auch Schlüssel werden für den kanonischen Vergleich kleingeschrieben.
+
+Die tragende Unterscheidung liegt in der Operation, und das ist der Teil, den die meisten falsch machen, wenn sie das selbst skizzieren:
+
+- **Erhaltend** — `add`, `extend`, `modify`. Alles, was von dieser Sache abhängt, funktioniert weiter.
+- **Nicht erhaltend** — `replace`, `remove`, `rename`, `migrate`. Es funktioniert nicht weiter.
+
+Diese einzige Binärunterscheidung macht aus „zwei Agents haben `PaymentService` berührt“ (nutzlos, passiert ständig) ein „ein Agent löscht den Erweiterungspunkt, auf dem der andere aufbaut“ (verwertbar).
+
+### Die fünf Regeln, im Verhalten wörtlich
+
+| Regel | Feuert, wenn | Schweregrad |
+| --- | --- | --- |
+| **FM-C001** Destruktiv vs. additiv | Eine Seite nicht erhaltend, die andere erhaltend, auf überlappenden Scopes | HIGH, wenn beide Operationen explizit deklariert wurden; MEDIUM, wenn abgeleitet |
+| **FM-C002** Divergente Neuschreibung | Beide Seiten nicht erhaltend auf demselben Scope | HIGH behauptet / MEDIUM angezeigt — bittet die Agents, zuerst ein Zieldesign zu wählen |
+| **FM-C003** Gemeinsamer Vertrag | Beide Seiten erhaltend auf einem überlappenden Scope | MEDIUM, nie behauptet — eine Koordinationsnotiz; die Änderungen können durchaus vereinbar sein |
+| **FM-C004** Doppelte Arbeit | Ähnlichkeit der Zusammenfassung — tokenisiert, CamelCase getrennt, Stoppwörter entfernt — mit Jaccard ≥ 0,62, oder übereinstimmende Operationen plus überlappende Scopes über 0,42 | MEDIUM, nie behauptet |
+| **FM-C005** Überlappender Claim | Auf demselben kanonischen Scope existiert bereits ein aktiver Claim | MEDIUM, weiche Warnung — der neue Claim wird trotzdem erstellt |
+
+Zwei Details darin lohnt es sich zu übernehmen, selbst wenn du das Tool nie installierst. Erstens: **Nur exakte kanonische Scope-Übereinstimmungen können einen Befund behaupten**; alles Abgeleitete oder lose Übereinstimmende wird auf MEDIUM herabgestuft und lediglich angezeigt. Zweitens: Das Übersteuern eines HIGH-Befunds verlangt eine nicht leere schriftliche Begründung — der Notausgang existiert, hinterlässt aber eine Spur.
+
+### Drei bewusste Verweigerungen
+
+<Steps items={[
+  {title: "Keine Locks — Claims sind beratende Leases", body: "Ein Claim trägt eine Lease-Dauer in Sekunden und wird nie zu exklusivem Besitz. Die Begründung ist betrieblich: Ein abgestürzter Agent mit einem harten Lock legt die ganze Flotte lahm. Verlassene Arbeit läuft von selbst ab. Das Bedrohungsmodell wird offen als fehlbare Agents benannt, nicht als feindselige."},
+  {title: "Kein Modell im Erkennungspfad", body: "Die Konflikterkennung ist deterministisch und heuristisch — gleiche Eingaben, gleiche Antwort, bei jedem Lauf. Das Argument des Autors: Ein Richter, der zwischen Läufen seine Meinung ändert, zerstört genau das Vertrauen, das die Schicht bieten soll. Es heißt auch, dass du deine Konfliktregeln per Unit-Test prüfen kannst, was mit einem LLM-Schiedsrichter nicht geht."},
+  {title: "Kein Merge-Gating", body: "Merge-Queues liegen ausdrücklich außerhalb des Umfangs — das gehört dem Git-Host. Das ist eine Schicht vor dem Code, und sie ersetzt weder Code-Review noch CI noch Architektur-Governance."}
+]} />
+
+### Wo der Zustand liegt — der elegante Teil
+
+Der Zustand ist eine einzelne SQLite-Datei im WAL-Modus unter `.git/foremerge/state.sqlite3`. Kein Server, kein Daemon, keine Infrastruktur. Und weil jeder Worktree eines Repos bereits das gemeinsame Git-Verzeichnis teilt, **kommt gemeinsamer Koordinationszustand über Worktrees hinweg gratis** — dasselbe, was die Isolation möglich gemacht hat, macht auch die Koordination möglich.
+
+<PromptCard title="Es in eine Flotte von Claude-Code-Sitzungen einbinden">{`# install + initialise coordination in the repo
+curl -fsSL https://foremerge.com/install.sh | sh
+foremerge init
+foremerge setup all      # wires the agent clients (Claude Code, Codex, Cursor) over MCP
+
+# what an agent does before it writes a line of code
+foremerge intent publish
+foremerge work claim
+foremerge changeset accept`}</PromptCard>
+
+### Das Compliance-Problem, das niemand wegkonstruieren kann
+
+Das Protokoll funktioniert nur, wenn Agents tatsächlich ihre Absicht veröffentlichen. Mit MCP in der Schleife, argumentiert der Autor, ist die Compliance stark, weil das Deklarieren der Absicht nur ein weiterer Tool-Aufruf in der Schleife des Agents ist — derselbe Mechanismus wie bei jedem anderen [MCP-Server](/docs/claude-code/mcp). Foremerge stellt so 18 Lifecycle-Tools bereit, darunter `publish_intent`, `publish_changeset` und `run_verification`, und installiert beim Setup native Skills.
+
+Ohne MCP ist die Compliance das, wozu dein System-Prompt das Modell überreden kann — also unzuverlässig genau in dem Moment, in dem die Flotte ausgelastet ist.
+
+<Callout type="warning" items={["Noch keine veröffentlichten Benchmarks, Validierungsbefehle laufen nicht in einer Sandbox, und das Projekt ist zum Zeitpunkt des Schreibens vor 1.0 und drei Wochen alt. Betrachte das Protokoll als die Lehre und das Binary als Experiment.","Eine Koordinationsschicht fügt der Schleife jedes Agents einen Schritt hinzu. Besteht deine Flotte aus zwei Sitzungen, lohnt sich der Aufwand nicht — Worktrees plus eine Policy für kurzlebige Branches gewinnen weiterhin."]} />
+
+---
+
+## Teil 3 — Die CI-Wand, mit den Zahlen
+
+Nun das andere Ende. Lineares Engineering-Team veröffentlichte die Rechnung dessen, was passiert, wenn Agents produktiv sind: Die Test-Suite hat sich **seit Jahresbeginn fast vervierfacht** und wächst um etwa **2.000 Tests pro Woche**.
+
+Ihre ehrliche Schlagzeile: Nach all der Arbeit unten ging die mediane Wartezeit eines Pull Requests von **mehr als 6 Minuten auf knapp über 5**. Ohne die Optimierungen würde dieselbe Suite Entwickler heute **etwa 11 Minuten** warten lassen. Diese Rahmung ist die eigentliche Lehre — der Großteil der Mühe erkaufte Stillstand gegenüber einer Suite, die sich unter dir verdoppelt.
+
+### Der kritische Pfad sind die kurzen Jobs
+
+Die Intuition sagt, die langen Test-Shards zu optimieren. Die Messungen sagen etwas anderes. Jeder Lauf beginnt mit Gating-Jobs, die prüfen, welche Pfade ein PR berührt hat und ob die Tests für dieselben Eingaben schon bestanden haben. Keiner der acht API-Test-Shards kann starten, bevor diese fertig sind — ein paar Sekunden bei einem winzigen Job kosten also jeden nachgelagerten Job dieselben Sekunden.
+
+| Gate-Arbeit | Vorher | Nachher |
+| --- | --- | --- |
+| Änderungserkennung, langsamster Lauf | 138 s | 37 s |
+| Änderungserkennung, Median | 26 s | 8 s |
+| Checkout beim langsamsten Gate | 94 s | 20 s |
+| Gate-Jobs ganz ohne Checkout | 27 s | 7 s |
+| Ersparnis auf dem Merge-Pfad pro API-Pull-Request | — | 42 s |
+
+Zwei konkrete Kniffe: Ein **spärlicher, blobloser Checkout mit begrenzter Historie** reichte für die Änderungserkennung (weitere ~11 s), und `actions/checkout` wurde durch eine Composite Action ersetzt, die mit Backoff wiederholt und `GIT_HTTP_LOW_SPEED_LIMIT` / `GIT_HTTP_LOW_SPEED_TIME` setzt, sodass eine hängende Verbindung nach etwa 30 Sekunden abbricht, statt den Lauf zu blockieren.
+
+Dann der günstigste Gewinn auf dem Brett: **Sieben unabhängige Prüfungen** starteten jeweils einen Runner, checkten das Repo aus und installierten Abhängigkeiten, um ein paar Sekunden echte Arbeit zu verrichten. Sie zu bündeln sparte etwa **87.000 Runner-Minuten pro Monat — 11,8 % der gesamten CI-Nutzung.**
+
+<Callout type="key" items={["Den langsamsten Job zu optimieren verkürzt das Ende. Die Gating-Jobs zu optimieren verkürzt jedermanns Wartezeit. Miss den kritischen Pfad, bevor du die Test-Suite anfasst."]} />
+
+### Der Setup-Aufwand entscheidet, wie weit du shardern kannst
+
+Eine Verdopplung der Shards halbiert die Laufzeit nicht, weil jeder Shard das Setup erneut bezahlt. Linear konnte erst von vier auf acht Shards wechseln, *nachdem* das Setup pro Shard billig geworden war:
+
+| Setup-Komponente | Vorher | Nachher |
+| --- | --- | --- |
+| Setup pro Shard | 110–140 s | 67–73 s (−44 %) |
+| `pnpm install` | 44–73 s | 16–18 s |
+| Datenbank-Setup (Snapshots) | 12 s pro Container | 1–2 s pro Container |
+
+Der Gewinn: Bei vier Shards verbrauchte das Setup insgesamt **8,3 Minuten**. Nach den Kürzungen konnten sie **acht Shards bei 7,5 Minuten** Gesamt-Setup betreiben — mehr Parallelität bei geringerem Gesamtaufwand. Der kritische Job wurde etwa **19 % schneller und 19 % günstiger**, wobei der langsamste Shard von **5,25 auf 4,33 Minuten** und die gesamte Runner-Zeit der API-Shards von **32,8 auf 22 Minuten pro Lauf** sank.
+
+### Tausche das Werkzeug, bevor du die Regeln neu schreibst
+
+Die größten einzelnen Gewinne waren nicht clever — sie bestanden darin, eine langsame Implementierung durch eine schnelle zu ersetzen, die dieselbe Arbeit tut.
+
+| Änderung | Gemessener Effekt |
+| --- | --- |
+| GitHub-gehostete Runner → Drittanbieter-Runner | Jobs im Schnitt **34 % schneller**; `tsc`-Workloads **−52 %** |
+| `tsc` → `tsgo` | Wöchentlicher Median der TypeScript-Prüfung **−73 %** |
+| Typbewusste eigene Lint-Regeln → reine AST-Statikanalyse | API-Lint **−68 %**, Lint des gesamten Repositories **−55 %** (plus weitere Einsparungen durch Oxlint) |
+| Vitest-Opt-in-Projekt mit `isolate: false` | Shard-Zeit **300–379 s → ~195 s**, rund **17 %** der monatlichen CI-Kosten wert |
+
+Das Letzte ist ein echter Kompromiss, kein Gratisessen: Isolation auszuschalten lässt sichere Testdateien innerhalb jedes Workers eine Modulregistry teilen. Es ist pro Projekt ein Opt-in, gerade weil ein Test, der Modulzustand verändert, nun seine Nachbarn vergiftet. Schnellere Tests, schwächere Garantien — entscheide bewusst.
+
+### Der Gegenpunkt aus dem Thread
+
+Die Hacker-News-Diskussion ließ die Prämisse nicht unwidersprochen passieren, und der Einwand ist es wert, mitgenommen zu werden: *Ein Agent, der 2.000 Tests pro Woche hinzufügt, fügt nicht offensichtlich den Signalwert von 2.000 Tests hinzu.* Mehrere Kommentierende beschrieben Agents, die große Mengen wertarmer Tests auf ineffiziente Weise schreiben, was die CI-Kosten für immer aufbläht und künftige Änderungen erschwert — jeder dieser Tests ist etwas, das ein späteres Refactoring erfüllen oder löschen muss.
+
+Bevor du ein Quartal damit verbringst, die CI um 19 % schneller zu machen, lohnt sich die Frage, ob ein Teil der Suite überhaupt existieren sollte. Ein Test, der nie aus einem echten Grund fehlschlägt, ist reine Haltekosten.
+
+---
+
+## Was du diese Woche tun kannst
+
+<Steps items={[
+  {title: "1. Miss die Wartezeit, nicht die Laufzeit", body: "Hole den Median der Zeit von „PR geöffnet“ bis „alle Checks grün“ der letzten 30 Tage. Zerlege ihn dann: Wie viel ist Gating/Setup, bevor echte Arbeit beginnt, und wie viel tatsächliche Testausführung? Die meisten Teams haben nie hingesehen und sind vom Verhältnis überrascht."},
+  {title: "2. Finde jeden Job, der einen Runner startet, um weniger als 30 Sekunden Arbeit zu tun", body: "Jeder zahlt einen vollen Runner-Start, Checkout und Abhängigkeitsinstallation. Bündle sie zu einem einzigen Job. Das ist meist die größte verfügbare Kosteneinsparung und dauert einen Nachmittag."},
+  {title: "3. Behebe das Setup, bevor du Shards hinzufügst", body: "Cache oder Snapshot für die teuren Teile — Abhängigkeitsinstallation, Datenbankerstellung. Erst dann erhöhe die Shard-Zahl und miss erneut: Wächst das Gesamt-Setup schneller, als die Ausführung schrumpft, bist du einen Schritt zu weit gegangen."},
+  {title: "4. Ersetze langsame Tools durch schnelle Drop-in-Alternativen", body: "Schnellere Typprüfer, reine AST-Linter, schnellere Runner. Sie ändern weder Semantik noch Regeln, kosten also im Review fast nichts und sind trivial rückgängig zu machen."},
+  {title: "5. Lege deine Koordinations-Policy fest, bevor die Flotte wächst", body: "Bei zwei parallelen Agents: Worktrees plus kurzlebige Branches. Bei fünf oder mehr auf einer Codebasis: Verlange vor dem Code einen deklarierten Plan (Scope + Operation), sei es ein Protokoll wie Foremerge, eine gemeinsame Aufgabendatei oder ein Lead-Agent, der das Design besitzt. Ad hoc überlebt den Übergang nicht."},
+  {title: "6. Setze eine Obergrenze für die Testgenerierung", body: "Gib deinen Agents in CLAUDE.md oder AGENTS.md eine ausdrückliche Anweisung, wann sie KEINEN Test schreiben sollen. Sonst wachsen die CI-Kosten für immer linear mit dem Agent-Output."}
+]} />
+
+<PromptCard title="Den eigenen kritischen Pfad mit Claude Code prüfen">{`Read our CI configuration under .github/workflows (or the CI config in this repo).
+
+Produce a table of every job with: does it block other jobs, its typical duration,
+and whether it starts a runner + checkout + dependency install to do less than
+30 seconds of real work.
+
+Then answer three things:
+1. Which jobs are on the critical path before any test can start?
+2. Which short jobs could be batched into one, and what would that save?
+3. Where does the same expensive setup step (dependency install, DB creation,
+   checkout) get repeated across jobs that could share a cache or a snapshot?
+
+Do not change any files. Output the table and the three answers only.`}</PromptCard>
+
+---
+
+## Begriffe, die man behalten sollte
+
+<Flashcards cards={[
+  { front: "Intent-Konflikt", back: "Zwei Agent-Pläne, die nicht beide wahr sein können, obwohl ihre Diffs sauber zusammenlaufen. Git vergleicht Diffs; es hat keine Darstellung dessen, was die Agents vorhatten." },
+  { front: "Semantischer Scope", back: "Ein strukturiertes Ziel — Art, Schlüssel und Operation —, etwa ein Symbol namens PaymentService, das ersetzt wird. Wird kanonisch verglichen (Art und Schlüssel kleingeschrieben) statt nach Dateipfad." },
+  { front: "Erhaltende vs. nicht erhaltende Operation", back: "Erhaltend: add, extend, modify — Abhängige funktionieren weiter. Nicht erhaltend: replace, remove, rename, migrate — sie funktionieren nicht. Diese Binärunterscheidung macht Konflikterkennung nützlich statt verrauscht." },
+  { front: "Beratende Lease (Claim)", back: "Zeitlich begrenzter, nicht exklusiver Besitz eines Scopes. Nie ein Dateilock, weil ein abgestürzter Agent mit hartem Lock die ganze Flotte lahmlegen würde. Verlassene Claims laufen ab." },
+  { front: "Behaupteter vs. angezeigter Befund", back: "Nur eine exakte kanonische Scope-Übereinstimmung mit explizit deklarierten Operationen kann einen HIGH-Befund behaupten. Abgeleitete Operationen und lose Übereinstimmungen werden auf MEDIUM herabgestuft und lediglich angezeigt." },
+  { front: "Gating-Job", back: "Ein kurzer CI-Job, der fertig sein muss, bevor echte Arbeit beginnt — Änderungserkennung, Cache-Abfrage, Checkout. Sekunden hier vervielfachen sich über jeden nachgelagerten Job, weshalb der kritische Pfad meist aus kurzen, nicht aus langen Jobs besteht." },
+  { front: "Sharding-Steuer", back: "Jeder Shard wiederholt das Setup. Eine Verdopplung der Shards lohnt sich erst, wenn das Setup pro Shard so billig ist, dass der Gesamtaufwand nicht schneller wächst, als die Ausführungszeit schrumpft." },
+  { front: "Test-Isolations-Kompromiss (isolate: false)", back: "Sichere Testdateien innerhalb eines Workers eine Modulregistry teilen zu lassen macht Shards viel schneller — Linear maß 300–379 s auf ~195 s —, aber ein Test, der Modulzustand verändert, vergiftet nun seine Nachbarn. Opt-in pro Projekt." }
+]} />
+
+<Quiz title="Teste dich selbst" questions={[
+  {
+    q: "Zwei Agents arbeiten in getrennten Worktrees. Agent A ersetzt PaymentService durch eine Stripe-spezifische Klasse; Agent B fügt der ursprünglichen Abstraktion PayPal-Unterstützung hinzu. Was tut Git beim Merge?",
+    options: [
+      "Löst einen Merge-Konflikt aus, weil beide PaymentService berührt haben",
+      "Führt beide Branches sauber zusammen, sodass B von einem Erweiterungspunkt abhängt, den A gelöscht hat",
+      "Verweigert den Merge, bis ein Mensch den semantischen Unterschied auflöst"
+    ],
+    answer: 1,
+    explain: "Das ist das dokumentierte Beispiel. Die Diffs überlappen textuell nicht, also ist der Merge sauber — und die zweite Änderung hängt nun von etwas ab, das die erste entfernt hat. Git vergleicht Diffs, keine Pläne."
+  },
+  {
+    q: "Welches Paar von Operationen auf demselben Scope löst im Modell von Foremerge den Befund mit dem höchsten Schweregrad aus?",
+    options: [
+      "Zwei erhaltende Operationen (add + extend)",
+      "Eine nicht erhaltende und eine erhaltende (replace + extend)",
+      "Zwei identische Operationen (modify + modify)"
+    ],
+    answer: 1,
+    explain: "FM-C001, destruktiv vs. additiv: Eine Seite replace/remove/rename/migrate, die andere add/extend/modify. Zwei erhaltende Operationen sind FM-C003 — MEDIUM und nie behauptet, weil sie durchaus vereinbar sein können."
+  },
+  {
+    q: "Warum sind Claims beratende Leases statt exklusiver Locks?",
+    options: [
+      "Weil SQLite kein Locking implementieren kann",
+      "Weil ein einzelner abgestürzter Agent mit hartem Lock die ganze Flotte lahmlegen würde",
+      "Weil Git Dateien beim Merge ohnehin sperrt"
+    ],
+    answer: 1,
+    explain: "Genannte Design-Begründung: Das Bedrohungsmodell sind fehlbare, nicht feindselige Agents. Harte Locks machen aus einem Absturz einen flottenweiten Stillstand, daher sind Claims geleast, beratend und laufen von selbst ab."
+  },
+  {
+    q: "Warum steckt im Konflikterkennungspfad bewusst kein LLM?",
+    options: [
+      "Kosten — ein Modell bei jeder Absicht laufen zu lassen wäre zu teuer",
+      "Determinismus — ein Richter, der zwischen Läufen seine Meinung ändert, zerstört das Vertrauen, das die Schicht bieten soll",
+      "Latenz — Modelle sind für einen Pre-Commit-Hook zu langsam"
+    ],
+    answer: 1,
+    explain: "Die Regeln sind deterministisch und heuristisch: gleiche Eingaben, gleiche Antwort, bei jedem Lauf. Das macht die Konfliktregeln auch unit-testbar, was ein LLM-Schiedsrichter nicht ist."
+  },
+  {
+    q: "Linear senkte die mediane PR-Wartezeit von über 6 Minuten auf knapp über 5. Wie hoch wäre die Wartezeit ohne diese Optimierungen, bei der heutigen Suite?",
+    options: [
+      "Etwa 7 Minuten",
+      "Etwa 11 Minuten",
+      "Etwa 30 Minuten"
+    ],
+    answer: 1,
+    explain: "Etwa 11 Minuten — fast das Doppelte. Bei einer Suite, die sich dieses Jahr mit rund 2.000 neuen Tests pro Woche fast vervierfacht hat, erkaufte der Großteil der Engineering-Arbeit Stillstand statt eines sichtbaren Speedups."
+  },
+  {
+    q: "Welche Änderung sparte etwa 87.000 Runner-Minuten pro Monat — 11,8 % der gesamten CI-Nutzung?",
+    options: [
+      "Der Wechsel von vier Test-Shards auf acht",
+      "Das Bündeln von sieben kurzen unabhängigen Prüfungen, die jeweils einen Runner starteten, das Repo auscheckten und Abhängigkeiten installierten",
+      "Der Wechsel von tsc auf tsgo"
+    ],
+    answer: 1,
+    explain: "Die sieben winzigen Prüfungen zahlten jeweils vollen Runner-Start, Checkout und Installation, um Sekunden echter Arbeit zu verrichten. Sie zu bündeln war die größte einzelne Nutzungseinsparung — größer als jede Test-Suite-Optimierung auf der Liste."
+  },
+  {
+    q: "Warum konnte Linear die Shard-Zahl nicht gleich zu Beginn einfach von vier auf acht verdoppeln?",
+    options: [
+      "GitHub Actions begrenzt parallele Jobs auf vier",
+      "Jeder Shard wiederholt das Setup, sodass mehr Shards mehr Gesamtaufwand bedeuteten, bis das Setup pro Shard um 44 % gesenkt war",
+      "Ihr Test-Runner unterstützte nicht mehr als vier Shards"
+    ],
+    answer: 1,
+    explain: "Die Sharding-Steuer. Bei vier Shards kostete das Setup insgesamt 8,3 Minuten; erst nachdem das Setup pro Shard von 110–140 s auf 67–73 s gesunken war, konnten acht Shards mit 7,5 Minuten Gesamt-Setup laufen."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Worktrees isolieren Dateien; sie können nicht erkennen, dass sich zwei Pläne widersprechen. Die drei Überlebenden der Isolation sind Kollisionen destruktiv-vs.-additiv, doppelte Arbeit und Vertragsdrift.",
+  "Eine Koordinationsschicht funktioniert, indem sie Agents einen Scope — Art, Schlüssel, Operation — deklarieren lässt, bevor Code geschrieben wird, und die Aufteilung dieser Operation in erhaltend vs. nicht erhaltend macht die Erkennung verwertbar statt verrauscht.",
+  "Halte den Erkennungspfad deterministisch und die Claims beratend: Ein nicht reproduzierbarer Richter zerstört Vertrauen, und ein harter Lock macht aus einem abgestürzten Agent eine lahmgelegte Flotte.",
+  "Dein CI-kritischer Pfad besteht wahrscheinlich aus kurzen Gating-Jobs, nicht aus langen Test-Shards — Lineares mediane Änderungserkennung ging von 26 s auf 8 s, und das Bündeln von sieben winzigen Prüfungen sparte 11,8 % der gesamten CI-Nutzung.",
+  "Sharding wird vom Setup besteuert: Kürze zuerst das Setup pro Shard, dann füge Shards hinzu, dann miss erneut.",
+  "Werkzeugtausch (tsgo −73 % bei der tsc-Prüfung, reines AST-Lint −68 %, Drittanbieter-Runner −34 %) ändert keine Semantik und sind die günstigsten verfügbaren Gewinne.",
+  "Nichts davon überholt eine Agent-Flotte, die Tests ohne Obergrenze erzeugt — begrenze die Testgenerierung in CLAUDE.md oder AGENTS.md, bevor du die Suite optimierst, die sie ausführt."
+]} />
+
+## Quellen & weiterführende Links
+
+- [AI coding has made CI a bottleneck, so we reworked ours to keep up](https://linear.app/now/ci-bottleneck-reworked) — Mufeez Amjad, Linear, 21. September 2026. Jede CI-Zahl auf dieser Seite stammt von hier.
+- [Hacker-News-Diskussion zum Linear-Beitrag](https://news.ycombinator.com/item?id=49792067) — einschließlich des Gegenpunkts zum Testvolumen.
+- [naw103/foremerge](https://github.com/naw103/foremerge) — Apache-2.0, Rust. Protokollobjekte, CLI und MCP-Integration.
+- [foremerge/docs/protocol.md](https://github.com/naw103/foremerge/blob/main/docs/protocol.md) — Scope-Arten, erhaltende vs. nicht erhaltende Operationen, Lease-Semantik, Objekt-Lebenszyklus.
+- [foremerge/docs/conflict-detection.md](https://github.com/naw103/foremerge/blob/main/docs/conflict-detection.md) — die Regeln FM-C001 bis FM-C005 und ihre Schweregrade.
+- [Parallel coding agents without the carnage](https://dev.to/naw103/parallel-coding-agents-without-the-carnage-gf9) und [31 hard questions about coordinating parallel coding agents](https://dev.to/naw103/31-hard-questions-about-coordinating-parallel-coding-agents-answered-2md2) — die Fehlermodus-Beiträge des Autors.
+- [Show HN: Foremerge](https://news.ycombinator.com/item?id=49789356) — 22. September 2026.
+- [Git-worktree-Dokumentation](https://git-scm.com/docs/git-worktree) — die Isolationsschicht unter alldem.
+
+## Weiter
+
+- [Git-Worktrees & parallele Arbeitsstränge](/docs/claude-code/worktrees) — die Dateiisolationsschicht, auf der diese Seite aufsetzt
+- [Subagent-Flottenlimits](/docs/claude-code/subagent-fleet-limits) — wie viele parallele Agents du tatsächlich betreiben kannst, bevor die Koordinationskosten dominieren
+- [Der Verifikations-Engpass](/docs/frontiers/the-verification-bottleneck) — die menschliche Hälfte desselben Problems: prüfen, was die Flotte erzeugt hat
+- [CI/CD für von Agents geschriebenen Code](/docs/playbooks/ci-for-agent-written-code) — die Merge-Queue-Rechnung und das Gate, das verhindert, dass ein Agent seine eigenen Hausaufgaben benotet
