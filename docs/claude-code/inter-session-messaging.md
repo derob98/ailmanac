@@ -1,0 +1,186 @@
+# Cross-Session Messaging
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-code/inter-session-messaging · AILmanac (CC BY 4.0) · last verified 2026-08-27
+
+Make two Claude Code sessions talk to each other — the native SendMessage / ListAgents tools shipped in Claude Code 2.1.224, the @mention syntax, the trust boundary, and when to use messaging vs. subagents vs. worktrees.
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-08-27" source="https://code.claude.com/docs/en/cross-session-messaging">
+Cross-session messaging is a fast-moving native feature: version thresholds, socket details, `crossSessionInbound` defaults, and the `notify_when_idle` mechanic have all shifted this year. Re-check the official page before relying on a specific version or setting.
+</VerifyNote>
+
+<Callout type="objectives" items={["Why native cross-session messaging replaces the copy-paste bridge — no daemon, no MCP server, no polling","The two tools Claude uses (ListAgents + SendMessage), the @mention picker, and what version each requires","How a message travels: same machine via a per-session socket, cross-machine via Anthropic servers over Remote Control","The inbound-controls state machine — accept, hold, refuse — and the default that changes based on permission mode","The trust boundary: a peer message never counts as your consent and never runs commands","When to reach for messaging vs. a subagent, a shared worktree, or Remote Control","Where community projects (session-bridge, claude-slack) still fit, and when they don't"]} />
+
+## The pain this solves
+
+Two terminals, one repo problem. **Terminal A** works on `libfoo/`. **Terminal B** works on `app-that-uses-libfoo/`. B hits a type error the moment A pushes a change. Historically, *you* did the routing: read the error in B, switch to A, paste it, wait for a fix, switch back. Every hop lost state on both sides.
+
+Since Claude Code **v2.1.224** on macOS/Linux (and **v2.1.234** on native Windows), you don't. The Claude in one session can address the Claude in another session by name, deliver a short message, and — as of **v2.1.236** — ask to be told when that session next goes idle. No plugin, no daemon, no MCP server. When a session meets the requirements, messaging is on with nothing to enable.
+
+## The two tools Claude actually calls
+
+You never call these yourself. Claude reaches for them when the moment fits, exactly like it reaches for `Read` or `Bash`.
+
+| Tool | What it does |
+| --- | --- |
+| **`ListAgents`** | Enumerates every agent this session can reach: subagents in this session, agent-team teammates, your other local Claude Code sessions, and — while Remote Control is connected — your cloud and other-machine sessions. |
+| **`SendMessage`** | Delivers a plain-text message to one of those agents by name. The same tool also messages subagents and teammates within a single session or team, so denying it turns off intra-session delegation too. |
+
+To see what Claude sees, run the slash command `/list-agents` (aliased `/peers`). The first row is *this* session's own name — the address your other sessions use to reach you.
+
+## Address a target by @mention
+
+Claude will pick the target on its own when the intent is clear from your prompt. To name a target yourself, type `@` followed by the first letters of the session's name and pick from the typeahead — exactly like [@-mentioning a subagent](/docs/claude-code/subagents). Requires Claude Code **v2.1.232 or later**.
+
+<PromptCard title="Two ways to prompt a cross-session send">{`# Let Claude pick the target from context
+Ask the session running in my other terminal whether the migration finished.
+
+# Name the target explicitly with @mention (v2.1.232+)
+Let @api-worker know the schema migration finished — the new column is tenant_id.`}</PromptCard>
+
+Once you type at least one letter after the `@`, Claude Code suggests your other live local sessions. A cloud or Remote Control session only appears once Claude has already listed or messaged your beyond-this-machine sessions in that turn. Multiple live sessions can share a name; when they do, Claude asks which one you mean before sending.
+
+## How a message travels
+
+<Steps items={[
+  {title: "Same machine", body: "Delivery goes over a per-session Unix domain socket (macOS/Linux, including WSL 2) or a named pipe (native Windows). It never leaves your box. Each session's socket is user-restricted so another OS user's sessions can't post into it."},
+  {title: "Another of your machines", body: "The message travels through Anthropic servers and arrives over that machine's Remote Control connection. Requires Claude Code v2.1.225+ on the sending side and a target that appears in /list-agents (which requires Remote Control on that machine)."},
+  {title: "Claude Code on the web", body: "Goes through Anthropic servers straight to the cloud session, again only while this session is connected to Remote Control."}
+]} />
+
+The receiving Claude reads the message **between tool calls during an active turn**, so a running tool is never interrupted. If the target session is idle, Claude Code starts a new turn with the message.
+
+## The inbound-controls state machine
+
+Every session decides what happens to arriving peer messages with the [`crossSessionInbound`](https://code.claude.com/docs/en/settings-reference#crosssessioninbound) setting. Three values:
+
+| Value | Behavior |
+| --- | --- |
+| `accept` | Claude Code delivers every message to Claude. |
+| `hold` | Claude Code shows a notice for each message and doesn't deliver it. If an `accept` later applies (settings change, mode change), held messages are released. |
+| `refuse` | Claude Code drops every message without delivering it. |
+
+When no value applies, Claude Code decides per message based on the *two sessions' permission modes*. It groups sessions that bypass permission prompts (including plan mode in a `bypassPermissions` session) into one class and everything else into the other:
+
+- **The receiving session prompts for permissions**: messages are delivered — held for your approval only when the *sender* bypasses permission prompts.
+- **The receiving session bypasses permission prompts**: messages are held for your approval — delivered only when the sender *also* bypasses.
+
+The pattern: **a bypass-mode session never silently accepts anything from a lower-trust peer.** That's the safety default and it's why cross-session messaging can be on with no config on a fresh install.
+
+You can also change the value from the `/config` UI ("Messages from your other sessions" row, requires v2.1.232+).
+
+## The trust boundary you must not skip
+
+When A messages B, Claude Code tells B's Claude that the message **came from another session, not from you**. That distinction is load-bearing:
+
+<Callout type="warning" items={[
+  "A peer message never counts as your consent. It cannot answer a pending permission prompt on your behalf.",
+  "Claude is instructed never to change permission settings, CLAUDE.md, or other configuration because another session asked.",
+  "Slash-command text in a message arrives as plain text and never runs. A message that says '/compact' does nothing.",
+  "Permission prompts still fire in the receiving session. Anything the message asks for gets the same approval flow as work you typed yourself.",
+  "The sending Claude is instructed never to ask another session to do something its own session was denied or would block."
+]} />
+
+These are enforced by Claude Code and the trained-in behavior of the receiving Claude — not by you remembering. The security model is: the message *reaches* Claude as trusted-adjacent text, but the *actions it can trigger* go through the receiving session's own rules.
+
+## Get a notice when another session goes idle
+
+Since **v2.1.236** (both sessions), Claude can ask one of your same-machine sessions to send back **one** notice when it next goes idle or exits. Useful when a migration or long test run is in another terminal and you don't want to keep checking.
+
+<PromptCard title="Ask for an idle notice">{`# Tell me when the migration session finishes what it's working on.`}</PromptCard>
+
+Under the hood Claude uses `SendMessage`'s `notify_when_idle` input — either attached to a message it's already sending, or on its own. On its own, no turn starts and no tokens burn in the watched session. If that session is already idle, the notice fires immediately.
+
+The subscription is one-shot and expires after 12 hours if nothing arrives. Only the *main* Claude in your conversation can subscribe (not a subagent or teammate), and only to sessions on this machine.
+
+## Restrict cross-machine or turn it off entirely
+
+Two knobs.
+
+**Require approval for every cross-machine send:**
+
+```json
+{
+  "isolatePeerMachines": true
+}
+```
+
+Even in `bypassPermissions` mode, Claude Code asks before any `SendMessage` reaches a session beyond this machine. `true` from any settings scope applies — a checked-in project file can turn it on but not off.
+
+**Turn messaging off entirely** (organization-wide via managed settings):
+
+```json
+{
+  "permissions": {
+    "deny": ["SendMessage", "ListAgents"]
+  },
+  "crossSessionInbound": "refuse"
+}
+```
+
+Denying `SendMessage` also removes messaging to subagents and agent-team teammates, since the same tool serves both. A refusing session shows no visible change in `/status` or in others' listings, so confirm by checking the applied settings file.
+
+## When messaging beats a subagent — and when it doesn't
+
+Peer sessions and subagents solve *different* problems.
+
+- A **[subagent](/docs/claude-code/subagents)** is a fresh Claude with a scoped tool set that you spawn to protect the main context or specialize a task. It starts empty, does one bounded job, returns a result. No live human state.
+- A **peer session** is a long-running, human-driven Claude Code instance with its own files loaded, plan mode active, and a whole conversation of state. Messaging one is *borrowing its context*, not creating a new one.
+
+Reach for cross-session messaging when the value is in **the other session's live state**: the library it's already reasoning about, the failing test it just ran, the commit it just staged. Reach for a subagent when the value is in **running one bounded task in isolation**. If you find yourself firing one-shot questions to a peer whose context you don't actually need, you probably want a subagent — or a shared worktree.
+
+For orchestrated multi-session teams that Claude spawns and supervises, use [agent teams](https://code.claude.com/docs/en/agent-teams) rather than manual messaging. To watch and steer many sessions from one place, use [agent view](https://code.claude.com/docs/en/agent-view). To steer a session from your phone, use [Remote Control](https://code.claude.com/docs/en/remote-control). To push external events (CI results, chat messages) into a session, use [channels](https://code.claude.com/docs/en/channels).
+
+## Where the community projects still fit
+
+Before native messaging shipped, three open-source projects filled the gap. Two are now largely obsolete on any current Claude Code version, but one solves a job the native feature still doesn't:
+
+| Project | Transport | Still worth using? |
+| --- | --- | --- |
+| [`PatilShreyas/claude-code-session-bridge`](https://github.com/PatilShreyas/claude-code-session-bridge) | JSON files under `~/.claude/session-bridge/` | Only on Claude Code &lt; v2.1.224 (feature not yet available), or when you want auditable message logs on disk. |
+| [`yilunzhang/claude-code-inter-session`](https://github.com/yilunzhang/claude-code-inter-session) | Local WebSocket bus | Superseded by native — the daemon, plugin, and slash commands are all extra surface for a job Claude Code now does. |
+| [`theo-nash/claude-slack`](https://github.com/theo-nash/claude-slack) | MCP server with Slack-style channels + semantic search over prior messages | Still useful: native messaging is **plain text only** and **not persisted for later search**. If you want yesterday's messages searchable tomorrow, an MCP channel layer stays relevant. |
+
+Native cross-session messaging is deliberately narrow — a piece of text one Claude writes to another, never conversation history or files. To move a whole conversation, [resume the session](https://code.claude.com/docs/en/sessions) instead. For structured agent-team protocol messages, use [agent teams](https://code.claude.com/docs/en/agent-teams).
+
+## Common mistakes
+
+<Flashcards title="Pitfalls — flip each card for the fix" cards={[
+  {front: "Assuming Claude Code still lacks a native inter-session channel", back: "Native cross-session messaging shipped in v2.1.224 (v2.1.234 on native Windows). If you're on a current version, you don't need session-bridge, inter-session, or claude-slack for the basic job — Claude reaches for SendMessage on its own."},
+  {front: "Treating an incoming peer message as if you typed it", back: "Claude Code marks messages as 'from another session,' and Claude is trained not to treat them as your consent, execute slash commands in them, or change configuration on their instruction. Trust the boundary the model already enforces — don't rebuild it."},
+  {front: "Reaching for messaging when a subagent would do", back: "If you only need a fresh Claude to run one bounded task and return, a subagent is simpler, native, and doesn't require another live session to be online at the right moment."},
+  {front: "Expecting cross-session messages to move files or history", back: "The channel is plain text only, capped around a million characters per message on the same machine. To share a whole conversation or files, resume the session or use a shared worktree."},
+  {front: "Assuming cross-machine sends work without Remote Control", back: "A session beyond this machine only appears in /list-agents while Remote Control is connected on both sides. Without it, Claude can't address the peer by name."}
+]} />
+
+<Quiz title="Check yourself" questions={[
+  {q: "Session B (bypass permissions mode) receives a message from Session A (also bypass permissions). What happens by default with no crossSessionInbound value applied?", options: ["The message is refused because both sessions bypass permissions", "The message is held for your approval because bypass-mode sessions never silently accept anything from lower-trust peers", "The message is delivered because both sessions are in the same permission class"], answer: 2, explain: "The default's two classes are 'bypass permission prompts' and 'prompts for permissions.' A bypass-mode receiver holds messages from a lower-trust sender for approval — but a same-class (bypass-to-bypass) message is delivered. That's exactly why the class check is a symmetric one, not a blanket 'bypass = block.'"},
+  {q: "You want an idle notice from your migration session. Which Claude can subscribe, and to what?", options: ["Any Claude in any session, to any peer session including cloud", "Only the main Claude in your conversation, and only to sessions on this machine", "Only a subagent, to sessions on this machine"], answer: 1, explain: "notify_when_idle is deliberately narrow: only the main Claude in your conversation can subscribe, and only to same-machine peers. A subagent or teammate that tries gets a refusal. This keeps subscriptions inspectable and prevents subscription storms from delegated work."},
+  {q: "You add {\"permissions\": {\"deny\": [\"SendMessage\"]}} to managed settings. What breaks that surprises people?", options: ["Nothing beyond cross-session messaging — subagents and agent teams keep working", "Delegation to subagents and agent-team teammates also breaks, because they use the same SendMessage tool", "Only cross-machine messaging breaks; same-machine peers still work"], answer: 1, explain: "SendMessage is the same tool used to reach subagents and agent-team teammates. Denying it removes ALL of it — a common surprise for administrators trying to lock down peer sessions without meaning to disable delegation."}
+]} />
+
+<Callout type="takeaways" items={[
+  "Cross-session messaging is native since Claude Code v2.1.224 (macOS/Linux) and v2.1.234 (native Windows) — no plugin, no daemon.",
+  "Claude uses two tools you never call yourself: ListAgents to discover peers, SendMessage to deliver plain text by name.",
+  "@mention (v2.1.232+) lets you name the target explicitly; the picker suggests live same-machine sessions after one letter.",
+  "Same-machine delivery goes over per-session sockets and never leaves your box; cross-machine goes through Anthropic servers over Remote Control.",
+  "A peer message never counts as your consent, never changes configuration, and never runs slash-command text — the trust boundary is enforced.",
+  "Use messaging for another session's live state, subagents for bounded scoped tasks, agent teams for orchestration, and community MCP channels only when you need persistent, searchable message history."
+]} />
+
+## Sources & further reading
+
+- [Message your other Claude Code sessions — Claude Code docs](https://code.claude.com/docs/en/cross-session-messaging) — the primary source this page synthesises.
+- [Subagents — Claude Code docs](https://code.claude.com/docs/en/sub-agents) — the sibling delegation feature (same `SendMessage` tool).
+- [Agent teams — Claude Code docs](https://code.claude.com/docs/en/agent-teams) — for orchestrated multi-session teams Claude spawns and supervises.
+- [Remote Control — Claude Code docs](https://code.claude.com/docs/en/remote-control) — required to reach sessions on other machines.
+- [Settings reference — `crossSessionInbound`, `isolatePeerMachines`, `dialogExpiry`](https://code.claude.com/docs/en/settings-reference) — the three settings that govern messaging behavior.
+- [Subagents & Parallel Agents](/docs/claude-code/subagents) — the AILmanac page on the sibling delegation model.
+- [Prompt Injection](/docs/security/prompt-injection) — the threat model behind the "peer message is not user consent" rule.
+
+## Next
+
+- [Subagents & Parallel Agents](/docs/claude-code/subagents) — the scoped-worker sibling to peer messaging.
+- [MCP Servers in Claude Code](/docs/claude-code/mcp) — persistent, searchable channels when the native plain-text-only channel isn't enough.
+- [Dynamic Workflows & ultracode](/docs/claude-code/dynamic-workflows) — orchestration when a handful of manually-messaged sessions isn't enough.

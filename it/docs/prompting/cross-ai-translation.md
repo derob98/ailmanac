@@ -1,0 +1,81 @@
+# Traduzione dei prompt tra AI diverse
+
+> Source: https://derob98.github.io/ailmanac/it/docs/prompting/cross-ai-translation · AILmanac (CC BY 4.0) · last verified 2026-09-30
+
+Lo stesso concetto tra Claude, GPT e Gemini — e cosa si trasferisce.
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Sapere quali fondamentali del prompting si trasferiscono invariati a ogni modello", "Individuare i pochi dettagli superficiali che cambiano quando passi da un modello o fornitore a un altro", "Eseguire un flusso di lavoro portabile che sposta un prompt su un nuovo modello senza riscriverlo", "Evitare la trappola del doppio prompt che chiede a un modello di ragionamento di pensare passo dopo passo"]} />
+
+Buone notizie: **i fondamentali del prompting si trasferiscono a ogni modello.** Se sai fare prompting con Claude, sai farlo bene anche con ChatGPT, Gemini o Llama. Cambiano solo pochi dettagli superficiali — ecco la stele di Rosetta.
+
+## Cosa si trasferisce ovunque
+
+Questi funzionano su tutti — riguardano la *comunicazione*, non un fornitore:
+
+- **Dare contesto**: obiettivo, pubblico, formato, tono ([Nozioni di base sul prompting](/docs/prompting/basics)).
+- **Esempi** ([few-shot](/docs/prompting/few-shot)).
+- **Chiedere il ragionamento** nei compiti difficili.
+- **Vincolare l'output** (lunghezza, formato, "solo JSON").
+- **Iterare** in linguaggio naturale.
+- **Ruoli / system prompt** — ogni modello importante ha questo concetto ([System prompt](/docs/prompting/system-prompts)).
+
+Impara questi una volta e sei portabile.
+
+## Cosa cambia (e cosa regolare)
+
+| Aspetto | Nota quando cambi |
+|---|---|
+| **Indicatori di struttura** | Claude ama i [tag XML](/docs/prompting/xml-tags); altri modelli li accettano ma possono preferire intestazioni Markdown o JSON. |
+| **Intensità del tono** | I modelli più vecchi toleravano prompt energici/in TUTTO MAIUSCOLO; quelli più recenti, che seguono le istruzioni alla lettera, preferiscono istruzioni calme e specifiche. Ritara per ogni modello. |
+| **Ragionamento** | "Pensa passo dopo passo" aiuta alcuni; i modelli di ragionamento dedicati lo fanno internamente — non raddoppiare. |
+| **Prefilling** | Mettere parole in bocca all'assistente era la leva sul formato in stile Claude. È stato ritirato: da Claude 4.6 in poi una richiesta con un turno assistant prefillato in ultima posizione restituisce un 400, e altrove il supporto varia. Usa invece un contratto di output o uno schema. |
+| **Plumbing del system prompt** | Anthropic: il parametro top-level `system`. OpenAI: il ruolo `developer` o il parametro `instructions`. Gemini: `system_instruction`. Stessa idea, tre forme di richiesta — e quanto ciascuna vincoli davvero varia, quindi testa ([System prompt](/docs/prompting/system-prompts)). |
+| **Chiamata di tool/funzioni** | Stesso concetto, schemi di richiesta diversi per ogni fornitore. |
+
+<VerifyNote lastVerified="2026-09-30" source="https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices">
+Nomi dei parametri e restrizione sul prefill verificati sul riferimento di prompting di Anthropic, sulla [guida alla generazione di testo di OpenAI](https://developers.openai.com/api/docs/guides/text) e sulla [guida alla generazione di testo di Gemini di Google](https://ai.google.dev/gemini-api/docs/text-generation). Le forme di richiesta dei fornitori cambiano indipendentemente l'una dall'altra — verifica alla fonte per il modello verso cui stai portando il prompt.
+</VerifyNote>
+
+<Flashcards title="Le sei differenze superficiali" cards={[{front: "Indicatori di struttura", back: "Claude predilige i tag XML; altri modelli possono preferire intestazioni Markdown o JSON. La struttura si trasferisce — lo stile del delimitatore forse no."}, {front: "Intensità del tono", back: "I modelli più vecchi toleravano prompt energici, in TUTTO MAIUSCOLO. Quelli più recenti, che seguono le istruzioni alla lettera, preferiscono istruzioni calme e specifiche. Ritara quando cambi."}, {front: "Ragionamento", back: "Pensa passo dopo passo aiuta alcuni modelli; i modelli di ragionamento dedicati lo fanno internamente — non raddoppiare, altrimenti sprechi token e puoi peggiorare la qualità."}, {front: "Prefilling", back: "Iniziare la risposta dell'assistente per guidare il formato era una leva dell'era Claude. È stata ritirata: da Claude 4.6 in poi una richiesta con un turno assistant prefillato in ultima posizione restituisce un 400, e altrove il supporto varia. Usa un contratto di output o uno schema."}, {front: "Plumbing del system prompt", back: "Anthropic usa un parametro top-level `system`; OpenAI usa il ruolo `developer` o un parametro `instructions`; Gemini usa `system_instruction`. Stessa idea, tre forme di richiesta — e quanto ciascuna vincoli davvero differisce."}, {front: "Chiamata di tool / funzioni", back: "Il concetto è universale; lo schema di richiesta dipende dal fornitore. La tua logica dei tool si porta dietro; l'involucro JSON attorno no."}]} />
+
+## Un flusso di lavoro portabile
+
+<Steps items={[
+  {title: "Scrivi con una struttura universale", body: "Redigi il prompt con contesto + formato + esempi — le parti che si trasferiscono a qualsiasi modello. Non incorporare ancora sintassi specifica del fornitore."},
+  {title: "Testa sul tuo modello di destinazione", body: "Fai passare qualche input reale nel modello con cui andrai davvero in produzione (/docs/foundations/evals). Giudica gli output, non la tua intuizione sul modello."},
+  {title: "Regola solo i dettagli superficiali", body: "Se qualcosa non va, cambia una leva superficiale alla volta — stile del delimitatore, intensità del tono, se chiedere il ragionamento — non l'intero prompt."},
+  {title: "Tieni i prompt sotto controllo di versione", body: "Conserva i prompt come file, così cambiare modello è un diff piccolo e revisionabile invece di una riscrittura."}
+]} />
+
+Poiché cambia solo la *superficie*, un singolo prompt ben strutturato di solito si porta con una modifica di una riga. Eccone uno scritto in modo universale — contesto, formato esplicito e un compito chiaro, senza sintassi specifica del fornitore da rimuovere:
+
+<PromptCard title="Un prompt portabile e neutro rispetto al fornitore">{`You are a technical editor. Rewrite the text below to be clearer and more concise.
+
+Constraints:
+- Keep every fact unchanged.
+- Target a general professional audience.
+- Return only the rewritten text, no preamble.
+
+Text:
+"""
+[paste the draft here]
+"""`}</PromptCard>
+
+Quel prompt gira così com'è su Claude, GPT, Gemini o un modello aperto. Se un modello ignora "return only the rewritten text", quella è la tua unica modifica superficiale — irrigidisci il vincolo, spostalo nel [system prompt](/docs/prompting/system-prompts) oppure vincola la forma con gli [structured output](/docs/api/structured-output).
+
+:::tip[Non riscrivere da zero]
+Passare a un nuovo modello raramente richiede un prompt nuovo — di solito basta una modifica di tono/formato. La tua struttura e i tuoi esempi si trasferiscono.
+:::
+
+<Quiz title="Mettiti alla prova" questions={[{q: "Quale di questi NON si trasferisce tra i modelli e va ritarato quando cambi?", options: ["Dare contesto: obiettivo, pubblico, formato, tono", "Fornire esempi few-shot", "L'esatta intensità del tono — formulazione energica o calma", "Vincolare la lunghezza e il formato dell'output"], answer: 2, explain: "Contesto, esempi e vincoli sull'output si trasferiscono tutti. L'intensità del tono è un dettaglio superficiale: i modelli più vecchi toleravano prompt energici, quelli più recenti che seguono le istruzioni alla lettera preferiscono quelli calmi e specifici."}, {q: "Sposti un prompt su un modello di ragionamento dedicato. Cosa dovresti fare con la tua istruzione pensa passo dopo passo?", options: ["Ripeterla due volte per sicurezza", "Rimuoverla — il modello ragiona internamente, quindi non raddoppiare", "Convertirla in TUTTO MAIUSCOLO per enfasi", "Racchiuderla in tag XML"], answer: 1, explain: "I modelli di ragionamento dedicati procedono passo dopo passo internamente. Aggiungere un esplicito pensa passo dopo passo in cima è ridondante — non raddoppiare."}, {q: "Qual è il modo consigliato per spostare un prompt su un nuovo modello?", options: ["Riscriverlo da zero per quel fornitore", "Mantenere la struttura universale, testare sul modello di destinazione e regolare solo i dettagli superficiali", "Convertire sempre prima i tag XML in JSON", "Dare per scontato che funzioni allo stesso modo e saltare i test"], answer: 1, explain: "Il flusso di lavoro portabile: scrivi con una struttura universale, testa sul modello di destinazione con input reali, poi regola solo i dettagli superficiali che differiscono."}]} />
+
+<Callout type="takeaways" items={["I fondamentali — contesto, esempi, ragionamento, vincoli sull'output, ruoli — si trasferiscono invariati a ogni modello.", "Cambiano solo sei dettagli superficiali: indicatori di struttura, intensità del tono, prompt di ragionamento, prefilling, plumbing del system prompt e schemi dei tool.", "Cambiare modello è una modifica, non una riscrittura: mantieni la struttura universale, testa sulla destinazione, regola una leva superficiale alla volta.", "Metti i tuoi prompt sotto controllo di versione, così spostarti tra i modelli è un diff piccolo e revisionabile."]} />
+
+## Prossimi passi
+
+- [System prompt](/docs/prompting/system-prompts)
+- [Prompting specifico per Claude](/docs/prompting/prompting-claude)
+- [Claude a confronto con ChatGPT, Gemini e Copilot](/docs/foundations/claude-vs-others)
+- [Scegliere un modello e un fornitore](/docs/foundations/choosing-a-model-provider)

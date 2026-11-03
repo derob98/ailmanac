@@ -1,0 +1,70 @@
+# Fundamentos do Prompting
+
+> Source: https://derob98.github.io/ailmanac/pt-BR/docs/prompting/basics · AILmanac (CC BY 4.0)
+
+O framework de clareza e objetividade que te leva a 80% do caminho, em qualquer IA.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={[
+  "O framework de clareza e objetividade — objetivo, público, contexto, formato, tom",
+  "Por que a maioria dos resultados ruins são prompts mal especificados, não um modelo fraco",
+  "Como transformar um pedido vago em um preciso, com um antes/depois",
+]} />
+
+A maioria dos "resultados ruins de IA" são, na verdade, **prompts mal especificados**. Conserte o prompt e a saída se transforma — sem truques. Esta é a base; tudo em [Prompting](/docs/prompting) parte daqui, e isso se transfere para qualquer IA.
+
+## O único hábito: seja claro e direto
+
+Trate o modelo como um colega novo, brilhante e literal, que não consegue ler sua mente. Diga a ele cinco coisas:
+
+| Elemento | Pergunte a si mesmo | Exemplo |
+|---|---|---|
+| **Objetivo** | O que eu realmente quero? | "Escreva um e-mail de prospecção…" |
+| **Público** | Para quem é? | "…para um gerente de compras de hospital sem tempo" |
+| **Contexto** | O que ele precisa saber? | "Vendemos software de agendamento; economizamos cerca de 6 h/semana para eles" |
+| **Formato** | Que forma a saída deve ter? | "Menos de 120 palavras, 3 parágrafos curtos, uma CTA" |
+| **Tom** | Como deve soar? | "Profissional, acolhedor, sem ser insistente" |
+
+Juntando tudo:
+
+> "Escreva um e-mail de prospecção para um gerente de compras de hospital sem tempo. Vendemos software de agendamento que economiza cerca de 6 horas por semana para eles. Menos de 120 palavras, três parágrafos curtos, profissional e acolhedor mas sem ser insistente, terminando com uma única chamada para ação clara."
+
+<PromptCard title="E-mail de prospecção — claro e direto">{`Write a cold email to a busy hospital procurement manager. We sell scheduling software that saves them about 6 hours a week. Under 120 words, three short paragraphs, professional and warm but not pushy, ending with a single clear call to action.`}</PromptCard>
+
+Esse prompt vai superar "escreva um e-mail de prospecção" todas as vezes.
+
+## Cinco melhorias que rendem mais do que parecem
+
+1. **Mostre um exemplo.** Uma amostra do estilo ou formato que você quer ("siga a voz disto: …") ensina mais rápido do que descrever. Isso é prompting *few-shot* — veja [Few-Shot Bem Feito](/docs/prompting).
+2. **Atribua um papel.** "Você é um revisor de texto meticuloso" prepara o comportamento certo.
+3. **Peça o raciocínio em problemas difíceis.** "Pense passo a passo antes de dar a resposta final" melhora o raciocínio (*chain-of-thought*).
+4. **Restrinja a saída.** "Responda apenas com o JSON, sem preâmbulo." "Exatamente 5 tópicos." Formas específicas são mais fáceis de usar.
+5. **Itere.** Seu primeiro prompt é um rascunho. Refine em linguagem comum: "mais curto", "mais técnico", "adicione um contra-argumento".
+
+## Antipadrões a abandonar
+
+- ❌ **Linguagem de palavras-chave** ("e-mail cliente desconto") — você não está usando um buscador. Escreva frases completas.
+- ❌ **Esconder o pedido** em um muro de contexto. Coloque a instrução no topo *e* repita ao final em entradas longas.
+- ❌ **Palavras vagas de qualidade** ("deixe bom/profissional") sem dizer o que isso significa para você.
+- ❌ **Supor que ele lembra** das conversas anteriores. Por padrão, ele não lembra — veja [Tokens, Contexto e Memória](/docs/foundations).
+
+## Experimente agora
+
+Monte um prompt estruturado abaixo e copie para o Claude. Repare como nomear o papel, o objetivo, o formato e o tom muda tudo:
+
+<PromptBuilder />
+
+Depois pegue um prompt que você normalmente digitaria, reconstrua aqui e compare as duas saídas lado a lado. Esse contraste é toda a lição.
+
+<Quiz title="Teste seus conhecimentos" questions={[
+  {q: "O que normalmente causa resultados ruins de IA?", options: ["O modelo é pequeno demais", "Um prompt mal especificado", "Falta de poder computacional"], answer: 1, explain: "A maioria dos resultados ruins são prompts mal especificados — conserte o prompt e a saída se transforma."},
+  {q: "Qual NÃO é uma das cinco coisas a especificar?", options: ["Objetivo", "Público", "Temperatura do modelo", "Formato"], answer: 2, explain: "Objetivo, público, contexto, formato e tom. A temperatura é uma configuração de API, não parte do prompting claro e direto."},
+  {q: "Como você deve tratar o modelo ao fazer prompts?", options: ["Como alguém que lê mentes", "Como um colega novo brilhante mas literal", "Como um buscador"], answer: 1, explain: "Ele não consegue ler sua mente — explique o que um colega novo e literal precisaria saber."},
+]} />
+
+## Próximos passos
+
+- O kit de ferramentas reutilizável → [Biblioteca de Padrões de Prompt](/docs/prompting)
+- O que é genuinamente diferente no Claude → [Prompting Específico para o Claude](/docs/prompting)
+- Pegar e usar → [Modelos de Prompt Reutilizáveis](/docs/templates)

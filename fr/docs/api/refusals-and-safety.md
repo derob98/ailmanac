@@ -1,0 +1,85 @@
+# Sécurité, refus et solutions de repli
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/api/refusals-and-safety · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+Gérez les refus avec élégance et distinguez-les des blocages du classifieur.
+
+<LevelBadge level="intermediate" />
+
+En production, votre code doit gérer le cas où Claude **ne veut** (ou ne peut) pas répondre comme prévu. Bien fait, c'est invisible pour les utilisateurs ; mal fait, c'est un plantage ou une réponse déroutante.
+
+<Callout type="objectives" items={[
+  "Distinguer un refus du modèle d'un blocage classifieur/sécurité — et pourquoi c'est important",
+  "Traiter un refus comme un résultat normal au lieu de planter ou d'afficher une réponse vide",
+  "Réduire les refus non désirés, sans tenter de contourner ceux que vous voulez",
+  "Choisir un repli : question de clarification, alternative sûre ou passage à un humain",
+]} />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/api/overview">
+Les raisons d'arrêt et les formes des réponses de sécurité peuvent changer — vérifiez dans la référence officielle de l'API.
+</VerifyNote>
+
+## Deux choses différentes
+
+- **Un refus du modèle** — Claude décline une requête (par ex. il la juge nuisible). La réponse le signale (généralement via un `stop_reason`/contenu de refus). Traitez-le comme un résultat normal, et non comme une erreur.
+- **Un blocage du classifieur/de sécurité** — une couche de sécurité distincte peut bloquer le contenu. Cela peut se présenter différemment d'un refus du modèle.
+
+Savoir lequel des deux vous avez obtenu vous permet de réagir de manière appropriée plutôt que de réessayer à l'aveugle.
+
+## Gérez-le avec élégance
+
+```python
+resp = client.messages.create(...)
+if getattr(resp, "stop_reason", None) == "refusal":
+    # Don't show a raw/empty result. Offer a safe fallback or a clarifying ask.
+    show_user("I can't help with that as asked. Here's what I can do instead…")
+else:
+    render(resp)
+```
+
+## Réduire les refus indésirables
+
+- **Ajoutez un contexte légitime.** Une requête peut ressembler par motif à quelque chose de sensible alors que l'intention est bénigne ; énoncer le but réel et légitime aide.
+- **Soyez précis.** Une formulation vague ou limite invite à la prudence.
+- **Ne luttez pas contre.** Si une requête est réellement interdite, le refus est correct — concevez un chemin élégant, n'essayez pas de contourner les protections.
+
+<PromptCard title="Ajouter le contexte légitime dès le départ">{`I am a security engineer at [company] reviewing our own authentication code
+before a release. Below is a function we wrote and own.
+
+Identify weaknesses in it and explain how an attacker would exploit each one,
+so we can fix them before we ship.
+
+[code]`}</PromptCard>
+
+## Patrons de repli
+
+- Une **question de clarification** plutôt qu'une impasse.
+- Une **alternative sûre** (« Je peux résumer les informations publiques à la place »).
+- Pour les pipelines, **acheminez vers un humain** lorsque la confiance/l'éligibilité est faible.
+
+<Steps items={[
+  {title: "Détectez, ne présumez pas", body: "Inspectez la réponse à la recherche d'un signal de refus avant de l'afficher. Ne redirigez jamais une réponse non vérifiée directement dans votre UI — c'est ainsi que les utilisateurs voient une boîte vide ou un objet brut."},
+  {title: "Classifiez-le", body: "Refus du modèle ou blocage classifieur/sécurité ? Un refus est un jugement sur la requête ; un blocage est une couche de sécurité distincte. Réessayer l'entrée identique n'aide ni pour l'un ni pour l'autre, mais ils pointent vers des corrections différentes."},
+  {title: "Dégradez avec élégance", body: "Remplacez l'impasse par une question de clarification ou une alternative sûre, dans la voix de votre propre produit. L'utilisateur doit obtenir une étape suivante, pas une erreur."},
+  {title: "Faites remonter quand les enjeux le justifient", body: "Dans un pipeline, acheminez les cas à faible confiance ou inéligibles vers une file d'attente humaine plutôt que de deviner ou de les abandonner silencieusement."},
+]} />
+
+<Quiz title="Vérifiez-vous" questions={[
+  {q: "Votre code reçoit un refus de Claude. Quelle est la bonne manière de le traiter ?", options: ["Comme une exception — la capturer et retenter la même requête", "Comme un résultat normal — le détecter et afficher un repli", "Comme un bug de votre prompt à contourner"], answer: 1, explain: "Un refus est une réponse normale, pas une erreur. Détectez-le, puis proposez une question de clarification ou une alternative sûre. Réessayer l'entrée identique ne fait que dépenser des tokens."},
+  {q: "Une requête bénigne se fait constamment refuser. Que tenter en premier ?", options: ["La reformuler pour cacher ce que vous demandez", "Énoncer le but réel et légitime et être plus précis", "Passer à un plus petit modèle"], answer: 1, explain: "Les requêtes sont refusées quand elles correspondent par motif à quelque chose de sensible. Ajouter un contexte légitime et être précis est la solution. Cacher son intention est du jailbreaking — mauvaise décision, et cela rend aussi la sortie moins utile."},
+  {q: "Pourquoi est-ce important de savoir si vous avez reçu un refus du modèle ou un blocage classifieur/sécurité ?", options: ["Ça ne l'est pas — traitez-les à l'identique", "Ils peuvent se présenter différemment dans la réponse et pointent vers des corrections différentes", "Un seul des deux est facturable"], answer: 1, explain: "Ce sont des mécanismes différents : un refus du modèle est Claude qui décline, tandis qu'une couche de sécurité distincte peut bloquer le contenu. Savoir lequel vous avez reçu vous permet de réagir de manière appropriée au lieu de réessayer à l'aveugle."},
+]} />
+
+<Callout type="takeaways" items={[
+  "Un refus est un résultat, pas une erreur — détectez-le avant l'affichage, toujours.",
+  "Refus du modèle et blocage classifieur sont des choses différentes ; identifiez celui reçu.",
+  "Les refus non désirés diminuent habituellement quand vous ajoutez un contexte légitime et êtes précis.",
+  "Si une requête est réellement interdite, le refus est correct — construisez un chemin élégant, ne contournez pas.",
+  "Replis dans l'ordre : question de clarification, alternative sûre, passage à un humain.",
+]} />
+
+## Suite
+
+- [Erreurs, limites de débit et fiabilité](/docs/api/errors-and-rate-limits)
+- [Usage responsable, éthique et vérification](/docs/security/responsible-use)
+- [Dépannage : pourquoi Claude a-t-il fait cela ?](/docs/contribute/troubleshooting)

@@ -1,0 +1,66 @@
+# Prompting Claude Specifically
+
+> Source: https://derob98.github.io/ailmanac/docs/prompting/prompting-claude · AILmanac (CC BY 4.0) · last verified 2026-09-30
+
+What's genuinely Claude-specific vs universal.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-09-30" source="https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices">
+Anthropic's prompt-engineering guidance changes with each model generation, and its model-specific section moves fastest. Two items on this page are version-gated: prefilled final assistant turns return a 400 error on Claude 4.6 and later models, and the advice to dial back forceful language applies to the Opus 4.5/4.6 generation onward. Recheck at the source before relying on either.
+</VerifyNote>
+
+Most of [prompting](/docs/prompting/basics) is universal. But a few techniques are especially effective with Claude — and several habits from older models are now counterproductive or outright rejected by the API. This lesson separates the signal from the noise: what's actually Claude-specific, as of today.
+
+<Callout type="objectives" items={["Recognize the Claude-specific techniques worth leaning into — XML tags, clarity, roles, thinking, and examples", "Unlearn the old-model habits (ALL-CAPS, threats, over-engineered scaffolding) that now backfire", "Know that prefilling the final assistant turn is retired on Claude 4.6+ — and what replaced it", "Understand what to re-check when you switch models"]} />
+
+## Lean into these with Claude
+
+These are the moves that pay off the most with Claude. The first one is the single highest-value habit you can build.
+
+- **[XML tags](/docs/prompting/xml-tags).** Claude is well-tuned to structured prompts with named tags for inputs, instructions, and examples. Current models read clean headings and whitespace well too, so tags are no longer mandatory — but they remain the most reliable way to keep a long prompt's sections from bleeding into each other.
+- **Be clear and direct.** State the goal, constraints, and what "done" looks like. Claude follows explicit instructions closely.
+- **Give it a role** in the [system prompt](/docs/prompting/system-prompts) — one sentence is enough to shift tone and focus.
+- **Let it think on hard problems** — ask for step-by-step reasoning, or use [extended thinking/effort](/docs/api/thinking-and-effort) on reasoning models (where you often *don't* need to ask for CoT explicitly).
+- **Use examples** ([few-shot](/docs/prompting/few-shot)) for format and edge cases. Claude reads examples closely, so one good example beats five sloppy ones.
+- **Give it permission to be unsure.** An explicit "say so instead of guessing" line is one of the cheapest reliability wins available.
+
+### Lock the output format without prefilling
+
+Prefilling — seeding the start of Claude's reply so it continues in your format — was for years *the* Claude-specific format lever. It is retired: **on Claude 4.6 and later models, a request whose final message is a prefilled assistant turn returns a 400 error.** Anthropic's stated reason is that instruction-following advanced far enough that most prefill use cases no longer need it. Earlier models still accept prefills, and assistant messages *elsewhere* in the conversation — [few-shot examples](/docs/prompting/few-shot), prior turns — are unaffected.
+
+Here is the migration, one old use at a time:
+
+<Steps items={[
+  {title: "Forcing JSON or a schema", body: "Use structured outputs (/docs/api/structured-output), which constrain the response to a schema, or just describe the shape — current models match complex schemas reliably when told to. For classification, a tool with an enum field is the sturdiest option."},
+  {title: "Killing the \"Here is the summary:\" preamble", body: "Put a direct instruction in the system prompt: respond directly, no preamble, don't open with \"Here is\" or \"Based on\". Alternatively have the model write inside a named tag and read only that."},
+  {title: "Steering around an unnecessary refusal", body: "Clear prompting in the user turn is now enough; refusal calibration improved substantially. If it still refuses, the ask itself probably needs rewording (/docs/api/refusals-and-safety)."},
+  {title: "Continuing a truncated response", body: "Move the continuation into a user turn that quotes the tail of the interrupted text and asks Claude to carry on from there — or simply retry the request if no one is watching the latency."}
+]} />
+
+<Callout type="tip" items={["Quick test for whether you still depend on prefill: search your codebase for a `messages` array whose last element has role `assistant`. On Claude 4.6+ every one of those is a 400 waiting to happen."]} />
+
+## Drop these old habits
+
+Newer, literal-following Claude models change the rules. Tricks that helped on older models now get in the way.
+
+<Callout type="warning" items={["Ease off ALL-CAPS and threat-style prompts (\"YOU MUST… OR ELSE\"). Current models are more responsive to the system prompt than the ones that style was invented for, so hardened language now causes over-eager tool calls rather than compliance.", "Don't over-engineer with elaborate \"jailbreak-style\" scaffolding — clear, honest instructions outperform tricks.", "Don't stack every technique at once. Role plus XML plus few-shot plus chain-of-thought plus a schema, all added blind, is the most common form of prompt over-engineering. Add one, measure, keep what helped.", "Less is often more — a tight prompt beats a sprawling one that buries the ask."]} />
+
+## Claude vs other models
+
+The *principles* transfer (see [Cross-AI Prompt Translation](/docs/prompting/cross-ai-translation)), but a few things are worth remembering as Claude-specific.
+
+<Steps items={[{title: "Default to XML tags for structure", body: "Wrap inputs, instructions, and examples in named tags. Claude's tag affinity makes this the most reliable structuring habit in long prompts."}, {title: "Put the standing rules in the system parameter, not the user turn", body: "Anthropic's `system` is a top-level request parameter, not an entry in `messages` — see /docs/prompting/system-prompts. It is also the best-cached part of the request."}, {title: "Re-check tone and formatting when you switch models", body: "When you move off Claude, re-check tone intensity and formatting cues; what's literal here may not transfer cleanly."}]} />
+
+<Flashcards title="Claude-specific quick reference" cards={[{front: "Highest-value Claude habit", back: "Structured prompts with named XML tags for inputs, instructions, and examples — especially in long prompts."}, {front: "Prefilling the final assistant turn", back: "Retired. Returns a 400 error on Claude 4.6 and later models. Use structured outputs, a \"no preamble\" instruction, or a tool with an enum field instead."}, {front: "ALL-CAPS / threat prompts", back: "Drop them. Current models are more responsive to the system prompt than the models that style targeted, so shouting produces overtriggering, not obedience."}, {front: "Over-engineered scaffolding", back: "Avoid it. Clear, honest instructions outperform jailbreak-style tricks — and stacking every technique at once is its own failure mode."}, {front: "Extended thinking / effort", back: "On reasoning models, let Claude think on hard problems — you often don't need to ask for chain-of-thought explicitly."}, {front: "Cheapest reliability win", back: "Explicitly permit uncertainty: tell Claude to say it doesn't know rather than guess."}]} />
+
+<Callout type="takeaways" items={["XML tags remain the highest-value Claude structuring habit, though current models no longer require them for short prompts.", "Prefilling the final assistant turn is retired — a 400 on Claude 4.6+. Migrate to structured outputs, an output contract, or tools.", "Current Claude models follow instructions literally and weight the system prompt heavily — be clear and direct, not loud.", "Less is more: a tight, honest prompt beats elaborate scaffolding, and beats stacking every technique at once.", "Principles transfer across models, but re-check tone intensity and formatting cues when you switch."]} />
+
+<Quiz title="Check yourself" questions={[{q: "Which technique is described as the highest-value Claude structuring habit?", options: ["ALL-CAPS emphasis", "Named XML tags for inputs, instructions, and examples", "Threat-style prompting"], answer: 1, explain: "Claude is well-tuned to structured prompts with named XML tags. Current models handle clean headings too, but tags stay the most reliable way to separate sections in a long prompt."}, {q: "You send a request whose last message is an assistant turn containing an opening brace, to force JSON. What happens on Claude 4.6 or later?", options: ["Claude continues the JSON as intended", "The request returns a 400 error — prefilled final assistant turns are no longer supported", "The brace is silently stripped", "Claude asks you to clarify"], answer: 1, explain: "Starting with Claude 4.6, prefilled responses on the last assistant turn are not supported and such requests return a 400. Use structured outputs or a direct instruction instead."}, {q: "What should you do with ALL-CAPS and \"YOU MUST… OR ELSE\" prompts on current Claude models?", options: ["Use them more aggressively", "Ease off them — these models are more system-prompt-responsive, so forceful language causes overtriggering", "Combine them with elaborate scaffolding"], answer: 1, explain: "Anthropic's guidance for the Opus 4.5/4.6 generation and later is to dial the language back: normal phrasing outperforms hardened phrasing, which now over-triggers tools and skills."}]} />
+
+## Next
+
+- [System Prompts](/docs/prompting/system-prompts)
+- [Structuring Prompts with XML Tags](/docs/prompting/xml-tags)
+- [Cross-AI Prompt Translation](/docs/prompting/cross-ai-translation)
+- [Named Techniques, Judged](/docs/prompting/named-techniques) — a verdict on every famous prompting technique

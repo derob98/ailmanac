@@ -1,0 +1,60 @@
+# Rédiger des prompts spécifiquement pour Claude
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/prompting/prompting-claude · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+Ce qui est vraiment propre à Claude vs universel.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/overview">
+Les recommandations d'Anthropic sur le prompt engineering évoluent avec chaque modèle — consultez la documentation officielle de prompt engineering pour les bonnes pratiques actuelles.
+</VerifyNote>
+
+L'essentiel du [prompting](/docs/prompting/basics) est universel. Mais quelques techniques sont particulièrement efficaces avec Claude — et une paire d'habitudes héritées des anciens modèles sont désormais contre-productives. Cette leçon sépare le signal du bruit : ce qui est réellement propre à Claude.
+
+<Callout type="objectives" items={["Reconnaître les techniques propres à Claude sur lesquelles miser — balises XML, clarté, rôles, réflexion, exemples et préremplissage", "Désapprendre les vieilles habitudes (MAJUSCULES, menaces, échafaudages sur-conçus) qui se retournent maintenant contre vous", "Savoir lesquelles des deux habitudes — l'affinité pour les balises XML et le préremplissage — adopter comme votre signature Claude", "Comprendre ce qu'il faut revérifier quand vous changez de modèle"]} />
+
+## Misez sur celles-ci avec Claude
+
+Ce sont les leviers les plus payants avec Claude. Le premier est l'habitude à plus forte valeur que vous puissiez développer.
+
+- **[Balises XML](/docs/prompting/xml-tags).** Claude est bien réglé pour les prompts structurés avec des balises nommées pour les entrées, les instructions et les exemples. C'est l'habitude Claude à plus forte valeur.
+- **Soyez clair et direct.** Énoncez l'objectif, les contraintes et ce à quoi ressemble « terminé ». Claude suit les instructions explicites de près.
+- **Donnez-lui un rôle** via le [prompt système](/docs/foundations/roles).
+- **Laissez-le réfléchir sur les problèmes difficiles** — demandez un raisonnement étape par étape, ou utilisez [la réflexion étendue / l'effort](/docs/api/thinking-and-effort) sur les modèles de raisonnement (où souvent vous n'avez *pas* besoin de demander explicitement une chaîne de pensée).
+- **Utilisez des exemples** ([few-shot](/docs/prompting/few-shot)) pour le format et les cas limites.
+- **Préremplissez** le début de la réponse de Claude (sur l'API) pour orienter le format.
+
+### Essayez le préremplissage
+
+Préremplir signifie commencer vous-même le tour de l'assistant pour que Claude continue dans le format voulu. Sur l'API, entamez le tour de l'assistant par un caractère d'ouverture ou un titre :
+
+<PromptCard title="Préremplir pour forcer une sortie JSON">{`{`}</PromptCard>
+
+<PromptCard title="Préremplir un titre pour forcer la structure">{`## Summary`}</PromptCard>
+
+<Callout type="tip" items={["Commencez le tour de l'assistant par { pour forcer du JSON, ou par un titre pour forcer une sortie structurée. Le préremplissage est un levier réservé à l'API — il oriente le format sans dépenser de mots en instructions."]} />
+
+## Abandonnez ces vieilles habitudes
+
+Les modèles Claude récents, qui suivent les instructions à la lettre, changent les règles. Les astuces qui aidaient sur les anciens modèles gênent désormais.
+
+<Callout type="warning" items={["Levez le pied sur les MAJUSCULES et les prompts menaçants (« TU DOIS… SINON »). Les modèles Claude récents suivent les instructions à la lettre, et des instructions polies et précises fonctionnent mieux que crier.", "Ne sur-concevez pas avec des échafaudages élaborés de style « jailbreak » — des instructions claires et honnêtes surpassent les astuces.", "Souvent, moins c'est plus — un prompt serré vaut mieux qu'un prompt tentaculaire qui noie la demande."]} />
+
+## Claude vs autres modèles
+
+Les *principes* se transfèrent (voir [Traduction de prompts entre IA](/docs/prompting/cross-ai-translation)), mais deux choses valent surtout la peine d'être retenues comme propres à Claude.
+
+<Steps items={[{title: "Par défaut, utilisez les balises XML", body: "Enveloppez les entrées, instructions et exemples dans des balises nommées. L'affinité de Claude pour les balises en fait l'habitude de structuration la plus fiable."}, {title: "Recourez au préremplissage sur l'API", body: "Amorcez le tour de l'assistant pour verrouiller le format — une accolade d'ouverture pour le JSON, un titre pour la structure."}, {title: "Revérifiez le ton et le formatage quand vous changez de modèle", body: "Quand vous quittez Claude, revérifiez l'intensité du ton et les indices de formatage ; ce qui est littéral ici peut ne pas se transférer proprement."}]} />
+
+<Flashcards title="Référence rapide propre à Claude" cards={[{front: "Habitude Claude à plus forte valeur", back: "Des prompts structurés avec des balises XML nommées pour les entrées, instructions et exemples."}, {front: "Préremplissage", back: "Commencer la réponse de Claude sur l'API pour orienter le format — p. ex. entamer par { pour du JSON ou par un titre pour la structure."}, {front: "Prompts en MAJUSCULES / menaçants", back: "Abandonnez-les. Les modèles Claude récents suivent mieux des instructions littérales, polies et précises que crier."}, {front: "Échafaudages sur-conçus", back: "Évitez-les. Des instructions claires et honnêtes surpassent les astuces de type jailbreak."}, {front: "Réflexion étendue / effort", back: "Sur les modèles de raisonnement, laissez Claude réfléchir aux problèmes difficiles — souvent vous n'avez pas besoin de demander explicitement une chaîne de pensée."}]} />
+
+<Callout type="takeaways" items={["Les balises XML sont l'habitude Claude à plus forte valeur ; le préremplissage est le levier de format propre à Claude le plus utile.", "Les modèles Claude récents suivent les instructions à la lettre — soyez clair et direct, pas bruyant ni menaçant.", "Moins c'est plus : un prompt serré et honnête vaut mieux qu'un échafaudage élaboré.", "Les principes se transfèrent d'un modèle à l'autre, mais revérifiez l'intensité du ton et les indices de formatage quand vous changez."]} />
+
+<Quiz title="Testez-vous" questions={[{q: "Quelle technique est décrite comme l'habitude propre à Claude à plus forte valeur ?", options: ["L'emphase en MAJUSCULES", "Des balises XML nommées pour les entrées, instructions et exemples", "Les prompts menaçants"], answer: 1, explain: "Claude est bien réglé pour les prompts structurés avec des balises XML nommées — c'est présenté comme l'habitude Claude à plus forte valeur."}, {q: "Comment le préremplissage oriente-t-il le format de sortie de Claude sur l'API ?", options: ["En criant le format en MAJUSCULES", "En commençant la réponse de l'assistant — p. ex. par { pour du JSON ou par un titre pour la structure", "En ajoutant un échafaudage de style jailbreak"], answer: 1, explain: "Préremplir le début de la réponse de Claude (entamer par { pour forcer du JSON, ou par un titre pour forcer la structure) oriente le format."}, {q: "Que faire des prompts en MAJUSCULES et « TU DOIS… SINON » sur les modèles Claude récents ?", options: ["Les utiliser plus agressivement", "Lever le pied — des instructions littérales, polies et précises fonctionnent mieux", "Les combiner avec un échafaudage élaboré"], answer: 1, explain: "Les modèles Claude récents suivent les instructions à la lettre ; des instructions précises et polies surpassent les cris et les menaces."}]} />
+
+## Suite
+
+- [Structurer les prompts avec des balises XML](/docs/prompting/xml-tags)
+- [Traduction de prompts entre IA](/docs/prompting/cross-ai-translation)
+- [Réflexion étendue & effort](/docs/api/thinking-and-effort)

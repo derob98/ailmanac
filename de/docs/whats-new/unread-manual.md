@@ -1,0 +1,92 @@
+# Claude hat 68 % der Claude-Code-Dokumentation nie gesehen
+
+> Source: https://derob98.github.io/ailmanac/de/docs/whats-new/unread-manual · AILmanac (CC BY 4.0) · last verified 2026-10-15
+
+Wir haben 15 Monate der offiziellen Claude-Code-Dokumentation Woche für Woche nachgespielt. 68 % dessen, was dort heute steht, wurde nach Juni 2026 geschrieben, dem Trainings-Cutoff aller aktuellen Claude-Modelle. Hier steht, was jedes Modell verpasst hat – und ein Plugin, das es ihm sagt.
+
+import {UnreadHeadline, ModelBars, LearnedSlider, CohortChart, SurvivalChart, NewIdentifiers} from '@site/src/components/DocsDecay';
+
+<VerifyNote lastVerified="2026-10-15" source="https://platform.claude.com/docs/en/about-claude/models/overview">
+Die Trainings-Cutoffs stammen von der Seite des jeweiligen Modells in der Claude-Platform-Dokumentation. Die Historie der Claude-Code-Dokumentation stammt aus einem Community-Mirror, der die offiziellen Seiten mehrmals täglich kopiert. Die Zahlen sind eine Momentaufnahme vom 15. Oktober 2026; das Skript, das sie erzeugt, ist unten verlinkt, sodass jeder es erneut ausführen kann.
+</VerifyNote>
+
+Jedes Claude-Modell hat Claude Code aus der Dokumentation gelernt, wie sie zu seinem Trainings-Cutoff aussah. Danach hat sich die Dokumentation weiterbewegt. Wir haben ihre Geschichte Woche für Woche nachgespielt, um zu messen, wie weit beides auseinandergedriftet ist.
+
+<UnreadHeadline />
+
+Die neuesten Modelle, Fable 5.1, Opus 5.5, Sonnet 5.5 und Haiku 5.5, haben einen verlässlichen Wissens-Cutoff von Juni 2026. Zwischen Ende Juni und dem 15. Oktober wuchs die Dokumentation von 107 auf 164 Seiten, und das meiste, was sie heute sagt, wurde in diesen dreieinhalb Monaten geschrieben. Zählt man strenger, nach exaktem Wortlaut statt nach Fakten, steigt der Anteil auf 72 %. Lässt man die Codebeispiele weg, sind es 70 %. Wie man auch zählt: Claude hat den größten Teil seines eigenen Handbuchs nie gesehen.
+
+## Was jedes Modell nie gesehen hat
+
+Je älter der Cutoff, desto weniger von der heutigen Dokumentation kann ein Modell gelesen haben. Alle diese Modelle sind weiterhin über die Claude API verfügbar.
+
+<ModelBars />
+
+Claude Haiku 4.5 mit Cutoff im Februar 2025 liegt vor fast allem: Claude Code startete in diesem Monat als Research Preview, und fast die gesamte heutige Dokumentation kam später.
+
+## Wähle die Woche, in der du Claude Code gelernt hast
+
+Dieselbe Rechnung gilt auch für Menschen. Schiebe den Regler auf die Woche, in der du die Dokumentation gelesen hast, oder auf das Datum des Tutorials, dem du folgst.
+
+<LearnedSlider />
+
+## Die Dokumentation wird umgebaut, nicht nur erweitert
+
+Das Wachstum erklärt den größten Teil der Lücke, aber nicht alles. Seiten werden auch umgeschrieben. Jedes Band unten ist der Text, der in einem Quartal geschrieben wurde; ein Band wird dünner, je mehr seiner Sätze gelöscht oder geändert werden.
+
+<CohortChart />
+
+Im Juli 2025 hatte die Dokumentation 29 Seiten. Heute sind es 164, mit 21-mal so vielen Sätzen und Codezeilen. Von der Dokumentation, wie sie im Juli 2025 stand, gilt noch 30,5 %; der Rest wurde gelöscht oder mit anderer Zahl, anderem Flag oder anderem Namen umgeschrieben. Selbst die Dokumentation vom Juni 2026, die die neuesten Modelle gesehen haben, hat in weniger als vier Monaten 26,9 % ihrer Fakten verloren.
+
+## Wie lange ein Satz hält
+
+Verfolgt man jeden Satz von der Woche seines Erscheinens bis zur Woche seines Verschwindens, ist die Hälfte innerhalb von 196 Tagen gelöscht oder umformuliert. Zählt eine Umformulierung nur, wenn sie eine Zahl, ein Flag, einen Pfad oder einen Namen ändert, ist die Hälfte der Fakten innerhalb von 266 Tagen weg: etwa neun Monate.
+
+<SurvivalChart />
+
+## Wovon dein Modell noch nie gehört hat
+
+Das sind die Bezeichner in den heutigen Referenztabellen, die zum Cutoff eines Modells noch nicht existierten: CLI-Flags, Slash-Befehle, Hook-Events und Umgebungsvariablen. Frage Claude nach einem davon, und es kann nur raten.
+
+<NewIdentifiers />
+
+„Dokumentiert seit" ist nicht „ausgeliefert seit": Einige davon gab es früher und sie schafften es erst später in die Dokumentation. So oder so hatte das Modell keine Seite, aus der es sie hätte lernen können.
+
+## Gib Claude die Liste
+
+Das [since-cutoff-Plugin](https://github.com/derob98/ailmanac/tree/main/plugins/since-cutoff) legt Claude diese Listen vor. Beim Start einer Sitzung liest ein Hook, welches Modell läuft, und fügt seinem Kontext eine kurze Notiz hinzu: die Flags, Befehle und Hook-Events, die nach dem Cutoff dieses Modells dokumentiert wurden, sowie die Anweisung, die Dokumentation zu prüfen, bevor man sich auf das Gedächtnis verlässt oder sagt, ein Feature existiere nicht.
+
+```bash
+claude plugin marketplace add derob98/ailmanac --sparse .claude-plugin plugins
+claude plugin install since-cutoff@ailmanac
+```
+
+Der Hook besteht aus wenigen Zeilen POSIX-Shell: kein Node, kein Netzwerk, etwa 400 bis 750 Token pro Sitzung. Wenn Claude Code das Modell nicht an den Hook übergibt, wie in unserem Headless-`-p`-Test, listet die Notiz auf, was sich seit Juni 2026 geändert hat – das gilt für jedes Claude-Modell. In diesem Test erhielt die Sitzung die Notiz, und Claude zitierte sie Wort für Wort zurück.
+
+## Was du damit tun solltest
+
+- **Vertraue nicht Claudes Gedächtnis über Claude Code.** Lass es bei Flags, Einstellungen, Hooks und Befehlen die Seite lesen. Claude Code bringt einen Guide-Agenten für Fragen zu sich selbst mit, und die Dokumentation veröffentlicht einen Index unter [code.claude.com/docs/llms.txt](https://code.claude.com/docs/llms.txt).
+- **Datiere deine Tutorials.** Eine Anleitung von vor sechs Monaten hat mehr als ein Drittel ihrer Fakten verloren. Prüfe alles, was älter ist, gegen die Dokumentation, bevor du Befehle daraus kopierst.
+- **Bevorzuge Seiten, die angeben, wann sie geprüft wurden.** Jede Seite dieser Website trägt das Datum ihrer letzten Überprüfung; das [Aktualitäts-Dashboard](/docs/whats-new/freshness) listet sie alle auf, und [Deprecation & Migration Watch](/docs/whats-new/deprecations) verfolgt, was entfernt wurde.
+
+## Wie wir gemessen haben
+
+- **Historie.** [web3dev1337/claude-code-docs](https://github.com/web3dev1337/claude-code-docs) ist ein Fork eines bekannten Dokumentations-Mirrors, der die vollständige Sync-Historie behalten hat: 3.604 Syncs zwischen Juli 2025 und Oktober 2026. Wir haben den letzten Sync jeder Woche genommen, insgesamt 67 Snapshots.
+- **Umfang.** Jede Claude-Code-Seite außer dem Changelog und den wöchentlichen Digests, die von Natur aus Geschichte festhalten, und den Agent-SDK-Seiten, die 2026 von einer anderen Dokumentationsseite herüberkamen und sonst als neu zählen würden.
+- **Einheiten.** Jede Seite wird in Sätze, Tabellenzeilen und Codezeilen zerlegt, ohne Links und Markup. Eine Zeile, die auf fünf oder mehr Seiten gleichzeitig vorkommt, etwa ein Banner oder eine generische Codezeile, wird verworfen. Übrig blieben 90.674 verschiedene Einheiten zum Verfolgen.
+- **Verschwinden.** Eine Einheit gilt als verschwunden, sobald sie in zwei aufeinanderfolgenden Wochen-Snapshots oder im letzten fehlt, damit eine Seite, die einen Sync verpasst hat, nicht mitzählt.
+- **Fakten.** Ein neuer Satz, der einen in derselben Woche gelöschten ersetzt, gilt als dasselbe Faktum, wenn mindestens 60 % ihrer Wörter übereinstimmen und jede Zahl, jedes Flag, jeder Pfad und jeder Bezeichner identisch ist. So wurden 7.965 Umformulierungen verknüpft.
+- **Cutoffs.** Jedes Modell wird mit dem letzten Wochen-Snapshot am oder vor dem letzten Tag seines Cutoff-Monats verglichen, der großzügigsten Lesart. Cutoffs vor Juli 2025 verwenden den ersten Snapshot, der bereits mehr enthält, als diese Modelle hätten sehen können: Ihre Anteile sind Untergrenzen.
+- **Überleben.** Kaplan-Meier-Schätzungen über alle Einheiten, die nach dem ersten Snapshot entstanden, wobei Einheiten, die heute noch vorhanden sind, als zensiert gelten.
+
+Der Mirror ist inoffiziell: Hat er eine Seite verpasst oder verstümmelt, erben die Zahlen das. Wir haben die Cutoff-Wochen auf Seiten geprüft, die für einen Sync verschwanden, und keine gefunden. Die Analyse vergleicht Text, nicht Produktverhalten.
+
+## Reproduziere es
+
+Das Skript und seine Ausgabe liegen im Repository dieser Website: [scripts/research/docs-decay.mjs](https://github.com/derob98/ailmanac/blob/main/scripts/research/docs-decay.mjs) und [data/research/claude-code-docs-decay.json](https://github.com/derob98/ailmanac/blob/main/data/research/claude-code-docs-decay.json). Es braucht Node und git und läuft in etwa 15 Sekunden:
+
+```bash
+git clone https://github.com/web3dev1337/claude-code-docs
+git clone https://github.com/derob98/ailmanac
+node ailmanac/scripts/research/docs-decay.mjs claude-code-docs
+```

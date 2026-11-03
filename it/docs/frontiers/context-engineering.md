@@ -1,0 +1,210 @@
+# Context Engineering
+
+> Source: https://derob98.github.io/ailmanac/it/docs/frontiers/context-engineering · AILmanac (CC BY 4.0) · last verified 2026-08-22
+
+Il passaggio dal prompt engineering al trattare il context window del modello come uno spazio di lavoro curato e scarso — e perché contano sia ciò che ci metti, sia dove lo metti, sia ciò che lasci fuori.
+
+<LevelBadge level="intermediate" />
+
+# Context Engineering
+
+Il prompt engineering riguarda le parole che scegli. Il context engineering riguarda lo *spazio di lavoro* che consegni al modello — cosa contiene, in che ordine, e cosa hai deliberatamente lasciato fuori.
+
+La distinzione conta perché un context window non è un blocco per appunti. È una risorsa attentiva limitata e costosa. Come lo riempi cambia su cosa si concentra il modello, quanto ti costa, e se resta utile mentre le sessioni si allungano.
+
+<Callout
+  type="objectives"
+  items={[
+    "Distinguere il context engineering dal prompt engineering — e capire perché il campo si è spostato",
+    "Trattare il context window come un budget di attenzione, non come un magazzino",
+    "Riconoscere il context rot e il fenomeno \"lost in the middle\" prima che rovinino una sessione lunga",
+    "Collocare le istruzioni dove l'attenzione atterra davvero — in cima, alla fine, mai sepolte nel mezzo",
+    "Applicare le tre tattiche da lavoro: compaction, note-taking e retrieval just-in-time"
+  ]}
+/>
+
+<VerifyNote lastVerified="2026-08-22" source="https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents">
+Anthropic definisce il context engineering come la cura del "più piccolo insieme possibile di token ad alto segnale che massimizzi la probabilità di un determinato esito". Le tattiche e l'inquadramento qui sotto seguono quella guidance ufficiale — verifica i dettagli specifici alla fonte, perché la guidance sugli agenti evolve rapidamente.
+</VerifyNote>
+
+## Il context budget
+
+Ogni modello ha una dimensione massima di contesto — un tetto rigido misurato in token. Pensalo come un budget. Lo spendi in:
+
+- Il tuo system prompt e le istruzioni permanenti
+- Documenti recuperati, frammenti di codebase, definizioni dei tool
+- La cronologia della conversazione
+- L'output del modello (che nelle sessioni multi-turno conta anch'esso contro la finestra)
+
+Quando lo esaurisci, qualcosa deve cedere. O i contenuti vecchi vengono scartati, o la sessione va a muro.
+
+La maggior parte delle guide per principianti tratta il context window secondo il principio "più è meglio". Il context engineering lo tratta come una risorsa da *allocare con cura*: spendila su ciò che al modello serve davvero per questo turno, non su tutto ciò che potrebbe essere rilevante. Anthropic inquadra l'intera disciplina come la ricerca del "più piccolo insieme possibile di token ad alto segnale" — ogni token che aggiungi compete per un **attention budget** finito, conseguenza diretta del modo in cui un transformer mette in relazione ogni token con tutti gli altri.
+
+## Context rot e "lost in the middle"
+
+C'è un fenomeno ben documentato negli LLM a contesto lungo: i modelli prestano attenzione in modo sproporzionato ai contenuti vicini all'*inizio* e alla *fine* del loro contesto, mentre il richiamo dei contenuti sepolti nel *mezzo* si degrada. I ricercatori che hanno studiato questo effetto l'hanno chiamato "lost in the middle".
+
+La conseguenza pratica: se riempi un contesto da 100.000 token di documenti e seppellisci l'istruzione più critica alla posizione 60.000, il modello potrebbe di fatto ignorarla — non perché sia incapace di leggere fin lì, ma perché l'attenzione non è distribuita uniformemente sulla finestra.
+
+Il "context rot" è il pattern più ampio: al crescere di una sessione, la qualità delle risposte tende a derivare. Le istruzioni iniziali si diluiscono. Il continuo botta e risposta scaccia il task originale. Il modello inizia a temporeggiare, a ripetersi, o a perdere il filo di ciò che avevi effettivamente chiesto.
+
+Questi non sono bug che puoi risolvere del tutto con un prompt migliore. Sono proprietà strutturali di come funziona l'attenzione su larga scala. La risposta ingegneristica è tenere il contesto *più piccolo e più affilato*, non riempirlo e sperare.
+
+## L'ordine conta
+
+Dove collochi il contenuto è tanto importante quanto cosa includi. Buone pratiche consolidate:
+
+| Posizione | Cosa metterci |
+|---|---|
+| In cima (system prompt) | Istruzioni stabili e durature. Persona, regole, requisiti di formato. |
+| Dopo il system prompt | Il task corrente, in termini semplici. |
+| Appena prima dell'ultimo turno utente | Il contesto più critico e specifico per esattamente questa richiesta. |
+| Nel mezzo | Documenti di supporto, chunk recuperati — ordinati per rilevanza, non per cronologia. |
+| Cronologia della conversazione | Solo ciò che serve alla continuità. Pota in modo aggressivo. |
+
+La regola generale: più è vicino al turno corrente, più attenzione riceve. Le istruzioni critiche che vivono solo nel mezzo di una storia lunga sono a rischio.
+
+### La "giusta altitudine" per le istruzioni
+
+Un system prompt può fallire in due modi opposti. Troppo in basso e finisci per codificare logica fragile if-this-then-that, che si rompe appena la realtà è diversa. Troppo in alto e scrivi indicazioni vaghe che presuppongono un contesto che il modello non ha. Anthropic chiama l'obiettivo la **"right altitude"** — la zona di Riccioli d'Oro che è "abbastanza specifica da guidare efficacemente il comportamento, ma abbastanza flessibile da fornire euristiche solide". Mira lì: regole ed esempi concreti, non un albero decisionale e non un'atmosfera vaga.
+
+## Retrieval invece di riempimento
+
+La tentazione è metterci tutto: tutti i documenti, l'intera codebase, la conversazione completa. Resisti.
+
+L'approccio migliore è il *retrieval selettivo*: identifica cosa serve davvero al modello per questa specifica richiesta, e inietta solo quello. Un chunk da 2.000 token del documento giusto, ben recuperato, batte un dump da 40.000 token in cui la risposta sta da qualche parte nel mezzo.
+
+È per questo che esiste la retrieval-augmented generation (RAG) — non solo per superare i limiti di contesto, ma per migliorare la qualità mantenendo il contesto *curato*. La versione agentica è il **retrieval just-in-time**: invece di pre-caricare ogni documento, l'agente conserva identificatori leggeri (path di file, ID, query) e tira il contenuto effettivo nel contesto solo nel momento in cui serve.
+
+Per le sessioni interattive vale la stessa logica: invece di accumulare tutto, compatta o azzera periodicamente la cronologia per rimuovere i contenuti non più rilevanti per il task corrente. I comandi `/compact` e `/clear` di Claude Code sono strumenti di context engineering, non solo di gestione della sessione. Sull'API lo stesso pattern è automatizzato da [memory e context editing](/docs/api/memory-and-context-editing) — i vecchi risultati dei tool vengono potati dalla finestra, mentre ciò che conta viene scritto in un memory store persistente.
+
+## Le tre tattiche da lavoro
+
+Per il lavoro su orizzonti lunghi, tre tecniche fanno la gran parte del lavoro pesante. Si compongono — la maggior parte degli agenti reali le usa tutte e tre.
+
+<Steps
+  items={[
+    {title: "Compaction", body: "Quando una sessione si avvicina al limite della finestra, riassumila e reinizializzala con la versione distillata. Preserva i dettagli portanti — decisioni architetturali, bug irrisolti, scelte implementative chiave — e scarta la cronaca minuto per minuto. È ciò che fa /compact in Claude Code."},
+    {title: "Note-taking strutturato", body: "Fai scrivere all'agente i fatti duraturi in una memoria esterna (un file, uno scratchpad, un CLAUDE.md) e rileggerli più tardi. Questo dà memoria persistente con overhead minimo nella finestra — le note vivono fuori dal budget finché non servono."},
+    {title: "Retrieval just-in-time", body: "Non precaricare ogni documento. Conserva riferimenti leggeri e carica il contenuto effettivo a runtime, solo per lo step che ne ha bisogno. Un recupero mirato da 2.000 token batte un dump da 40.000 token."}
+  ]}
+/>
+
+## Il lato costi
+
+I token che invii sono token che paghi — sia in denaro sia in latenza. Riempire il contesto di materiale vagamente rilevante gonfia entrambi. Context engineering ed efficienza di costo sono lo stesso problema.
+
+Più concretamente:
+
+- Un system prompt gonfio che copi-incolli da un template lo paghi a ogni singola chiamata.
+- La vecchia cronologia di conversazione che ti porti dietro perché "potrebbe essere utile" la paghi a ogni singola chiamata.
+- I documenti che inietti "nel caso serva" li paghi a ogni singola chiamata.
+
+Tagliare ciò che non deve esserci è contemporaneamente meglio per la qualità e più economico da far girare.
+
+## Tattiche pratiche per chi usa Claude
+
+**In Claude.ai:**
+- Usa conversazioni distinte per task distinti. Non lasciare che un pomeriggio di divagazioni inquini il contesto di un progetto focalizzato.
+- Riassumi i thread lunghi prima di porre una domanda complessa che dipende da essi. Un riassunto esplicito è spesso più utile della cronologia grezza.
+- Metti la cosa specifica che vuoi alla *fine* di un messaggio lungo, non sepolta nel mezzo.
+
+**In Claude Code:**
+- Tieni snello il tuo file `CLAUDE.md`. Ogni sua riga viene iniettata in ogni sessione. Vedi [CLAUDE.md](/docs/claude-code/claude-md) e [Gestione del contesto](/docs/claude-code/context-management).
+- Usa `/clear` quando passi a un task davvero diverso. Usa `/compact` quando vuoi continuare ma la sessione sta crescendo.
+- Fai riferimento ai file per path invece di incollarne il contenuto, quando il file completo non serve per lo step corrente.
+
+**A livello di API:**
+- Progetta i system prompt in modo che contengano solo ciò che serve davvero a ogni richiesta. Sposta le istruzioni specifiche del task nel turno utente.
+- Per i casi d'uso ricchi di documenti, recupera e inietta i chunk rilevanti invece di caricare un intero corpus.
+- Struttura il prompt così che il prefisso stabile e riutilizzabile venga per primo — questo abilita anche il prompt caching, compagno naturale del context engineering.
+
+Quando vuoi consegnare un documento lungo a Claude, la regola di posizionamento batte il volume grezzo ogni volta:
+
+<PromptCard title="Istruzione in cima, ribadita in fondo">{`Task: Find every clause where this contract caps our liability, and quote each one verbatim with its section number.
+
+[... paste the full 40-page contract here ...]
+
+Reminder of the task: list every liability-cap clause above, quoted exactly, with section numbers. If there are none, say so explicitly.`}</PromptCard>
+
+La stessa istruzione sta in cima *e* in fondo — le due posizioni che l'attenzione privilegia — così sopravvive anche a un mezzo molto lungo.
+
+## Il cambio di mentalità
+
+Il prompt engineering chiede: "Cosa dovrei dire?"
+Il context engineering chiede: "Cosa dovrebbe *vedere* il modello, in che ordine, e cosa dovrei deliberatamente tenere fuori?"
+
+La seconda domanda è più difficile, ma è quella che determina davvero la qualità su scala.
+
+<Quiz
+  questions={[
+    {
+      q: "Qual è la differenza centrale tra prompt engineering e context engineering?",
+      options: [
+        "Il prompt engineering serve per la chat, il context engineering per il codice",
+        "Il prompt engineering sono le parole che scegli; il context engineering è la cura dell'intero insieme di token che il modello vede",
+        "Il context engineering conta solo sopra il milione di token",
+        "Sono due nomi per la stessa cosa"
+      ],
+      answer: 1,
+      explain: "Il prompt engineering si concentra sul formulare un singolo prompt. Il context engineering è il compito più ampio di curare cosa riempie la finestra — system prompt, tool, cronologia, dati recuperati — e cosa lasciare fuori."
+    },
+    {
+      q: "Seppellisci l'unica istruzione più importante al token 60.000 di un contesto da 100.000 token. Qual è il risultato probabile?",
+      options: [
+        "Il modello le dà il peso maggiore perché l'ha letta più di recente",
+        "Costa meno perché i token centrali sono scontati",
+        "Il modello potrebbe di fatto ignorarla — l'attenzione è più debole nel mezzo",
+        "Non cambia nulla; la posizione non ha effetto"
+      ],
+      answer: 2,
+      explain: "L'effetto \"lost in the middle\": il richiamo si degrada per i contenuti sepolti nel mezzo di un contesto lungo. Metti le istruzioni critiche in cima o appena prima del turno finale — idealmente in entrambi i punti."
+    },
+    {
+      q: "Un agente di coding sta per esaurire il contesto durante un task lungo. Quale tattica preserva meglio i progressi?",
+      options: [
+        "Incollare di nuovo l'intera cronologia per rinfrescarla",
+        "Compaction: riassumere in uno stato distillato che conserva decisioni e bug aperti, poi reinizializzare",
+        "Abbassare la temperature",
+        "Passare a un modello più piccolo"
+      ],
+      answer: 1,
+      explain: "La compaction riassume la sessione e reinizializza con la versione distillata — preservando le decisioni architetturali e i bug irrisolti, e liberandosi della cronaca minuto per minuto, pesante in token."
+    }
+  ]}
+/>
+
+<Flashcards
+  title="Fissa il vocabolario"
+  cards={[
+    {front: "Context engineering", back: "Curare il più piccolo insieme di token ad alto segnale che il modello vede — system prompt, tool, cronologia, dati recuperati — e lasciare deliberatamente fuori il resto."},
+    {front: "Attention budget", back: "La capacità finita che un transformer ha di mettere in relazione i token tra loro. Ogni token in più la consuma: ecco perché più contesto può significare risposte peggiori."},
+    {front: "Lost in the middle", back: "I modelli ricordano i contenuti vicini all'inizio e alla fine del contesto molto meglio di quelli sepolti nel mezzo. Determina dove collochi le istruzioni critiche."},
+    {front: "Context rot", back: "La graduale deriva di qualità di una sessione lunga, mentre le istruzioni iniziali si diluiscono e il task originale viene scacciato."},
+    {front: "Right altitude", back: "La zona di Riccioli d'Oro per le istruzioni: abbastanza specifiche da guidare il comportamento, abbastanza flessibili da fare da euristiche solide — né logica hardcoded e fragile, né vaghe generalità."},
+    {front: "Retrieval just-in-time", back: "Conservare riferimenti leggeri (path, ID, query) e caricare il contenuto effettivo nel contesto solo nel momento in cui uno step ne ha bisogno."}
+  ]}
+/>
+
+<Callout
+  type="takeaways"
+  items={[
+    "Il context window è un budget di attenzione, non uno spazio di archiviazione — spendilo solo su token ad alto segnale.",
+    "La posizione batte il volume: le istruzioni critiche vanno in cima e appena prima del turno finale, mai sepolte nel mezzo.",
+    "Compaction, note-taking e retrieval just-in-time sono le tre tattiche che tengono coerenti gli agenti a lungo raggio.",
+    "Curare il contesto è la stessa leva del tagliare i costi — meno token, risposte migliori, bolletta più bassa."
+  ]}
+/>
+
+## Correlati
+
+- [Come funziona davvero la memoria degli agenti](/docs/frontiers/agent-memory-architectures) — l'altra metà: cosa sopravvive *tra* i turni, non solo all'interno di uno.
+- [Gestione del contesto in Claude Code](/docs/claude-code/context-management)
+- [Basi del prompting](/docs/prompting/basics)
+- [Economia del prompt caching](/docs/frontiers/prompt-caching-economics)
+- [Token e contesto](/docs/foundations/tokens-and-context)
+
+
+## Prossimo
+
+- [Il divario capacità-affidabilità](/docs/frontiers/the-capability-reliability-gap)

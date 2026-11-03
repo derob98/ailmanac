@@ -1,0 +1,372 @@
+# CLAUDE.md 起步模板
+
+> Source: https://derob98.github.io/ailmanac/zh-Hans/docs/templates/claude-md · AILmanac (CC BY 4.0)
+
+按项目类型分类、带注释、可复制粘贴的 CLAUDE.md 模板。
+
+<LevelBadge level="all" />
+
+`CLAUDE.md` 是你能给 [Claude Code](/docs/claude-code/what-is-claude-code) 的最高杠杆的东西：它是 Claude 每次会话都会读取的持久化指令。把下面任意一个模板放到你的仓库根目录（或运行 `/init` 生成一个起点），然后裁剪到合适。用每个代码块上的复制按钮即可。
+
+:::tip[保持简短而真实]
+一个冗长、空想或过时的 CLAUDE.md 会*帮倒忙* —— Claude 会照字面执行它。请描述项目**实际**的运作方式，并狠心删减。详情见 [CLAUDE.md 页面](/docs/claude-code/claude-md)。
+:::
+
+## 通用起步模板
+
+```markdown
+# Project: <name>
+
+
+## What this is
+
+<One or two sentences: what the project does and who uses it.>
+
+
+## Tech stack
+
+- Language/runtime: <e.g. TypeScript, Node 20>
+- Framework: <e.g. Next.js 14 App Router>
+- Key libraries: <e.g. Prisma, tRPC, Tailwind>
+
+
+## How to run
+
+- Install: `<cmd>`
+- Dev server: `<cmd>`
+- Tests: `<cmd>`
+- Lint/format: `<cmd>`
+
+
+## Conventions
+
+- <e.g. Use functional components; no class components.>
+- <e.g. Co-locate tests as *.test.ts next to source.>
+- <e.g. Conventional Commits for messages.>
+
+
+## Guardrails
+
+- Run the tests before saying a task is done.
+- Don't edit files under `/generated` or `/vendor`.
+- Never commit secrets or .env files.
+
+
+## Good to know
+
+- <Gotchas, non-obvious decisions, links to deeper docs.>
+```
+
+## Node / TypeScript Web 应用
+
+```markdown
+# Project: <name> (Next.js + TypeScript)
+
+
+## How to run
+
+- Dev: `npm run dev`
+- Build: `npm run build`
+- Test: `npm test`
+- Lint: `npm run lint` (must pass before commit)
+
+
+## Conventions
+
+- TypeScript strict; no `any` without a comment justifying it.
+- Components in `src/components`, one folder per component.
+- Data fetching via tRPC; never call the DB from a client component.
+- Styling: Tailwind utility classes; no inline styles.
+
+
+## Guardrails
+
+- After any change, run `npm run lint && npm test`.
+- Keep files under ~300 lines; split when larger.
+- Do not modify `prisma/migrations` by hand.
+```
+
+## Python 服务
+
+```markdown
+# Project: <name> (FastAPI)
+
+
+## How to run
+
+- Install: `uv sync` (or `pip install -e .`)
+- Dev: `uvicorn app.main:app --reload`
+- Test: `pytest`
+- Lint/format: `ruff check . && ruff format .`
+
+
+## Conventions
+
+- Type hints everywhere; prefer `pathlib` over `os.path`.
+- Pydantic models for all request/response bodies.
+- f-strings, not %-formatting.
+
+
+## Guardrails
+
+- Run `pytest` and `ruff check` before completing a task.
+- Fail fast with descriptive errors; no silent excepts.
+```
+
+## Django
+
+
+```markdown
+# Project: <name> (Django <version>)
+
+## Tech stack
+
+- Python 3.12 · Django 5.x
+- Database: PostgreSQL (psycopg3)           # or SQLite for local dev; state the truth
+- Task queue: Celery + Redis               # remove if unused
+- Auth: django-allauth / dj-rest-auth      # remove if unused
+- API layer: Django REST Framework (DRF)   # remove if unused; note if it's pure server-side templates instead
+- Frontend: HTMX + Alpine.js / React SPA   # pick one; state the truth
+- Key packages: django-environ, Pillow, whitenoise
+
+
+## Settings layout
+
+# config/
+#   settings/
+#     base.py      ← shared
+#     local.py     ← DEBUG=True, console email backend
+#     production.py← env-driven secrets, ALLOWED_HOSTS, SECURE_* flags
+# Load via DJANGO_SETTINGS_MODULE env var.
+
+
+## How to run
+
+- Install:      `pip install -e ".[dev]"` or `uv sync`
+- Env file:     copy `.env.example` → `.env` and fill secrets
+- Migrate:      `python manage.py migrate`
+- Dev server:   `python manage.py runserver`
+- Shell:        `python manage.py shell_plus`   # django-extensions
+- Test:         `pytest` (pytest-django; see pytest.ini)
+- Lint/format:  `ruff check . && ruff format .`
+- Type check:   `mypy .`   # if mypy is configured
+
+
+## Project layout
+
+<project_slug>/
+  <app_name>/
+    models.py         # one model family per app; no god-models
+    views.py          # CBVs preferred; FBVs for simple one-offs
+    serializers.py    # DRF only
+    urls.py           # app-level URL conf; included from config/urls.py
+    services.py       # business logic lives here, NOT in views or models
+    tasks.py          # Celery tasks
+    tests/
+      test_models.py
+      test_views.py
+  config/
+    settings/
+    urls.py
+    wsgi.py / asgi.py
+  manage.py
+
+
+## Conventions
+
+### Models
+- Fat service layer, thin models: domain logic goes in `services.py`, not model methods.
+- Always set `verbose_name` and `verbose_name_plural` on Meta.
+- Use `get_object_or_404` or `select_related`/`prefetch_related` — never N+1 queries.
+- UUID primary keys for all user-facing models: `id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)`.
+
+### Migrations
+- One migration per logical change; never squash without team sign-off.
+- Never edit a migration that has been applied to staging or production.
+- Name meaningful ones: `python manage.py makemigrations --name add_published_at_to_post`.
+
+### Views & URLs
+- Class-Based Views for CRUD and list/detail; Function-Based Views for anything with unusual branching.
+- DRF ViewSets for API endpoints; routers in `<app>/urls.py`.
+- All URLs namespaced: `app_name = "blog"` in each app's `urls.py`.
+
+### Templates (if server-side rendered)
+- Extend `base.html`; block names: `title`, `content`, `extra_css`, `extra_js`.
+- No business logic in templates; use template tags or pass computed context from the view.
+
+### Security
+- `SECRET_KEY` and all credentials via environment variables (django-environ); never hardcoded.
+- CSRF on all mutating endpoints; DRF uses `SessionAuthentication` + CSRF by default.
+- `SECURE_SSL_REDIRECT`, `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE` = True in production.
+
+
+## Guardrails
+
+- Run `pytest && ruff check .` before marking any task done.
+- Never edit applied migrations; create a new one instead.
+- Do not add raw SQL unless there is no ORM equivalent — document why if you do.
+- Do not import from `django.conf.settings` inside model files; pass values explicitly.
+- After adding a new dependency, update `pyproject.toml` (or `requirements/*.txt`) and note it here.
+
+
+## Good to know
+
+- `DEBUG=True` in local; `DEBUG=False` in all server environments — never skip this.
+- Static files are served by WhiteNoise in production; run `collectstatic` before deploy.
+- Celery worker: `celery -A config worker -l info`; beat: `celery -A config beat -l info`.
+- <Add any project-specific gotchas: custom user model, multi-tenancy, third-party integrations.>
+```
+
+## Go
+
+```markdown
+# Project: <name> (Go <version>)
+
+
+## What this is
+
+<One or two sentences: what the service does and who uses it.>
+
+
+## Tech stack
+
+- Go 1.23+
+- HTTP: net/http stdlib / chi / gin        # pick one; delete the rest
+- Database: pgx + sqlc                     # or database/sql + sqlx; state what's true
+- Migrations: golang-migrate               # remove if unused
+- Config: envconfig / godotenv             # remove if unused
+- Key deps: zap (logging), testify (assertions)
+
+
+## How to run
+
+- Install deps:  `go mod download`
+- Build:         `go build ./...`
+- Dev (live):    `air` (github.com/air-verse/air)   # remove if unused
+- Test:          `go test ./... -race`
+- Lint:          `golangci-lint run`
+- Generate:      `go generate ./...`   # sqlc, mockgen, etc.
+
+
+## Project layout
+
+    cmd/
+      <service>/
+        main.go       # wiring only — no business logic
+    internal/
+      <domain>/
+        service.go    # business logic
+        repository.go # DB layer (interface + impl)
+        handler.go    # HTTP handlers
+    pkg/              # code safe to import from outside this module
+    migrations/       # SQL migration files
+
+
+## Conventions
+
+- Package names: short, lowercase, no underscores (`userstore` not `user_store`).
+- One package per domain concern inside `internal/`; avoid a god `utils` package.
+- Errors: always wrap with `fmt.Errorf("doing X: %w", err)`; never discard.
+- Interfaces: define them in the *consumer* package, not the producer.
+- No global state; inject dependencies via constructor functions.
+- context.Context is the first parameter of every function that does I/O.
+- Prefer table-driven tests; subtests via `t.Run`.
+
+
+## Guardrails
+
+- Run `go test ./... -race && golangci-lint run` before marking any task done.
+- Never use `panic` in library code; return errors.
+- Do not use `init()` functions — wire everything in `main`.
+- Avoid naked `interface{}`; use typed interfaces or generics (Go 1.18+).
+- Keep `main.go` thin: parse config, build deps, call `server.Run`.
+
+
+## Good to know
+
+- `go generate` must be run after changing any `.sql` query files (sqlc).
+- Linter config lives in `.golangci.yml` — do not add lint exceptions without a comment.
+- <Add project-specific gotchas: service mesh, internal auth, proto generation.>
+```
+
+## Rust
+
+```markdown
+# Project: <name> (Rust <edition>)
+
+
+## What this is
+
+<One or two sentences: what this binary/library does and who uses it.>
+
+
+## Tech stack
+
+- Rust edition 2021, MSRV <version>
+- Async runtime: Tokio                     # or async-std; pick one
+- HTTP: Axum / Actix-web                   # remove unused
+- Serialisation: serde + serde_json
+- Database: sqlx (async, compile-time checked queries)   # remove if unused
+- Error handling: thiserror (library) / anyhow (binary)  # pick per crate type
+- Key crates: tracing, tracing-subscriber, dotenvy
+
+
+## How to run
+
+- Build (dev):   `cargo build`
+- Build (rel):   `cargo build --release`
+- Test:          `cargo test`
+- Lint:          `cargo clippy -- -D warnings`
+- Format:        `cargo fmt --check`
+- Docs:          `cargo doc --open`
+- Watch:         `cargo watch -x test`   # remove if unused
+
+
+## Workspace layout (if multi-crate)
+
+    Cargo.toml           # [workspace] root
+    crates/
+      core/              # domain logic, no I/O, no async
+      api/               # Axum HTTP layer
+      db/                # sqlx repository layer
+      cli/               # binary entry-point
+
+
+## Conventions
+
+- No `unwrap()` or `expect()` in library crates; propagate with `?`.
+- `expect()` in binaries only where a panic is truly unrecoverable — with a message explaining why.
+- Prefer `thiserror` for library error enums; `anyhow` for binary/main error chains.
+- Async only at the edges (HTTP handlers, DB calls); keep domain logic sync.
+- Derive `Debug`, `Clone`, `serde::Serialize/Deserialize` where it makes sense.
+- Feature flags in `Cargo.toml` for optional integrations; document each one.
+
+
+## Guardrails
+
+- Run `cargo test && cargo clippy -- -D warnings && cargo fmt --check` before done.
+- Never silence a Clippy lint without a `#[allow(...)]` comment explaining why.
+- Do not use `unsafe` without a `// SAFETY:` comment justifying it.
+- Do not add a crate that duplicates one already in the dependency tree without discussion.
+- Keep compile times in mind: prefer concrete types over heavy generics in hot paths.
+
+
+## Good to know
+
+- `sqlx` queries are checked at compile time — run `cargo sqlx prepare` to update the offline cache after changing queries.
+- MSRV is enforced in CI; do not use features newer than the stated MSRV.
+- <Add project-specific gotchas: WASM target, FFI boundaries, no_std constraints.>
+```
+
+
+## 适用于以上全部模板的小贴士
+
+- **分层使用。** 用一个仓库根目录的 `CLAUDE.md` 管理整个项目；在子文件夹里放嵌套的 `CLAUDE.md` 文件来制定特定区域的规则。
+- **使用 `@imports`** 来引入现有文档，而不是重复编写它们（参见 [CLAUDE.md 参考](/docs/claude-code/claude-md)）。
+- **每月复查一次。** 过时的指令比没有指令更糟。
+
+## 相关内容
+
+- 完整操作指南 → [CLAUDE.md 与记忆文件](/docs/claude-code/claude-md)
+- 更多起步模板 → [SKILL.md 模板](/docs/templates/skills)、[hooks 与设置配方](/docs/templates/hooks-settings)
+- 改进这些内容 → [参与贡献](/docs/contribute/contribute-in-10-minutes)

@@ -1,0 +1,114 @@
+# 最初の本番API呼び出し(コスト意識)
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/walkthroughs/first-production-call · AILmanac (CC BY 4.0)
+
+実際の、ストリーミング、エラー処理、コスト予算のある呼び出し。
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["本番呼び出しをおもちゃの一行と分ける4つの規律に名前を付ける:シークレット、ストリーミング、コスト、エラー処理", "一時的な失敗(429/5xx)をバックオフでリトライする回復力のあるストリーミング呼び出しを書く — そして400は決してリトライしない", "モデルIDを設定に保持し、モデル切り替えが検索置換ではなく1行の変更で済むようにする", "すべての呼び出しでトークンコストを監視し、意図的に上限を設ける"]} />
+
+おもちゃの[API呼び出し](/docs/api/first-call)は1行です。*本番*呼び出しは、エラーを処理し、出力をストリームし、コストを監視し、シークレットを安全に保ちます。段階的に構築していきましょう。
+
+## ステップ1 — 設定からシークレットとモデル
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."   # never in source control
+```
+
+**モデルIDを設定に**保持し、リテラルを散在させないでください、そうすれば移行が容易になります([なぜ](/docs/api/errors-and-rate-limits))。意図的に選ぶ — [モデルの選び方](/docs/api/choosing-a-model)。
+
+## ステップ2 — 回復力のあるストリーミング呼び出し
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+import os, time, random, anthropic
+client = anthropic.Anthropic()
+MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
+
+def ask_stream(prompt, system=None, max_tokens=1024):
+    for attempt in range(5):
+        try:
+            with client.messages.stream(
+                model=MODEL, max_tokens=max_tokens,
+                system=system or anthropic.NOT_GIVEN,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                for text in stream.text_stream:
+                    print(text, end="", flush=True)
+                final = stream.get_final_message()
+            print()
+            usage = final.usage
+            print(f"\n[tokens in/out: {usage.input_tokens}/{usage.output_tokens}]")
+            return final
+        except (anthropic.RateLimitError, anthropic.APIStatusError):
+            if attempt == 4: raise
+            time.sleep(min(2 ** attempt + random.random(), 30))
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+const client = new Anthropic();
+const MODEL = process.env.CLAUDE_MODEL ?? "claude-sonnet-5";
+
+export async function askStream(prompt: string, system?: string, maxTokens = 1024) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const stream = client.messages.stream({ model: MODEL, max_tokens: maxTokens, system,
+        messages: [{ role: "user", content: prompt }] });
+      for await (const e of stream)
+        if (e.type === "content_block_delta") process.stdout.write(e.delta.text ?? "");
+      const final = await stream.finalMessage();
+      console.error(`\n[tokens in/out: ${final.usage.input_tokens}/${final.usage.output_tokens}]`);
+      return final;
+    } catch (e: any) {
+      if (attempt === 4 || ![429, 500, 529].includes(e?.status)) throw e;
+      await new Promise(r => setTimeout(r, Math.min(2 ** attempt * 1000, 30000)));
+    }
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+何かに配線する前にスモークテストしてください — 1つの小さな呼び出しが、ストリーム、トークン行、そしてキーがすべて動くことを証明します:
+
+<PromptCard title="最初のスモークテスト(Python REPL)">{`ask_stream("Say hello in one sentence.", max_tokens=64)`}</PromptCard>
+
+## ステップ3 — コストに気をつける
+
+- **トークン使用量をログする**(上記)、各呼び出しのコストが見えるように。
+- **`max_tokens`とモデルを適切なサイズに**、集中的なプロンプトで入力を制限する。
+- 繰り返される安定したプレフィックスには、[プロンプトキャッシュ](/docs/api/prompt-caching)を追加。
+- [トークンと価格](/docs/api/tokens-and-pricing)と[コストとレイテンシ](/docs/foundations/cost-and-latency)を参照。
+
+## ステップ4 — 不幸な経路を処理する
+
+- **一時的な**エラー(429/5xx)はバックオフでリトライ(上記);400はリトライしない。
+- [拒否](/docs/api/refusals-and-safety)を優雅に処理する。
+- エージェント的なものには**タイムアウト**と**コスト/イテレーション予算**を設定する。
+
+## 検証
+
+各経路を強制して何が起きるか観察してください — 本番呼び出しはただ成功するだけでなく、うまく失敗することでその名に値します:
+
+<Steps items={[{title: "ストリーム出力が現れる", body: "テキストが最後に一括ブロックではなく生成されるにつれ段階的に印字される。それがユーザーが感じるレイテンシの勝利。"}, {title: "トークン行が印字される", body: "レスポンスの後に[tokens in/out: …]行が見える。それが呼び出しごとのコストメーターで、すべての呼び出しでログされる。"}, {title: "悪いキーがクリーンに失敗する", body: "ANTHROPIC_API_KEYを間違った値に設定して再実行 — スタックトレースのクラッシュではなく、クリーンなエラーが得られるはず。"}, {title: "一時エラーはリトライ、400はしない", body: "429/5xxエラーは最大5回までバックオフでリトライ;不正な400リクエストは無意味にリトライせずに即座に表面化するはず。"}]} />
+
+<Quiz title="理解度チェック" questions={[{q: "コード全体にリテラル文字列を散在させるのではなく、なぜモデルIDを設定に保持するのですか?", options: ["設定値はSDKによって暗号化されて保存される", "新しいモデルへの移行が、散在するリテラルを狩るのではなく1行の変更になる", "AnthropicのSDKは環境変数なしでは実行を拒否する"], answer: 1, explain: "モデルIDは新しいバージョンが出荷されると変わります。IDを1つの設定値に保持することで移行が1回の編集になり、散在するリテラルはモデルを切り替えるたびにコードベース全体の検索置換を意味します。"}, {q: "リトライループは一部の失敗をキャッチし、他は再スローします。どのエラーをリトライすべきですか?", options: ["すべてのエラー、成功の可能性を最大化するため", "429や5xxのような一時的なエラーを指数バックオフで — ただし400は違う", "400エラーのみ、それがクライアントの落ち度だから"], answer: 1, explain: "429(レート制限)と5xx(サーバー)は一時的 — バックオフしてリトライすればしばしば成功します。400はリクエスト自体が不正なことを意味し、変更なしでリトライしても呼び出しと時間を無駄にするだけなので、即座に表面化すべきです。"}, {q: "各呼び出しが実際にいくらかかっているか見る最も安い方法は?", options: ["すべてのリクエストの前に価格エンドポイントを呼ぶ", "すべての呼び出しでusageで返される入力/出力トークン数をログする", "プロンプトキャッシュを有効にしてコストをゼロに落とす"], answer: 1, explain: "最終メッセージには入力と出力のトークン数を持つusageオブジェクトがあります。それをログすれば、無料で各呼び出しがそれ自体のコストメーターになります。プロンプトキャッシュは繰り返しプレフィックスのコストを下げますが、測定はしません。"}]} />
+
+<Callout type="takeaways" items={["本番呼び出しは一行に重ねられた4つの規律:シークレットをソースの外に保つ、出力をストリーム、コストを監視、エラーを処理", "一時的な失敗(429/5xx)を指数バックオフとジッタでリトライ — そして400は決してリトライしない、それはあなたが修正しなければならないリクエストのバグ", "モデルIDを設定に保持し、モデル切り替えが1行、コードベース全体の検索置換ではないようにする", "すべての呼び出しでトークン使用量をログ:リクエストごとのコストメーターで、追加コストはゼロ", "ストリーミングは知覚されるレイテンシを改善;タイムアウトとコスト/イテレーション予算がエージェント的ループの暴走を防ぐ"]} />
+
+## 次のステップ
+
+- [エラー、レート制限と信頼性](/docs/api/errors-and-rate-limits)
+- [本番APIスニペット](/docs/templates/api-snippets)
+- [APIでのエージェント構築](/docs/api/building-agents)

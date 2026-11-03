@@ -1,0 +1,86 @@
+# إعداد MCP وهياكل الخوادم
+
+> Source: https://derob98.github.io/ailmanac/ar/docs/templates/mcp-config · AILmanac (CC BY 4.0) · last verified 2026-08-10
+
+ملف .mcp.json بالإضافة إلى قوالب بدء بسيطة لخادم stdio وخادم بعيد.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-10" source="https://modelcontextprotocol.io">
+تتطور مفاتيح إعداد MCP وواجهات SDK البرمجية — تحقّق منها مقابل مستندات MCP الرسمية ومستندات MCP الخاصة بـ Claude Code.
+</VerifyNote>
+
+قوالب بدء جاهزة للنسخ واللصق لربط Claude بالأدوات عبر [MCP](/docs/claude-code/mcp). هذّبها إلى ما تحتاجه.
+
+## `.mcp.json` — إعلان الخوادم (مشترك في المشروع)
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "${DATABASE_URL}"]
+    }
+  }
+}
+```
+
+:::warning[أبقِ الأسرار خارج الملف]
+أشِر إلى متغيرات البيئة (`${GITHUB_TOKEN}`) — لا تضع الرموز المميزة مباشرة في ملف مُلتزَم به.
+:::
+
+## خادم stdio بسيط (TypeScript)
+
+خادم صغير يكشف أداة واحدة. كيّف المعالج ليناسب بياناتك.
+
+```ts
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { z } from "zod";
+
+const server = new McpServer({ name: "echo", version: "1.0.0" });
+
+server.registerTool(
+  "echo",
+  {
+    description: "Echo back the provided text",
+    inputSchema: z.object({ text: z.string().describe("Text to echo back") }),
+  },
+  async ({ text }) => ({ content: [{ type: "text", text: `You said: ${text}` }] }),
+);
+
+await server.connect(new StdioServerTransport());
+```
+
+## خادم stdio بسيط (Python)
+
+```python
+from mcp.server import MCPServer
+
+mcp = MCPServer("echo")
+
+@mcp.tool()
+def echo(text: str) -> str:
+    """Echo the text back."""
+    return f"You said: {text}"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
+
+## قبل أن تطلق خادماً
+
+- **الحد الأدنى من الامتيازات** — البيانات/الإجراءات التي يحتاجها فقط ([تأمين الوكلاء](/docs/security/securing-agents)).
+- **تحقّق من صحة المدخلات**؛ أعِد الأخطاء كنتائج، ولا تتعطّل.
+- **راجع خوادم الطرف الثالث** قبل الاتصال بها ([مراجعة كود الطرف الثالث](/docs/security/reviewing-third-party-code)).
+
+## التالي
+
+- [خوادم MCP في Claude Code](/docs/claude-code/mcp)
+- [ابنِ واربط أول خادم MCP لك](/docs/walkthroughs/first-mcp-server)
+- [وصفات الخطافات و settings.json](/docs/templates/hooks-settings)

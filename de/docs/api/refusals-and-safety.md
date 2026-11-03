@@ -1,0 +1,85 @@
+# Sicherheit, Verweigerungen & Fallbacks
+
+> Source: https://derob98.github.io/ailmanac/de/docs/api/refusals-and-safety · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+Verweigerungen souverän behandeln und sie von Classifier-Blocks unterscheiden.
+
+<LevelBadge level="intermediate" />
+
+In der Produktion muss dein Code den Fall abdecken, in dem Claude nicht wie erwartet antworten **will** (oder kann). Gut gemacht bleibt das für Nutzer unsichtbar; schlecht gemacht ist es ein Crash oder eine verwirrende Antwort.
+
+<Callout type="objectives" items={[
+  "Eine Modell-Verweigerung von einem Classifier-/Safety-Block unterscheiden — und warum das zählt",
+  "Eine Verweigerung als normales Ergebnis behandeln, statt zu crashen oder eine leere Antwort zu zeigen",
+  "Ungewollte Verweigerungen reduzieren, ohne die berechtigten jailbreaken zu wollen",
+  "Einen Fallback wählen: klärende Rückfrage, sichere Alternative oder Übergabe an einen Menschen",
+]} />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/api/overview">
+Stop-Gründe und Safety-Response-Formen können sich ändern — bestätige das in der offiziellen API-Referenz.
+</VerifyNote>
+
+## Zwei verschiedene Dinge
+
+- **Eine Modell-Verweigerung** — Claude lehnt eine Anfrage ab (z. B. weil er sie als schädlich einstuft). Die Antwort signalisiert das (typischerweise über einen Refusal-`stop_reason`/-Content). Behandle sie als normales Ergebnis, nicht als Fehler.
+- **Ein Classifier-/Safety-Block** — eine separate Sicherheitsschicht kann Inhalte blockieren. Das kann anders aussehen als eine Modell-Verweigerung.
+
+Zu wissen, was du bekommen hast, lässt dich passend reagieren, statt blind zu wiederholen.
+
+## Souverän behandeln
+
+```python
+resp = client.messages.create(...)
+if getattr(resp, "stop_reason", None) == "refusal":
+    # Don't show a raw/empty result. Offer a safe fallback or a clarifying ask.
+    show_user("I can't help with that as asked. Here's what I can do instead…")
+else:
+    render(resp)
+```
+
+## Ungewollte Verweigerungen reduzieren
+
+- **Legitimen Kontext hinzufügen.** Eine Anfrage kann etwas Sensibles matchen, obwohl die Absicht harmlos ist; den echten, legitimen Zweck zu nennen hilft.
+- **Präzise sein.** Vage oder verwegene Formulierungen laden zu Vorsicht ein.
+- **Nicht dagegen anrennen.** Wenn eine Anfrage tatsächlich unzulässig ist, ist die Verweigerung korrekt — gestalte einen sauberen Ausweg, statt zu jailbreaken.
+
+<PromptCard title="Den legitimen Kontext gleich vorne nennen">{`I am a security engineer at [company] reviewing our own authentication code
+before a release. Below is a function we wrote and own.
+
+Identify weaknesses in it and explain how an attacker would exploit each one,
+so we can fix them before we ship.
+
+[code]`}</PromptCard>
+
+## Fallback-Muster
+
+- Eine **klärende Rückfrage** statt einer Sackgasse.
+- Eine **sichere Alternative** („Ich kann stattdessen die öffentlichen Infos zusammenfassen“).
+- In Pipelines: **an einen Menschen routen**, wenn Vertrauen/Berechtigung niedrig sind.
+
+<Steps items={[
+  {title: "Erkennen, nicht annehmen", body: "Prüfe die Antwort auf ein Refusal-Signal, bevor du sie renderst. Leite niemals eine ungeprüfte Antwort direkt in dein UI — so bekommen Nutzer eine leere Box oder ein rohes Objekt."},
+  {title: "Klassifizieren", body: "Modell-Verweigerung oder Classifier-/Safety-Block? Eine Verweigerung ist ein Urteil über die Anfrage; ein Block ist eine separate Sicherheitsschicht. Identisch zu wiederholen hilft bei keinem — aber sie zeigen auf verschiedene Fixes."},
+  {title: "Elegant degradieren", body: "Tausche die Sackgasse gegen eine klärende Rückfrage oder eine sichere Alternative — in der Stimme deines Produkts. Der Nutzer sollte einen nächsten Schritt bekommen, keinen Fehler."},
+  {title: "Eskalieren, wenn der Einsatz es rechtfertigt", body: "In einer Pipeline route Fälle mit niedrigem Vertrauen oder ohne Berechtigung an eine menschliche Queue, statt zu raten oder sie stillschweigend zu verwerfen."},
+]} />
+
+<Quiz title="Prüfe dich selbst" questions={[
+  {q: "Dein Code bekommt eine Verweigerung von Claude zurück. Wie behandelst du sie richtig?", options: ["Als Exception — fangen und dieselbe Anfrage wiederholen", "Als normales Ergebnis — erkennen und einen Fallback zeigen", "Als Bug in deinem Prompt, um den man jailbreaken sollte"], answer: 1, explain: "Eine Verweigerung ist eine normale Antwort, kein Fehler. Erkenne sie und biete eine klärende Rückfrage oder eine sichere Alternative an. Identisch zu wiederholen verbrennt nur Tokens."},
+  {q: "Eine harmlose Anfrage wird immer wieder verweigert. Was probierst du zuerst?", options: ["Umformulieren, um zu verschleiern, worum es geht", "Den echten, legitimen Zweck nennen und präziser werden", "Auf ein kleineres Modell umschalten"], answer: 1, explain: "Anfragen werden verweigert, wenn sie etwas Sensibles matchen. Legitimen Kontext zu ergänzen und präziser zu werden ist der Fix. Absicht zu verschleiern ist Jailbreaking — falscher Zug, und macht die Ausgabe außerdem schlechter."},
+  {q: "Warum ist es wichtig, ob du eine Modell-Verweigerung oder einen Classifier-/Safety-Block bekommen hast?", options: ["Ist es nicht — identisch behandeln", "Sie können in der Antwort unterschiedlich aussehen und auf verschiedene Fixes zeigen", "Nur einer davon wird abgerechnet"], answer: 1, explain: "Es sind verschiedene Mechanismen: Eine Modell-Verweigerung ist Claude, der ablehnt; ein separater Safety-Layer kann Inhalte blockieren. Zu wissen, was du bekommen hast, lässt dich passend reagieren, statt blind zu wiederholen."},
+]} />
+
+<Callout type="takeaways" items={[
+  "Eine Verweigerung ist ein Ergebnis, kein Fehler — erkenne sie immer vor dem Rendern.",
+  "Modell-Verweigerung und Classifier-Block sind verschiedene Dinge; erkenne, was du bekommen hast.",
+  "Ungewollte Verweigerungen schrumpfen meist, wenn du legitimen Kontext ergänzt und präzise wirst.",
+  "Wenn eine Anfrage tatsächlich unzulässig ist, ist die Verweigerung korrekt — baue einen sauberen Ausweg, jailbreake nicht.",
+  "Fallbacks in Reihenfolge: klärende Rückfrage, sichere Alternative, Übergabe an einen Menschen.",
+]} />
+
+## Weiter
+
+- [Fehler, Rate Limits & Zuverlässigkeit](/docs/api/errors-and-rate-limits)
+- [Verantwortungsvoller Umgang, Ethik & Verifikation](/docs/security/responsible-use)
+- [Troubleshooting: Warum hat Claude das getan?](/docs/contribute/troubleshooting)

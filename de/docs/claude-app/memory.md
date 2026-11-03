@@ -1,0 +1,120 @@
+# Memory über Chats hinweg
+
+> Source: https://derob98.github.io/ailmanac/de/docs/claude-app/memory · AILmanac (CC BY 4.0) · last verified 2026-08-02
+
+Wie Cross-Chat-Memory funktioniert und wie sie je nach Tarif verfügbar ist.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={[
+  "Die vier verschiedenen Dinge unterscheiden, die man „Memory“ nennt — nur eines davon ist das Thema dieser Seite",
+  "Wissen, was Cross-Chat-Memory für Sie leisten kann und warum die Verfügbarkeit von Ihrem Tarif abhängt",
+  "Die Kontrolle behalten: prüfen, bearbeiten, löschen oder deaktivieren, was Claude behält",
+  "Wissen, wann stattdessen ein expliziter Mechanismus zu nutzen ist, weil ein Fakt angewendet werden *muss*"
+]} />
+
+<VerifyNote lastVerified="2026-08-02" source="https://www.anthropic.com">
+Verhalten und Verfügbarkeit von Cross-Chat-Memory variieren je nach Tarif und ändern sich — bestätigen Sie die aktuellen Details in der App bzw. im Help Center.
+</VerifyNote>
+
+Standardmäßig ist jede Konversation ein [unbeschriebenes Blatt](/docs/foundations/tokens-and-context). **Memory**-Funktionen lassen Claude nützliche Fakten über Sie über Chats hinweg mitnehmen — damit Sie sich nicht jedes Mal neu vorstellen müssen.
+
+## Was „Memory“ hier bedeutet
+
+Es gibt einige verschiedene Dinge, die man „Memory“ nennt — verwechseln Sie sie nicht:
+
+| Art | Was es ist |
+|---|---|
+| **Kontextfenster** | Arbeitsgedächtnis *innerhalb* eines Chats (vergessen, wenn er endet) — siehe [Tokens & Kontext](/docs/foundations/tokens-and-context) |
+| **Cross-Chat-Memory** | Claude merkt sich Fakten über Sie *über* Konversationen hinweg (das Thema dieser Seite) |
+| **[Custom Instructions](/docs/claude-app/custom-instructions)** | Dauerhafte Fakten, die *Sie* explizit festlegen |
+| **[Projekte](/docs/claude-app/projects)** | Wissen, das auf einen Workspace begrenzt ist |
+
+## Wie Cross-Chat-Memory hilft
+
+Ist sie aktiviert, kann Claude sich an Dinge wie Ihre Präferenzen, laufende Projekte oder Details erinnern, die Sie geteilt haben — und wirkt dadurch mehr wie ein durchgehender Assistent als wie ein Fremder in jeder Sitzung. Verfügbarkeit und Steuerungsmöglichkeiten hängen von Ihrem Tarif ab.
+
+## Die Kontrolle behalten
+
+<Steps items={[
+  {
+    title: "Prüfen und bearbeiten, was gespeichert ist",
+    body: "Wo die App Steuerungen bietet, öffnen Sie sie und lesen Sie, was Claude tatsächlich behalten hat. Menschen sind regelmäßig überrascht — sowohl von dem, was gespeichert wurde, als auch von dem, was nicht."
+  },
+  {
+    title: "Löschen oder deaktivieren, wenn Sie ein unbeschriebenes Blatt wollen",
+    body: "Memory auszuschalten oder zu löschen ist der richtige Zug, wenn Sie einen Neustart oder schlicht mehr Privatsphäre wollen."
+  },
+  {
+    title: "Sich bei wichtigen Fakten nicht auf sie verlassen",
+    body: "Bestätigen Sie kritische Details, statt dem Abruf zu vertrauen. Memory lässt Claude durchgehend wirken; sie macht es nicht zur maßgeblichen Instanz über Ihr Leben."
+  },
+  {
+    title: "Auf Datenschutz achten",
+    body: "Memory speichert Informationen dauerhaft. Speichern Sie keine sensiblen Daten, die Sie nicht aufbewahrt haben wollen. Siehe [Datenschutz](/docs/foundations/privacy)."
+  }
+]} />
+
+:::tip[Explizit schlägt implizit]
+Für Fakten, die angewendet werden *müssen* (Ihre Rolle, Einheiten, harte Regeln), setzen Sie [Custom Instructions](/docs/claude-app/custom-instructions) oder nutzen Sie ein [Projekt](/docs/claude-app/projects) — das ist verlässlicher, als darauf zu hoffen, dass Memory sie abruft.
+:::
+
+<Quiz questions={[
+  {
+    q: "Sie haben eine harte Regel, dass jede Antwort metrische Einheiten verwenden muss. Wo sollte sie stehen?",
+    options: [
+      "Einmal in einem Chat erwähnen und von der Cross-Chat-Memory aufgreifen lassen",
+      "In Custom Instructions oder einem Projekt, weil sie jedes Mal angewendet werden muss",
+      "Nirgends — Claude schließt Einheiten aus dem Kontext",
+      "Im Kontextfenster jedes neuen Chats, manuell neu getippt"
+    ],
+    answer: 1,
+    explain: "Cross-Chat-Memory kann sie abrufen; Custom Instructions und Projekte wenden sie an. Für alles, was angewendet statt nur gemerkt werden muss, nutzen Sie den expliziten Mechanismus."
+  },
+  {
+    q: "Welche Art von Memory wird vergessen, wenn eine einzelne Konversation endet?",
+    options: [
+      "Cross-Chat-Memory",
+      "Custom Instructions",
+      "Das Kontextfenster",
+      "Projektwissen"
+    ],
+    answer: 2,
+    explain: "Das Kontextfenster ist das Arbeitsgedächtnis innerhalb eines Chats. Cross-Chat-Memory, Custom Instructions und Projekte bleiben alle über eine einzelne Konversation hinaus bestehen."
+  },
+  {
+    q: "Wie verhalten Sie sich richtig gegenüber einem kritischen Fakt, den Claude aus einem früheren Chat abruft?",
+    options: [
+      "Ihm vertrauen — dafür ist Memory da",
+      "Ihn bestätigen, weil Memory eine Komfortfunktion und keine Genauigkeitsgarantie ist",
+      "Die Memory löschen und den Fakt in jeder Sitzung neu eingeben",
+      "Ihm nur in bezahlten Tarifen vertrauen"
+    ],
+    answer: 1,
+    explain: "Memory lässt Claude über Sitzungen hinweg durchgehend wirken. Sie ist kein System of Record — bestätigen Sie kritische Details, statt dem Abruf zu vertrauen."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Kontextfenster", back: "Arbeitsgedächtnis innerhalb eines Chats. Vergessen, wenn die Konversation endet. Siehe Tokens & Kontext." },
+  { front: "Cross-Chat-Memory", back: "Claude trägt Fakten über Sie über getrennte Konversationen hinweg — Präferenzen, laufende Projekte, geteilte Details. Verfügbarkeit und Steuerung hängen von Ihrem Tarif ab." },
+  { front: "Custom Instructions", back: "Dauerhafte Fakten, die Sie explizit festlegen und die jedes Mal angewendet werden. Der verlässliche Ort für harte Regeln — Rolle, Einheiten, Vorgaben." },
+  { front: "Projekte", back: "Wissen, das auf einen Workspace begrenzt ist, statt auf Sie persönlich oder auf einen einzelnen Chat." },
+  { front: "Explizit schlägt implizit", back: "Wenn ein Fakt angewendet werden MUSS, hoffen Sie nicht darauf, dass Memory ihn abruft. Legen Sie ihn in Custom Instructions oder einem Projekt ab." },
+  { front: "Die Datenschutzregel für Memory", back: "Memory speichert Informationen dauerhaft. Speichern Sie keine sensiblen Daten, die Sie nicht aufbewahrt haben wollen — und prüfen, löschen oder deaktivieren Sie sie, wo die App Steuerungen bietet." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Vier verschiedene Dinge heißen „Memory“ — Kontextfenster, Cross-Chat-Memory, Custom Instructions, Projekte. Nur das zweite ist das Thema dieser Seite.",
+  "Cross-Chat-Memory ist eine Annehmlichkeit der Kontinuität, kein System of Record. Bestätigen Sie alles Kritische.",
+  "Alles, was jedes Mal angewendet werden muss, gehört in Custom Instructions oder ein Projekt, nicht in die Memory.",
+  "Memory bleibt bestehen. Prüfen Sie, was gespeichert ist, und halten Sie sensible Daten heraus."
+]} />
+
+## Weiter
+
+- [Memory 2026 — kategorisierte Einträge, von der App bis zur API](/docs/power-user/memory-2026-categorized-entries) — die Überarbeitung vom Juli 2026 im Detail
+- [Reflect & Focus](/docs/claude-app/reflect-and-focus) — der monatliche Rückblick auf Basis der Memory
+- [Tokens, Kontext & Memory](/docs/foundations/tokens-and-context)
+- [Custom Instructions & Styles](/docs/claude-app/custom-instructions)
+- [Datenschutz & Datenverarbeitung](/docs/foundations/privacy)

@@ -1,0 +1,280 @@
+# Code Erosion: Warum dein Agent kaputt macht, was er schon gebaut hat
+
+> Source: https://derob98.github.io/ailmanac/de/docs/frontiers/code-erosion-slopcodebench · AILmanac (CC BY 4.0) · last verified 2026-10-21
+
+SlopCodeBench fragt nicht mehr, ob ein Agent eine Aufgabe lösen kann, sondern was passiert, wenn sich die Spezifikation fünfmal ändert. Die Antworten sind unbequem: Kein Agent hat je ein einziges Problem durchgängig abgeschlossen, 82–88 % der fehlgeschlagenen Tests am letzten Checkpoint sind Regressionen und nicht die neue Anforderung, und in den Kampagnen vom Oktober 2026 kostete xhigh-Effort das 2,11–4,22-Fache von medium, während Opus 5.5 damit WENIGER Checkpoints bestand. Dazu der Befund, der ändern sollte, wie du promptest: Explizite Qualitätsvorgaben verbesserten den ersten Commit und taten nichts gegen die Fäulnis.
+
+<LevelBadge level="advanced" />
+
+Fast jeder Coding-Benchmark, über den du gelesen hast, stellt dieselbe Frage: *Kann der Agent bei gegebener Aufgabe sie lösen?* Ein Prompt, ein Patch, ein Urteil. Dieses Setup ist bequem, und es verbirgt den Fehlermodus, der dich tatsächlich Geld kostet, denn echte Software wird nie nur einmal geschrieben. Die Spezifikation bewegt sich. Du erweiterst, was du letzte Woche gebaut hast. Und die interessante Frage ist nicht, ob der Agent das Feature schreiben kann — sondern **was der Agent mit dem Code macht, der bereits funktionierte.**
+
+[SlopCodeBench](https://www.scbench.ai) existiert, um genau das zu messen, und die Ergebnisse sind schlechter, als der Diskurs vermuten lässt. In den Worten des Papers: *"Software development is iterative, yet agentic coding benchmarks hide design issues through their single-shot setup."*
+
+Zwei Dinge machten es diese Woche eine Seite wert. Erstens erreichte ein Kampagnenbericht eines Dritten — *"SlopCodeBench 10/2026 – Opus 5.5, Astra wins overall, xhigh considered harmful"* — am 15. Oktober 2026 auf Hacker News **260 Punkte und 101 Kommentare**, nach einem Beitrag mit 405 Punkten zum selben Benchmark im Juli. Zweitens zitiert fast niemand die Zahlen darin, die am meisten zählen. Die Schlagzeile hat sich verbreitet; die Regressionsstatistik, die Rechnung der Kosten pro bestandenem Checkpoint und die Umkehrung von Sauberkeit und Korrektheit nicht.
+
+<Callout type="objectives" items={[
+  "Erklären, was SlopCodeBench misst, was Benchmarks im SWE-bench-Stil strukturell nicht können — iterative Verfeinerung der Spezifikation, mit Regressionstests, die über jeden Checkpoint mitgeführt werden",
+  "Die beiden Pass-Raten richtig lesen: Strict und Core reihen dieselben zehn Kampagnen fast umgekehrt, und welche du zitierst, entscheidet deinen Gewinner",
+  "Die Statistik herleiten, die die Berichte vergraben — zwischen 82 % und 88 % der fehlgeschlagenen Tests am letzten Checkpoint sind Regressionen, nicht die neue Anforderung",
+  "Effort ehrlich bepreisen: Jede medium-Kampagne schlug jede xhigh-Kampagne bei den Kosten pro bestandenem Checkpoint, mit einer Spanne von 9,7× vom besten zum schlechtesten",
+  "Zwei Befunde zusammenhalten, ohne zu zucken — Opus 5.5 bei xhigh schrieb deutlich saubereren Code und bestand weniger Checkpoints als dasselbe Modell bei medium",
+  "Das umsetzbarste Ergebnis des Papers anwenden: Dem Agenten zu sagen, er solle sauberen Code schreiben, verbesserte seinen ersten Commit um bis zu ein Drittel und änderte die Degradationskurve überhaupt nicht",
+]} />
+
+<VerifyNote lastVerified="2026-10-21" source="https://arxiv.org/abs/2603.24755">
+Hier werden zwei getrennte Quellen mit unterschiedlichen Autoren verwendet, die nicht vermischt werden sollten. Der **Benchmark und die Befunde auf Paper-Ebene** (36 Probleme, 196 Checkpoints, die Erosionsraten von 77 % / 75,5 %, der Vergleich 2,3× / 2,0× mit 473 echten Repositories) stammen von Orlanski et al., arXiv 2603.24755, eingereicht am 25. März 2026 und überarbeitet am 7. Mai 2026. Die **Zahlen je Modell** stammen aus dem Kampagnenbericht von HumanLayer vom Oktober 2026 — einem späteren, unabhängigen Satz von Läufen eines Dritten, ausdrücklich **ein Lauf pro Modell-Effort-Einstellung**. Leaderboards und Modellversionen ändern sich; prüfe beides, bevor du zitierst.
+</VerifyNote>
+
+## Was der Benchmark tatsächlich tut
+
+Die Arbeitseinheit von SlopCodeBench ist keine Aufgabe, sondern eine **Trajektorie**. Ein Agent bekommt ein Problem, schreibt eine Lösung, erhält dann eine neue Anforderung und muss seinen *eigenen bestehenden Code* ändern. Wiederholen. Die Spezifikationen entwickeln sich so, dass sie Architekturentscheidungen erzwingen, aber Implementierungsdetails offenlassen, und — das ist der Mechanismus, der zubeißt — **Tests aus früheren Checkpoints werden mitgeführt**. Um einen Checkpoint zu bestehen, musst du die neue Anforderung erfüllen *und* jede vorherige weiter funktionieren lassen.
+
+Der Umfang laut Paper: **36 Probleme**, zerlegt in insgesamt **196 Checkpoints**, mit **15 Coding-Agenten**, die über offene und geschlossene Modellfamilien hinweg bewertet wurden.
+
+Daraus ergeben sich zwei Metriken:
+
+- **Strict Pass** — jeder Test besteht, einschließlich jedes Regressionstests aus jedem früheren Checkpoint.
+- **Core Pass** — die lockerere Latte, die Punkte dafür gibt, die aktuelle Anforderung erfüllt zu haben.
+
+Und das Paper benennt die zwei Degradationsmodi, die es verfolgt. **Strukturelle Erosion** ist Komplexität, die sich konzentriert — der Code gerinnt zu ein paar überladenen Stellen. **Verbosity** ist redundanter Code, der sich vermehrt. Das wird gemessen, ist kein Bauchgefühl.
+
+### Das Ergebnis, das die Schlagzeile sein sollte
+
+Laut Paper: **Kein Agent hat irgendein Problem durchgängig vollständig gelöst.** Nicht einer der 15, nicht eines der 36 Probleme. Der beste Agent erreichte **14,8 % der Checkpoints**.
+
+Strukturelle Erosion nahm in **77 % der Trajektorien** zu; Verbosity in **75,5 %**. Verglichen mit einem Korpus aus **473 Open-Source-Repositories** zeigte von Agenten geschriebener Code **2,3× mehr Verbosity** und **2,0× mehr Erosion**.
+
+Die Basisaussage lautet also nicht „Agenten schreiben etwas unordentlicheren Code als Menschen“. Sie lautet: In drei Vierteln der Langzeit-Trajektorien wird der Code strukturell schlechter, während der Agent daran arbeitet, und der Endzustand ist etwa doppelt so erodiert wie das, was Menschen ausliefern.
+
+## Die Kampagnen vom Oktober 2026
+
+HumanLayer führte zehn vollständige Kampagnen auf dem fixierten v1.0-Katalog mit dem Standard-Prompt `just-solve`, Seed 42, Runner-Pass-Policy `any-case`, in Docker mit Python 3.12 und uv durch. Ein Lauf pro Kombination aus Modell und Effort.
+
+| Kampagne | Strict | Strict-Rate | Core-Rate | Gesch. Kosten |
+|---|---:|---:|---:|---:|
+| GPT-6 Astra XHigh | 32/196 | 16,33 % | 69,39 % | $758,62 |
+| GPT-6 SOL Medium | 30/196 | 15,31 % | 67,86 % | $245,69 |
+| GPT-6 Astra Medium | 29/196 | 14,80 % | 66,33 % | $261,05 |
+| GPT-6.1 SOL Medium | 29/196 | 14,80 % | 65,82 % | $178,51 |
+| Opus 5.5 Medium | 28/196 | 14,29 % | **73,98 %** | $193,47 |
+| GPT-5.6 SOL XHigh | 28/196 | 14,29 % | 70,92 % | $753,30 |
+| Fable 5.1 XHigh | 26/196 | 13,27 % | 72,45 % | $1.550,07 |
+| GPT-6 SOL XHigh | 26/196 | 13,27 % | 68,37 % | $517,32 |
+| Opus 5.5 XHigh | 25/196 | 12,76 % | 71,94 % | $817,04 |
+| GLM 5.3 XHigh | 24/196 | 12,24 % | 66,33 % | $365,13 |
+
+Schau zuerst auf die Strict-Spalte. Das gesamte Frontier-Feld landet zwischen **12,24 % und 16,33 %**. Die Spanne vom Besten zum Schlechtesten beträgt 8 Checkpoints von 196. Wer dir erzählt, eines dieser Modelle sei bei der Langzeit-Wartung eindeutig besser, liest Rauschen — zumal bei einem Lauf pro Zelle.
+
+### Das Ranking kippt, je nachdem, welche Metrik du zitierst
+
+Das gehört verinnerlicht, bevor du irgendetwas davon zitierst.
+
+- **GPT-6 Astra XHigh** ist **1. bei Strict** (16,33 %) und **5. bei Core** (69,39 %).
+- **Opus 5.5 Medium** ist **5. bei Strict** (14,29 %) und **1. bei Core** (73,98 %) — die beste Core-Rate der Tabelle.
+- **GPT-6.1 SOL Medium** ist gemeinsam **4. bei Strict** (14,80 %) und **Letzter bei Core** (65,82 %).
+
+Dieselben zehn Läufe, dieselben Daten, und das Podium mischt sich neu. Die beiden Metriken messen wirklich verschiedene Dinge: Die Core-Rate sagt „wie oft hat es das Neue geschafft“, die Strict-Rate sagt „wie oft hat es das Neue geschafft, *ohne das Alte kaputt zu machen*“. Ein Modell kann bei einem gut und beim anderen mittelmäßig sein, und die meisten hier sind es.
+
+Wenn du dir von dieser Seite nur eine Regel merkst: **Frag, auf welche Pass-Rate sich eine Zahl zu einem Coding-Agenten bezieht.** Die Lücke zwischen 14,29 % und 73,98 % für ein Modell auf einem Datensatz ist das ganze Argument.
+
+## Die Statistik, die niemand zitiert: Es sind Regressionen, nicht das neue Feature
+
+Der Bericht veröffentlicht eine Tabelle zum letzten Checkpoint mit fehlgeschlagenen Testfällen und, getrennt davon, wie viele davon Regressionsfehler waren. Teile die eine Spalte durch die andere, und die These des Benchmarks hört auf, eine These zu sein.
+
+| Kampagne | Fehlgeschlagene Tests am Ende | Regressionen | Regressionsanteil |
+|---|---:|---:|---:|
+| Opus 5.5 Medium | 2.508 | 2.206 | **88,0 %** |
+| GPT-6 SOL Medium | 2.831 | 2.479 | 87,6 % |
+| GPT-6.1 SOL Medium | 2.757 | 2.404 | 87,2 % |
+| GPT-5.6 SOL XHigh | 2.727 | 2.376 | 87,1 % |
+| GPT-6 Astra Medium | 1.747 | 1.516 | 86,8 % |
+| Opus 5.5 XHigh | 2.446 | 2.123 | 86,8 % |
+| Fable 5.1 XHigh | 2.463 | 2.126 | 86,3 % |
+| GLM 5.3 XHigh | 2.748 | 2.311 | 84,1 % |
+| GPT-6 SOL XHigh | 1.651 | 1.366 | 82,7 % |
+| GPT-6 Astra XHigh | 1.435 | 1.178 | **82,1 %** |
+
+Die Spalte mit dem Regressionsanteil ist Arithmetik auf den veröffentlichten Zahlen des Berichts, keine Zahl, die er selbst nennt. Über alle zehn Kampagnen liegt sie zwischen **82,1 % und 88,0 %** — bemerkenswert eng für zehn verschiedene Konfigurationen aus vier Modellfamilien.
+
+Lies das noch einmal: Wenn ein Frontier-Coding-Agent am Ende einer langen iterativen Aufgabe scheitert, sind etwa **sechs von sieben Fehlern Dinge, die früher funktionierten.** Nur etwa einer von sieben ist das Feature, um das er tatsächlich gebeten wurde.
+
+<Callout type="warning" items={[
+  "Das ist die Zahl, die dein Harness ändern sollte, nicht deine Modellwahl. Ein Unterschied von 4–6 Prozentpunkten in der Strict-Rate zwischen Frontier-Modellen liegt im Rauschen eines einzelnen Laufs. Ein Regressionsanteil von rund 85 % ist eine strukturelle Eigenschaft davon, wie Agenten Code bearbeiten — und das ist das, worauf deine CI, deine Policy zur Testaufbewahrung und dein Review-Prozess tatsächlich einwirken können.",
+  "Es erklärt auch, warum Agenten sich besser anfühlen, als sie messen. Man bittet um ein Feature, sieht es landen, liefert es aus. Die Regression ist drei Checkpoints entfernt, und niemand hat die alten Tests erneut ausgeführt.",
+]} />
+
+## „xhigh considered harmful“
+
+Nun der Befund, der den Beitrag auf die Startseite brachte. Drei Modelle liefen sowohl bei medium als auch bei xhigh Effort:
+
+| Modell | Strict: Medium → XHigh | Core: Medium → XHigh | Kostenfaktor |
+|---|---:|---:|---:|
+| Opus 5.5 | 28 → **25** | 145 → 141 | **4,22×** |
+| GPT-6 SOL | 30 → **26** | 133 → 134 | 2,11× |
+| GPT-6 Astra | 29 → **32** | 130 → 136 | 2,91× |
+
+Zwei von drei Modellen wurden bei höherem Effort bei den Strict-Passes **schlechter**, während sie das 2,11- bis 4,22-Fache kosteten. In den Worten des Autors: *"opus 5.5 did BETTER on medium effort than on xhigh."*
+
+Zu seiner beträchtlichen Ehre weigert er sich, es überzuverkaufen. Der Bericht hält fest, der Befund *"doesn't prove that more reasoning hurts coding"* — nur dass *"higher effort was not a reliable way to buy more strict passes."* Und der methodische Vorbehalt wird klar benannt: *"I ran each model and effort setting once... These single runs don't isolate effort as the cause."*
+
+Dieser Vorbehalt ist echt, und du solltest ihn festhalten. Ein Ausschlag von 3 Checkpoints von 196 liegt gut innerhalb der Varianz, die man zwischen zwei Läufen derselben Konfiguration erwartet. **Die schwache Aussage bleibt bestehen: Effort ist kein Regler, der bei Langzeitarbeit verlässlich Korrektheit kauft.** Die starke Aussage — dass xhigh dem Coding aktiv schadet — wird durch diese Daten nicht belegt, und der Autor behauptet sie nicht.
+
+### Wo die Evidenz viel stärker wird: Kosten pro bestandenem Checkpoint
+
+Die Effort-Tabelle ist verrauscht. Die Ökonomie ist es nicht, weil die Kostenunterschiede hier groß genug sind, um das Rauschen zu erschlagen. Teilt man die geschätzten Kosten durch die Strict-Passes:
+
+| Kampagne | Effort | $ pro Strict-Pass |
+|---|---|---:|
+| GPT-6.1 SOL Medium | Medium | **$6,16** |
+| Opus 5.5 Medium | Medium | $6,91 |
+| GPT-6 SOL Medium | Medium | $8,19 |
+| GPT-6 Astra Medium | Medium | $9,00 |
+| GLM 5.3 XHigh | XHigh | $15,21 |
+| GPT-6 SOL XHigh | XHigh | $19,90 |
+| GPT-6 Astra XHigh | XHigh | $23,71 |
+| GPT-5.6 SOL XHigh | XHigh | $26,90 |
+| Opus 5.5 XHigh | XHigh | $32,68 |
+| Fable 5.1 XHigh | XHigh | **$59,62** |
+
+Das ist meine Arithmetik auf den veröffentlichten Zahlen des Berichts, und das Muster ist absolut: **Jede medium-Kampagne ist pro bestandenem Checkpoint billiger als jede xhigh-Kampagne.** Keine Überlappung. Die Spanne vom Besten zum Schlechtesten beträgt **9,7×**.
+
+Der krasseste Einzelvergleich im gesamten Datensatz: **Fable 5.1 bei xhigh gab $1.550,07 aus, um 26 Checkpoints zu bestehen. Opus 5.5 bei medium gab $193,47 aus, um 28 zu bestehen.** Das Achtfache an Geld für zwei Passes weniger.
+
+<Callout type="tip" items={[
+  "Die umsetzbare Fassung: Beginne bei iterativem Langzeit-Coding mit medium und lass xhigh auf DEINEM Workload beweisen, dass es sich lohnt, bevor du dafür zahlst. Die Standardwerte neigen schon in diese Richtung — Opus 5.5 und Haiku 5.5 haben medium als Standard, und medium ist der empfohlene Start-Effort für agentisches Coding auf Sonnet 5.5.",
+  "Wenn du einen Vergleich durchführst, lass jede Konfiguration mehr als einmal laufen. Eine einzelne Kampagne in der Auflösung dieses Benchmarks kann einen Effort-Effekt von 3 Checkpoints nicht von einem Münzwurf über 3 Checkpoints unterscheiden.",
+]} />
+
+## Saubererer Code, der seltener funktioniert
+
+Hier ist das Ergebnis, das sich wirklich schwer wegerklären lässt, und das Interessanteste im Bericht.
+
+Opus 5.5 bei xhigh bestand **weniger** Strict-Checkpoints als Opus 5.5 bei medium — und schrieb nach den Slop-Metriken deutlich **besseren** Code. Über 28 gematchte Probleme lag die Slop-Coverage bei **77,75 %** für xhigh gegenüber **94,25 %** für medium (92,90 % nach Filterung); der Autor beschreibt die Ausgabe von xhigh als *"close to ~5x cleaner."*
+
+Ein Hinweis zu dieser Zahl, weil er wichtig dafür ist, wie du sie zitierst: ~5× ist die Charakterisierung des Autors für seine zusammengesetzte Slop-Metrik. Sie ist **nicht** aus den beiden oben genannten Coverage-Prozentwerten ableitbar, die sich um etwa 16 Punkte unterscheiden, nicht um das 5-Fache. Zitiere die Coverage-Zahlen, wenn du etwas Überprüfbares brauchst; behandle „~5× sauberer“ als richtungsweisende Aussage über eine Metrik, deren Interna du nicht kennst.
+
+So oder so ist die Richtung konsistent und die Folgerung unbequem: **Mehr Reasoning-Effort kaufte Code, der besser aussieht und schlechter funktioniert.** Effort scheint teilweise architektonischen Geschmack zu kaufen — Refactoring, Abstraktion, Ordentlichkeit —, und genau diese Änderungen zerbrechen Code, der bereits funktionierte. Aufräumen ist ein Regressionsrisiko. Ein Modell, das das hässliche funktionierende Ding in Ruhe lässt, schneidet in einem Benchmark besser ab, der sich daran erinnert, was früher bestand.
+
+Die Spekulation des Berichts zur Lücke zwischen Pass-Raten und Code-Metriken ist es wert, wiederholt zu werden: Neuere Modelle könnten neuartige Slop-Muster erzeugen, die bestehende Linter noch nicht erkennen. Das ist eine ordentliche Erinnerung daran, dass ein sauberer Lint-Bericht über Agenten-Output ebenso ein Beleg über deinen Linter ist wie über deinen Code.
+
+### Zwei gegensätzliche Architekturstile, sichtbar in den Metriken
+
+Noch ein Detail, leicht zu übersehen und still aufschlussreich. Mittlere zyklomatische Komplexität über Funktionen und Methoden:
+
+- **Fable 5.1**: 8.967 Callables, mittlere Komplexität **3,57**
+- **GPT-6 SOL Medium**: 1.083 Callables, mittlere Komplexität **11,70**
+
+Vergleichbare Probleme, und ein **8,3-facher Unterschied darin, wie viele Funktionen geschrieben wurden.** Fable zerlegt aggressiv in viele einfache Einheiten; GPT-6 SOL schreibt weit weniger, weit dichtere. Reiht man sie allein nach mittlerer Komplexität, gewinnt Fable um das Dreifache. Reiht man sie nach Callable-Anzahl, kehrt sich die Geschichte um — all die winzigen Funktionen sind auch der Ort, an dem Verbosity wohnt.
+
+Keine der beiden Zahlen bedeutet allein etwas. Das ist die allgemeine Lehre über Code-Qualitätsmetriken bei Agenten-Output: Jede einzelne lässt sich durch einen Architekturstil austricksen, also lies sie paarweise.
+
+## Was man tatsächlich dagegen tun kann
+
+Das Paper testete die naheliegende Intervention, und das Ergebnis verdient größere Bekanntheit: **Explizite Qualitätsvorgaben senkten die anfänglichen Probleme um bis zu ein Drittel — und beeinflussten die Degradationsmuster nicht.**
+
+Dem Agenten zu sagen, er solle sauberen Code schreiben, funktioniert, einmal. Es verbessert den ersten Commit. Es stoppt die Fäulnis nicht. Erosion ist eine Eigenschaft des *iterativen Bearbeitungsprozesses*, nicht der anfänglichen Absicht des Agenten, daher berühren auf die Absicht gerichtete Anweisungen sie nicht.
+
+Das verlagert die Abhilfe an eine unbequemere Stelle als deinen Prompt:
+
+<Steps items={[
+  {title: "Alle alten Tests aufbewahren und jedes Mal erneut ausführen", body: "Ein Regressionsanteil von 82–88 % ist nur sichtbar, wenn die alten Tests noch laufen. Wenn deine Agenten-Schleife die aktuelle Anforderung validiert und sonst nichts, misst du die Core-Pass-Rate und lieferst Strict-Fehler aus. Das ist die einzelne Änderung mit dem größten Hebel."},
+  {title: "Review-Aufwand für Löschungen und Refactorings einplanen, nicht für Ergänzungen", body: "Die Umkehrung von Sauberkeit und Korrektheit besagt, dass die gefährlichen Änderungen die ordentlichen sind. Diffs, die funktionierenden Code umorganisieren, verdienen mehr Prüfung als Diffs, die neuen Code daneben ergänzen — das Gegenteil der meisten Review-Instinkte."},
+  {title: "Bei medium Effort beginnen und xhigh seinen Multiplikator verdienen lassen", body: "Jede medium-Kampagne schlug jede xhigh-Kampagne bei den Kosten pro bestandenem Checkpoint, ohne Überlappung. Behandle hohen Effort als Hypothese, die du an deinem eigenen Workload testest, nicht als Qualitätseinstellung, die man angeschaltet lässt."},
+  {title: "Erosion über die Trajektorie messen, nicht die Qualität am Ende", body: "Verfolge Komplexität und Umfang pro Checkpoint über eine lange Aufgabe. Ein einzelner Lint-Wert des Endzustands kann Code, der schon immer so war, nicht von Code unterscheiden, der sich mit jeder Iteration verschlechtert hat — und der Trend sagt die nächste Regression voraus."},
+  {title: "Die Spezifikation neu verankern, statt den Kontext zu verlängern", body: "Erosion häuft sich über Checkpoints an, die jeweils die Drift des vorigen erben. Die vollständige aktuelle Spezifikation regelmäßig gegen den aktuellen Code neu zu formulieren, statt das nächste Delta anzuhängen, greift den Mechanismus direkt an."},
+]} />
+
+<Quiz title="Check yourself" questions={[
+  {
+    q: "Was misst SlopCodeBench, was Single-Shot-Coding-Benchmarks strukturell nicht können?",
+    options: [
+      "Die rohe Geschwindigkeit der Codegenerierung in Tokens pro Sekunde",
+      "Ob ein Agent seine eigene frühere Arbeit weiter bestehen lässt, während er über viele Checkpoints neue Anforderungen erfüllt",
+      "Wie gut Agenten bestehende, von Menschen geschriebene Codebasen lesen",
+      "Die Leistung von Agenten bei Competitive-Programming-Aufgaben"
+    ],
+    answer: 1,
+    explain: "Die Einheit ist eine Trajektorie, keine Aufgabe: Der Agent erweitert wiederholt seinen eigenen Code, während sich die Spezifikation entwickelt, und Tests aus früheren Checkpoints werden mitgeführt. Der Rahmen des Papers ist, dass Single-Shot-Setups 'hide design issues' — ein Benchmark, der den Agenten nie bittet, seinen eigenen Code erneut anzufassen, kann Erosion gar nicht beobachten."
+  },
+  {
+    q: "Welcher Anteil der fehlgeschlagenen Tests am letzten Checkpoint war über die zehn Kampagnen vom Oktober 2026 hinweg ungefähr eine Regression statt der neuen Anforderung?",
+    options: [
+      "Etwa 20–25 %",
+      "Etwa 50 %",
+      "Zwischen 82 % und 88 %",
+      "So gut wie keiner — die Fehler lagen fast alle bei der neuen Anforderung"
+    ],
+    answer: 2,
+    explain: "Teilt man die Regressionsfehler durch die gesamten fehlgeschlagenen Testfälle, ergeben sich über alle zehn Kampagnen 82,1 % bis 88,0 % — ein auffallend enges Band über vier Modellfamilien. Etwa sechs von sieben Fehlern sind Dinge, die zuvor funktionierten, weshalb Testaufbewahrung hier wichtiger ist als die Modellwahl."
+  },
+  {
+    q: "GPT-6 Astra XHigh liegt bei der Strict-Pass-Rate auf Platz 1 und bei Core auf Platz 5. Opus 5.5 Medium liegt bei Strict auf Platz 5 und bei Core auf Platz 1. Was solltest du folgern?",
+    options: [
+      "Eine der beiden Messungen muss fehlerhaft sein",
+      "Die Metriken messen verschiedene Dinge — Core fragt, ob die neue Anforderung erfüllt wurde, Strict fragt, ob sie erfüllt wurde, ohne etwas kaputt zu machen — also bestimmt die zitierte Metrik den Gewinner",
+      "Die Core-Rate ist eine strikt bessere Metrik, und die Strict-Rate sollte ignoriert werden",
+      "Die Modelle sind in ihrer Leistungsfähigkeit identisch"
+    ],
+    answer: 1,
+    explain: "Beide Zahlen sind echt, und sie reihen das Feld fast umgekehrt. Core würdigt das Erfüllen der aktuellen Anforderung; Strict verlangt zusätzlich, dass jeder frühere Regressionstest besteht. Frag immer, auf welche Pass-Rate sich eine Aussage zu einem Coding-Agenten bezieht — bei Opus 5.5 Medium unterscheiden sich die beiden mit 14,29 % gegenüber 73,98 %."
+  },
+  {
+    q: "Welche Aussage zum Effort stützen die Daten vom Oktober 2026 tatsächlich?",
+    options: [
+      "Höherer Reasoning-Effort verschlechtert die Coding-Leistung verlässlich",
+      "Höherer Effort war kein verlässlicher Weg, mehr Strict-Passes zu kaufen, und kostete das 2,11–4,22-Fache — aber einzelne Läufe können Effort nicht als Ursache isolieren",
+      "XHigh verbesserte die Strict-Passes bei allen drei getesteten Modellen",
+      "Effort hatte keinen messbaren Einfluss auf die Kosten"
+    ],
+    answer: 1,
+    explain: "Zwei von drei Modellen schnitten bei xhigh schlechter bei Strict ab, aber der Autor vermerkt ausdrücklich einen Lauf pro Einstellung und dass dies 'doesn't prove that more reasoning hurts coding'. Ein Ausschlag von 3 Checkpoints von 196 liegt innerhalb der plausiblen Varianz von Lauf zu Lauf. Die schwache Aussage bleibt bestehen; die starke ist nicht belegt."
+  },
+  {
+    q: "Opus 5.5 bei xhigh schrieb messbar saubereren Code als bei medium, bestand aber weniger Strict-Checkpoints. Was ist die plausibelste Lesart?",
+    options: [
+      "Die Slop-Metriken sind bedeutungslos",
+      "Höherer Effort geht teilweise für das Refactoring und Aufräumen von funktionierendem Code drauf — und genau diese Änderungen verursachen Regressionen",
+      "Saubererer Code besteht Tests immer seltener",
+      "Die Strict-Metrik bestraft kurze Funktionen"
+    ],
+    answer: 1,
+    explain: "Effort scheint architektonischen Geschmack zu kaufen, und in einem Benchmark, der sich daran erinnert, was früher bestand, ist das Umorganisieren von funktionierendem Code ein Regressionsrisiko. Ein Modell, das eine hässliche funktionierende Implementierung in Ruhe lässt, schneidet besser ab. Es kehrt auch den üblichen Review-Instinkt um: Aufgeräumte Diffs verdienen mehr Prüfung als additive."
+  },
+  {
+    q: "Das Paper fand, dass explizite Qualitätsvorgaben die anfänglichen Probleme um bis zu ein Drittel senkten. Was taten sie NICHT?",
+    options: [
+      "Sie senkten den Token-Verbrauch nicht",
+      "Sie änderten die Degradationsmuster über die Trajektorie nicht",
+      "Sie funktionierten bei geschlossenen Modellen nicht",
+      "Sie verbesserten den ersten Commit nicht"
+    ],
+    answer: 1,
+    explain: "Die Vorgaben verbesserten den Ausgangspunkt und ließen die Erosionskurve unangetastet. Erosion ist eine Eigenschaft des iterativen Bearbeitens und nicht der anfänglichen Absicht, daher berühren Prompt-Anweisungen, die auf die Absicht zielen, sie nicht — was die Abhilfe zu Testaufbewahrung, gezieltem Review und Messung pro Checkpoint verlagert."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "SlopCodeBench misst Trajektorien, nicht Aufgaben: Der Agent erweitert seinen eigenen Code, während sich die Spezifikation entwickelt, und jeder frühere Test wird mitgeführt. Kein Agent hat ein einziges Problem durchgängig vollständig gelöst; das Frontier-Feld liegt bei Strict zwischen 12,24 % und 16,33 %.",
+  "Strict- und Core-Pass-Raten reihen dieselben zehn Kampagnen fast umgekehrt. Opus 5.5 Medium hat 14,29 % Strict und 73,98 % Core. Frag immer, auf welche sich eine Zahl bezieht.",
+  "82–88 % der fehlgeschlagenen Tests am letzten Checkpoint sind Regressionen, nicht die neue Anforderung — sechs von sieben Fehlern sind Dinge, die früher funktionierten. Das ist ein Harness-Problem, kein Problem der Modellauswahl.",
+  "Jede medium-Kampagne schlug jede xhigh-Kampagne bei den Kosten pro Strict-Pass, ohne Überlappung und mit einer Spanne von 9,7×. Fable 5.1 XHigh: $1.550 für 26 Passes; Opus 5.5 Medium: $193 für 28.",
+  "Effort kauft teilweise Ordentlichkeit, und das Aufräumen von funktionierendem Code verursacht Regressionen. Opus 5.5 XHigh schrieb saubereren Code und bestand weniger Checkpoints — also prüfe Refactorings strenger als Ergänzungen.",
+  "Dem Agenten zu sagen, er solle sauberen Code schreiben, verbesserte den ersten Commit um bis zu ein Drittel und tat nichts gegen die Degradationskurve. Erosion steckt im Bearbeitungsprozess, also behebe sie mit aufbewahrten Tests und Messung pro Checkpoint.",
+  "Lies Code-Qualitätsmetriken paarweise: 8.967 Callables bei mittlerer Komplexität 3,57 gegenüber 1.083 bei 11,70 sind zwei Architekturstile, und jede Metrik allein reiht sie falsch herum.",
+]} />
+
+## Quellen & weiterführende Literatur
+
+- [SlopCodeBench: Benchmarking How Coding Agents Degrade Over Long-Horizon Iterative Tasks (arXiv 2603.24755)](https://arxiv.org/abs/2603.24755) — Orlanski, Roy, Yun, Shin, Gu, Ge, Adila, Roberts, Sala, Albarghouthi; eingereicht am 25. März 2026, überarbeitet am 7. Mai 2026. Quelle für das Benchmark-Design, 36 Probleme / 196 Checkpoints / 15 Agenten, die Definitionen von struktureller Erosion und Verbosity, die Trajektorienraten von 77 % und 75,5 %, den Vergleich 2,3× / 2,0× mit 473 Open-Source-Repositories, das Ergebnis „kein Agent löste irgendein Problem vollständig“ und den Befund zu Qualitätsvorgaben.
+- [SprocketLab/slop-code-bench](https://github.com/SprocketLab/slop-code-bench) — die Benchmark-Implementierung (262 Sterne). Problemkatalog, Runner und Metrikcode.
+- [scbench.ai](https://www.scbench.ai) — Leaderboards und die Projektseite.
+- [SlopCodeBench 10/2026 — Opus 5.5, Astra wins overall, xhigh considered harmful](https://github.com/humanlayer/advanced-context-engineering-for-coding-agents/blob/main/benchmarking-new-models-on-slop-code-bench.md) — der Kampagnenbericht von HumanLayer vom Oktober 2026. Quelle für alle zehn Kampagnenzeilen, die Effort-Tabelle medium gegen xhigh samt Kostenfaktoren, die Zahlen zu Fehlern und Regressionen am letzten Checkpoint, die Slop-Coverage- und Komplexitätszahlen, die Charakterisierung „~5x cleaner“, die Methodik (v1.0-Katalog, Prompt `just-solve`, Seed 42, Policy `any-case`, Docker/Python 3.12/uv) und den Ein-Lauf-Vorbehalt. Die Spalten Kosten pro Strict-Pass und Regressionsanteil auf dieser Seite sind meine eigene Arithmetik auf seinen veröffentlichten Zahlen.
+- [Benchmarking Opus 5 on SlopCodeBench](https://github.com/humanlayer/advanced-context-engineering-for-coding-agents/blob/main/benchmarking-opus-5-on-slop-code-bench.md) — der frühere Bericht vom Juli 2026 aus demselben Repo (2,8k Sterne), der auf Hacker News 405 Punkte erreichte.
+- [Hacker-News-Diskussion, 15. Oktober 2026](https://news.ycombinator.com/item?id=50108717) — 260 Punkte, 101 Kommentare zum Oktober-Bericht.
+- AILmanac-Begleitseiten: [Effort tuning: 5 levels, model defaults, and the cache trap](/docs/api/effort-tuning) · [Reward hacking in coding agents](/docs/frontiers/reward-hacking-in-coding-agents) · [Reading AI benchmarks](/docs/models/reading-ai-benchmarks) · [The capability-reliability gap](/docs/frontiers/the-capability-reliability-gap)
+
+## Weiter
+
+- [Effort tuning: 5 levels, model defaults, and the cache trap](/docs/api/effort-tuning) — die Mechanik hinter dem Regler, den diese Seite bepreist: wohin das Feld tatsächlich geht, welche Modelle `xhigh` und `max` akzeptieren und die Cache-Invalidierung, die Effort-Wechsel mitten in einer Konversation teuer macht
+- [Reward hacking: why your agent edits the test instead of the code](/docs/frontiers/reward-hacking-in-coding-agents) — die andere Art, wie ein bestandener Test aufhört, das zu bedeuten, was du denkst, und der natürliche Begleiter zu einem Regressionsanteil von 85 %
+- [The verification bottleneck](/docs/frontiers/the-verification-bottleneck) — der strukturelle Grund, warum aufbewahrte Tests und gezieltes Review hier der Hebel sind und kein besseres Modell

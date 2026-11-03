@@ -1,0 +1,291 @@
+# La scelta dello stack è una leva di costo per gli agenti
+
+> Source: https://derob98.github.io/ailmanac/it/docs/playbooks/framework-choice-agent-cost · AILmanac (CC BY 4.0) · last verified 2026-11-02
+
+Un benchmark su 12 framework ha fatto costruire a Claude Opus 5.5 la stessa app cinque volte per ciascuno. Angular è costato l'86% in più di Hono+htmx. Ma la forbice dei token è 2,5x mentre quella del codice è solo 1,47x, la tariffa effettiva per token va AL CONTRARIO, e gli intervalli dentro ciascun framework si sovrappongono tanto che la maggior parte delle coppie adiacenti non dimostra nulla. Ecco come leggerlo — e come ripeterlo sul tuo stack.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-11-02" source="https://nolanlawson.com/2026/10/28/the-ai-cost-of-javascript-frameworks/">
+Tutti i numeri sui framework qui sotto vengono da un unico benchmark sperimentale pubblicato il 28 ottobre 2026, eseguito su una sola app con Claude Opus 5.5. L'autore dice esplicitamente che non è definitivo. I prezzi dei modelli cambiano, gli agenti cambiano, e una nuova esecuzione il prossimo trimestre sposterà la classifica. I *meccanismi* di questa pagina sono la parte duratura; considera le cifre in dollari come un'istantanea datata e rimisura prima di basare su di esse una decisione di stack.
+</VerifyNote>
+
+<Callout type="objectives" items={[
+  "Leggere l'unico benchmark che ha messo numeri veri su «quale framework costa meno a un agente»",
+  "Individuare le tre cose che il titolo sbaglia — compresa una tariffa per token che va al contrario",
+  "Capire perché il conto dei token segue il LOOP dell'agente, non la dimensione del codice che scrive",
+  "Sapere quale singolo numero si compone davvero nel corso della vita del progetto (non è il costo per build)",
+  "Vedere il confondente non controllato che può spiegare diverse righe, e perché è una leva che possiedi",
+  "Ripetere la stessa misura sul tuo stack, con un protocollo che regge alla varianza degli LLM",
+]} />
+
+Per vent'anni scegliere un framework frontend ha significato barattare esperienza di sviluppo e dimensione del bundle. Gli agenti hanno aggiunto un terzo asse di cui nessuno aveva numeri: **quanto costa a un modello lavorare in questa codebase?**
+
+Il 28 ottobre 2026 Nolan Lawson ha pubblicato il primo tentativo serio di misurarlo. Il risultato è finito in prima pagina su Hacker News e ha generato una settimana di post «Angular costa l'86% in più». Il titolo è vero. È anche la cosa meno interessante del dataset.
+
+Questa pagina è la lettura attenta. Tre risultati nei dati contraddicono il modo in cui viene citato, e la leva più azionabile di tutto l'esperimento è una che il benchmark non intendeva nemmeno testare.
+
+## L'esperimento
+
+Dodici stack, un'app, cinque esecuzioni ciascuno.
+
+<Steps items={[
+  {title: "Il task", body: "Costruire un'app Pokémon su PokéAPI — ricerca, filtri, visualizzazione dei tipi e dati sulle mosse attraverso più versioni di gioco. L'autore la descrive come ricca di contenuto con interattività minima. Tienilo a mente: decide a cosa si generalizzano i risultati."},
+  {title: "L'agente", body: "Claude Opus 5.5 a effort alto, con la specifica del framework, il server MCP o la skill ufficiale dove esistevano, e una suite di test di conformità su cui programmare."},
+  {title: "Le esecuzioni", body: "Cinque esecuzioni indipendenti per framework — tre per Angular, che è fallito del tutto in 2 tentativi su 5. Riportati mediane e intervalli completi, il dettaglio che rende possibile una lettura onesta."},
+  {title: "Le misure", body: "Costo API in USD, minuti di wall-clock, token consumati, righe di codice non vuote, punteggi Lighthouse e kilobyte di JavaScript trasferiti al browser."},
+]} />
+
+Ecco il risultato centrale — costo, token e dimensione del codice, ordinati per costo mediano:
+
+| Stack | Costo (mediana) | Intervallo di costo | Token | Righe di codice | JS spedito |
+|---|---|---|---|---|---|
+| Hono+htmx | **$2.67** | $2.23–$3.19 | 4.26 M | **1,370** | 18 KiB |
+| Astro | $2.76 | $2.16–$3.63 | 4.13 M | 1,461 | **0 KiB** |
+| Nuxt | $2.82 | $2.39–$4.25 | **3.85 M** | 1,415 | 84 KiB |
+| Vanilla (Vite) | $2.98 | $2.24–$3.37 | 5.00 M | 1,492 | 7 KiB |
+| Next.js | $3.14 | $2.58–$4.13 | 4.99 M | 1,539 | 142 KiB |
+| Qwik | $3.27 | $2.35–$3.80 | 5.64 M | 1,744 | 40 KiB |
+| TanStack Start | $3.54 | $3.11–$3.96 | 7.07 M | 1,697 | 118 KiB |
+| SolidStart | $3.79 | $2.84–$4.81 | 7.13 M | 1,630 | 40 KiB |
+| React Router | $3.81 | $2.82–$3.97 | 7.58 M | 1,564 | 115 KiB |
+| SvelteKit | $4.28 | $3.59–$4.65 | 8.53 M | 1,611 | 36 KiB |
+| Gracile+Lit | $4.65 | $3.92–$5.07 | 9.04 M | 1,717 | 8 KiB |
+| Angular | **$4.97** | $3.19–$6.82 | **9.76 M** | **2,009** | 93 KiB |
+
+Il wall-clock ha seguito da vicino il costo: Astro 8,2 min e Hono+htmx 8,6 min all'estremo veloce, Angular 17,2 min a quello lento.
+
+## Risultato 1: il conto dei token segue il loop, non l'artefatto
+
+Confronta le forbici:
+
+- **Token:** 3.85 M (Nuxt) → 9.76 M (Angular) = **2,54x**
+- **Righe di codice:** 1,370 (Hono+htmx) → 2,009 (Angular) = **1,47x**
+
+Se i token fossero per lo più l'agente che *scrive codice*, questi due rapporti sarebbero vicini. Non lo sono — la forbice dei token è più del 70% più larga di quella del codice. I 5,9 milioni di token in più consumati da Angular non sono finiti nelle 639 righe in più che ha prodotto.
+
+Sono finiti nel loop: leggere file, rileggerli dopo ogni modifica, eseguire la suite di conformità, interpretare i fallimenti e riprovare. **Il conto dei token di un agente è dominato da quante volte deve girare in tondo e da quanto contesto si trascina dietro ogni volta.** L'artefatto finale è un errore di arrotondamento.
+
+Questo ribalta l'intera domanda. «Quale framework produce meno codice» è un proxy debole. La vera domanda è quale framework permette a un agente di convergere in meno turni — una funzione di quanto è prevedibile la struttura dei file, quanto sono leggibili i messaggi d'errore, quanta cerimonia richiede una modifica e quanto bene gli idiomi correnti del framework sono rappresentati nei dati di training.
+
+<Callout type="note" items={["I due fallimenti netti di Angular sono un fallimento di loop, non di qualità del codice. In entrambe le esecuzioni l'agente ha costruito un'app SSR che rifiutava connessioni non-localhost, nonostante le istruzioni specificassero un deploy dietro reverse proxy. È l'agente che interpreta male un vincolo di deploy — il tipo di cosa che un CLAUDE.md più preciso risolve, e un motivo per classificare i fallimenti invece di limitarsi a contarli."]} />
+
+## Risultato 2: la tariffa effettiva per token va al contrario
+
+È il risultato assente da ogni riassunto che ho letto, e salta fuori dividendo due colonne che nessuno ha diviso.
+
+Prendi costo mediano ÷ token mediani per ogni riga:
+
+| Stack | Token | Costo | $/Mtok effettivo |
+|---|---|---|---|
+| Nuxt | 3.85 M | $2.82 | **$0.73** |
+| Astro | 4.13 M | $2.76 | $0.67 |
+| Hono+htmx | 4.26 M | $2.67 | $0.63 |
+| Next.js | 4.99 M | $3.14 | $0.63 |
+| Vanilla | 5.00 M | $2.98 | $0.60 |
+| Qwik | 5.64 M | $3.27 | $0.58 |
+| SolidStart | 7.13 M | $3.79 | $0.53 |
+| Gracile+Lit | 9.04 M | $4.65 | $0.51 |
+| Angular | 9.76 M | $4.97 | **$0.51** |
+
+La tariffa scende al salire del numero di token, quasi in modo monotono. I framework che bruciano più token pagano *meno* per token.
+
+Perché? Opus 5.5 ha un listino di **$4 per MTok di input fresco, $20 di output e $0,20 per le letture da cache** — un moltiplicatore del 5% per le cache read dove lo standard di piattaforma è il 10%. Una tariffa mista tra $0,51 e $0,73 sta appena sopra il pavimento di $0,20 delle cache read e circa sei volte *sotto* la tariffa dell'input fresco. C'è un solo mix che produce quei numeri: **la stragrande maggioranza dei token contati sono letture da cache.** Abbina cache read pure a circa l'11% di traffico fresco e output e arrivi a $0,62; portalo all'8% e arrivi a $0,50 — il numero di Angular.
+
+Il meccanismo è questo. Ogni passo in più in una lunga sessione agentica riproduce lo stesso contesto crescente. Quella riproduzione sono cache read a $0,20. Il token marginale in un framework pesante costa un ventesimo del primo token, ed è per questo che **i 2,54x di token di Angular diventano solo un conto di 1,86x.**
+
+Due conseguenze che contano più della classifica:
+
+1. **Il prompt caching fa il lavoro pesante in ogni riga.** Questo benchmark è in buona parte una misura del volume di cache read. Qualunque setup di agente *senza* caching efficace vedrebbe le stesse forbici di token tradursi in un conto fino a 20x più caro — e il divario tra framework si allargherebbe invece di comprimersi. Se vuoi sapere la tua vera esposizione a uno stack verboso, controlla prima il tuo cache hit rate. Vedi [prompt caching tra i provider](/docs/models/prompt-caching-across-providers) e [economia del prompt caching](/docs/frontiers/prompt-caching-economics).
+2. **Il costo per build sottostima sistematicamente la penalità di uno stack pesante**, perché il caching assorbe esattamente ciò che gli stack pesanti generano. Il che porta al numero che davvero si compone.
+
+<Callout type="warning" items={["Questa aritmetica è mia, non dell'autore. Costo mediano ÷ token mediani non è la mediana dei rapporti per singola esecuzione, e le mediane di due colonne possono venire da esecuzioni diverse — quindi trattale come cifre approssimative e direzionali, non come verità per singola esecuzione. La direzione è coerente su tutte e dodici le righe, ed è ciò che la rende degna di essere riportata."]} />
+
+## Risultato 3: gli intervalli si sovrappongono, quindi la maggior parte delle coppie adiacenti non prova nulla
+
+L'esecuzione più economica di Angular è costata **$3,19**. L'esecuzione più cara di Hono+htmx è costata **$3,19**. Identiche.
+
+Nuxt andava da $2,39 a $4,25; Astro da $2,16 a $3,63; SolidStart da $2,84 a $4,81. Su cinque esecuzioni stocastiche, la varianza dentro il framework è paragonabile — e spesso maggiore — alle differenze tra framework. Le affermazioni difendibili da questo dataset sono grossolane:
+
+- **Difendibile:** il cluster MPA snello (Hono+htmx, Astro, Nuxt) costa meno del cluster pesante (SvelteKit, Gracile+Lit, Angular), di circa 1,5–1,9x.
+- **Non difendibile:** «Astro batte Nuxt», «SolidStart batte React Router» o qualunque altra coppia vicina. Quei divari sono dentro il rumore.
+
+L'autore lo dice lui stesso — l'obiettivo era «non scrivere il benchmark definitivo» ma mostrare che una selezione basata sulle evidenze è possibile. I post che hanno convertito le sue mediane in classifiche hanno lasciato cadere gli intervalli, e gli intervalli sono dove vive l'onestà. È la stessa disciplina che la nostra pagina [leggere i benchmark AI](/docs/models/reading-ai-benchmarks) applica alle classifiche dei modelli: una mediana senza dispersione è una sensazione travestita da numero.
+
+## Il confondente non controllato — e la leva che possiedi davvero
+
+Sepolta nella metodologia c'è la cosa più azionabile dell'esperimento. A ogni agente è stato offerto il server MCP o la skill ufficiale del framework. **Se li abbia usati è variato enormemente:**
+
+| Stack | Esecuzioni che hanno usato l'MCP / skill ufficiale |
+|---|---|
+| SvelteKit | 5 su 5 |
+| Next.js | 1–2 su 5 (hanno letto file di guida) |
+| TanStack Start | 2 su 5 (hanno scoperto le skill) |
+| Nuxt | 0 su 5 (MCP mai usato) |
+
+Fermati a pensarci. Su 60 esecuzioni, una frazione significativa della varianza potrebbe non essere «quanto costa questo framework» ma **«l'agente ha notato la documentazione che stava lì a portata di mano?»**. SvelteKit ha usato il suo MCP ogni volta ed è comunque finito vicino all'estremo caro; Nuxt non ha mai toccato il suo MCP ed è arrivato terzo più economico. Questi due fatti da soli dovrebbero impedire a chiunque di leggere questa tabella come una classifica pulita dei framework.
+
+L'inversione pratica: la *scoperta* della documentazione è una variabile che controlli completamente, mentre la scelta del framework è una che per lo più non puoi controllare. Prima di migrare una codebase per risparmiare $2 a build, rendi la documentazione impossibile da perdere:
+
+- Metti le convenzioni del framework direttamente in `CLAUDE.md` invece di sperare che una skill venga scoperta — vedi il nostro [template CLAUDE.md](/docs/templates/claude-md) e il [generatore](/docs/tools/claude-md-generator).
+- Dichiara esplicitamente i vincoli di deploy. I due fallimenti di Angular erano esattamente questa lacuna.
+- Se pubblichi un server MCP o una skill per il tuo framework o la tua libreria interna, misura se gli agenti la invocano davvero. Uno strumento usato in 0 esecuzioni su 5 è, economicamente, uno strumento che non esiste.
+
+## Il numero che si compone: costo di modifica, non costo di build
+
+Una build avviene una volta. Ogni task successivo paga una tassa proporzionale a quanto codice l'agente deve portare nel contesto per capire ciò che sta modificando.
+
+Questo fa delle **righe di codice la quantità duratura**, e la forbice è più stretta di quella dei token ma permanente: 1,370 per Hono+htmx contro 2,009 per Angular — circa una **tassa di contesto fissa più piccola del 32% su ogni task futuro, per sempre.**
+
+Combinalo col Risultato 2 e ottieni il modello mentale giusto. Al momento della build il caching comprime la differenza tra stack. Nell'arco della manutenzione paghi di nuovo la differenza di LOC a ogni task, e gran parte della lettura di base del repo è input *fresco* al primo turno di ogni nuova sessione, non un cache hit. Il divario una tantum di $2,30 è rumore; un terzo di codice in più da portarsi dietro per tre anni no.
+
+<Callout type="warning" items={["Non leggerlo come «scegli sempre lo stack più snello». Le righe di codice sono un termine della funzione di costo. Un framework che previene una classe di bug di sincronizzazione dello stato può far risparmiare molti più loop dell'agente di quanto costi in contesto — e un commento in cima a HN ha fatto esattamente questo ragionamento, sostenendo che htmx richiede test estesi per intercettare bug di stato sotto codegen AI mentre la forte presenza di React nei dati di training aiuta gli agenti su app davvero interattive. È un effetto reale che l'app di questo benchmark, ricca di contenuto, non può vedere."]} />
+
+## Cosa questo non dimostra
+
+I limiti sono portanti. L'autore ne elenca la maggior parte; ho aggiunto quelli che la copertura mediatica ha lasciato cadere.
+
+| Limite | Perché conta |
+|---|---|
+| **Un solo tipo di app** | Ricca di contenuto, interattività minima. Dashboard, editor, giochi e app real-time ribaltano i compromessi che qui favoriscono le MPA. |
+| **Lighthouse favorisce le MPA** | In particolare l'LCP punisce il routing lato client. Che gli stack snelli vincano sia sul costo sia su Lighthouse è in parte un artefatto di misura, non due vittorie indipendenti. |
+| **Cinque esecuzioni, alta varianza** | Non bastano a separare righe adiacenti. Lo stesso Lighthouse è stato incoerente tra le esecuzioni, scegliendo elementi LCP diversi. |
+| **Un modello, un livello di effort** | Opus 5.5 a effort alto. Un modello più economico o un effort più basso cambia sia il conto assoluto sia, plausibilmente, l'ordinamento. |
+| **Solo Chromium + throttling mobile** | CPU 4x, Slow 4G, un browser, un laptop. |
+| **Nessun task di manutenzione misurato** | Il costo composto sostenuto sopra è un'inferenza dalla colonna LOC, non un risultato misurato. Nessuno ha ancora eseguito il benchmark di manutenzione. |
+| **Tempo umano non prezzato** | La mediana di 17,2 minuti di Angular contro gli 8,2 di Astro è un divario di ~9 minuti. Se un ingegnere supervisiona l'esecuzione, quei nove minuti di attenzione plausibilmente costano più dell'intero delta di $2,30 di token. Ottimizzare il conto API ignorando il wall-clock è la funzione obiettivo sbagliata. |
+
+## Ripetilo sul tuo stack
+
+La cosa più forte di questo benchmark è che è riproducibile — sia l'harness sia i risultati grezzi sono pubblici. La tua codebase non è un'app Pokémon, quindi i numeri che dovrebbero guidare le tue decisioni sono i tuoi.
+
+<Steps items={[
+  {title: "Scegli un task che rappresenti il tuo lavoro reale", body: "Non una build da zero — è il caso che farai meno spesso. Scegli tre ticket chiusi di recente, di dimensione tipica, e usali come insieme di task. I benchmark greenfield misurano ciò che fai una volta sola."},
+  {title: "Fissa tutto tranne la variabile", body: "Stesso modello, stesso livello di effort, stesso harness, stesso prompt, stessi test di accettazione. Se confronti due stack, la suite di conformità deve essere a livello di comportamento, così da poter girare su entrambi."},
+  {title: "Esegui almeno cinque iterazioni per braccio", body: "Cinque è il minimo, non l'obiettivo — gli intervalli pubblicati mostrano perché. Registra ogni esecuzione, non solo la mediana, e riporta la dispersione. Se gli intervalli si sovrappongono, il tuo risultato è «nessuna differenza rilevabile» ed è una risposta vera."},
+  {title: "Registra i quattro numeri giusti", body: "Costo, token suddivisi per tipo (input fresco / output / cache read — la suddivisione è l'intera storia del Risultato 2), wall-clock e dimensione del diff risultante. Il solo costo nasconde il meccanismo."},
+  {title: "Verifica se l'agente ha usato i tuoi strumenti", body: "Fai grep nelle trascrizioni per le tue chiamate MCP e i caricamenti di skill. Se la scoperta è incoerente, sistema prima quella e riesegui — costa meno di una migrazione e può cancellare il divario che stavi cercando di chiudere."},
+  {title: "Decidi sul termine che si compone", body: "Pesa la dimensione del diff risultante e la tassa di contesto fissa più del costo di build una tantum. La prima la paghi a ogni task futuro."},
+]} />
+
+<PromptCard title="Misura il costo per un agente di un task sul tuo stack">
+{`I want to measure how expensive a task is for you to complete in this codebase,
+so I can compare stacks and tooling with evidence instead of vibes.
+
+Task: <paste a real, closed ticket of typical size>
+
+Rules:
+1. Work only inside this repo. Do not install new dependencies.
+2. Stop when the existing test suite passes for the changed behaviour.
+3. Do not optimise for token use — work the way you normally would. I am
+   measuring the honest cost, not a best case.
+
+When you are done, report exactly:
+- Files read, and how many times each was re-read
+- Number of test/build invocations
+- Lines added and removed
+- Anything in the repo that made you go around an extra time: missing docs,
+  surprising file layout, an unclear error message, a convention you had to
+  infer. Be specific and name the file.
+
+That last list is what I am really after. Rank it by how many turns each item cost you.`}
+</PromptCard>
+
+L'ultima domanda è quella che rende. L'agente è l'unica entità che sa quale delle tue convenzioni gli è costata tre loop in più, e te lo dirà se glielo chiedi. Quelle risposte si convertono in righe di `CLAUDE.md`, e una buona riga di `CLAUDE.md` vale più di una migrazione di framework.
+
+<Flashcards cards={[
+  { front: "Forbice dei token vs forbice delle LOC nel benchmark", back: "Token 2,54x (3.85M Nuxt → 9.76M Angular); righe di codice solo 1,47x (1,370 → 2,009). Il conto dei token è il loop dell'agente, non l'artefatto che produce." },
+  { front: "Perché i framework pesanti pagano meno per token", back: "La tariffa effettiva scende da ~$0,73/Mtok (Nuxt) a ~$0,51 (Angular). Opus 5.5 addebita $4 di input fresco, $20 di output, $0,20 di cache read. I passi extra dell'agente sono per lo più replay del contesto = cache read, quindi il token marginale costa un ventesimo del primo." },
+  { front: "L'esecuzione più economica di Angular vs la più cara di Hono+htmx", back: "Entrambe $3,19. La varianza dentro il framework rivaleggia con la differenza tra framework, quindi le coppie adiacenti della classifica non sono separabili su cinque esecuzioni." },
+  { front: "Il confondente della scoperta MCP", back: "Gli agenti SvelteKit hanno usato l'MCP ufficiale in 5/5 esecuzioni; l'MCP di Nuxt in 0/5; le skill TanStack trovate in 2/5; la guida di Next.js letta in 1–2/5. Parte della forbice misurata è «l'agente ha trovato la documentazione», non il costo del framework." },
+  { front: "Quale numero si compone", back: "Le righe di codice. Una build avviene una volta; ogni task futuro paga una tassa di contesto fissa proporzionale alla dimensione del codice. Hono+htmx ne porta ~32% in meno di Angular, in modo permanente." },
+  { front: "L'avvertenza su Lighthouse", back: "Le metriche Lighthouse — LCP in particolare — favoriscono strutturalmente le app multi-pagina rispetto al routing lato client. Che gli stack snelli vincano su costo E Lighthouse è in parte un solo artefatto di misura, non due risultati indipendenti." },
+  { front: "I 2 fallimenti su 5 di Angular", back: "Gli agenti hanno costruito app SSR che rifiutavano connessioni non-localhost nonostante le istruzioni sul reverse proxy. Un fallimento di prompt/vincolo, non di qualità del framework — il tipo che un CLAUDE.md più preciso risolve." },
+  { front: "Più economico e più caro da costruire", back: "Hono+htmx $2,67 di mediana; Angular $4,97 di mediana — un conto di 1,86x su 2,54x di token. Astro $2,76 e Nuxt $2,82 completano il cluster snello." },
+]} />
+
+<Quiz questions={[
+  {
+    q: "Il benchmark mostra che Angular ha consumato 2,54x i token di Nuxt, ma il suo conto è stato solo 1,86x. Cosa spiega la compressione?",
+    options: [
+      "Le esecuzioni Angular sono state fatturate con uno sconto sul volume",
+      "La maggior parte dei token extra erano cache read, prezzate $0,20/Mtok contro $4 per l'input fresco",
+      "I token di output di Angular erano in media più corti",
+      "Le due cifre venivano da modelli diversi"
+    ],
+    answer: 1,
+    explain: "Opus 5.5 prezza le cache read a $0,20/Mtok — un moltiplicatore del 5%, dove lo standard di piattaforma è il 10%. I passi extra dell'agente riproducono lo stesso contesto crescente, che si fattura come cache read. La tariffa mista effettiva su tutti e dodici gli stack cade tra $0,51 e $0,73/Mtok, possibile solo se la grande maggioranza dei token contati sono cache read. L'avvertenza pratica: un setup di agente senza caching efficace non vedrebbe questa compressione."
+  },
+  {
+    q: "Quale confronto del dataset è davvero difendibile?",
+    options: [
+      "Astro costa meno di Nuxt per gli agenti",
+      "SolidStart costa meno di React Router per gli agenti",
+      "Il cluster MPA snello costa circa 1,5–1,9x meno del cluster pesante",
+      "Qwik produce meno righe di codice di SvelteKit"
+    ],
+    answer: 2,
+    explain: "Solo l'affermazione grossolana a livello di cluster sopravvive alla varianza. L'esecuzione più economica di Angular e quella più cara di Hono+htmx erano esattamente entrambe $3,19, e intervalli come i $2,39–$4,25 di Nuxt si sovrappongono quasi del tutto ai $2,16–$3,63 di Astro. Cinque esecuzioni stocastiche non separano righe adiacenti. (La mediana di 1,744 LOC di Qwik è in realtà più alta di quella di SvelteKit, 1,611, quindi anche quell'opzione è fattualmente rovesciata.)"
+  },
+  {
+    q: "Il tuo team vuole migrare da un framework che qui ha ottenuto un brutto punteggio. Prima di impegnarsi, qual è il controllo a più alta leva?",
+    options: [
+      "Rieseguire il benchmark pubblicato su un laptop più veloce",
+      "Passare a un modello più economico per ridurre il conto assoluto",
+      "Verificare se i tuoi agenti stanno davvero scoprendo la documentazione, il server MCP e le skill del tuo framework",
+      "Ridurre il budget Lighthouse per far finire prima le build"
+    ],
+    answer: 2,
+    explain: "La scoperta della documentazione non era controllata ed era enormemente incoerente — 5/5 esecuzioni per l'MCP di SvelteKit, 0/5 per quello di Nuxt, 2/5 per le skill di TanStack. Una quota significativa della forbice misurata può essere scoperta, non costo del framework. Sistemare la scoperta è gratis, reversibile e sotto il tuo controllo; una migrazione non è nessuna di queste cose. Dopo, misura il tuo stack sui tuoi ticket."
+  },
+  {
+    q: "Quale quantità dovrebbe pesare di più in una decisione di stack per un progetto di lunga durata nell'era degli agenti?",
+    options: [
+      "Il costo mediano della build iniziale",
+      "La dimensione del codice risultante, perché ogni task futuro paga una tassa di contesto proporzionale ad essa",
+      "Il wall-clock della build iniziale",
+      "I kilobyte di JavaScript spediti al browser"
+    ],
+    answer: 1,
+    explain: "Una build avviene una volta; la manutenzione per sempre. La dimensione del codice è la tassa di contesto fissa su ogni task futuro — circa il 32% più bassa per Hono+htmx rispetto ad Angular qui. Il JavaScript spedito conta moltissimo per i tuoi utenti ma è un asse separato dal costo per l'agente (Gracile+Lit ha spedito solo 8 KiB pur essendo il secondo più costoso da costruire). Nota l'avvertenza onesta: l'argomento del costo composto è un'inferenza dalla colonna LOC, dato che non è stato eseguito alcun benchmark di manutenzione."
+  },
+  {
+    q: "Perché «gli stack snelli hanno vinto sia sul costo sia su Lighthouse» è un risultato più debole di come suona?",
+    options: [
+      "I punteggi Lighthouse non sono stati in realtà registrati",
+      "Lighthouse favorisce strutturalmente le app multi-pagina, quindi i due risultati condividono un solo bias di misura",
+      "È stato testato solo il throttling desktop",
+      "Lighthouse è stato eseguito su un'app diversa da quella della misura dei costi"
+    ],
+    answer: 1,
+    explain: "Lo segnala lo stesso autore: le metriche Lighthouse, l'LCP più di tutte, puniscono il routing lato client e favoriscono le architetture MPA. Gli stack snelli di questo benchmark sono per lo più MPA. Quindi costo e Lighthouse non sono due conferme indipendenti — condividono in parte un bias verso l'architettura che l'app di test si prestava a favorire. Un'app Pokémon ricca di contenuto è vicina al caso migliore per una MPA."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Il costo in token di un agente segue il numero di loop, non le righe prodotte: una forbice di token di 2,54x su una forbice di codice di 1,47x.",
+  "La tariffa effettiva per token va al contrario ($0,73 → $0,51/Mtok) perché i passi extra dell'agente si fatturano come cache read da $0,20. Il caching assorbe la maggior parte della penalità — controlla il tuo hit rate prima di fidarti di qualunque cifra di costo per build.",
+  "Riporta gli intervalli o non riportare nulla. La migliore esecuzione di Angular ha eguagliato la peggiore di Hono+htmx, quindi sopravvive solo l'affermazione grossolana snello-vs-pesante.",
+  "La scoperta della documentazione non era controllata e può spiegare diverse righe. È anche gratis da sistemare e interamente tua da controllare — fallo prima di una migrazione.",
+  "Ottimizza la quantità che si compone: la dimensione del codice risultante, pagata a ogni task futuro, non il conto di build una tantum.",
+  "Un divario di ~9 minuti di wall-clock sotto supervisione umana plausibilmente costa più dell'intero delta di $2,30 di token. Non ottimizzare il conto API in isolamento.",
+]} />
+
+## Fonti e approfondimenti
+
+- [Nolan Lawson — The AI cost of JavaScript frameworks (28 ottobre 2026)](https://nolanlawson.com/2026/10/28/the-ai-cost-of-javascript-frameworks/) — la fonte primaria: metodologia, tutte le tabelle dei risultati, i fallimenti di Angular, i conteggi di adozione di MCP/skill e le avvertenze dell'autore stesso
+- [nolanlawson/agent-framework-benchmark](https://github.com/nolanlawson/agent-framework-benchmark) — l'harness del benchmark, per rieseguirlo sul tuo stack e sul tuo modello
+- [nolanlawson/agent-framework-benchmark-results](https://github.com/nolanlawson/agent-framework-benchmark-results) — i risultati grezzi per singola esecuzione, leggermente redatti, dietro le mediane
+- [Discussione su Hacker News (item 50323088)](https://news.ycombinator.com/item?id=50323088) — le controargomentazioni che valgono la lettura: l'obiezione «non è Figma» sulla complessità dell'app, il caso che htmx sia più difficile per gli agenti di quanto la sua snellezza suggerisca, e il costo di manutenzione nascosto dell'evitare i framework
+- [Anthropic — Prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) — prezzi delle cache read e comportamento del TTL, il meccanismo dietro il Risultato 2
+- Correlato su AILmanac: [Prompt caching tra i provider](/docs/models/prompt-caching-across-providers) — le soglie di idoneità e la regola di pareggio che decide se il caching ti aiuta davvero
+- Correlato su AILmanac: [Economia del prompt caching](/docs/frontiers/prompt-caching-economics) — perché le cache read diventano la voce dominante in qualunque lunga sessione agentica
+- Correlato su AILmanac: [Come leggere un benchmark AI senza farsi ingannare](/docs/models/reading-ai-benchmarks) — la stessa disciplina statistica applicata alle classifiche dei modelli
+- Correlato su AILmanac: [Perché gli agenti bruciano token](/docs/models/why-agents-burn-tokens) — la meccanica a livello di loop dietro il Risultato 1
+
+## Avanti
+
+- [Perché gli agenti bruciano token](/docs/models/why-agents-burn-tokens) — il meccanismo sotto il Risultato 1, al livello dei singoli turni
+- [Prompt caching tra i provider](/docs/models/prompt-caching-across-providers) — la leva che sta pagando silenziosamente la maggior parte del conto in questo benchmark
+- [Coding e sviluppo software](/docs/playbooks/coding) — il playbook più ampio in cui si inserisce questa decisione
+- [CI/CD per il codice scritto dagli agenti](/docs/playbooks/ci-for-agent-written-code) — una volta che gli agenti sono economici e veloci, la pipeline è la prossima cosa a rompersi

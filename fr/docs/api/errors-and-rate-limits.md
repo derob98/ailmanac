@@ -1,0 +1,72 @@
+# Erreurs, limites de débit et fiabilité
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/api/errors-and-rate-limits · AILmanac (CC BY 4.0) · last verified 2026-06-28
+
+La carte des erreurs, les nouvelles tentatives avec backoff, les paliers de limite de débit et la migration de modèle.
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Lire la carte des erreurs HTTP et savoir quels statuts réessayer plutôt que corriger", "Réessayer les erreurs transitoires avec un backoff exponentiel et du jitter, plafonné", "Gérer les limites de débit avec retry-after, lissage, traitement par lots et modèles moins chers", "Isoler votre code des dépréciations et migrations de modèles"]} />
+
+<VerifyNote lastVerified="2026-06-28" source="https://platform.claude.com/docs/en/api/errors">
+Les codes de statut, en-têtes et paliers de limite de débit exacts changent — confirmez-les dans la documentation officielle sur les erreurs/limites de débit.
+</VerifyNote>
+
+Le code de production dialogue avec un service réseau ; il doit donc s'attendre aux échecs. Un peu de structure ici, c'est la différence entre une intégration instable et une intégration fiable.
+
+## La carte des erreurs
+
+Les statuts HTTP typiques que vous gérerez :
+
+| Statut | Signification | Que faire |
+|---|---|---|
+| 400 | Requête invalide | Corrigez la charge utile ; ne réessayez pas telle quelle |
+| 401 | Clé API absente/incorrecte | Vérifiez les identifiants |
+| 403 | Non autorisé | Vérifiez l'accès/les permissions |
+| 429 | Limite de débit atteinte | **Faites un backoff et réessayez** (respectez `retry-after`) |
+| 500/529 | Erreur serveur / surcharge | **Réessayez avec backoff** |
+
+<Callout type="tip" items={["Les SDK exposent ces erreurs comme des exceptions typées, ce qui vous permet de brancher proprement au lieu d'analyser des chaînes de caractères."]} />
+
+## Nouvelles tentatives avec backoff
+
+Pour les erreurs transitoires (429, 5xx), réessayez avec un **backoff exponentiel + jitter**, plafonné :
+
+```python
+import time, random
+for attempt in range(5):
+    try:
+        return client.messages.create(...)
+    except (RateLimitError, APIStatusError) as e:
+        if attempt == 4 or not should_retry(e):
+            raise
+        time.sleep(min(2 ** attempt + random.random(), 30))
+```
+
+<Callout type="warning" items={["De nombreux SDK réessaient automatiquement les erreurs transitoires — connaissez le comportement par défaut de votre client avant d'ajouter le vôtre, sinon vous risquez de doubler les tentatives."]} />
+
+## Limites de débit
+
+Les limites s'appliquent par compte/palier (requêtes et tokens par minute). Quand vous en atteignez une, vous obtenez un **429** avec des indications de timing. Stratégies pour rester sous le plafond :
+
+<Steps items={[{title: "Respecter retry-after", body: "Quand vous obtenez un 429, lisez l'indication de timing dans la réponse et attendez d'autant avant de réessayer."}, {title: "Lisser les pics", body: "Étalez les requêtes dans le temps au lieu de toutes les envoyer d'un coup."}, {title: "Traiter le travail hors ligne par lots", body: "Déplacez les tâches à fort volume et non interactives vers le traitement par lots."}, {title: "Utiliser un modèle moins cher", body: "Routez les étapes à fort volume vers un modèle moins cher — voir Choisir un modèle."}]} />
+
+Voir [Choisir un modèle](/docs/api/choosing-a-model) pour sélectionner le bon modèle pour les étapes à fort volume.
+
+## Migration de modèle
+
+Les identifiants de modèle sont datés/versionnés et finissent dépréciés. Isolez-vous :
+
+- **Lisez l'identifiant de modèle depuis la configuration**, pas depuis des littéraux disséminés.
+- **Surveillez les dépréciations** — voir [Veille dépréciations & migration](/docs/whats-new/deprecations) et la [table des modèles](/docs/whats-new/models-and-pricing).
+- **Relancez vos [évaluations](/docs/foundations/evals)** quand vous changez de modèle.
+
+<Callout type="takeaways" items={["400/401/403 sont de votre fait — corrigez la requête ou les identifiants, ne réessayez pas à l'aveugle. 429 et 500/529 sont réessayables.", "Réessayez les erreurs transitoires avec un backoff exponentiel + jitter, plafonné (p. ex. min(2 ** attempt + random(), 30)).", "Sur un 429 : respectez retry-after, lissez les pics, traitez le travail hors ligne par lots, et routez les étapes à fort volume vers un modèle moins cher.", "Lisez les identifiants de modèle depuis la configuration, surveillez les dépréciations, et relancez les évaluations lors d'une migration de modèle."]} />
+
+<Quiz title="Testez-vous" questions={[{q: "Vous obtenez un 400 Requête invalide. Que devriez-vous faire ?", options: ["Faire un backoff et réessayer la même charge utile", "Corriger la charge utile ; ne pas réessayer telle quelle", "Faire tourner votre clé API", "Attendre le retry-after"], answer: 1, explain: "400 signifie que la requête elle-même est invalide — corrigez la charge utile. Réessayer la même charge utile échouera à nouveau."}, {q: "Quels statuts sont ceux que vous devriez réessayer avec backoff ?", options: ["400 et 401", "403 et 401", "429 et 500/529", "400 et 429"], answer: 2, explain: "429 (limite de débit) et 500/529 (erreur serveur / surcharge) sont transitoires — faites un backoff et réessayez. 400/401/403 sont des problèmes côté appelant à corriger."}, {q: "Pourquoi ajouter du jitter au backoff exponentiel ?", options: ["Pour rendre les tentatives exactes et prévisibles", "Pour rendre aléatoires les temps d'attente afin que les tentatives ne se percutent pas toutes", "Pour ignorer l'en-tête retry-after", "Pour réduire la consommation de tokens"], answer: 1, explain: "L'exemple utilise min(2 ** attempt + random.random(), 30) — la composante aléatoire (jitter) étale les tentatives pour que de nombreux clients ne réessaient pas en même temps, et le plafond garde les attentes bornées."}, {q: "Lequel n'est PAS une stratégie de limite de débit suggérée ?", options: ["Respecter retry-after", "Traiter le travail hors ligne par lots", "Utiliser un modèle moins cher pour les étapes à fort volume", "Coder en dur l'identifiant de modèle dans chaque point d'appel"], answer: 3, explain: "Les stratégies de limite de débit sont : respecter retry-after, lisser les pics, traiter le travail hors ligne par lots, et utiliser un modèle moins cher. Lire l'identifiant de modèle depuis la configuration (au lieu de le coder en dur) est une pratique de migration de modèle, pas de limite de débit."}]} />
+
+## Ensuite
+
+- [Sécurité, refus et solutions de repli](/docs/api/refusals-and-safety)
+- [Tokens et tarification](/docs/api/tokens-and-pricing)
+- [Construire des agents sur l'API](/docs/api/building-agents)

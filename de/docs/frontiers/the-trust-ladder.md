@@ -1,0 +1,65 @@
+# Die Vertrauensleiter
+
+> Source: https://derob98.github.io/ailmanac/de/docs/frontiers/the-trust-ladder · AILmanac (CC BY 4.0)
+
+Fünf Stufen der Autonomie, die du einem KI-Agenten gewähren kannst, gekoppelt daran, wie umkehrbar und wie groß ein Fehler wäre — und das Schutzgeländer, das jede Stufe sicher macht.
+
+<LevelBadge level="intermediate" />
+
+# Die Vertrauensleiter
+
+<Callout type="objectives" items={["Warum Autonomie eine Leiter ist — eine Stufe nach der anderen — und kein Ein/Aus-Schalter","Die fünf Stufen, eingeordnet nach Wirkungsradius und Umkehrbarkeit (nicht danach, wie klug das Modell ist)","Drei Regeln für die richtige Stufe: niedrig anfangen, nach dem schlimmsten Fall bemessen, pro Aufgabe wählen","Wie sich die Leiter auf die Berechtigungsmodi von Claude Code abbildet","Wo CLAUDE.md ins Spiel kommt — die Datei, die 'Schutzgeländer, die ich im Kopf habe' in solche verwandelt, denen der Agent tatsächlich folgen kann"]} />
+
+„Wie viel sollte ich die KI einfach *machen* lassen?“ ist die Frage hinter fast jeder Agenten-Entscheidung — Claude-Code-Berechtigungen, Auto-Genehmigungseinstellungen, ob man ein Skript unbeaufsichtigt laufen lässt. Menschen neigen dazu, sie als einen einzigen Ein/Aus-Schalter zu beantworten: Entweder du beaufsichtigst alles, oder du lässt es von der Leine.
+
+Hier ist eine Brille, die AILmanac stattdessen verwendet:
+
+> **Autonomie ist kein Schalter, sondern eine Leiter. Du erklimmst sie Stufe für Stufe, und die Stufe, auf der du stehst, sollte davon bestimmt werden, wie schlimm ein Fehler wäre — nicht davon, wie sehr du dem Modell vertraust.**
+
+Die Kernerkenntnis ist, dass das richtige Maß an Autonomie fast nichts damit zu tun hat, wie „klug“ die KI ist. Es geht um den **Wirkungsradius** (wie viel Schaden eine falsche Aktion anrichtet) und die **Umkehrbarkeit** (wie leicht du sie rückgängig machen kannst). Ein brillantes Modell, das etwas Unumkehrbares unbeaufsichtigt tut, ist ein schlechterer Aufbau als ein mittelmäßiges Modell, das etwas Umkehrbares tut.
+
+## Die fünf Stufen
+
+Ein Modell, das wir nützlich finden, ist, in fünf verschiedenen Stufen zu denken, von der geringsten zur größten Autonomie:
+
+| Stufe | Was die KI tut | Wann sie angemessen ist | Was sie sicher macht |
+| --- | --- | --- | --- |
+| **1. Nur vorschlagen** | Sagt dir, was sie tun *würde*; ergreift keine Aktion | Arbeit mit hohem Einsatz oder unumkehrbare Arbeit; ein Bereich, in dem du ihr noch nicht vertraust; du lernst noch, worin sie gut ist | Du bist der Ausführende. Nichts passiert, ohne dass du es von Hand tust. |
+| **2. Entwurf zur Prüfung** | Erzeugt das eigentliche Artefakt (Code, E-Mail, Query), hält aber inne, bevor es angewendet wird | Die Ausgabe ist konkret und du kannst sie schneller prüfen, als du sie schreiben könntest | Ein echter Mensch hat gelesen, bevor irgendetwas in Kraft tritt. Ein Diff, den du wirklich anschaust, nicht überfliegst. |
+| **3. Bei umkehrbaren Dingen handeln** | Führt direkt aus, aber nur bei risikoarmen, leicht rückgängig zu machenden Aktionen | Die Aktion hat ein sauberes Rückgängig: Änderungen in der Versionsverwaltung, Schreibvorgänge in einen Wegwerf-Branch, alles, was ein einzelner Befehl zurückrollt | **Umkehrbarkeit ist das Schutzgeländer.** Die Kosten eines Fehlers sind „mach es rückgängig“, nicht „erkläre es der Rechtsabteilung“. |
+| **4. Handeln, dann berichten** | Erledigt die Arbeit autonom und zeigt dir dann genau, was sie getan hat | Repetitive, klar abgegrenzte Aufgaben, bei denen die Prüfung *danach* günstiger ist als das Gatekeeping *davor* | Eine vollständige, ehrliche Prüfspur — ein Log, ein Diff, eine Zusammenfassung — die du danach auch wirklich liest. |
+| **5. Autonom innerhalb von Schutzgeländern handeln** | Läuft unbeaufsichtigt innerhalb harter Grenzen | Enge, gut verstandene Abläufe, denen du viele Male beim Gelingen zugesehen hast | **Die Schutzgeländer übernehmen die Aufsicht.** Harte Grenzen, die die KI nicht überschreiten kann, plus ein Notausschalter. |
+
+## Wie man die Leiter nutzt
+
+Drei Regeln machen das praktikabel:
+
+<Steps items={[{title: "Beginne eine Stufe tiefer, als nötig erscheint", body: "Es ist günstig, eine Stufe zu erklimmen, sobald du etwas hast funktionieren sehen; es ist teuer, aufzuräumen, nachdem du zu früh zu viel gewährt hast. Wenn du einen Agenten zum ersten Mal auf eine neue Art von Aufgabe ansetzt, geh auf Vorschlagen oder Entwurf zurück, selbst wenn du vermutest, dass er mehr bewältigen kann."}, {title: "Setze die Stufe nach dem schlimmsten Fall, nicht dem Durchschnittsfall", body: "Wenn eine Aufgabe zu 95 % umkehrbar ist, die anderen 5 % aber Produktionsdaten berühren, setzt du die Stufe für die 5 %. Der Wirkungsradius der schlimmsten plausiblen Aktion ist deine Obergrenze."}, {title: "Steige pro Aufgabe, nicht pro Werkzeug", body: "Dieselbe KI kann bei 'formatiere meinen Code' auf Stufe 4 und bei 'lösche Datensätze aus der Datenbank' auf Stufe 1 sein, in derselben Sitzung. Bei der Leiter geht es um die Aktion, nicht um eine globale Vertrauenseinstellung, die du einmal umlegst."}]} />
+
+## Übertragung auf Claude Code
+
+Claude Code ist ein guter Ort, um die Leiter in Aktion zu sehen, denn sein Berechtigungssystem ist im Grunde ein Satz von Reglern zur Wahl deiner Stufe:
+
+- **Stufen 1–2** sind die voreingestellte vorsichtige Haltung: Claude schlägt Änderungen und Befehle vor, und du genehmigst jeden einzelnen. Du prüfst jeden Diff, bevor er landet.
+- **Stufe 3** bedeutet, bestimmte umkehrbare Werkzeugaufrufe zuzulassen — Dateiänderungen in einem Git-Repo, das du mit `git restore` zurücksetzen kannst, Läufe auf einem Wegwerf-Branch — und dabei alles Zerstörerische weiterhin abzuschotten.
+- **Stufe 4** bedeutet, Kategorien sicherer Aktionen auf eine Allowlist zu setzen, sodass Claude bei diesen ohne Rückfrage fortfährt, und danach das Transkript und die Diffs zu lesen.
+- **Stufe 5** ist vollere Autonomie für einen engen, bewährten Ablauf — und sie ist *nur* dann sicher, wenn echte Schutzgeländer vorhanden sind: eingegrenzte Berechtigungen, ein eingeschränktes Arbeitsverzeichnis und die Fähigkeit, sie zu stoppen.
+
+Der Mechanismus, der dich sicher aufsteigen lässt, ist deine **[CLAUDE.md](/docs/claude-code/claude-md)**. In dieser Datei schreibst du die Schutzgeländer nieder: was immer erlaubt ist, was niemals passieren darf, welche Pfade tabu sind, wann gestoppt und gefragt werden soll. Schutzgeländer, die du nur im Kopf hast, beschränken keinen Agenten — Schutzgeländer, die in CLAUDE.md geschrieben stehen, schon. Wenn du nicht sicher bist, wie du sie formulierst, gibt dir der [CLAUDE.md-Generator](/docs/tools/claude-md-generator) einen strukturierten Ausgangspunkt.
+
+Die ehrliche Zusammenfassung: **Gewähre Autonomie nicht, weil die KI fähig wirkt. Gewähre sie, weil die Aktion umkehrbar ist, der Wirkungsradius klein ist und die Schutzgeländer niedergeschrieben sind.** Steige dann Stufe für Stufe auf, sobald die Belege eintreffen.
+
+<Quiz title="Prüfe dich selbst" questions={[{q: "Du hast einen bewährten Prompt, der in ~200 Testläufen nie fehlgeschlagen ist. Solltest du direkt auf Stufe 5 (autonom) springen?", options: ["Ja — 200 saubere Läufe sind ein starker Beleg dafür, dass das Modell das zuverlässig kann", "Nein — Stufe 5 wird durch Wirkungsradius und Umkehrbarkeit bestimmt, nicht durch die bisherige Erfolgsquote", "Ja, solange das Modell Opus ist"], answer: 1, explain: "Die Leiter wird nach der SCHLIMMSTEN plausiblen Aktion bemessen, nicht nach beobachteter Zuverlässigkeit. 200/200 Testläufe sagen etwas über die Fähigkeit aus, nicht darüber, was bei Lauf 201 mit einer neuartigen Eingabe passiert. Stufe 5 erfordert harte Schutzgeländer plus einen Notausschalter — und nur für enge, gut verstandene Abläufe."}, {q: "Eine Aufgabe ist zu 95 % umkehrbar. Die anderen 5 % berühren Abrechnungsdaten in der Produktion. Welche Stufe?", options: ["Stufe 4 — der umkehrbare Durchschnitt dominiert","Stufe 1 oder 2 — du setzt die Stufe für den schlimmsten Fall der 5 %","Stufe 3 — der Mittelweg"], answer: 1, explain: "Du setzt die Stufe nach dem schlimmsten Fall, nicht nach dem Durchschnitt. Wenn irgendein plausibler Pfad zu unumkehrbarem Schaden führt, ist die Obergrenze 'Nur vorschlagen' oder 'Entwurf zur Prüfung', bis du garantieren kannst, dass der 5-%-Pfad nicht genommen werden kann (z. B. ein Schutzgeländer, das Schreibvorgänge auf diese Tabelle hart blockiert)."}, {q: "Wo leben die Schutzgeländer, die dich Stufen sicher erklimmen lassen, tatsächlich?", options: ["In deinem Kopf — du prüfst jede Aktion, während sie passiert","In CLAUDE.md und den Berechtigungseinstellungen — niedergeschrieben, damit der Agent danach handeln kann","Im Modell — Claude verweigert riskante Aktionen von Natur aus"], answer: 1, explain: "Schutzgeländer, die du nur im Kopf hast, beschränken keinen autonomen Agenten — der Agent kann sie nicht lesen. Um die Leiter zu erklimmen, müssen die Grenzen dort kodiert sein, wo der Agent sie tatsächlich respektiert: CLAUDE.md, Berechtigungsmodi, Allow-/Deny-Listen, eingegrenzter Werkzeugzugriff."}]} />
+
+<Callout type="takeaways" items={["Autonomie ist eine Leiter, kein Schalter — erklimme sie Stufe für Stufe, während sich Belege ansammeln.","Setze die Stufe nach Wirkungsradius und Umkehrbarkeit der schlimmsten plausiblen Aktion, nicht danach, wie klug das Modell wirkt.","Umkehrbarkeit ist das Schutzgeländer auf Stufe 3; eine echte Prüfspur ist das Schutzgeländer auf Stufe 4; harte Grenzen + ein Notausschalter sind das Schutzgeländer auf Stufe 5.","Wähle die Stufe pro Aufgabe, nicht pro Werkzeug — derselbe Agent kann in derselben Sitzung beim Formatieren auf Stufe 4 und beim Löschen aus der Datenbank auf Stufe 1 sein.","Schutzgeländer gehören in CLAUDE.md und die Berechtigungseinstellungen — nicht in deinen Kopf."]} />
+
+## Verwandt
+
+- [Was ist CLAUDE.md?](/docs/claude-code/claude-md)
+- [CLAUDE.md-Generator](/docs/tools/claude-md-generator)
+- [Die Frische-Halbwertszeit](/docs/frontiers/freshness-half-life)
+
+
+## Weiter
+
+- [Context Engineering](/docs/frontiers/context-engineering)

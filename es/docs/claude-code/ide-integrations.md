@@ -1,0 +1,46 @@
+# Integraciones con IDE
+
+> Source: https://derob98.github.io/ailmanac/es/docs/claude-code/ide-integrations · AILmanac (CC BY 4.0) · last verified 2026-07-16
+
+Extensiones de VS Code y JetBrains, diffs en línea y ajustes compartidos.
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-07-16" source="https://code.claude.com/docs/en/vs-code">
+Los IDE compatibles y los pasos de configuración cambian — confírmalo en la documentación oficial de integración con IDE.
+</VerifyNote>
+
+No tienes por qué vivir en la terminal. Claude Code se integra con tu editor para que revises los cambios **como diffs, justo donde programas**.
+
+## Qué obtienes
+
+- **Diffs en línea.** Las ediciones propuestas aparecen como un diff revisable en el editor, no solo como texto en una terminal.
+- **Contexto del editor.** Tus archivos abiertos, la selección y el proyecto están disponibles para Claude.
+- **El mismo cerebro.** Es el mismo Claude Code — tu [CLAUDE.md](/docs/claude-code/claude-md), [permisos](/docs/claude-code/permissions), [hooks](/docs/claude-code/hooks) y [ajustes](/docs/claude-code/settings) se aplican de forma idéntica en el CLI y el IDE. Configura una vez, úsalo en todas partes.
+
+## Editores compatibles
+
+- **VS Code** (y editores basados en VS Code) mediante la extensión.
+- **IDE de JetBrains** (IntelliJ, PyCharm, WebStorm, etc.) mediante el plugin.
+
+Instálalo desde el marketplace del editor y autentícate; consulta la [documentación oficial](https://code.claude.com/docs/en/vs-code) para los pasos actuales.
+
+## ¿CLI o IDE — cuál?
+
+Son la misma herramienta; elige según tu preferencia y la tarea:
+
+| Prefiere el IDE cuando… | Prefiere el CLI cuando… |
+|---|---|
+| Quieres revisar diffs visualmente | Estás programando scripts o en modo [headless](/docs/claude-code/headless-and-agent-sdk) |
+| Ya estás programando en el editor | Estás en un servidor / SSH |
+| Te gusta tener el contexto del editor integrado | Quieres el máximo control y pipes |
+
+:::tip[Los ajustes se comparten]
+Como el CLI y el IDE leen la misma configuración, configura tu [CLAUDE.md](/docs/claude-code/claude-md) y tus [permisos](/docs/claude-code/permissions) una vez y te seguirán entre ambos.
+:::
+
+## Siguiente
+
+- [CLAUDE.md y archivos de memoria](/docs/claude-code/claude-md)
+- [Modo Plan](/docs/claude-code/plan-mode)
+- [settings.json](/docs/claude-code/settings)

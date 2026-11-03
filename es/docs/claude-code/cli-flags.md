@@ -1,0 +1,181 @@
+# La CLI claude: los flags que cambian el resultado
+
+> Source: https://derob98.github.io/ailmanac/es/docs/claude-code/cli-flags · AILmanac (CC BY 4.0) · last verified 2026-10-07
+
+Un recorrido con criterio por la línea de comandos de Claude Code: el contrato de cinco flags para ejecuciones desatendidas, la trampa del prompt de sistema grabado y en qué se diferencian --bare, --safe-mode y --restricted.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-10-07" source="https://code.claude.com/docs/en/cli-reference">
+Todos los comandos, flags, valores por defecto y versiones mínimas de abajo proceden de la [referencia oficial de la CLI](https://code.claude.com/docs/en/cli-reference), consultada el 2026-10-07. Los flags aparecen y cambian entre versiones, y la referencia afirma expresamente que `claude --help` **no lista todos los flags**, así que un flag ausente de `--help` no está necesariamente ausente de tu versión. Consulta la referencia, no el texto de ayuda, y comprueba tu versión con `claude -v`.
+</VerifyNote>
+
+La mayoría aprende tres cosas de la línea de comandos de Claude Code (`claude`, `claude -c` y `claude -p`) y se queda ahí. Es un buen punto donde parar si solo lo usas sentado delante. En cuanto metes Claude Code en un script, un trabajo de CI, una cola en segundo plano o las manos de un compañero, los flags dejan de ser comodidades y pasan a marcar la diferencia entre una ejecución que cuesta un dólar y una que se queda colgada una hora.
+
+Esta página no es una segunda copia de la tabla de referencia. Es el **orden en que conviene aprender la superficie**, los flags que cambian materialmente lo que ocurre y las cuatro trampas que le han costado tiempo real a la gente.
+
+<Callout type="objectives" items={["Los seis tipos de sesión que puedes iniciar y qué flag elige cada uno","El contrato de cinco flags que hace que una ejecución desatendida esté acotada, sea respondible y se pueda analizar","Por qué editar --append-system-prompt y volver a lanzar --continue parece no hacer nada: la regla del prompt grabado","En qué se diferencian --bare, --safe-mode y --restricted, y cuál elegir en cada caso","Manejar sesiones en segundo plano desde el shell: agents, attach, logs, respawn, rm, daemon","Los pares de flags que la gente confunde: --tools vs --allowedTools vs --disallowedTools"]} />
+
+## Empieza por la pregunta: ¿qué tipo de sesión es?
+
+Todas las demás decisiones se derivan de esta. Claude Code puede iniciar seis cosas materialmente distintas, y el flag que elige una suele ser lo primero que escribes.
+
+| Quieres | Flag | Te da |
+| --- | --- | --- |
+| Una conversación que sigues en directo | *(ninguno)* | Sesión interactiva en este terminal |
+| Una respuesta y salir | `-p` / `--print` | Ejecución no interactiva, salida a stdout |
+| Trabajo que sobreviva a este terminal | `--bg` / `--background` | Una sesión en segundo plano; imprime su ID y cómo gestionarla |
+| Una rama aislada para experimentar | `-w` / `--worktree` | Un worktree de git en `<repo>/.claude/worktrees/<name>` |
+| Trabajo en las máquinas de Anthropic | `--cloud` | Una sesión en la nube, o un seguimiento encolado en una existente |
+| Controlar esta sesión desde el móvil | `--rc` / `--remote-control` | Una sesión interactiva que también se puede controlar desde claude.ai o la app de Claude |
+
+Dos de ellas no se pueden combinar: `--bg` y `-p` son mutuamente excluyentes, porque una vuelve de inmediato y la otra espera una respuesta. Si quieres un comando de shell, y no una sesión de Claude, en segundo plano, combina `--bg` con `--exec`:
+
+<PromptCard title="Run the test suite as a background job, not a Claude session">
+{`claude --bg --exec 'pytest -x'`}
+</PromptCard>
+
+Además, `--bg` comprueba la confianza del espacio de trabajo del directorio antes de empezar, de modo que una sesión en segundo plano en un repositorio no confiable falla de entrada y no a mitad de camino.
+
+## El contrato de cinco flags para ejecuciones desatendidas
+
+Es lo más valioso de esta página. Una ejecución desatendida de `claude -p` puede fallar de tres maneras que una sesión interactiva sencillamente no tiene: puede **quedarse bloqueada** en peticiones de permiso que nadie está para responder, puede **entrar en bucle** mucho más de lo esperado y puede **emitir prosa** cuando tu script necesitaba datos. Cinco flags cierran las tres.
+
+<Steps items={[
+  {title: "Ejecuta de forma no interactiva — -p", body: "`claude -p \"query\"` imprime la respuesta y sale. Todo lo que sigue es solo del modo print, así que este flag es la puerta de entrada al resto."},
+  {title: "Decide quién responde a las peticiones de permiso — --permission-prompts", body: "El valor por defecto es `host`, que envía las peticiones al host del Agent SDK o a un `--permission-prompt-tool`. Pasa `--permission-prompts none` cuando nadie puede responder, como en un cron o un paso de CI: la ejecución deja de consultar o esperar a un host, todo lo que pediría permiso se deniega salvo que lo permita un hook `PermissionRequest`, y se le indica a Claude que no reintente. Una ejecución `-p` sin ningún host ya deniega esas peticiones; ahí el flag sobre todo evita los reintentos. Requiere v2.1.259 o posterior. Combínalo con reglas `--allowedTools` estrechas para que las denegaciones sean raras y no constantes."},
+  {title: "Acota el bucle — --max-turns", body: "No hay límite de turnos por defecto. `--max-turns 3` sale con un error al alcanzar el límite. Úsalo como alarma ante bucles agénticos descontrolados, no como presupuesto."},
+  {title: "Acota el gasto — --max-budget-usd", body: "`--max-budget-usd 5.00` se detiene cuando la estimación de coste del lado del cliente alcanza el tope. El gasto de los subagentes cuenta; una vez alcanzado, lanzar otro subagente falla con `Budget limit reached` y se detienen los subagentes en segundo plano que estén en marcha. La aplicación del tope requiere v2.1.217 o posterior."},
+  {title: "Haz la salida analizable — --output-format o --json-schema", body: "`--output-format json` te da un sobre estructurado. `--json-schema '<schema>'` va más lejos: Claude Code valida la respuesta final contra tu JSON Schema y da error de entrada si el esquema no es válido, de modo que tu script nunca tiene que aplicar expresiones regulares a prosa."}
+]} />
+
+<PromptCard title="A CI step that cannot hang, cannot loop forever, and cannot overspend">
+{`claude -p "Review the staged diff and list bugs" \\
+  --permission-prompts none \\
+  --allowedTools "Read" "Bash(git diff *)" \\
+  --max-turns 6 \\
+  --max-budget-usd 2.00 \\
+  --output-format json`}
+</PromptCard>
+
+<Callout type="warning" title="--max-budget-usd es una estimación, no tu factura" items={["Claude Code comprueba el tope con su propia estimación de coste del lado del cliente, que puede diferir de lo que se te factura.","Cuando vuelves a una conversación con --continue o --resume, los totales restaurados de ejecuciones anteriores no cuentan para el tope, así que tres ejecuciones reanudadas con un tope de 2 $ pueden gastar en total más de 2 $.","Trátalo como un cortacircuitos para una sola ejecución. Para un techo real sobre una cuenta o un proyecto completos, consulta Hard Spend Caps."]} />
+
+Para conocer toda la postura sobre dejar que una ejecución avance sin una persona (qué permitir, qué enmascarar, qué registrar), consulta [Reforzar las ejecuciones autónomas](/docs/security/hardening-autonomous-runs) y [Modo headless y el Agent SDK](/docs/claude-code/headless-and-agent-sdk). Para los techos a nivel de proveedor, [Hard Spend Caps](/docs/models/hard-spend-caps).
+
+## La familia del prompt de sistema, y la trampa que contiene
+
+Cinco flags dan forma al prompt de sistema. Cuatro fijan su texto; el quinto decide si la conversación conserva el texto con el que empezó.
+
+| Flag | Qué hace |
+| --- | --- |
+| `--system-prompt` | Sustituye todo el prompt por defecto por tu texto |
+| `--system-prompt-file` | Lo sustituye por el contenido de un archivo |
+| `--append-system-prompt` | Añade tu texto al prompt por defecto |
+| `--append-system-prompt-file` | Añade el contenido de un archivo al prompt por defecto |
+| `--system-prompt-snapshot` | `off` reconstruye el prompt en cada petición; `on` (el valor por defecto) reutiliza el grabado |
+
+Elegir entre *añadir* y *sustituir* es elegir una identidad. Añadir conserva la guía de herramientas, las instrucciones de seguridad y las convenciones de programación por defecto de Claude Code, y pone tus reglas encima: lo adecuado para instrucciones por ejecución, formato de salida o contexto del proyecto. Sustituir descarta **todo** eso, incluida la guía de herramientas, por lo que solo es lo correcto cuando la superficie realmente no es un asistente de programación: un agente que no programa dentro de un pipeline que nadie vigila. Si sustituyes, eres responsable de todo lo que la tarea siga necesitando.
+
+Puedes combinarlos. Pasar un flag de añadir junto con uno de sustituir sustituye el prompt por defecto y luego añade tu texto. Desde v2.1.283 también puedes pasar un flag junto con su propia forma de archivo (`--append-system-prompt` *y* `--append-system-prompt-file`), y Claude Code usa ambos, con el contenido del archivo primero sin importar el orden en que los escribiste.
+
+<Callout type="warning" title="La trampa: una conversación reanudada reutiliza el prompt con el que nació" items={["Claude Code construye el prompt de sistema una sola vez, en la primera petición de una conversación, y lo graba en la sesión.","Hasta que la conversación se compacta, cada petición posterior usa ese prompt grabado, también tras --resume o --continue.","Así que editas el texto de --append-system-prompt, vuelves a lanzar claude --continue y nada cambia. El flag no está roto; la conversación sigue usando la grabación.","El texto nuevo surte efecto cuando la conversación se compacta, o en una conversación nueva.","Para iterar sobre la redacción entre ejecuciones con --continue, pasa --system-prompt-snapshot off y el prompt se reconstruye en cada petición. Requiere v2.1.257 o posterior."]} />
+
+Hay un truco más que conviene conocer en un prompt de sustitución que mezcla instrucciones estables con contexto por ejecución. Pon entre ambos una línea que contenga solo `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__`: Claude Code divide en la primera línea así y la elimina, de modo que la parte de arriba permanece en caché mientras la de abajo cambia. Requiere v2.1.275 o posterior. Por qué esto importa para tu factura es el tema de [Prompt Caching](/docs/api/prompt-caching).
+
+Y para cargas de trabajo con scripts y varios usuarios, `--exclude-dynamic-system-prompt-sections` traslada el contexto por usuario, como la ubicación de la memoria automática, del prompt de sistema al primer mensaje del usuario, de modo que la misma tarea en máquinas distintas comparta un único prefijo en caché. Solo se aplica al prompt por defecto y se ignora cuando fijas `--system-prompt` o `--system-prompt-file`.
+
+## Tres flags que apagan cosas, y no son lo mismo
+
+La gente los usa indistintamente y luego se pregunta por qué el síntoma no se movió. Resuelven tres problemas distintos.
+
+| | `--bare` | `--safe-mode` | `--restricted` |
+| --- | --- | --- | --- |
+| El problema que resuelve | El arranque es demasiado lento para una llamada con script | Mi configuración está rota y no sé qué parte | Un arnés de evaluación no debe tocar esta máquina compartida |
+| CLAUDE.md, skills, comandos, subagentes, plugins, MCP, memoria automática | No se descubren | No se cargan | Solo se cargan los ajustes gestionados y `--settings` |
+| Herramientas integradas | Bash, lectura de archivos, edición de archivos | Funcionan con normalidad | Las herramientas que ejecutan comandos/código y WebFetch se **eliminan** salvo que se nombren una a una en `--tools` |
+| Acceso a archivos | Normal | Normal | Confinado a los directorios de trabajo |
+| `bypassPermissions` | Permitido | Permitido | **Rechazado** |
+| Política gestionada | Se aplica | Se sigue aplicando, incluidos los hooks de política y la línea de estado | Se aplica |
+| Efecto secundario | Fija `CLAUDE_CODE_SIMPLE` | Fija `CLAUDE_CODE_SAFE_MODE` | Se niega a crear sesiones en la nube |
+
+Lee la tabla como una progresión de intención: `--bare` es por **velocidad**, `--safe-mode` es por **diagnóstico**, `--restricted` es por **contención**. Un detalle útil: las skills de un directorio que pasas con `--add-dir` siguen cargándose con `--bare`, que es como conservas exactamente una capacidad en una ejecución por lo demás despojada.
+
+`--safe-mode` es el primero al que recurrir cuando algo falla y no puedes saber si es Claude Code o tu propia configuración, incluso cuando intentas averiguar si una personalización es lo que dispara el cambio automático de modelo. Combínalo con `claude doctor`, que imprime diagnósticos de solo lectura de la instalación y los ajustes sin iniciar ninguna sesión. (El comando `/doctor` dentro de una sesión es otra cosa: también puede aplicar correcciones.) Más depuración partiendo del síntoma en [Solución de problemas de Claude Code](/docs/claude-code/troubleshooting). `--restricted` requiere v2.1.248 o posterior.
+
+## Manejar sesiones en segundo plano desde el shell
+
+Una vez que inicias sesiones con `--bg`, el terminal se convierte en un plano de control. Todo el ciclo de vida tiene un comando, y nada de eso requiere abrir la interfaz interactiva.
+
+<Steps items={[
+  {title: "Ver qué se está ejecutando — claude agents", body: "Abre la vista de agentes para supervisar y despachar sesiones paralelas en segundo plano. Para scripts, `--json` imprime las sesiones activas como un array JSON, y `--json --all` incluye las completadas. `--cwd <path>` limita a las sesiones iniciadas bajo ese directorio. Abrir la vista en sí necesita un terminal interactivo; la forma JSON no."},
+  {title: "Mirar dentro de una — claude logs", body: "`claude logs <id|name>` imprime la salida reciente de una sesión en segundo plano. Desde v2.1.290 puedes pasar parte del nombre de una sesión en ejecución en lugar de su ID, así que `claude logs auth` suele bastar."},
+  {title: "Tomar el control — claude attach", body: "`claude attach <id|name>` trae una sesión en segundo plano a este terminal. La coincidencia por nombre parcial también requiere v2.1.290 o posterior."},
+  {title: "Reiniciarla — claude respawn", body: "`claude respawn <id>` reinicia una sesión, en ejecución o detenida, con su conversación intacta. `--all` reinicia todas las sesiones en ejecución: lo que toca tras actualizar el binario de Claude Code."},
+  {title: "Detener y limpiar — claude stop, claude rm", body: "`claude stop <id>` (también `claude kill`) detiene una sesión. `claude rm <id>` la quita de la lista; la transcripción permanece en tu máquina y sigue accesible mediante `claude --resume`. Si se rechaza la eliminación por el worktree de la sesión, el rechazo imprime el flag exacto que pasar a continuación: `--discard-unpushed` (v2.1.260+) o `--force-remove-worktree` (v2.1.268+)."},
+  {title: "Cuando todo se ha atascado — claude daemon", body: "Las sesiones en segundo plano están alojadas por un proceso supervisor. `claude daemon status` imprime su estado, versión, directorio del socket y número de workers, y sale con 1 si no está en ejecución. `claude daemon logs` sigue `~/.claude/daemon.log`. `claude daemon stop --any --keep-workers` reinicia el supervisor dejando las sesiones vivas para que el siguiente se reconecte a ellas."}
+]} />
+
+La contrapartida desde dentro de una sesión (cómo se pasa trabajo a segundo plano y qué se conserva al hacerlo) es [Tareas en segundo plano, /loop y programación](/docs/claude-code/background-tasks).
+
+## Los pares de flags que la gente confunde
+
+<Callout type="warning" title="Seis confusiones que conviene anticipar" items={["--tools restringe qué herramientas integradas existen. --allowedTools dice qué llamadas se saltan la petición de permiso. --disallowedTools deniega llamadas. Son tres trabajos distintos, y pasar el equivocado es la causa más común de «¿por qué me sigue preguntando?».","--tools no afecta en absoluto a las herramientas MCP. Para quitarlas también, añade --disallowedTools \"mcp__*\".","Un nombre simple en --disallowedTools quita la herramienta del contexto de Claude; una regla con alcance como Bash(rm *) deja la herramienta disponible y deniega solo las llamadas que coinciden.","--dangerously-skip-permissions arranca en bypassPermissions. --allow-dangerously-skip-permissions solo añade ese modo al ciclo de Shift+Tab, de modo que puedes empezar en modo plan y cambiar después. Casi siempre lo que querías era el segundo.","--add-dir concede acceso a archivos, pero Claude Code no descubre la mayor parte de la configuración de .claude/ desde esos directorios. Añadir un directorio no es lo mismo que adoptar su configuración.","--desktop no admite prompt ni otros flags salvo --verbose y los flags de --debug, porque la app de escritorio inicia la sesión por sí misma. Requiere v2.1.285 o posterior."]} />
+
+Un pequeño detalle de comodidad: si escribes mal un subcomando, Claude Code sugiere la coincidencia más cercana y sale sin iniciar una sesión: `claude udpate` imprime `Did you mean claude update?` en lugar de abrir una conversación que no querías.
+
+## Compruébalo tú mismo
+
+<Quiz questions={[
+  {
+    q: "Tu trabajo nocturno ejecuta `claude -p` dentro de una app del Agent SDK cuyo callback `canUseTool` consulta a una persona, y por la noche se cuelga hasta el timeout. ¿Qué flag es más probable que falte?",
+    options: [
+      "--max-turns, porque el agente está en bucle",
+      "--permission-prompts none, porque nadie está para responder a una petición de permiso",
+      "--output-format json, porque el analizador se está bloqueando",
+      "--bare, porque el arranque es lento"
+    ],
+    answer: 1,
+    explain: "En modo print, las peticiones de permiso van por defecto al host, aquí tu callback del SDK, y la ejecución espera su respuesta. `--permission-prompts none` deja de consultar al host: todo lo que pediría permiso se deniega salvo que lo permita un hook PermissionRequest, y se le indica a Claude que no reintente, así que el trabajo termina. Una ejecución `-p` sin host ya deniega esas peticiones. `--max-turns` acota un bucle, que es un síntoma distinto."
+  },
+  {
+    q: "Cambias el texto de --append-system-prompt, vuelves a lanzar `claude --continue` y el comportamiento no cambia. ¿Por qué?",
+    options: [
+      "Los flags de añadir solo funcionan con -p",
+      "La conversación reutiliza el prompt de sistema grabado en su primera petición hasta que se compacta",
+      "--continue descarta en silencio todos los flags del prompt de sistema",
+      "El texto se añade pero se coloca después del mensaje del usuario"
+    ],
+    answer: 1,
+    explain: "Claude Code construye el prompt una sola vez, en la primera petición de la conversación, y lo graba. Las peticiones posteriores, también tras --continue o --resume, reutilizan la grabación hasta que la conversación se compacta. Pasa --system-prompt-snapshot off para reconstruirlo en cada petición mientras iteras."
+  },
+  {
+    q: "Una personalización está rompiendo tu sesión y no sabes cuál. ¿Qué flag la aísla manteniendo tus herramientas y permisos funcionando con normalidad?",
+    options: [
+      "--bare",
+      "--restricted",
+      "--safe-mode",
+      "--disable-slash-commands"
+    ],
+    answer: 2,
+    explain: "--safe-mode desactiva las personalizaciones (CLAUDE.md, skills, plugins, hooks, servidores MCP, comandos, agentes, estilos de salida, línea de estado, memoria automática) mientras la autenticación, la selección de modelo, las herramientas integradas y los permisos siguen funcionando. --bare es para la velocidad de arranque y --restricted es para la contención en una máquina compartida."
+  }
+]} />
+
+<Flashcards cards={[
+  {front: "--bg vs -p", back: "Mutuamente excluyentes. --bg vuelve de inmediato con un ID de sesión; -p espera e imprime la respuesta. Combina --bg con --exec para poner en segundo plano un comando de shell en lugar de una sesión de Claude."},
+  {front: "--max-budget-usd", back: "Tope del modo print comprobado contra la estimación de coste del lado del cliente de Claude Code, no contra tu factura. El gasto de los subagentes cuenta; los totales restaurados por --continue/--resume no. v2.1.217+."},
+  {front: "--system-prompt-snapshot off", back: "Reconstruye el prompt de sistema en cada petición en lugar de reutilizar el grabado en la primera petición de la conversación. v2.1.257+."},
+  {front: "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__", back: "Una línea que contenga solo este marcador divide un prompt de sistema de sustitución para que la parte de arriba permanezca en caché y la de abajo cambie en cada ejecución. v2.1.275+."},
+  {front: "--tools vs --allowedTools", back: "--tools decide qué herramientas integradas existen. --allowedTools decide qué llamadas se ejecutan sin petición de permiso. Ninguno afecta a las herramientas MCP."},
+  {front: "claude doctor vs /doctor", back: "`claude doctor` imprime diagnósticos de solo lectura de la instalación y los ajustes sin iniciar sesión. El comando `/doctor` dentro de una sesión también puede aplicar correcciones."},
+  {front: "claude respawn --all", back: "Reinicia todas las sesiones en segundo plano en ejecución con las conversaciones intactas: lo que toca tras actualizar el binario de Claude Code."},
+  {front: "--add-dir", back: "Concede acceso de lectura y edición a otro directorio. No hace que Claude Code descubra desde allí la mayor parte de la configuración de .claude/."}
+]} />
+
+<Callout type="takeaways" items={["Elige primero el tipo de sesión: el flag que lo decide condiciona cualquier otro flag que puedas pasar.","Una ejecución desatendida necesita cinco flags, no uno: -p, --permission-prompts none, --max-turns, --max-budget-usd y un formato de salida estructurado.","Trata --max-budget-usd como un cortacircuitos para una sola ejecución, no como un techo de factura. Es una estimación del lado del cliente y los totales reanudados se le escapan.","Las conversaciones graban su prompt de sistema en la primera petición. Si una edición del prompt parece ignorada, esa es la razón: usa --system-prompt-snapshot off mientras iteras.","--bare es velocidad, --safe-mode es diagnóstico, --restricted es contención. Usar el equivocado te hace perder una tarde.","--help es incompleto por diseño. La referencia de la CLI es la fuente de verdad, y las versiones mínimas importan: comprueba claude -v antes de culpar a un flag."]} />
+
+## Siguiente
+
+- [Modo headless y el Agent SDK](/docs/claude-code/headless-and-agent-sdk): qué construir cuando una llamada `-p` de un solo uso ya no basta
+- [settings.json: el sistema de configuración](/docs/claude-code/settings): el hogar persistente de los flags que no dejas de reescribir
+- [Solución de problemas de Claude Code](/docs/claude-code/troubleshooting): depuración partiendo del síntoma, empezando por `--safe-mode`

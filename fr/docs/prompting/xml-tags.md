@@ -1,0 +1,67 @@
+# Structurer les prompts avec des balises XML
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/prompting/xml-tags · AILmanac (CC BY 4.0)
+
+La convention privilégiée de Claude pour délimiter entrées, instructions et exemples.
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Pourquoi les balises de style XML donnent à Claude des frontières nettes entre les parties d'un prompt", "Comment envelopper instructions, documents, exemples et règles de format dans des balises nommées", "Comment demander à Claude une sortie balisée que vous pouvez parser de façon fiable", "Quand baliser — et quand ne pas sur-baliser"]} />
+
+Quand un prompt mélange instructions, un document, des exemples et une question, le modèle peut les confondre. Les **balises de style XML** sont un moyen propre d'étiqueter chaque partie — et Claude y répond particulièrement bien.
+
+## L'idée
+
+Enveloppez chaque section dans une balise nommée pour qu'il soit sans ambiguïté de savoir ce qui est quoi :
+
+<PromptCard title="Structure de prompt balisée">{`<instructions>
+Summarize the document for a busy executive. Use only the document; if a fact
+isn't there, say so.
+</instructions>
+
+<document>
+{paste the long document here}
+</document>
+
+<format>
+3 bullet points, then a one-line "decision needed".
+</format>`}</PromptCard>
+
+Les balises ne sont que du texte que vous inventez — `<document>`, `<example>`, `<context>`, `<rules>` — mais elles donnent au modèle des frontières nettes.
+
+## Pourquoi cela aide
+
+<Callout type="tip" items={["Sépare les données des instructions — le modèle est moins susceptible d'obéir à du texte parasite à l'intérieur d'un document collé (une défense légère contre l'injection de prompt — voir /docs/security/prompt-injection).", "Réduit le « il a ignoré une partie de mon prompt ». Chaque partie est clairement délimitée.", "Rend les sorties plus faciles à parser — vous pouvez demander à Claude de mettre sa réponse dans des balises <answer> et l'extraire de façon fiable.", "Se combine avec le few-shot (/docs/prompting/few-shot) — enveloppez chaque exemple dans <example>."]} />
+
+Les quatre bénéfices en détail :
+
+- **Sépare les données des instructions** — le modèle est moins susceptible d'obéir à du texte parasite à l'intérieur d'un document collé (une défense légère contre l'[injection de prompt](/docs/security/prompt-injection)).
+- **Réduit le « il a ignoré une partie de mon prompt ».** Chaque partie est clairement délimitée.
+- **Rend les sorties plus faciles à parser** — vous pouvez demander à Claude de mettre sa réponse dans des balises `<answer>` et l'extraire de façon fiable.
+- **Se combine avec le [few-shot](/docs/prompting/few-shot)** — enveloppez chaque exemple dans `<example>`.
+
+## Demander une sortie balisée
+
+<Steps items={[{title: "Demandez à Claude d'envelopper sa sortie dans des balises", body: "Dites au modèle exactement quelles balises utiliser pour le raisonnement vs. la réponse finale."}, {title: "Extrayez juste la partie dont vous avez besoin", body: "Votre code peut ne récupérer que le contenu de <answer>, en ignorant le raisonnement."}, {title: "Combinez avec la sortie structurée", body: "Se marie bien avec la sortie structurée (/docs/api/structured-output) quand vous avez besoin de résultats lisibles par machine."}]} />
+
+<PromptCard title="Demander une sortie balisée">{`Put your reasoning in <thinking> tags and your final answer in <answer> tags.`}</PromptCard>
+
+Votre code peut alors récupérer juste le contenu de `<answer>`. Se marie bien avec la [sortie structurée](/docs/api/structured-output) quand vous avez besoin de résultats lisibles par machine.
+
+## Astuces
+
+<Callout type="takeaways" items={["Soyez cohérent — ouvrez et fermez chaque balise ; réutilisez les mêmes noms.", "Nommez les balises de façon significative (<contract>, pas <x>).", "Ne sur-balisez pas les prompts triviaux — utilisez ceci quand il y a vraiment plusieurs parties distinctes."]} />
+
+- **Soyez cohérent** — ouvrez et fermez chaque balise ; réutilisez les mêmes noms.
+- **Nommez les balises de façon significative** (`<contract>`, pas `<x>`).
+- **Ne sur-balisez pas** les prompts triviaux — utilisez ceci quand il y a vraiment plusieurs parties distinctes.
+
+## Testez-vous
+
+<Quiz title="Testez-vous" questions={[{q: "Quelle est la principale raison pour laquelle les balises de style XML aident quand un prompt mélange instructions, un document et une question ?", options: ["Elles compressent le prompt pour économiser des tokens", "Elles donnent au modèle des frontières nettes et sans ambiguïté entre les parties", "C'est une syntaxe obligatoire sans laquelle Claude ne peut pas fonctionner", "Elles traduisent le prompt en un appel d'API structuré"], answer: 1, explain: "Les balises ne sont que du texte que vous inventez, mais elles étiquettent chaque section pour qu'il soit sans ambiguïté de savoir ce qui est quoi — donnant au modèle des frontières nettes."}, {q: "Pourquoi les balises agissent-elles comme une défense légère contre l'injection de prompt ?", options: ["Elles chiffrent le document collé", "Le modèle est moins susceptible d'obéir à du texte parasite dans un document clairement délimité", "Elles suppriment automatiquement les instructions malveillantes", "Elles envoient le document à un modèle séparé"], answer: 1, explain: "En séparant les données des instructions, le modèle est moins susceptible d'obéir à du texte parasite dans un document collé."}, {q: "Comment extraire de façon fiable juste la réponse finale de Claude d'une réponse balisée ?", options: ["Demander le raisonnement dans des balises <thinking> et la réponse dans des balises <answer>, puis récupérer le contenu de <answer>", "Demander à Claude de supprimer son raisonnement", "Toujours utiliser une seule balise pour tout", "Parser toute la réponse sans balises"], answer: 0, explain: "Mettre le raisonnement dans <thinking> et la réponse finale dans <answer> permet à votre code de récupérer juste le contenu de <answer>."}, {q: "Quelle est la meilleure pratique pour nommer les balises ?", options: ["Utiliser des noms courts et cryptiques comme <x> pour gagner de la place", "Nommer les balises de façon significative, p. ex. <contract> au lieu de <x>", "Ne jamais fermer les balises pour garder les prompts courts", "Utiliser un nom différent à chaque fois pour la même section"], answer: 1, explain: "Nommez les balises de façon significative (<contract>, pas <x>) et soyez cohérent — ouvrez et fermez chaque balise en réutilisant les mêmes noms."}, {q: "Quand ne PAS recourir aux balises XML ?", options: ["Quand le prompt a plusieurs parties distinctes", "Quand vous avez besoin d'une sortie lisible par machine", "Quand le prompt est trivial sans parties vraiment distinctes", "Quand vous enveloppez des exemples few-shot"], answer: 2, explain: "Ne sur-balisez pas les prompts triviaux — utilisez les balises seulement quand il y a vraiment plusieurs parties distinctes."}]} />
+
+## Suite
+
+- [Rédiger des prompts spécifiquement pour Claude](/docs/prompting/prompting-claude)
+- [Le few-shot bien fait](/docs/prompting/few-shot)
+- [Sortie structurée](/docs/api/structured-output)

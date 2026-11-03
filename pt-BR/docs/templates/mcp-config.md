@@ -1,0 +1,86 @@
+# Configuração de MCP e Esqueletos de Servidor
+
+> Source: https://derob98.github.io/ailmanac/pt-BR/docs/templates/mcp-config · AILmanac (CC BY 4.0) · last verified 2026-08-10
+
+.mcp.json mais starters mínimos de servidor stdio e remoto.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-10" source="https://modelcontextprotocol.io">
+As chaves de configuração do MCP e as APIs dos SDKs evoluem — confirme na documentação oficial do MCP e na documentação de MCP do Claude Code.
+</VerifyNote>
+
+Starters prontos para copiar e colar para conectar o Claude a ferramentas via [MCP](/docs/claude-code/mcp). Ajuste para o que você precisa.
+
+## `.mcp.json` — declarar servidores (compartilhado no projeto)
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "${DATABASE_URL}"]
+    }
+  }
+}
+```
+
+:::warning[Mantenha segredos fora do arquivo]
+Referencie variáveis de ambiente (`${GITHUB_TOKEN}`) — não codifique tokens diretamente em um arquivo versionado.
+:::
+
+## Servidor stdio mínimo (TypeScript)
+
+Um servidor minúsculo expondo uma ferramenta. Adapte o handler aos seus dados.
+
+```ts
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { z } from "zod";
+
+const server = new McpServer({ name: "echo", version: "1.0.0" });
+
+server.registerTool(
+  "echo",
+  {
+    description: "Echo back the provided text",
+    inputSchema: z.object({ text: z.string().describe("Text to echo back") }),
+  },
+  async ({ text }) => ({ content: [{ type: "text", text: `You said: ${text}` }] }),
+);
+
+await server.connect(new StdioServerTransport());
+```
+
+## Servidor stdio mínimo (Python)
+
+```python
+from mcp.server import MCPServer
+
+mcp = MCPServer("echo")
+
+@mcp.tool()
+def echo(text: str) -> str:
+    """Echo the text back."""
+    return f"You said: {text}"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
+
+## Antes de publicar um servidor
+
+- **Privilégio mínimo** — apenas os dados/ações de que ele precisa ([Protegendo Agentes](/docs/security/securing-agents)).
+- **Valide as entradas**; retorne erros como resultados, não trave.
+- **Revise servidores de terceiros** antes de conectá-los ([Revisando Código de Terceiros](/docs/security/reviewing-third-party-code)).
+
+## A seguir
+
+- [Servidores MCP no Claude Code](/docs/claude-code/mcp)
+- [Construa e Conecte Seu Primeiro Servidor MCP](/docs/walkthroughs/first-mcp-server)
+- [Receitas de Hooks e settings.json](/docs/templates/hooks-settings)

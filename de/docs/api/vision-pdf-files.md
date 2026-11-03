@@ -1,0 +1,56 @@
+# Vision, PDF & Datei-Eingabe
+
+> Source: https://derob98.github.io/ailmanac/de/docs/api/vision-pdf-files · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+Sende Bilder und Dokumente und verwende Uploads per file_id wieder.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/build-with-claude/vision">
+Unterstützte Dateitypen, Größenbeschränkungen und der Umfang der Files API ändern sich — überprüfe dies in der offiziellen Vision-/PDF-Dokumentation.
+</VerifyNote>
+
+<Callout type="objectives" items={["Warum Claude multimodal ist: Bilder und Dokumente in einer Nachricht", "Die drei Wege, eine Datei zu senden: Base64, URL und die Files API", "Wann du einen Upload per file_id wiederverwendest, um Kosten und Zeit zu sparen", "Wofür Vision großartig ist — Extraktion, visuelles Verständnis, Dokument-Q&A", "Wie du es sicher nutzt: Auflösungsgrenzen und das Überprüfen kritischer Zahlen"]} />
+
+Claude ist **multimodal**: Du kannst **Bilder und Dokumente** (wie PDFs) in eine Nachricht einfügen und Fragen dazu stellen — Daten extrahieren, ein Diagramm beschreiben, einen Vertrag zusammenfassen, einen Screenshot lesen.
+
+## Drei Wege, eine Datei zu senden
+
+<Steps items={[{title: "Base64", body: "Kodiere die Bytes inline in der Anfrage. Am einfachsten für Einzelfälle."}, {title: "URL", body: "Verweise auf eine gehostete Datei."}, {title: "Files API", body: "Lade einmal hoch und referenziere die Datei dann per file_id über viele Anfragen hinweg (vermeidet erneutes Hochladen großer Dateien)."}]} />
+
+So sieht ein Bild-Inhaltsblock neben einer Textfrage aus:
+
+```python
+# Conceptual: an image content block alongside text (see docs for exact fields)
+messages=[{
+  "role": "user",
+  "content": [
+    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+    {"type": "text", "text": "What does this chart show? Give the top 3 takeaways."},
+  ],
+}]
+```
+
+PDFs funktionieren ähnlich (ein Dokument-Inhaltsblock); Claude kann Text und visuelles Layout lesen, und du kannst **Zitate** dorthin zurück anfordern, woher im Dokument eine Antwort stammt.
+
+## Wofür es großartig ist
+
+<Callout type="tip" items={["Extraktion — strukturierte Daten aus Rechnungen, Formularen, Tabellen herausziehen (kombiniere mit Strukturierter Ausgabe: /docs/api/structured-output).", "Visuelles verstehen — Diagramme, Schaubilder, Screenshots, UI.", "Dokument-Q&A — Fragen über ein langes PDF mit Zitaten stellen."]} />
+
+Ein schneller Copy-Paste-Einstieg für Dokument-Q&A:
+
+<PromptCard title="Prompt für Dokument-Q&A">{`What does this chart show? Give the top 3 takeaways.`}</PromptCard>
+
+## Tipps
+
+<Callout type="takeaways" items={["Verwende file_id wieder, wenn du dasselbe große Dokument wiederholt sendest — günstiger und schneller.", "Auflösung/Größe sind wichtig — sehr große Bilder können herunterskaliert werden; prüfe die Limits.", "Verifiziere extrahierte Zahlen — Vision ist stark, aber nicht unfehlbar; überprüfe kritische Werte stichprobenartig."]} />
+
+<Callout type="warning" items={["Vision ist stark, aber nicht unfehlbar — überprüfe kritische Werte immer stichprobenartig. Siehe Halluzinationen: /docs/foundations/hallucinations."]} />
+
+<Quiz title="Teste dich selbst" questions={[{q: "Welche Methode lässt dich eine Datei einmal hochladen und über viele Anfragen hinweg per file_id referenzieren?", options: ["Base64", "URL", "Files API"], answer: 2, explain: "Die Files API lädt einmal hoch und wird per file_id referenziert, sodass große Dateien nicht wiederholt hochgeladen werden müssen."}, {q: "Was kannst du von Claude bei einem Dokument-Q&A über ein PDF zurückerhalten?", options: ["Zitate zu der Stelle im Dokument, aus der eine Antwort stammt", "Eine neu gerenderte Kopie des PDFs", "Das rohe Base64 der Datei"], answer: 0, explain: "Claude liest Text und visuelles Layout, und du kannst Zitate anfordern, die dorthin zurückverweisen, woher eine Antwort stammt."}, {q: "Warum solltest du kritische extrahierte Zahlen stichprobenartig überprüfen?", options: ["Vision scheitert bei Zahlen immer", "Vision ist stark, aber nicht unfehlbar", "Zahlen kosten zusätzliche Tokens"], answer: 1, explain: "Vision ist stark, aber nicht unfehlbar — überprüfe kritische Werte, anstatt ihnen blind zu vertrauen."}]} />
+
+## Weiter
+
+- [Strukturierte Ausgabe](/docs/api/structured-output)
+- [Echte Dateien generieren (docx/pptx/xlsx/pdf)](/docs/claude-app/generating-files)
+- [Tokens & Preise](/docs/api/tokens-and-pricing) — Bilder kosten ebenfalls Tokens

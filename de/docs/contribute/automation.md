@@ -1,0 +1,43 @@
+# Wie unsere Automatisierung funktioniert
+
+> Source: https://derob98.github.io/ailmanac/de/docs/contribute/automation · AILmanac (CC BY 4.0)
+
+Link-Prüfungen, der Release-Watcher und der Modelltabellen-Verifizierer, erklärt.
+
+<LevelBadge level="advanced" />
+
+Transparenzseite: Hier ist die Maschinerie, die hilft, AILmanac mit minimalem Maintainer-Aufwand frisch und hochwertig zu halten. Das durchgängige Prinzip: **Automatisierung legt Menschen Arbeit zur Freigabe vor — sie veröffentlicht niemals stillschweigend ungeprüfte Aussagen.**
+
+## Das Build-Gate (aktiv)
+
+Jede Änderung wird mit `onBrokenLinks: 'throw'` gebaut, sodass ein toter interner Link oder kaputtes MDX **den Build vor dem Merge zum Scheitern bringt**. Dies ist die wertvollste einzelne Prüfung — sie hält die Navigation vertrauenswürdig.
+
+## CI-Workflows
+
+> Die Workflow-Dateien liegen auf dem Branch `ci-workflows` und werden aktiviert, sobald das Repo über ein Token mit dem Scope `workflow` verfügt (siehe README). Bis dahin wird die Website vom Branch `gh-pages` deployt.
+
+- **`build-check`** — baut jeden PR (kaputte Links lassen ihn fehlschlagen). Eine erforderliche Prüfung.
+- **`deploy`** — baut und veröffentlicht bei Push auf `main` auf GitHub Pages.
+- **`link-check`** — `lychee` läuft wöchentlich und bei PRs; bei kaputten externen Links **eröffnet es ein Tracking-Issue** (Label `link-rot`), statt nur rot zu werden.
+
+## Aktualitäts-Automatisierung (geplant / schrittweise)
+
+- **Release-Watcher** — ein geplanter Job, der Anthropics Doku/Changelog **und** die sich am schnellsten ändernden Consumer-Oberflächen (Apps, Voice, Mobile, Marketplace) abfragt. Bei einer Änderung eröffnet er ein Issue/einen PR mit dem Label `upstream-change` + `needs-verification`, das auf wahrscheinlich betroffene Seiten verweist. Ein Mensch schreibt das Update.
+- **Modelltabellen-Verifizierer** — vergleicht `data/models.json` mit der offiziellen Modellliste und eröffnet einen PR, wenn etwas abweicht. Die [Modelltabelle](/docs/whats-new/models-and-pricing) zeigt ein „last verified“-Datum.
+- **Veraltungs-Durchlauf** — markiert volatile Seiten, deren `lastVerified` älter als ein Schwellenwert ist.
+
+## Warum Human-in-the-Loop
+
+:::tip[Automatisiert und ehrlich > automatisiert und falsch]
+Eine KI, die „News“ automatisch in eine Referenzseite committet, riskiert die Veröffentlichung von Halluzinationen — das Gegenteil von vertrauenswürdig. Daher **schlägt** unsere Automatisierung vor (Issues/PRs); Menschen **verifizieren und mergen**. Siehe [Faktenprüfung](/docs/contribute/fact-verification).
+:::
+
+## Möchtest du bei der Automatisierung helfen?
+
+Diese Workflows zu verbessern ist ein großartiger fortgeschrittener Beitrag — siehe `.github/workflows` (auf dem Branch `ci-workflows`) und [Beitragen](/docs/contribute/contribute-in-10-minutes).
+
+## Weiter
+
+- [Faktenprüfung & Aktualität](/docs/contribute/fact-verification)
+- [Dieser Monat in Claude](/docs/whats-new/this-month)
+- [Verhaltenskodex & Governance](/docs/contribute/governance)

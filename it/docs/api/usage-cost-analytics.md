@@ -1,0 +1,271 @@
+# L'API Usage & Cost Analytics: attribuire ogni dollaro
+
+> Source: https://derob98.github.io/ailmanac/it/docs/api/usage-cost-analytics · AILmanac (CC BY 4.0) · last verified 2026-11-02
+
+La guida pratica all'API Usage and Cost Analytics di Claude — la beta che ha sostituito gli endpoint legacy usage_report e cost_report. Forma delle righe, il limite di cinque dimensioni, la semantica degli actor, la trappola dei centesimi (errore di 100 volte), le regole di freschezza dei dati che rompono le dashboard ingenue e la tabella di migrazione dal legacy.
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={[
+  "Che cosa ha sostituito usage_report e cost_report, e perché la nuova forma è fatta di righe e non di bucket temporali",
+  "Il contratto delle righe: starting_at / ending_at, group e usage o cost — e perché una dimensione vale null a meno che tu non raggruppi per essa",
+  "group_by[] accetta cinque dimensioni — tranne le due dell'endpoint cost che non contano e non rispettano limit",
+  "Il modello degli actor: utente, service account, identità cloud federata o la API key stessa — e perché api_key_ids[] e actor_ids[] rispondono a domande diverse",
+  "La trappola dei centesimi: amount è una stringa decimale in CENTESIMI, quindi \"41280.000000\" sono $412,80 e una dashboard ingenua sbaglia di 100 volte",
+  "Le regole di freschezza dei dati che invalidano una dashboard in giornata, e il trucco per ottenere risultati che non cambiano tra una chiamata e l'altra",
+  "La ricetta in una riga per il costo di Claude Code per singolo utente",
+]} />
+
+<VerifyNote lastVerified="2026-11-02" source="https://platform.claude.com/docs/en/manage-claude/usage-cost-analytics-api">
+L'API Usage and Cost Analytics è in **beta**: invia `anthropic-beta: analytics-usage-cost-2026-08-24` più un header `anthropic-version` a ogni richiesta. Anthropic ha marcato la precedente Usage and Cost API e gli endpoint Claude Enterprise Analytics come **legacy il 29 ottobre 2026** — ancora supportati, non rimossi. I percorsi degli endpoint, i nomi delle dimensioni, i limiti e il formato di `amount` in centesimi provengono dalla guida ufficiale e dai riferimenti API [usage](https://platform.claude.com/docs/en/api/beta/organization/analytics/usage/list) e [cost](https://platform.claude.com/docs/en/api/beta/organization/analytics/cost/list). I prezzi veri e propri stanno in [Modelli e prezzi attuali](/docs/whats-new/models-and-pricing).
+</VerifyNote>
+
+Due endpoint, un solo compito: dirti dove è finita davvero la tua spesa su Claude.
+
+- `GET /v1/organizations/analytics/usage` — conteggi di token e di richieste.
+- `GET /v1/organizations/analytics/cost` — costo in USD.
+
+Per un'organizzazione Claude Console è più o meno ciò che mostrano le pagine **Usage** e **Cost** della Console, con le dimensioni che scegli tu invece di quelle scelte da loro. Il motivo per cui conta è la domanda a cui nessuno sa rispondere dalla Console: *quale dei miei clienti, agent o API key è responsabile della riga che è salita?*
+
+:::tip[Questo è reporting, non enforcement]
+Niente qui ferma una fattura. Per quello, vedi [Hard Spend Caps](/docs/models/hard-spend-caps) — e nota che i due sono complementari: i cap decidono *se* la spesa avviene, questa API ti dice *chi* l'ha causata.
+:::
+
+## Credenziali, per tipo di organizzazione
+
+| Organizzazione | Cosa usare |
+| --- | --- |
+| Claude Console | Una [Admin API key](https://platform.claude.com/docs/en/manage-claude/admin-api-keys), oppure un bearer token OAuth con lo scope `org:admin` (inviato come `authorization: Bearer`, non `x-api-key`) |
+| Claude Enterprise | Una chiave con lo scope `read:analytics`, creata in claude.ai dal proprietario principale **dopo** l'abilitazione dell'Analytics API per l'organizzazione |
+
+Dai al servizio collector una chiave dedicata, tienila in un secrets manager e imposta una [scadenza della chiave](https://platform.claude.com/docs/en/manage-claude/authentication#key-expiration) così la rotazione è imposta anziché affidata alla memoria. Dove disponibile, una regola Workload Identity Federation con `org:admin` è decisamente meglio — token di breve durata, nessun segreto di lunga durata da far trapelare. Stesso ragionamento dell'[Admin API](/docs/api/admin-api) in generale.
+
+## Avvio rapido
+
+<PromptCard title="Utilizzo giornaliero di token per modello, una settimana">{`curl --globoff "https://api.anthropic.com/v1/organizations/analytics/usage?\\
+starting_at=2026-09-01T00:00:00Z&\\
+ending_at=2026-09-08T00:00:00Z&\\
+time_bucket_width=1d&\\
+group_by[]=model&\\
+limit=100" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: analytics-usage-cost-2026-08-24" \\
+  -H "x-api-key: $ANTHROPIC_API_KEY"`}</PromptCard>
+
+`--globoff` è importante: senza di esso, curl cerca di interpretare i `[]` di `group_by[]` come un intervallo glob.
+
+## Il contratto delle righe
+
+Questa è la parte che fa inciampare chi migra dai vecchi endpoint, perché la risposta ha di proposito una forma diversa.
+
+<Steps items={[
+  {title: "Ogni riga ha tre parti", body: "starting_at e ending_at indicano il periodo coperto dalla riga, group contiene ogni dimensione, e usage (o cost sull'endpoint cost) contiene le metriche. Dimensioni e metriche stanno in oggetti separati — non sono affiancate come nel report legacy."},
+  {title: "Una dimensione è null a meno che tu non raggruppi per essa", body: "group contiene sempre ogni dimensione, ma ciascuna vale null a meno che non compaia in group_by[]. Una dimensione raggruppata è null ANCHE nelle righe che non hanno un valore per essa — l'utilizzo di code execution, per esempio, ha model: null. group_by[] accetta fino a cinque dimensioni."},
+  {title: "Una riga per ogni combinazione che ha dati", body: "Ogni riga è una combinazione delle dimensioni raggruppate, e ogni combinazione con utilizzo o costo compare esattamente una volta nelle pagine di una query. Le combinazioni senza nulla non producono alcuna riga. Senza group_by[] e senza time_bucket_width ottieni un'unica riga che totalizza l'intero intervallo."},
+  {title: "I bucket temporali sono opt-in", body: "Imposta time_bucket_width a 1m, 1h o 1d per dividere ogni combinazione per bucket UTC; lo starting_at e l'ending_at di ciascuna riga delimitano allora il suo bucket. Non c'è alcun default — omettilo per i totali sull'intero intervallo. I bucket vuoti non producono righe."},
+  {title: "Le righe sono ordinate per rango, non cronologicamente", body: "Per impostazione predefinita le righe tornano ordinate per la metrica order_by sull'intero intervallo, dalla più grande (order=asc inverte). Per una serie temporale, imposta time_bucket_width E order_by=time: le righe arrivano allora bucket per bucket, prima il più recente per default, con le righe più grandi prima all'interno di ogni bucket. I bucket vuoti li riempi tu con zeri."},
+  {title: "I filtri sono indipendenti dal raggruppamento", body: "La maggior parte delle dimensioni raggruppabili ha un corrispondente filtro a lista in notazione tra parentesi, per es. models[]=claude-opus-5-5. Ripeti il parametro per più valori, fino a 100 per filtro. Più valori nello stesso filtro sono in OR; filtri diversi sono in AND. Puoi filtrare per una dimensione senza raggruppare per essa, o viceversa."},
+]} />
+
+`order_by` sull'endpoint usage accetta `total_tokens` (default), `output_tokens`, `uncached_input_tokens`, `requests` o `time`. Sull'endpoint cost: `amount` (default), `list_amount` o `time`.
+
+:::warning[L'ordinamento per rango come default è il bug silenzioso delle dashboard]
+Se richiedi un intervallo e disegni le righe nell'ordine in cui arrivano, ottieni un grafico a barre ordinato per dimensione che *sembra* una serie temporale. Ottieni righe cronologiche solo se imposti **entrambi** `time_bucket_width` e `order_by=time`.
+:::
+
+### Non ogni dimensione si applica a te
+
+`model` e `actor` valgono per ogni organizzazione. `api_key_id` è solo Console. `slack_channel_id` è solo Enterprise. Una dimensione che non si applica vale `null` su ogni riga e il suo filtro non corrisponde a nulla — **in silenzio**. L'unica eccezione è `rbac_group_id`, che invece restituisce un errore quando i team non sono disponibili per la tua organizzazione.
+
+E un cambio di comportamento da appendere al muro: nell'API legacy una API key o un ID workspace sconosciuti restituivano un errore. Qui **non corrispondono a nulla**, compreso un valore di `models[]` scritto male. Un risultato vuoto è ora la risposta normale a un refuso.
+
+## Gli actor: a chi viene addebitato
+
+La dimensione `actor` indica a chi viene attribuita una richiesta — un utente, un service account, un'identità cloud federata (un principal AWS o Google Cloud, per le organizzazioni che raggiungono Claude tramite la loro piattaforma cloud) oppure, quando nessuno di questi c'è dietro, **la API key stessa**. Raggruppa per `actor` e l'`actor` di ogni riga è un oggetto il cui `type` dice di che tipo è. L'utilizzo non attribuibile ad alcuna identità ha `actor: null`.
+
+Le regole di mappatura:
+
+- **Le chiavi personali e quelle dei service account** agiscono come l'utente o il service account a cui sono collegate: l'identità compare in `actor`, la chiave in `api_key_id`.
+- **Le chiavi workspace legacy** non sono collegate a un'identità, quindi la chiave compare **sia** come `actor` **sia** come `api_key_id`.
+- **Una chiave che Claude Code crea per un membro al momento dell'accesso** vive nel workspace Claude Code, e il suo utilizzo è attribuito a quel membro.
+- **Le richieste senza alcuna API key** — dalla Console, da Claude Code dopo un accesso senza API key, o con un token Workload Identity Federation — hanno `api_key_id: null`. L'`actor` resta il membro che ha effettuato l'accesso o, per un workload federato, il suo service account.
+
+:::tip[Due filtri, due domande diverse]
+`api_key_ids[]=apikey_…` corrisponde a ogni richiesta **autenticata da quella chiave**, a chiunque sia attribuita. `actor_ids[]=apikey_…` corrisponde solo alle richieste **attribuite alla chiave stessa**. Non sono intercambiabili, e confonderli è il modo in cui un audit torna incompleto. Per includere in un filtro `api_key_ids[]` anche l'utilizzo senza chiave, aggiungi una **voce vuota**: `api_key_ids[]=`.
+:::
+
+## L'endpoint cost e la trappola del 100×
+
+L'endpoint cost accetta gli stessi filtri, dimensioni e bucket temporali di `/usage`. L'oggetto `cost` di ogni riga contiene:
+
+| Campo | Significato |
+| --- | --- |
+| `amount` | Costo dopo gli sconti, **prima** dell'applicazione dei crediti |
+| `list_amount` | Costo ai prezzi di listino |
+| `currency` | Sempre `"USD"` |
+| `requests` | Numero di richieste |
+
+:::warning[amount è in CENTESIMI, non in dollari]
+`currency` dice `"USD"`, ma il numero è una stringa decimale **in centesimi con sei cifre decimali**. `"41280.000000"` sono **$412,80**, non $41.280. Il vecchio cost report restituiva stringhe quasi in dollari come `"123.45"`; lo stesso valore qui è `"12345.000000"`. Dividi per 100 prima di mostrare qualsiasi cosa, e scrivi il test — è un errore di 100× che supera la code review perché il campo si chiama `amount` e il campo della valuta dice dollari.
+:::
+
+Due dimensioni esistono **solo** sull'endpoint cost, ed entrambe infrangono a tuo favore le solite regole: `group_by[]=cost_type` divide ogni riga per tipo di costo e `group_by[]=token_type` divide il costo dei token per tipo di token. Nessuna delle due conta nel limite di cinque dimensioni, e nessuna rispetta `limit` — quindi una pagina può legittimamente contenere **più** righe di `limit`.
+
+<PromptCard title="Dove sono finiti i soldi: costo per modello, tipo di costo e tipo di token in un mese">{`curl --globoff "https://api.anthropic.com/v1/organizations/analytics/cost?\\
+starting_at=2026-09-01T00:00:00Z&\\
+ending_at=2026-10-01T00:00:00Z&\\
+group_by[]=model&\\
+group_by[]=cost_type&\\
+group_by[]=token_type" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: analytics-usage-cost-2026-08-24" \\
+  -H "x-api-key: $ANTHROPIC_API_KEY"`}</PromptCard>
+
+Quell'unica query è la prima che vale la pena eseguire su qualsiasi organizzazione, perché risponde alla domanda su cui la maggior parte dei team tira a indovinare: **quanta parte della fattura non è affatto inferenza.** Dividere per `cost_type` separa la spesa in token dagli strumenti lato server; dividere per `token_type` separa le letture dalla cache dall'input non in cache e dall'output. Se le letture dalla cache dominano la tua riga di input, le tappe successive sono [Prompt Caching](/docs/api/prompt-caching) e [Cache Diagnostics](/docs/api/cache-diagnostics); se dominano i token di output, è [Taglia l'uso dei token](/docs/power-user/token-economy).
+
+<PromptCard title="Costo di Claude Code per singolo utente, in una query">{`curl --globoff "https://api.anthropic.com/v1/organizations/analytics/cost?\\
+starting_at=2026-10-01T00:00:00Z&\\
+ending_at=2026-11-01T00:00:00Z&\\
+products[]=claude_code&\\
+group_by[]=actor" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: analytics-usage-cost-2026-08-24" \\
+  -H "x-api-key: $ANTHROPIC_API_KEY"`}</PromptCard>
+
+Le organizzazioni Console hanno una seconda opzione per questo scopo — la dedicata [Claude Code Analytics API](https://platform.claude.com/docs/en/manage-claude/claude-code-analytics-api), che riporta l'attività di Claude Code per utente insieme al costo stimato.
+
+## Intervalli di date, e gli arrotondamenti che nessuno si aspetta
+
+- I timestamp sono RFC 3339 con offset UTC (`2026-09-01T00:00:00Z`). **`starting_at` è inclusivo, `ending_at` è esclusivo.**
+- `starting_at` deve essere **uguale o successivo al 1° gennaio 2026** ed **entro gli ultimi 365 giorni**.
+- Una richiesta copre **al massimo 31 giorni**. `ending_at` ha come default 31 giorni dopo `starting_at`, oppure adesso, quale dei due viene prima. Dividi gli intervalli più lunghi in più richieste.
+- `ending_at` è **obbligatorio** ogni volta che `time_bucket_width` è impostato, e con `time_bucket_width=1m` l'intervallo è **al massimo di 24 ore**.
+- **Entrambi gli estremi si arrotondano *per difetto*** al confine di un bucket — o all'ora quando `time_bucket_width` non è impostato. Con bucket `1h`, `starting_at=2026-09-01T10:43:00Z` diventa `10:00:00Z` e `ending_at=2026-09-01T15:43:00Z` diventa `15:00:00Z`, quindi la risposta copre le 10:00–15:00 UTC. Una query "ultimi 90 minuti" scritta ingenuamente restituisce un'ora.
+
+## La freschezza dei dati è ciò che rompe le dashboard
+
+Ogni risposta porta un timestamp `data_refreshed_at`. L'utilizzo successivo a quell'istante è **mancante o parziale**. Quando non esistono ancora dati per alcuna parte dell'intervallo, `data_refreshed_at` è `null` e `data` è vuoto.
+
+| Proprietà | Valore |
+| --- | --- |
+| Ritardo tipico di aggiornamento | Entro **4 ore** dall'utilizzo sottostante |
+| Caso peggiore | Fino a **24 ore** |
+| Finestra di revisione | I valori possono cambiare man mano che arrivano eventi in ritardo e riconciliazioni, fino a **circa 7 giorni dopo la fine del mese di calendario** |
+| Paginazione | Ogni pagina di una stessa query paginata legge lo **stesso snapshot**, quindi `data_refreshed_at` è identico tra le pagine |
+
+In pratica: i numeri del 1° ottobre possono ancora cambiare fino a circa il 7 novembre.
+
+È una vera regressione rispetto all'API legacy, dove i dati comparivano tipicamente entro **5 minuti**, e cambia ciò che puoi costruire. Ne seguono direttamente due regole:
+
+- **Per risultati che non cambiano tra una chiamata e l'altra**, imposta `ending_at` a un valore pari o precedente a un `data_refreshed_at` che hai già visto.
+- **Per i totali definitivi**, interroga solo mesi terminati da almeno **7 giorni**.
+
+:::warning[Non costruirci sopra alert in tempo reale]
+Un alert su un picco di costo con 4–24 ore di ritardo non è un alert. Usa l'API per attribuzione, chargeback e report di tendenza; usa gli [spend cap](/docs/models/hard-spend-caps) per la parte che deve reagire in pochi minuti, e l'[OpenTelemetry tracing](/docs/api/opentelemetry-tracing) per una visibilità per richiesta quasi in tempo reale — ricordando che le trace sono best-effort e at-least-once, quindi il registro contabile è l'Analytics API, non le tue trace.
+:::
+
+## Migrare da `usage_report` e `cost_report`
+
+Cosa resta uguale: la tua Admin API key, l'header `anthropic-version`, `starting_at` / `ending_at`, i valori di ampiezza dei bucket (`1m`, `1h`, `1d`), la notazione tra parentesi, i nomi dei campi di paginazione e i nomi dei campi di token e costo. Cosa cambia:
+
+| Usage & Cost API legacy | Usage & Cost Analytics API |
+| --- | --- |
+| Nessun header beta | `anthropic-beta: analytics-usage-cost-2026-08-24` a ogni richiesta |
+| Dati entro ~5 minuti | 4 ore tipiche, fino a 24, riviste per ~7 giorni dopo la fine del mese |
+| `data` è un insieme di bucket temporali (dal più vecchio, compresi quelli vuoti), ciascuno con una lista `results` che mescola dimensioni e metriche | `data` è un insieme di righe ordinate per `order_by`, ciascuna con il proprio `starting_at` / `ending_at`, dimensioni in `group`, metriche in `usage` o `cost`. Nessuna riga per una combinazione vuota |
+| `bucket_width`, default `1d` | `time_bucket_width`, **nessun default** — passa `1d` per mantenere le righe giornaliere, omettilo per i totali sull'intero intervallo |
+| `limit` conta i bucket temporali per pagina | `limit` conta le **righe** per pagina (1–1.000, default 20), quindi il numero di pagine dipende da quante combinazioni hanno dati |
+| Qualsiasi intervallo di date, paginato in avanti per bucket | `starting_at` ≥ 1° gen 2026 ed entro 365 giorni; ≤ 31 giorni per richiesta; `ending_at` obbligatorio con i bucket; ≤ 24 h con `1m` |
+| `account_ids[]`, `service_account_ids[]`, `group_by[]=account_id`, `group_by[]=service_account_id` | `actor_ids[]` con gli stessi ID con tag, e `group_by[]=actor` o `actor_type`; leggi `actor.user_id` o `actor.service_account_id` |
+| `context_window[]` | `context_windows[]` (ora al plurale) |
+| `group_by[]=description` sul cost report, con una stringa `description` | **Scomparso.** Raggruppa invece per dimensioni strutturate — `model`, `cost_type`, `token_type`, `context_window`, `service_tier`, `inference_geo`, `speed`, tutte contenibili in un'unica richiesta |
+| API key o ID workspace sconosciuti → errore | Non corrisponde a nulla. Vale lo stesso per un valore di `models[]` scritto male |
+| `workspace_id: null` indicava il workspace predefinito | Il workspace predefinito ha il suo ID `wrkspc_` **reale** |
+| `inference_geo: "not_available"`, `service_tier: "standard"` per l'utilizzo senza nessuno dei due | `null` per entrambi. `inference_geos[]=not_available` corrisponde ancora alle righe senza geo |
+| Il `service_tier` del costo era `standard` o `batch`; `amount` come `"123.45"` | Il tier effettivo; `amount` con sei decimali (`"123.450000"`), più `list_amount` |
+| Code execution assente dal report usage; nessun conteggio di richieste | Code execution compare come righe di utilizzo con `model: null`; `requests` su entrambi gli endpoint e `total_tokens` sulle righe usage |
+
+Per riprodurre esattamente il report giornaliero legacy: richiedi `time_bucket_width=1d` con gli stessi `group_by[]`, scorri le pagine con `limit=1000`, aggiungi `order_by=time&order=asc` per avere i giorni in ordine cronologico, poi raggruppa le righe per `starting_at` e **riempi tu i giorni mancanti con zeri**.
+
+:::tip[Il workspace predefinito non è più null — aggiorna il tuo codice di raggruppamento]
+I consumer legacy spesso trattavano `workspace_id: null` come caso speciale "Default Workspace". Quella mappatura ora è sbagliata, e qui un `null` significa invece "non raggruppato per esso". Il workspace predefinito ha un normale ID `wrkspc_` — ma [List Workspaces](https://platform.claude.com/docs/en/api/organization/workspaces/list) lo **omette** a meno che tu non passi `include_default=true`, quindi un ID sconosciuto nelle tue righe potrebbe non comparire nella tua tabella dei workspace. Risolvilo con Get Workspace: quello predefinito restituisce `"name": "Default"`.
+:::
+
+## Oltre la Claude API
+
+| Piattaforma | Disponibilità | Cosa cambia |
+| --- | --- | --- |
+| Claude Platform on AWS | Entrambi gli endpoint | Usa l'URL base e l'autenticazione della piattaforma al posto di una Admin API key; AWS IAM autorizza tramite le azioni `ListAccountUsage` e `ListAccountCost`. **Ogni richiesta copre solo i workspace della regione AWS di quell'endpoint** — chiama ogni regione per coprire l'organizzazione. `user_profile_id`, `claude_tag_category`, `claude_tag_user_id` e le dimensioni di Managed Agents (`agent_id`, `environment_id`, `deployment_id`, `session_id`) sono `null` su ogni riga |
+| Claude Models on Google Cloud (gestito da Anthropic) | Entrambi gli endpoint | Chiamato tramite l'URL base a livello di organizzazione con credenziali Google Cloud; `/usage` richiede il permesso IAM `usageAnalytics.list`, `/cost` richiede `costAnalytics.list` |
+
+Quella dimensione `user_profile_id` è la più interessante sulla Claude API stessa: combinata con i [profili utente](/docs/api/user-profiles-and-enforcement), trasforma questa API in un chargeback per cliente finale per una piattaforma o un rivenditore — la stessa attribuzione che limita il raggio d'azione del tuo enforcement ti dice anche quanto ti costa ciascun cliente.
+
+## Errori comuni
+
+| Errore | Cosa succede davvero |
+| --- | --- |
+| Mostrare `amount` come dollari | Ogni cifra è 100× troppo grande. Sono centesimi con sei cifre decimali |
+| Disegnare le righe nell'ordine di risposta come serie temporale | Le righe sono ordinate per `order_by` sull'intero intervallo. Servono `time_bucket_width` **e** `order_by=time` |
+| Omettere `--globoff` da curl | curl tratta `[]` in `group_by[]` come un glob e la richiesta non parte come scritta |
+| Aspettarsi bucket riempiti con zeri | I bucket e le combinazioni senza dati producono **nessuna riga**. Riempi i vuoti lato client |
+| Costruirci un alert sui picchi di costo | I dati hanno 4–24 ore di ritardo e vengono rivisti per una settimana dopo la fine del mese |
+| Confrontare totali da inizio mese estratti in giorni diversi | I valori vengono rivisti fino a ~7 giorni dopo la fine del mese. Ancora `ending_at` a un `data_refreshed_at` che hai già visto |
+| Trattare un risultato vuoto come "nessun utilizzo" | Un ID workspace, un ID API key o un nome di modello scritto male sconosciuti ora non corrispondono a nulla invece di dare errore |
+| Mantenere la mappatura `workspace_id: null` → "Default" | Il workspace predefinito ha ora un vero ID `wrkspc_`; `null` significa "non raggruppato per questa dimensione" |
+| Presumere che `limit` limiti le righe per pagina | `cost_type` e `token_type` ignorano del tutto `limit` |
+| Riutilizzare `account_ids[]` / `service_account_ids[]` | Sostituiti da `actor_ids[]` con `group_by[]=actor` o `actor_type` |
+
+## Quiz
+
+<Quiz questions={[
+  {
+    q: "Una riga di costo torna con cost.amount = \"41280.000000\" e cost.currency = \"USD\". Che cosa dovrebbe mostrare la tua dashboard?",
+    options: [
+      "$41.280,00",
+      "$412,80",
+      "$41.280,000000",
+      "$4.128,00"
+    ],
+    answer: 1,
+    explain: "amount è una stringa decimale in CENTESIMI con sei cifre decimali, anche se currency riporta USD. 41280 centesimi sono $412,80. Mostrarlo direttamente è un errore di 100× — e supera la review proprio perché il campo si chiama amount e la valuta dice dollari."
+  },
+  {
+    q: "Richiedi 7 giorni di utilizzo con group_by[]=model e disegni le righe nell'ordine in cui arrivano, aspettandoti un grafico a linee giornaliero. Ottieni qualcosa che non è cronologico. Che cosa manca?",
+    options: [
+      "Solo time_bucket_width=1d — i bucket sono cronologici per default",
+      "Solo order_by=time — l'ordinamento è indipendente dal bucketing",
+      "Sia time_bucket_width=1d sia order_by=time",
+      "Niente; devi ordinare lato client perché l'API non ordina mai per tempo"
+    ],
+    answer: 2,
+    explain: "time_bucket_width non ha un default, quindi senza di esso ottieni totali sull'intero intervallo. E le righe sono ordinate per la metrica order_by (dalla più grande) a meno che tu non imposti order_by=time. Servono entrambi: i bucket per dividere l'intervallo, e order_by=time per riceverli bucket per bucket. I bucket vuoti li riempi comunque tu con zeri, dato che i bucket senza dati non producono righe."
+  },
+  {
+    q: "L'amministrazione estrae il costo da inizio mese di ottobre il 2 ottobre, di nuovo il 20 ottobre e ancora il 10 novembre — e ottiene tre totali diversi per il 1° ottobre. Quale spiegazione corrisponde al comportamento documentato?",
+    options: [
+      "Un bug: una volta che data_refreshed_at supera un timestamp, quei valori sono definitivi",
+      "I valori vengono rivisti man mano che arrivano eventi in ritardo e riconciliazioni, fino a circa 7 giorni dopo la fine del mese di calendario",
+      "Ogni pagina di una query paginata legge uno snapshot diverso, quindi i totali derivano",
+      "È interessato solo l'endpoint cost; l'endpoint usage è definitivo subito"
+    ],
+    answer: 1,
+    explain: "I dati di norma si aggiornano entro 4 ore e possono impiegarne fino a 24, e i valori possono essere rivisti fino a circa 7 giorni dopo la fine del mese di calendario — quindi il 1° ottobre può cambiare fino a circa il 7 novembre. Per i totali definitivi, interroga solo mesi terminati da almeno 7 giorni. (La paginazione non è la causa: ogni pagina di una stessa query legge lo stesso snapshot, ed è per questo che data_refreshed_at è identico tra le pagine.)"
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Due endpoint — /v1/organizations/analytics/usage e /cost — che richiedono entrambi anthropic-beta: analytics-usage-cost-2026-08-24.",
+  "Dividi amount per 100. Sono centesimi con sei cifre decimali, nonostante currency riporti USD.",
+  "Una dimensione è null a meno che tu non raggruppi per essa, e una combinazione senza dati non produce alcuna riga — quindi riempi con zeri lato client.",
+  "Ordinamento per rango come default: una vera serie temporale richiede time_bucket_width E order_by=time.",
+  "La freschezza è di 4-24 ore con revisioni per ~7 giorni dopo la fine del mese. È infrastruttura per attribuzione e chargeback, non per gli alert.",
+  "api_key_ids[] (ciò che la chiave ha autenticato) e actor_ids[] (ciò che è attribuito alla chiave) rispondono a domande diverse — scegli con cognizione.",
+  "I refusi non danno più errore. Un workspace, una chiave o un nome di modello sconosciuti non corrispondono a nulla, in silenzio.",
+]} />
+
+## Avanti
+
+- [L'Admin API: automatizza la tua organizzazione Claude](/docs/api/admin-api) — le credenziali, gli scope e le convenzioni di paginazione che questi endpoint ereditano.
+- [Hard Spend Caps: quali provider di AI fermano davvero la fattura](/docs/models/hard-spend-caps) — la metà enforcement dello stesso problema, tra i vari provider.
+- [Profili utente ed enforcement](/docs/api/user-profiles-and-enforcement) — la dimensione `user_profile_id` che trasforma questa API in chargeback per cliente finale.
+- [OpenTelemetry tracing di prima parte](/docs/api/opentelemetry-tracing) — visibilità per richiesta quando un ritardo di 4 ore è troppo lento.

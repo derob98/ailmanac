@@ -1,0 +1,67 @@
+# XML 태그로 프롬프트 구조화하기
+
+> Source: https://derob98.github.io/ailmanac/ko/docs/prompting/xml-tags · AILmanac (CC BY 4.0)
+
+입력, 지시, 예시를 구분하는 Claude가 선호하는 관례.
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["XML 스타일 태그가 왜 Claude에게 프롬프트 부분들 사이의 명확한 경계를 주는지", "지시, 문서, 예시, 형식 규칙을 이름 붙인 태그로 감싸는 법", "안정적으로 파싱할 수 있는 태그 출력을 Claude에게 요청하는 법", "언제 태그를 붙일지 — 그리고 언제 과하게 태그하지 말지"]} />
+
+프롬프트가 지시, 문서, 예시, 질문을 섞어 놓으면 모델이 이들을 뭉뚱그릴 수 있습니다. **XML 스타일 태그**는 각 부분에 레이블을 붙이는 깔끔한 방법이며 — Claude는 여기에 특히 잘 반응합니다.
+
+## 핵심 개념
+
+각 섹션을 이름 붙인 태그로 감싸서 무엇이 무엇인지 명확하게 만드세요:
+
+<PromptCard title="태그로 구조화한 프롬프트">{`<instructions>
+Summarize the document for a busy executive. Use only the document; if a fact
+isn't there, say so.
+</instructions>
+
+<document>
+{paste the long document here}
+</document>
+
+<format>
+3 bullet points, then a one-line "decision needed".
+</format>`}</PromptCard>
+
+태그는 당신이 만들어내는 텍스트일 뿐입니다 — `<document>`, `<example>`, `<context>`, `<rules>` — 하지만 모델에게 명확한 경계를 제공합니다.
+
+## 왜 도움이 되는가
+
+<Callout type="tip" items={["데이터를 지시와 분리합니다 — 모델이 붙여넣은 문서 안에 끼어든 텍스트를 따를 가능성이 줄어듭니다(프롬프트 인젝션에 대한 약한 방어 — /docs/security/prompt-injection 참고).", "'내 프롬프트의 일부를 무시했어'를 줄입니다. 각 부분이 명확하게 구분됩니다.", "출력을 파싱하기 쉽게 만듭니다 — Claude에게 답변을 <answer> 태그에 넣어달라고 요청해 안정적으로 추출할 수 있습니다.", "퓨샷(/docs/prompting/few-shot)과 잘 조합됩니다 — 각 예시를 <example>로 감싸세요."]} />
+
+네 가지 이점을 자세히 보면:
+
+- **데이터를 지시와 분리합니다** — 모델이 붙여넣은 문서 안에 끼어든 텍스트를 따를 가능성이 줄어듭니다([프롬프트 인젝션](/docs/security/prompt-injection)에 대한 약한 방어).
+- **"내 프롬프트의 일부를 무시했어"를 줄입니다.** 각 부분이 명확하게 구분됩니다.
+- **출력을 파싱하기 쉽게 만듭니다** — Claude에게 답변을 `<answer>` 태그에 넣어달라고 요청해 안정적으로 추출할 수 있습니다.
+- **[퓨샷](/docs/prompting/few-shot)과 잘 조합됩니다** — 각 예시를 `<example>`로 감싸세요.
+
+## 태그 출력 요청하기
+
+<Steps items={[{title: "Claude에게 출력을 태그로 감싸달라고 요청하세요", body: "추론용과 최종 답변용으로 각각 어떤 태그를 쓸지 모델에 정확히 알려주세요."}, {title: "필요한 부분만 추출하세요", body: "당신의 코드는 추론을 무시하고 <answer> 내용만 가져올 수 있습니다."}, {title: "구조화된 출력과 결합하세요", body: "기계 판독이 가능한 결과가 필요할 때 구조화된 출력(/docs/api/structured-output)과 잘 어울립니다."}]} />
+
+<PromptCard title="태그 출력 요청">{`Put your reasoning in <thinking> tags and your final answer in <answer> tags.`}</PromptCard>
+
+그러면 코드가 `<answer>` 내용만 가져올 수 있습니다. 기계 판독이 가능한 결과가 필요할 때 [구조화된 출력](/docs/api/structured-output)과 잘 어울립니다.
+
+## 팁
+
+<Callout type="takeaways" items={["일관성을 유지하세요 — 모든 태그를 열고 닫으세요. 같은 이름을 재사용하세요.", "태그 이름을 의미 있게 지으세요(<x>가 아니라 <contract>).", "사소한 프롬프트에 태그를 남발하지 마세요 — 정말로 여러 개의 구별되는 부분이 있을 때 사용하세요."]} />
+
+- **일관성을 유지하세요** — 모든 태그를 열고 닫으세요. 같은 이름을 재사용하세요.
+- **태그 이름을 의미 있게 지으세요** (`<x>`가 아니라 `<contract>`).
+- **사소한 프롬프트에 태그를 남발하지 마세요** — 정말로 여러 개의 구별되는 부분이 있을 때 사용하세요.
+
+## 스스로 확인하기
+
+<Quiz title="스스로 확인하기" questions={[{q: "프롬프트가 지시, 문서, 질문을 섞을 때 XML 스타일 태그가 도움이 되는 주된 이유는?", options: ["프롬프트를 압축해 토큰을 절약한다", "모델에게 부분들 사이의 명확하고 모호하지 않은 경계를 준다", "Claude가 없이는 작동할 수 없는 필수 문법이다", "프롬프트를 구조화된 API 호출로 변환한다"], answer: 1, explain: "태그는 당신이 만들어내는 텍스트일 뿐이지만 각 섹션에 레이블을 붙여 무엇이 무엇인지 명확하게 만듭니다 — 모델에게 명확한 경계를 줍니다."}, {q: "태그가 프롬프트 인젝션에 대한 약한 방어로 작동하는 이유는?", options: ["붙여넣은 문서를 암호화한다", "명확히 구분된 문서 안의 끼어든 텍스트를 모델이 따를 가능성이 줄어든다", "악성 지시를 자동으로 제거한다", "문서를 별도의 모델로 보낸다"], answer: 1, explain: "데이터를 지시와 분리함으로써, 모델이 붙여넣은 문서 안에 끼어든 텍스트를 따를 가능성이 줄어듭니다."}, {q: "태그가 붙은 응답에서 Claude의 최종 답변만 안정적으로 추출하려면?", options: ["추론을 <thinking> 태그에, 답변을 <answer> 태그에 요청한 뒤 <answer> 내용을 가져온다", "Claude에게 추론을 삭제하라고 요청한다", "항상 모든 것에 단일 태그를 사용한다", "태그 없이 응답 전체를 파싱한다"], answer: 0, explain: "추론을 <thinking>에, 최종 답변을 <answer>에 넣으면 코드가 <answer> 내용만 가져올 수 있습니다."}, {q: "태그 이름 짓기의 모범 사례는?", options: ["공간 절약을 위해 <x> 같은 짧고 암호 같은 이름을 쓴다", "태그 이름을 의미 있게 짓는다, 예: <x> 대신 <contract>", "프롬프트를 짧게 유지하려 태그를 절대 닫지 않는다", "같은 섹션에 매번 다른 이름을 쓴다"], answer: 1, explain: "태그 이름을 의미 있게 지으세요(<x>가 아니라 <contract>). 그리고 일관성을 유지하세요 — 모든 태그를 열고 닫고, 같은 이름을 재사용하세요."}, {q: "XML 태그를 꺼내 쓰지 말아야 할 때는?", options: ["프롬프트에 여러 개의 구별되는 부분이 있을 때", "기계 판독이 가능한 출력이 필요할 때", "구별되는 부분이 없는 사소한 프롬프트일 때", "퓨샷 예시를 감쌀 때"], answer: 2, explain: "사소한 프롬프트에 태그를 남발하지 마세요 — 정말로 여러 개의 구별되는 부분이 있을 때만 태그를 사용하세요."}]} />
+
+## 다음
+
+- [Claude 전용 프롬프팅](/docs/prompting/prompting-claude)
+- [퓨샷 예시 제대로 하기](/docs/prompting/few-shot)
+- [구조화된 출력](/docs/api/structured-output)

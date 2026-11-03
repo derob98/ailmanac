@@ -1,0 +1,243 @@
+# Statusline anpassen
+
+> Source: https://derob98.github.io/ailmanac/de/docs/claude-code/statusline · AILmanac (CC BY 4.0) · last verified 2026-10-26
+
+Die Statusline ist ein Shell-Skript, das die gesamte Sitzung als JSON auf stdin erhält — Modell, Kontextfenster, Kosten, Rate-Limits, PR-Status und Prompt-Cache-Gesundheit. Welche Felder ihren Platz wirklich verdienen, welche Auslöser das Skript starten und drei Rezepte, darunter eine Cache-Gesundheitszeile, die das leiseste Kostenleck in langen Sitzungen sichtbar macht.
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={[
+  "Den Vertrag verstehen: Claude Code leitet die gesamte Sitzung als JSON an ein Skript und gibt aus, was das Skript ausgibt",
+  "Es auf beiden Wegen einrichten — /statusline in natürlicher Sprache fragen oder den statusLine-Block selbst schreiben",
+  "Die Handvoll Felder auswählen, die ihren Platz wirklich verdienen, aus den rund sechzig verfügbaren",
+  "Die acht Ereignisse kennen, die dein Skript erneut ausführen, das 300-ms-Debounce und wann du refreshInterval brauchst",
+  "Drei Rezepte bauen: einen Kontextbalken, eine PR-und-Rate-Limit-Zeile und einen Prompt-Cache-Gesundheitsindikator",
+  "Die vier Fallstricke vermeiden: tput cols funktioniert nicht, Null-Felder vor dem ersten API-Aufruf, Abbruch laufender Ausführungen und der Verlust der Tastaturhinweise",
+]} />
+
+<VerifyNote lastVerified="2026-10-26" source="https://code.claude.com/docs/en/statusline">
+Geprüft gegen die offizielle Seite [Customize your status line](https://code.claude.com/docs/en/statusline). Mehrere Felder haben Versionsuntergrenzen: `prompt_cache` und `rate_limits.spend_limit` brauchen Claude Code v2.1.251+, `last_miss_cause` und `miss_causes` brauchen v2.1.260+, und `pr.kind` mit GitLab-Merge-Request-Daten braucht v2.1.234+. Das Eingabeschema wächst zwischen Releases — prüfe die offizielle Feldtabelle, bevor du dich auf einen Schlüssel verlässt.
+</VerifyNote>
+
+Die **Statusline** ist ein Streifen am unteren Rand von Claude Code, der **jedes Shell-Skript ausführt, das du konfigurierst**. Claude Code leitet den gesamten Sitzungszustand als JSON auf stdin an es weiter; dein Skript gibt etwas aus; Claude Code zeigt das an. Es läuft lokal und verbraucht keine API-Tokens.
+
+Dieser Vertrag ist die ganze Funktion. Alles Folgende handelt davon, was *im* JSON steht und wann das Skript läuft.
+
+Sie wird in einer eigenen Zeile **über** den eingebauten Fußzeilen-Badges dargestellt, statt sie zu ersetzen — doch wenn du eine konfigurierst, zeigt Claude Code die meisten Tastaturhinweise der Fußzeile nicht mehr an, darunter `esc to interrupt`, den Fallback `? for shortcuts` und den Diktierhinweis `hold space to speak`. Gut zu wissen, bevor du dieses Setup an ein Teammitglied weitergibst, das sich auf diese Hinweise verlässt.
+
+## Einrichten
+
+Zwei Wege. Der schnelle ist, zu beschreiben, was du willst:
+
+<PromptCard title="Claude Code das Skript für dich schreiben lassen">{`/statusline show model name and context percentage with a progress bar`}</PromptCard>
+
+Es erzeugt ein Skript in `~/.claude/`, aktualisiert deine Einstellungen und fragt für die Dateiänderungen nach Erlaubnis. Mit `/statusline delete` (oder `clear`, oder „remove it“) nimmst du sie wieder heraus.
+
+Der manuelle Weg ist ein `statusLine`-Block in `~/.claude/settings.json` oder den [Projekteinstellungen](/docs/claude-code/settings):
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh",
+    "padding": 2,
+    "refreshInterval": 10
+  }
+}
+```
+
+Vier Felder, drei davon optional:
+
+| Feld | Bedeutung |
+| :--- | :--- |
+| `type` | `"command"` |
+| `command` | Ein Skriptpfad **oder ein Inline-Shell-Befehl** — er läuft in einer Shell, ein Einzeiler funktioniert also |
+| `padding` | Zusätzlicher horizontaler Abstand in Zeichen, Standard `0`. Relative Einrückung, kein absoluter Abstand zum Terminalrand |
+| `refreshInterval` | Alle N Sekunden erneut ausführen **zusätzlich zu** den Ereignisauslösern. Minimum `1`. Ungesetzt lassen, um nur bei Ereignissen zu laufen |
+| `hideVimModeIndicator` | Auf `true` setzen, wenn dein Skript `vim.mode` selbst darstellt, damit der Modus nicht doppelt angezeigt wird |
+
+Weil `command` in einer Shell läuft, braucht die kleinstmögliche nützliche Statusline gar keine Skriptdatei — nur `jq`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "jq -r '\"[\\(.model.display_name)] \\(.context_window.used_percentage // 0)% context\"'"
+  }
+}
+```
+
+## Was im JSON steht
+
+Die Eingabe ist groß — Modell, Workspace, Kosten, Kontextfenster, Rate-Limits, PR-Status, Worktree, Vim-Modus, Prompt-Cache. Die Versuchung ist, alles anzuzeigen. Widerstehe ihr: Eine Statusline, die du nicht mehr liest, ist schlechter als keine.
+
+Das sind die Felder, die für die meisten Leute ihren Platz verdienen, gruppiert nach der Überraschung, die sie verhindern:
+
+| Feld | Verhindert |
+| :--- | :--- |
+| `model.display_name` | Opus für eine triviale Aufgabe zu verbrennen |
+| `context_window.used_percentage` | Mitten in der Aufgabe ohne Kontext dazustehen — dein Signal für [`/compact`](/docs/claude-code/context-management) |
+| `workspace.current_dir`, `workspace.git_worktree` | Den falschen Checkout zu bearbeiten, wenn mehrere [Worktrees](/docs/claude-code/worktrees) offen sind |
+| `rate_limits.five_hour.used_percentage` | Ohne Warnung gegen eine Wand zu laufen |
+| `cost.total_cost_usd` | Dass eine Sitzung unbemerkt teuer wird (clientseitige Schätzung zum Listenpreis — nicht deine Rechnung) |
+| `effort.level`, `fast_mode` | Zu vergessen, dass du den Effort auf `max` gelassen hast |
+| `pr.number`, `pr.review_state` | In einen Browser zu wechseln, um zu prüfen, ob das Review eingetroffen ist |
+| `prompt_cache.hit_ratio`, `prompt_cache.warm` | Das leiseste Kostenleck überhaupt — siehe [das dritte Rezept](#rezept-3-cache-gesundheit-das-leck-das-du-nicht-siehst) |
+
+Drei strukturelle Anmerkungen zum Schema, die echte Debugging-Zeit sparen:
+
+- **`cwd` und `workspace.current_dir` enthalten denselben Wert.** Bevorzuge `workspace.current_dir`, der Konsistenz mit `workspace.project_dir` wegen — das ist der Ort, an dem Claude Code *gestartet* wurde, und er kann abweichen, sobald sich das Arbeitsverzeichnis mitten in der Sitzung ändert.
+- **`workspace.git_worktree` und `worktree.*` sind nicht dasselbe.** `workspace.git_worktree` ist für *jeden* verknüpften Worktree gefüllt, der mit `git worktree add` erstellt wurde, und fehlt im Hauptbaum. Das Objekt `worktree.*` existiert nur, solange die Sitzung in einer Claude-Code-**Worktree-Sitzung** ist.
+- **`used_percentage` ist nur Eingabe.** Es wird aus `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` berechnet und schließt Ausgabe-Tokens aus. Wenn du selbst einen Prozentwert aus `current_usage` berechnest, verwende dieselbe reine Eingabe-Formel, sonst stimmt deine Zahl nicht mit der von Claude Code überein.
+
+<Flashcards cards={[
+  {front: "model.display_name", back: "Menschenlesbarer Modellname, z. B. \"Opus\". model.id enthält die rohe Kennung."},
+  {front: "workspace.current_dir vs workspace.project_dir", back: "current_dir ist, wo du gerade bist; project_dir ist, wo Claude Code gestartet wurde. Sie weichen voneinander ab, wenn sich das Arbeitsverzeichnis mitten in der Sitzung ändert. cwd dupliziert current_dir."},
+  {front: "workspace.git_worktree vs worktree.name", back: "git_worktree ist für jeden verknüpften Git-Worktree gesetzt und fehlt im Hauptbaum. worktree.* existiert nur während einer Claude-Code-Worktree-Sitzung."},
+  {front: "context_window.used_percentage", back: "Vorberechneter Prozentwert des genutzten Fensters, nur aus EINGABE-Tokens (frische Eingabe + Cache-Schreibvorgänge + Cache-Lesevorgänge). Schließt Ausgabe-Tokens aus."},
+  {front: "context_window.current_usage", back: "Dieselben Tokens aufgeschlüsselt: input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens. null vor dem ersten API-Aufruf und erneut direkt nach /compact bis zum nächsten Aufruf."},
+  {front: "cost.total_cost_usd", back: "Clientseitige Schätzung zum Listenpreis, kein abgerechneter Betrag. Wird auf $0 zurückgesetzt, wenn /clear eine neue Sitzung startet."},
+  {front: "rate_limits.five_hour / .seven_day", back: "used_percentage (0–100) und resets_at (Unix-Epoche in Sekunden) für jedes Fenster. Das Erreichen von resets_at ist selbst ein Update-Auslöser."},
+  {front: "prompt_cache.warm", back: "Ob das gecachte Präfix noch innerhalb seiner TTL liegt. false, wenn die letzte Antwort keine Cache-Tokens gemeldet hat — selbst wenn caching_observed true ist."},
+  {front: "prompt_cache.hit_ratio", back: "Cache-Lese-Tokens im Verhältnis zu allen Eingabe-Tokens dieser Sitzung, 0–1. Der Nenner zählt Cache-Lesevorgänge, Cache-Schreibvorgänge und nicht gecachte Eingabe. null, solange alle null sind."},
+  {front: "prompt_cache.last_miss_cause.causes", back: "Warum der letzte Cache-Miss auftrat: tools_changed, system_prompt_changed, ttl_expired_5m, likely_server_side. null bis zum ersten Miss. Braucht v2.1.260+."},
+  {front: "pr.review_state", back: "approved, pending, changes_requested oder draft für den offenen PR des aktuellen Branches. Kann fehlen, selbst wenn pr vorhanden ist."},
+  {front: "exceeds_200k_tokens", back: "Eine FESTE 200k-Schwelle auf die Gesamt-Tokens der letzten Antwort — nicht relativ zu deiner tatsächlichen context_window_size."},
+]} />
+
+## Wann dein Skript läuft
+
+Einmal beim Sitzungsstart, auch beim Fortsetzen. Danach bei jedem dieser Ereignisse:
+
+<Steps items={[
+  {title: "Eine neue Assistant-Nachricht trifft ein", body: "Der häufige Fall, und der Grund, warum ein Kontext-Prozentwert ganz ohne Timer ungefähr aktuell bleibt."},
+  {title: "Eine Zustandsänderung von dir", body: "/compact wird fertig, der Berechtigungsmodus wechselt, der Vim-Modus wird umgeschaltet oder du bearbeitest den Befehl in deinen statusLine-Einstellungen."},
+  {title: "Eine Frist in den Daten, die du zuletzt erhalten hast", body: "Ein Rate-Limit-Fenster erreicht sein resets_at oder ein warmer Prompt-Cache erreicht sein expires_at. Claude Code liest diese Zeitstempel aus dem JSON, das es dir schon gegeben hat, und plant einen erneuten Lauf."},
+  {title: "Ein refreshInterval-Timer, falls du einen gesetzt hast", body: "Der einzige Auslöser, der feuert, während nichts passiert — und genau dann brauchst du ihn."},
+]} />
+
+Aus dieser Liste folgen drei Verhaltensweisen:
+
+- **Updates werden mit 300 ms entprellt**, sodass schnelle Änderungen zu einem Lauf gebündelt werden. Das Bearbeiten des `command` selbst überspringt das Debounce und läuft sofort.
+- **Ein neuer Auslöser bricht ein laufendes Skript ab.** Halte es schnell. Eine Statusline, die einen langsamen Netzwerkaufruf per Shell startet, wird regelmäßig beendet, bevor sie etwas ausgibt.
+- **Die Ereignisauslöser werden still, wenn die Hauptsitzung im Leerlauf ist** — der klassische Fall ist ein Koordinator, der auf [Subagents](/docs/claude-code/subagents) im Hintergrund wartet, die unter dir den Git-Zustand verändern. Das, plus eine Uhr oder jedes extern bezogene Segment, ist wofür `refreshInterval` da ist.
+
+Dein Skript kann mehr als eine einfache Zeile ausgeben: **jedes `echo` ist eine Zeile**, ANSI-Escape-Codes geben dir Farbe (`\033[32m` grün, `\033[0m` zurücksetzen), und OSC-8-Sequenzen machen Text in iTerm2, Kitty oder WezTerm anklickbar.
+
+## Drei Rezepte
+
+### Rezept 1: Kontextbalken
+
+Die wertvollste Zeile, und die, die du haben solltest, selbst wenn du sonst nichts hinzufügst. Beachte die `// 0`-Fallbacks — `current_usage` ist vor dem ersten API-Aufruf und erneut direkt nach `/compact` `null`, sodass ein ungeschützter `jq`-Ausdruck genau in den Momenten `null` ausgibt, in denen du am wahrscheinlichsten hinsiehst.
+
+```bash
+#!/usr/bin/env bash
+input=$(cat)
+
+model=$(echo "$input" | jq -r '.model.display_name // "claude"')
+dir=$(echo "$input" | jq -r '.workspace.current_dir // "."')
+pct=$(echo "$input" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)
+
+# 20-cell bar: fill proportional to pct
+filled=$(( pct / 5 ))
+bar=""
+for ((i = 0; i < 20; i++)); do
+  if (( i < filled )); then bar+="▓"; else bar+="░"; fi
+done
+
+# green under 60%, yellow under 85%, red above
+if   (( pct < 60 )); then color="\033[32m"
+elif (( pct < 85 )); then color="\033[33m"
+else                      color="\033[31m"
+fi
+
+printf "%s · %s · ${color}%s %s%%\033[0m" "$model" "$(basename "$dir")" "$bar" "$pct"
+```
+
+### Rezept 2: Branch, PR-Status und dein Rate-Limit-Spielraum
+
+`pr.*` spiegelt das PR-Badge der Fußzeile — und in einem GitLab-Repository wird es stattdessen aus dem offenen **Merge Request** des Branches gefüllt, wobei `pr.kind` auf `mr` steht und `pr.number` die MR-Nummer ist. Die Rate-Limit-Felder sind die, die sich Leute im Nachhinein gewünscht hätten.
+
+```bash
+#!/usr/bin/env bash
+input=$(cat)
+
+branch=$(git branch --show-current 2>/dev/null)
+wt=$(echo "$input" | jq -r '.workspace.git_worktree // empty')
+pr=$(echo "$input" | jq -r '.pr.number // empty')
+state=$(echo "$input" | jq -r '.pr.review_state // empty')
+limit=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
+
+line="${branch:-no-git}"
+[ -n "$wt" ]    && line+=" ⎇ $wt"
+[ -n "$pr" ]    && line+=" · #$pr${state:+ ($state)}"
+[ -n "$limit" ] && line+=" · 5h ${limit%.*}%"
+
+printf "%s" "$line"
+```
+
+### Rezept 3: Cache-Gesundheit, das Leck, das du nicht siehst
+
+Das ist das Rezept, das niemand schreibt, und das mit dem höchsten Nutzen in langen agentischen Sitzungen. [Prompt Caching](/docs/api/prompt-caching) macht eine Sitzung mit 100 Zügen bezahlbar — und ein einziges sich änderndes Byte oben in deinem Prompt zerstört es stillschweigend, sodass das gesamte Präfix bei jedem Zug zum vollen Preis neu verarbeitet wird. Nichts in der Standardoberfläche sagt dir, dass das passiert.
+
+`prompt_cache` tut es. Zwei Felder tragen den Großteil des Signals — `warm` (liegt das Präfix noch innerhalb seiner TTL) und `hit_ratio` (Cache-Lesevorgänge im Verhältnis zu allen Eingabe-Tokens, 0–1) — und `last_miss_cause.causes` nennt den Schuldigen: `tools_changed`, `system_prompt_changed`, `ttl_expired_5m` oder `likely_server_side`.
+
+```bash
+#!/usr/bin/env bash
+input=$(cat)
+
+warm=$(echo "$input" | jq -r '.prompt_cache.warm // empty')
+ratio=$(echo "$input" | jq -r '.prompt_cache.hit_ratio // empty')
+cause=$(echo "$input" | jq -r '.prompt_cache.last_miss_cause.causes[0] // empty')
+misses=$(echo "$input" | jq -r '.prompt_cache.misses // 0')
+
+# prompt_cache is absent until the main conversation's first API response
+[ -z "$warm" ] && { printf "cache: —"; exit 0; }
+
+pct=$(awk "BEGIN{printf \"%d\", ${ratio:-0} * 100}")
+if [ "$warm" = "true" ]; then icon="\033[32m●\033[0m"; else icon="\033[31m○\033[0m"; fi
+
+printf "cache: ${icon} %s%% hit" "$pct"
+(( misses > 0 )) && printf " · %s miss%s%s" "$misses" "$([ "$misses" -eq 1 ] || echo es)" "${cause:+ ($cause)}"
+```
+
+Wenn `system_prompt_changed` als Ursache bei jedem Zug erscheint, ist etwas in deinem Prompt-Präfix nicht deterministisch — ein Zeitstempel in einer [`CLAUDE.md`](/docs/claude-code/claude-md), ein Hook, der wechselnde Ausgabe einschleust. `tools_changed` bei jedem Zug bedeutet meist, dass ein [MCP-Server](/docs/claude-code/mcp-token-cost) Tools uneinheitlich registriert. Beides lässt sich beheben, sobald du es sehen kannst. Claude Code zeigt dieselben Statistiken in der Zeile `Prompt cache (main)` von `/usage`, wenn du lieber bei Bedarf nachsiehst.
+
+Beachte, dass diese Statistiken nur die **Hauptunterhaltung** abdecken — Subagent-Anfragen werden nicht mitgezählt.
+
+## Vier Fallstricke
+
+1. **`tput cols` funktioniert nicht.** Claude Code fängt die Ausgabe deines Skripts ab, statt sie mit dem Terminal zu verbinden, sodass `tput cols` und sprachinterne Breitenerkennung die Terminalgröße nicht sehen können. Lies stattdessen die Umgebungsvariablen `COLUMNS` und `LINES` — Claude Code setzt beide vor jedem Lauf auf die aktuellen Maße.
+2. **Schütze jedes Feld.** `current_usage` ist vor dem ersten API-Aufruf und erneut direkt nach `/compact` `null`; `prompt_cache` und `rate_limits.spend_limit` fehlen bis zur ersten API-Antwort; `pr.review_state` kann fehlen, selbst wenn `pr` vorhanden ist; `effort.level` fehlt bei Modellen ohne den Parameter. Verwende `// empty` oder `// 0` bei allem.
+3. **Langsame Skripte werden abgebrochen, nicht eingereiht.** Ein neuer Auslöser beendet den laufenden Lauf. Wenn du externe Daten willst, lege sie aus einem separaten Prozess in einer Datei ab und lass die Statusline die Datei lesen.
+4. **Die Dollarbeträge der Ausgabenlimits hinken hinterher.** Hinter einem Claude-Apps-Gateway kommt `used_percentage` mit jeder Antwort, aber `used_usd`, `limit_usd` und `period` werden separat etwa alle fünf Minuten abgerufen — sie können dem Prozentwert also kurzzeitig widersprechen. Behandle sie als optional, selbst wenn `spend_limit` vorhanden ist.
+
+## Keine Lust auf Skripten?
+
+Community-Tools wie `ccstatusline` liefern fertige, konfigurierbare Statuslines, die du einfach einsetzen kannst. Sie sind ein vernünftiger Ausgangspunkt — und wie jedes Drittanbieter-Skript, das bei jeder Assistant-Nachricht mit deinen Rechten läuft, solltest du sie lesen, bevor du ihnen vertraust. Siehe [Drittanbieter-Code prüfen](/docs/security/reviewing-third-party-code).
+
+<Quiz title="Prüfe dein Verständnis" questions={[
+  {q: "Deine Statusline zeigt eine Uhr und einen Git-Dirty-Indikator. Während eine Koordinator-Sitzung auf Subagents im Hintergrund wartet, frieren beide ein. Warum, und was hilft?", options: ["Das Skript ist abgestürzt; Fehlerbehandlung hinzufügen", "Ereignisauslöser werden still, wenn die Hauptsitzung im Leerlauf ist — refreshInterval setzen, um in festem Takt erneut zu laufen", "Claude Code cacht die Statusline-Ausgabe fünf Minuten lang"], answer: 1, explain: "Die Statusline ist ereignisgesteuert: neue Assistant-Nachrichten, /compact, Moduswechsel und Datenfristen. Eine Hauptsitzung im Leerlauf erzeugt nichts davon, selbst wenn Subagents den Git-Zustand verändern. refreshInterval (Minimum 1 Sekunde) legt einen Timer über die Ereignisse."},
+  {q: "Direkt nach /compact gibt dein Kontext-Prozentwert „null“ aus. Was ist passiert?", options: ["used_percentage ist während der Kompaktierung nicht verfügbar", "current_usage ist nach /compact bis zum nächsten API-Aufruf null — ein ungeschützter jq-Ausdruck gibt null aus", "Das Skript wurde mitten im Lauf abgebrochen"], answer: 1, explain: "current_usage ist vor dem ersten API-Aufruf in einer Sitzung null und erneut direkt nach /compact, bis der nächste Aufruf es wieder füllt. Verwende immer einen Fallback wie // 0. Dasselbe gilt für prompt_cache und rate_limits.spend_limit, die bis zur ersten API-Antwort fehlen."},
+  {q: "Du willst, dass deine Statusline in einem schmalen Terminal sauber abschneidet, und rufst tput cols auf. Es liefert nichts Brauchbares. Warum?", options: ["tput ist in der Shell der Statusline nicht installiert", "Claude Code fängt die Ausgabe des Skripts ab, statt sie ans Terminal anzuhängen, sodass die Breitenerkennung scheitert — lies stattdessen die Umgebungsvariable COLUMNS", "Die Statusline wird immer mit fester Breite dargestellt"], answer: 1, explain: "Weil die Ausgabe abgefangen wird, hat das Skript kein Terminal, das es abfragen könnte. Claude Code setzt COLUMNS und LINES vor dem Ausführen deines Skripts auf die aktuellen Maße; lies diese."},
+  {q: "prompt_cache.last_miss_cause.causes meldet bei fast jedem Zug system_prompt_changed. Was sagt dir das?", options: ["Nichts Verwertbares — Cache-Misses sind normal", "Etwas in deinem Prompt-Präfix ist nicht deterministisch (ein Zeitstempel in CLAUDE.md, ein Hook, der wechselnde Ausgabe einschleust), sodass das gecachte Präfix bei jedem Zug ungültig wird und zum vollen Preis neu verarbeitet wird", "Deine Cache-TTL ist auf 5m statt 1h gesetzt"], answer: 1, explain: "Ein sich änderndes Präfix zerstört den Prompt-Cache bei jedem Zug, eines der leisesten Kostenlecks in langen Sitzungen. system_prompt_changed weist auf das Präfix; tools_changed weist meist auf einen MCP-Server, der Tools uneinheitlich registriert."},
+  {q: "Du berechnest den Kontext-Prozentwert selbst aus current_usage und erhältst eine andere Zahl als used_percentage. Wahrscheinlichster Grund?", options: ["used_percentage ist gerundet", "Du hast output_tokens eingerechnet — used_percentage ist reine Eingabe: input_tokens + cache_creation_input_tokens + cache_read_input_tokens", "Du hast die falsche context_window_size verwendet"], answer: 1, explain: "used_percentage wird nur aus Eingabe-Tokens berechnet und schließt Ausgabe-Tokens aus. Übernimm diese Formel, sonst stimmt deine Zahl nicht mit der von Claude Code überein."},
+]} />
+
+<Callout type="takeaways" items={[
+  "Die Statusline ist nur ein Skript: Claude Code leitet die gesamte Sitzung als JSON auf stdin und stellt dar, was das Skript auf stdout ausgibt. Sie läuft lokal und kostet keine Tokens.",
+  "/statusline mit einer Beschreibung in natürlicher Sprache schreibt das Skript und verdrahtet die Einstellungen für dich. Die manuelle Form ist ein statusLine-Block mit type, command und den optionalen padding, refreshInterval und hideVimModeIndicator.",
+  "Von den rund sechzig Feldern verdienen eine Handvoll ihren Platz: model.display_name, context_window.used_percentage, das Verzeichnis oder der Worktree, rate_limits.five_hour.used_percentage und — in langen Sitzungen — prompt_cache.",
+  "Ereignisgesteuert mit 300 ms Debounce. Eine Hauptsitzung im Leerlauf löst keine Ereignisse aus, daher brauchen zeitbasierte oder extern bezogene Segmente refreshInterval. Ein neuer Auslöser BRICHT ein laufendes Skript AB, also halte es schnell.",
+  "Schütze jedes Feld mit // empty oder // 0: current_usage ist vor dem ersten API-Aufruf und direkt nach /compact null, und prompt_cache und spend_limit fehlen bis zur ersten API-Antwort.",
+  "used_percentage ist nur Eingabe (frische Eingabe + Cache-Schreibvorgänge + Cache-Lesevorgänge). Übernimm diese Formel, wenn du es selbst berechnest.",
+  "tput cols kann das Terminal aus dem Skript heraus nicht sehen — lies COLUMNS und LINES, die Claude Code vor jedem Lauf setzt.",
+  "Ein prompt_cache-Segment ist die wirkungsvollste ungewöhnliche Ergänzung: warm plus hit_ratio verraten dir, ob dein Präfix gecacht wird, und last_miss_cause.causes benennt, was es gebrochen hat.",
+]} />
+
+## Weiter
+
+- [Kontextverwaltung](/docs/claude-code/context-management) — was der Prozentwert, den du gerade auf den Bildschirm gebracht hast, tatsächlich bedeutet und wie du darauf reagierst
+- [Prompt Caching](/docs/api/prompt-caching) — warum sich ein Blick auf `hit_ratio` lohnt und was ein gecachtes Präfix zerstört
+- [settings.json](/docs/claude-code/settings) — wo der `statusLine`-Block liegt und welche Ebene gewinnt
+- [Git-Worktrees](/docs/claude-code/worktrees) — die Funktion, die `workspace.git_worktree` und `worktree.*` beschreiben

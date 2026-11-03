@@ -1,0 +1,116 @@
+# Generating Real Files (docx/pptx/xlsx/pdf)
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-app/generating-files · AILmanac (CC BY 4.0) · last verified 2026-10-20
+
+Claude writes and runs code in a sandbox to hand you a finished Word doc, deck, spreadsheet or PDF. How to brief one, the 30MB ceiling, the toggle you have to turn on, and the prompt-injection risk that comes with giving a model a computer.
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-10-20" source="https://support.claude.com/en/articles/12111783-create-and-edit-files-with-claude">
+Per Anthropic's Help Center: *"Code execution and file creation is available to all Claude users (Free, Pro, Max, Team, and Enterprise) on the web, Claude Desktop, and Claude Mobile."* Claude can create **.xlsx, .pptx, .docx and PDF** files, with a ceiling of **30MB per file for both uploads and downloads**. On Free, Pro and Max you must turn it on yourself in **Settings → Capabilities**; on Team and Enterprise an owner controls it in organization settings. These controls change — confirm in the Help Center.
+</VerifyNote>
+
+Beyond text on screen, Claude can produce **real, downloadable files** — Word documents, PowerPoint decks, Excel spreadsheets, PDFs — formatted and ready to use. The mechanism is worth knowing, because it explains both the power and the risk: Claude is **writing and running code in a sandboxed computing environment**, then handing you what the code produced.
+
+<Callout type="objectives" items={[
+  "Turn the capability on, and know which surfaces and plans have it",
+  "Brief a file so the first attempt is usable instead of the third",
+  "Choose correctly between a generated file, a Claude Doc, and a dashboard",
+  "Stay inside the 30MB ceiling and know where the file can go",
+  "Understand the prompt-injection risk that comes with a sandbox, and how to limit it"
+]} />
+
+## Turn it on first
+
+<Steps items={[
+  {title: "Free, Pro and Max — flip the toggle", body: "Open Settings → Capabilities and switch on \"Code execution and file creation.\" If Claude keeps describing a spreadsheet instead of producing one, this is almost always why."},
+  {title: "Team and Enterprise — ask an owner", body: "The capability is controlled centrally in organization settings. An individual member cannot enable it for themselves."},
+  {title: "Check your surface", body: "It works on Claude on the web, Claude Desktop and Claude Mobile. That makes it one of the few creation features that is not web-and-desktop only."}
+]} />
+
+## What you can ask for
+
+- **Word (.docx)** — reports, letters, proposals, formatted docs.
+- **PowerPoint (.pptx)** — slide decks from an outline or notes.
+- **Excel (.xlsx)** — spreadsheets with data, formulas, simple models.
+- **PDF** — print-ready versions of the above.
+
+Finished files can be **downloaded, or saved straight to Google Drive**.
+
+## File, Doc, or Dashboard?
+
+This is the choice people get wrong, and it got sharper once Claude Docs and Slides became [generally available on every plan](/docs/claude-app/one-claude-docs-and-slides).
+
+| You want | Reach for | Because |
+| --- | --- | --- |
+| A deliverable to hand off and never touch inside Claude again | **A generated file** (this page) | One-shot download. No URL, no collaborators, no comments. |
+| A document that will keep changing, with colleagues in it | **A Claude Doc or Slides** | Living artifact with a URL, real-time co-editing and comments. Exports to a file when you are done. |
+| Numbers that stay current as the data changes | **A Claude Dashboard** | Each chart is backed by a live query, not a snapshot. See [Dashboards & Motion](/docs/claude-app/dashboards-and-motion). |
+
+A useful rule: **if you would be annoyed to re-download it next week, you wanted a Doc.**
+
+## How to get a good file
+
+<Steps items={[
+  {title: "Describe the deliverable, not the topic", body: "Type, audience, length, sections, tone. \"A deck about pricing\" produces guesswork; \"six slides for a board meeting, one chart per slide, no bullet lists\" produces a draft you can edit."},
+  {title: "Provide the content or the source", body: "Paste the notes, attach the data, or give the outline — or ask Claude to draft the content first and only then ask for the file. Two steps beats one muddled one."},
+  {title: "Refine in chat, export last", body: "It is far easier to fix a structure in conversation than inside the finished .pptx. Iterate on the outline, then ask for the file."},
+  {title: "Verify every computed number", body: "A spreadsheet Claude built can contain a formula that is subtly wrong, and a confident-looking total is the hardest error to notice. Spot-check the cells that matter — see Hallucinations."}
+]} />
+
+<PromptCard title="A file brief with enough structure to land first time">{`Turn these notes into a 6-slide investor update deck (.pptx).
+
+Slides, in order: traction, revenue, roadmap, team, the ask, appendix.
+Audience: existing seed investors, read on a laptop, not presented live.
+
+Rules:
+- One idea per slide. No slide gets more than 25 words of body text.
+- Revenue slide: a single chart, monthly, last 12 months.
+- Clean and minimal: one accent color, no stock imagery, no icons.
+- Use only numbers from my notes. If a figure I need isn't there,
+  leave the placeholder [TBD] and list what's missing at the end.
+
+Notes:
+[paste your notes here]`}</PromptCard>
+
+That last rule is the one that saves you. Without it, a missing figure gets filled in with something plausible; with it, you get a list of gaps. Never ship figures from a generated spreadsheet you have not checked — see [Hallucinations](/docs/foundations/hallucinations).
+
+## The limits worth knowing
+
+<Callout type="warning" items={[
+  "30MB per file, both directions. That is the ceiling for what you upload and for what Claude hands back. Large datasets need to be sampled, aggregated, or split before they go in.",
+  "It runs real code in a sandbox. Claude gets \"a sandboxed computing environment\" — an isolated container, separate from your systems. That is what makes a working Excel formula possible, and it is also an attack surface.",
+  "Network access is a setting, not a given. The configurations range from disabled (pre-installed packages only), to package managers only — the default for Team and Enterprise — to specific allowed domains, to all domains except a legal blocklist. Which one you are on changes what Claude can fetch mid-task.",
+  "Prompt injection is the real risk here. Anthropic's own warning: it is possible for a bad actor to inconspicuously add instructions via external files or websites that trick Claude into running malicious code or leaking data. Their guidance is to monitor Claude while it uses the feature and stop it if you see it touching data unexpectedly."
+]} />
+
+The practical habit: **treat any file or URL you did not write as untrusted input.** Be especially careful when a single request both reads an external document *and* has network access — that is the combination that turns a hidden instruction into exfiltration. The same reasoning, in depth, is on [Prompt Injection](/docs/security/prompt-injection) and [Reviewing Third-Party Code](/docs/security/reviewing-third-party-code).
+
+## Under the hood
+
+These capabilities are powered by [Skills](/docs/claude-code/skills) — the same mechanism you can author yourself. Knowing that is useful in two ways: it explains why file output quality improves without any model release, and it means a house style you keep re-explaining can be captured once as a skill instead of pasted into every prompt.
+
+## Quiz
+
+<Quiz questions={[
+  {q: "You ask Claude for an .xlsx on the Pro plan and it describes the spreadsheet in text instead of producing a file. What's the most likely cause?", options: ["File creation is Max, Team and Enterprise only", "\"Code execution and file creation\" is switched off in Settings → Capabilities", "Spreadsheets have to be requested from Claude Desktop", "The conversation is too long"], answer: 1, explain: "File creation is available to all plans — Free, Pro, Max, Team and Enterprise — on web, Desktop and Mobile, but on Free, Pro and Max you have to enable \"Code execution and file creation\" yourself in Settings → Capabilities. On Team and Enterprise, an owner controls it centrally."},
+  {q: "You need a quarterly report that your team will keep editing together for the next three weeks. What should you ask for?", options: ["A generated .docx — it's the real deliverable format", "A Claude Doc, and export to .docx when it's final", "A Claude Dashboard", "A PDF, then re-generate it after each change"], answer: 1, explain: "A generated file is a one-shot download with no URL, collaborators or comments. A Claude Doc is a living artifact with real-time co-editing that exports to Word, PDF, Markdown or Google Docs once the content settles. Reach for a file only when you are done changing it."},
+  {q: "What's the stated file size ceiling for file creation?", options: ["10MB per file", "30MB per file, for uploads and downloads", "100MB per conversation", "There is no documented limit"], answer: 1, explain: "The documented maximum is 30MB per file, and it applies in both directions — what you upload and what Claude produces. Large source data needs sampling or aggregation before it goes in."},
+  {q: "Why does Anthropic warn you to monitor Claude while it creates files?", options: ["Because generated files can exceed your usage limit without warning", "Because the sandbox has access to your local filesystem", "Because an external file or website can carry hidden instructions that trick Claude into running malicious code or leaking data", "Because formulas in .xlsx files are generated without validation"], answer: 2, explain: "The feature gives Claude a sandboxed environment that runs real code, and Anthropic flags that a bad actor can inconspicuously embed instructions in an external file or website. Their guidance is to watch the run and stop it if Claude starts using or accessing data unexpectedly. The sandbox is isolated from your own systems — the risk is injected instructions, not local filesystem access."}
+]} />
+
+<Callout type="takeaways" items={[
+  "File creation is on every plan and every surface — web, Desktop and Mobile — but Free, Pro and Max users have to enable it in Settings → Capabilities first.",
+  "It works by writing and running code in an isolated sandbox. That's why Excel formulas actually compute, and why the security guidance exists.",
+  "Brief the deliverable, not the topic: type, audience, length, structure, and an explicit rule that gaps are reported rather than invented.",
+  "Choose deliberately: a file is a one-shot download, a Claude Doc is a living document, a Dashboard is a live query. Picking wrong costs you a rebuild.",
+  "30MB per file, both directions. Sample or aggregate anything larger before it goes in.",
+  "Treat any external file or URL as untrusted input, and watch the run — hidden instructions are the documented risk, and they are worst when network access is wide open."
+]} />
+
+## Next
+
+- [Claude Dashboards & Claude Motion](/docs/claude-app/dashboards-and-motion) — when you need live numbers rather than a snapshot
+- [One Claude: The Merge, Claude Docs & Claude Slides](/docs/claude-app/one-claude-docs-and-slides) — the living-document alternative to a download
+- [Artifacts: Live, Runnable Outputs](/docs/claude-app/artifacts) — the panel everything renders into
+- [Writing & Content Creation](/docs/playbooks/writing) · [Business, Marketing & Strategy](/docs/playbooks/business)

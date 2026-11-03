@@ -1,0 +1,201 @@
+# Wie das Gedächtnis von Agenten wirklich funktioniert
+
+> Source: https://derob98.github.io/ailmanac/de/docs/frontiers/agent-memory-architectures · AILmanac (CC BY 4.0) · last verified 2026-07-03
+
+Das Kontextfenster ist kein Gedächtnis. Ein Feldführer zum Agenten-Gedächtnis im Jahr 2026 — Arbeits-, episodisches, semantisches und prozedurales Gedächtnis; die Speichermuster (Full-Context, Vector, Knowledge-Graph, Compaction); und wie Claude, ChatGPT und Gemini es jeweils umsetzen.
+
+<LevelBadge level="intermediate" />
+
+# Wie das Gedächtnis von Agenten wirklich funktioniert
+
+Stelle einem Chatbot dieselbe Frage zweimal in zwei Sitzungen, und er antwortet beide Male wie ein Fremder. Das ist kein Bug — es ist der Standard. Ein reines Sprachmodell hat kein Gedächtnis zwischen den Aufrufen. Alles, woran es sich innerhalb einer Konversation "erinnert", lebt im Kontextfenster, und wenn diese Konversation endet, ist es weg.
+
+**Gedächtnis** ist die Maschinerie, die du daraufsetzt, um das zu beheben: die Systeme, die entscheiden, was ein Agent mitnehmen soll, wo er es speichert und wie er das richtige Stück im richtigen Moment zurückholt. Im Jahr 2026 hörte das auf, eine Nebenquest zu sein, und wurde zu einem erstklassigen Bestandteil des Agenten-Designs, mit eigenen Benchmarks, Frameworks und einer echten Forschungsliteratur. Diese Seite ist die Landkarte.
+
+<Callout
+  type="objectives"
+  items={[
+    "Verstehen, warum ein Kontextfenster kein Gedächtnis ist — und wo die Grenze tatsächlich verläuft",
+    "Die vier Gedächtnistypen unterscheiden, die Agenten nutzen: Arbeits-, episodisches, semantisches, prozedurales Gedächtnis",
+    "Die vier Speichermuster vergleichen: Full-Context, Vector/RAG, Knowledge-Graph und Compaction/Zusammenfassung",
+    "Sehen, wie Claude, ChatGPT und Gemini Gedächtnis heute jeweils umsetzen",
+    "Einen Gedächtnisansatz für den eigenen Agenten wählen, ohne ihn zu überkonstruieren"
+  ]}
+/>
+
+<VerifyNote lastVerified="2026-07-03" source="https://arxiv.org/abs/2402.17753">
+Die Taxonomie und die Speichermuster unten sind stabil, aber die Framework-Landschaft (Mem0, Letta, Zep, LangMem, Cognee) und die Benchmark-Ranglisten bewegen sich monatlich. Behandle konkrete Scores und Produktfeatures als Momentaufnahmen — prüfe die verlinkten Quellen erneut, bevor du eine Zahl zitierst.
+</VerifyNote>
+
+## Die eine Idee, an der man festhalten sollte: Kontext ≠ Gedächtnis
+
+Die häufigste Verwechslung ist, ein großes Kontextfenster als "Gedächtnis" zu behandeln. Ist es nicht. Das Kontextfenster ist **Arbeitsraum für einen Zug** — es wird bei jedem Aufruf von Grund auf neu befüllt, es ist endlich und es ist teuer. Die Aufmerksamkeit lässt zudem über das Fenster hinweg nach (der "Lost in the Middle"-Effekt, der in [Context Engineering](/docs/frontiers/context-engineering) behandelt wird).
+
+Gedächtnis ist auf drei Weisen anders:
+
+| | Kontextfenster | Gedächtnis |
+| --- | --- | --- |
+| **Lebensdauer** | Eine Anfrage | Über Sitzungen, Tage, für immer |
+| **Größe** | Feste Token-Obergrenze | Praktisch unbegrenzt (externer Speicher) |
+| **Kosten** | Bei jedem einzelnen Zug bezahlt | Einmal zum Schreiben bezahlt; günstig zu referenzieren |
+| **Zugriff** | Alles, immer im Blick | Selektiv — nur abrufen, was relevant ist |
+
+Das ganze Spiel des Agenten-Gedächtnisses besteht darin, **die richtige Information zwischen diesen beiden zu verschieben**: dauerhafte Fakten *aus* dem Fenster hinausschreiben, damit du nicht bei jedem Zug für sie bezahlst, und sie nur dann wieder *hineinholen*, wenn dieser konkrete Schritt sie braucht. Bring diesen Fluss richtig hin, und ein Agent kann wochenlang auf einem Kontextfenster operieren, das immer nur ein paar Tausend relevante Tokens enthält.
+
+## Die vier Arten von Gedächtnis
+
+In (loser) Anlehnung an die Kognitionswissenschaft hat sich das Agenten-Ökosystem 2026 auf vier Kategorien geeinigt. Du brauchst selten alle vier — aber sie zu benennen hält dich davon ab, einen einzigen Klumpen zu bauen, der alles schlecht macht.
+
+<Steps
+  items={[
+    {title: "Arbeitsgedächtnis", body: "Was gerade im Kontextfenster ist — die aktuelle Aufgabe, die letzten paar Züge, die Tool-Ergebnisse dieses Schritts. Per Design flüchtig. Das ist der Notizblock, nicht das Archiv. Es gut zu verwalten ist Context Engineering; es ist keine Persistenz."},
+    {title: "Episodisches Gedächtnis", body: "Konkrete Dinge, die passiert sind, mit einem Zeitstempel. 'Am Dienstag sagte der Nutzer, der Checkout sei kaputt; am Mittwoch markierte der Support es als gelöst.' Episodisches Gedächtnis ist von Natur aus zeitlich — die Reihenfolge und das Wann sind wichtig. Es ist das, was einem Agenten erlaubt, über eine Geschichte statt über eine Momentaufnahme nachzudenken."},
+    {title: "Semantisches Gedächtnis", body: "Dauerhafte Fakten und Präferenzen, losgelöst davon, wann du sie gelernt hast. 'Der Nutzer bevorzugt metrische Einheiten.' 'Dieser Kunde ist im Enterprise-Plan.' Semantisches Gedächtnis ist weitgehend atemporal — es repräsentiert, was der Agent für derzeit wahr hält, nicht das Ereignis, bei dem er es herausfand."},
+    {title: "Prozedurales Gedächtnis", body: "Wie man etwas tut — wiederverwendbare Fähigkeiten, Workflows und erlernte Routinen. In der Praxis das am wenigsten ausgereifte der vier. In Tools wie Claude Code lebt das oft als Instruktionsdateien (CLAUDE.md) und wiederverwendbare Skills statt als automatischer Speicher."}
+  ]}
+/>
+
+Ein nützlicher Test: Wenn du mit *"wann ist das passiert?"* antworten würdest, ist es **episodisch**; wenn du mit *"was ist wahr?"* antworten würdest, ist es **semantisch**; wenn du mit *"so geht's"* antworten würdest, ist es **prozedural**; und wenn es nur für die nächsten paar Sekunden von Bedeutung ist, ist es **Arbeitsgedächtnis** und muss überhaupt nicht persistiert werden.
+
+## Die vier Speichermuster
+
+Sobald du weißt, *was* du dir merken willst, wählst du, *wie* du es speicherst und abrufst. Es gibt vier dominante Muster, grob in der Reihenfolge der Komplexität. Die meisten realen Systeme kombinieren zwei oder drei.
+
+### 1. Full-Context (alles reinstopfen)
+
+Behalte die gesamte Historie und schicke sie bei jedem Zug erneut. Null Infrastruktur, perfekte Erinnerung — bis du an die Token-Obergrenze, die Kostenkurve oder "Lost in the Middle" stößt. In Ordnung für kurze Assistenten; eine Sackgasse für alles Langlaufende. Das ist die Grundlinie, die jedes andere Muster verbessert.
+
+### 2. Vector-/RAG-Gedächtnis
+
+Schreibe jede Erinnerung als Embedding in eine Vektordatenbank; zur Abfragezeit embeddest du den aktuellen Zug und rufst die Top-k ähnlichsten Erinnerungen ab. Das ist [Retrieval-Augmented Generation](/docs/foundations/rag), auf die Konversationshistorie statt auf Dokumente gerichtet. Günstig, skalierbar und der Standard für die semantische Wiedergabe von Fakten und Präferenzen.
+
+Seine Schwäche: Ähnlichkeit ≠ Relevanz bei **zeitlichen** oder **mehrstufigen** (multi-hop) Fragen. "Was haben wir *nachdem* das Budget gekürzt wurde entschieden?" ist eine Reihenfolgefrage, und die Kosinus-Ähnlichkeit hat keinen Sinn für Zeit oder dafür, zwei Fakten miteinander zu verketten.
+
+### 3. Knowledge-Graph-Gedächtnis
+
+Speichere Erinnerungen als **Entitäten und Beziehungen** — Knoten und Kanten, oft mit Zeitstempeln an den Kanten. Um eine Frage zu beantworten, durchläufst du den Graphen, statt Vektoren unscharf abzugleichen. Das ist es, was mehrstufiges und zeitliches Schlussfolgern handhabbar macht ("wer ersetzte die Person, die den Account besaß, über den sich der Nutzer beschwerte?"). Frameworks wie Zep/Graphiti bauten ihren gesamten Pitch um temporale Knowledge Graphs. Der Preis ist echte Entwicklungsarbeit: Extraktion, Entitätsauflösung und den Graphen davor bewahren, zu verrotten.
+
+### 4. Compaction & Zusammenfassung
+
+Komprimiere periodisch die laufende Historie in eine destillierte Zusammenfassung und mach von dort aus weiter — und tausche wortgetreue Erinnerung gegen ein kleineres, günstigeres Fenster. Das ist es, was `/compact` in Claude Code tut, und was "Auto-Summary" in vielen Chat-Produkten tut. Es ist die günstigste Form des Langzeitgedächtnisses und oft die erste, die du tatsächlich brauchst. Sein Risiko: Die Zusammenfassung lässt still das eine Detail fallen, das du gebraucht hättest. Siehe [Long-Running Agent Harnesses](/docs/frontiers/long-running-agent-harnesses) dafür, wie sich das über stundenlange Läufe hinweg auswirkt.
+
+<Callout type="tip">
+Reale Systeme schichten diese. Ein üblicher 2026er-Stack: <strong>Compaction</strong> für die laufende Konversation, <strong>Vector</strong> für semantische Fakten und ein <strong>Graph</strong> obendrauf nur dann, wenn zeitliche/mehrstufige Abfragen tatsächlich in deinem Traffic auftauchen. Bau den Graphen nicht, bevor du den Schmerz spürst, den der Graph löst.
+</Callout>
+
+## Wie die großen drei es machen
+
+Jeder große Assistent liefert inzwischen irgendein Gedächtnis mit. Sie sind nicht dasselbe, und die Unterschiede sind wichtig.
+
+| Produkt | Was es sich merkt | Wie es funktioniert (grob) |
+| --- | --- | --- |
+| **Claude** | Zwei Ebenen: ein App-Level-Gedächtnis deiner Präferenzen und ein entwicklerseitiges **Memory-Tool** für Agenten. | Das [Claude App Memory](/docs/claude-app/memory) speichert Fakten über Chats hinweg; das API-[Memory-Tool plus Context Editing](/docs/api/memory-and-context-editing) lässt einen Agenten Notizen in einen clientseitigen Speicher schreiben und veraltete Tool-Ergebnisse automatisch beschneiden, um lange Läufe zu überstehen. |
+| **ChatGPT** | "Gespeicherte Erinnerungen" (explizite Fakten) plus Bezug auf deine vergangenen Chats. | Eine Mischung aus vom Nutzer angegebenen Fakten und automatisch extrahierten Präferenzen, die in späteren Zügen in den Systemkontext eingespeist werden. Vom Nutzer bearbeitbar und umschaltbar. |
+| **Gemini** | Persönlicher Kontext, gezogen aus deinen Chats und, optional, aus der breiteren Google-Account-Oberfläche. | Ruft Details aus vorherigen Konversationen ab und kann mithilfe des Account-Kontexts personalisieren, vorbehaltlich deiner Datenschutzeinstellungen. |
+
+Zwei Erkenntnisse. Erstens: **Consumer-Gedächtnis ist meist semantisch** — Präferenzen und Fakten — kein vollständiges episodisches Wiederabspielen. Zweitens: Wenn du einen Agenten *baust*, ist das eingebaute Gedächtnis des Produkts nicht dein Gedächtnissystem; diese Ebene gehört dir, mithilfe von Primitiven wie Claudes Memory-Tool oder einem externen Framework.
+
+<PromptCard title="Ein reines Modell in einen notizenmachenden Agenten verwandeln (das günstigste echte Gedächtnis)">
+{`You have a file called MEMORY.md that persists between our sessions.
+
+At the END of each session, append any durable facts worth keeping:
+- my stable preferences (tools, formats, style)
+- decisions we made and WHY
+- open threads to resume next time
+
+At the START of each session, read MEMORY.md first and use it.
+Keep it under 30 lines — when it grows past that, consolidate and
+delete anything stale. Never store secrets or credentials.`}
+</PromptCard>
+
+Dieses eine Muster — dauerhafte Notizen in eine externe Datei schreiben, sie beim nächsten Mal zurücklesen — ist das 80/20 des Agenten-Gedächtnisses. Die meiste Framework-Maschinerie weiter unten ist eine automatischere, skalierbarere Version genau dessen.
+
+## Gedächtnis messen: der LoCoMo-Benchmark
+
+Du kannst nicht verbessern, was du nicht messen kannst, und Gedächtnis war schwer zu messen, bis die Benchmarks kamen. Der meistzitierte ist **LoCoMo** ("Evaluating Very Long-Term Conversational Memory of LLM Agents"): sehr lange Multi-Session-Konversationen — Hunderte Züge über Dutzende Sitzungen hinweg — mit Frage-Antwort-Paaren in fünf Geschmacksrichtungen: Single-Hop, Multi-Hop (sitzungsübergreifend), zeitliches Schlussfolgern, Open-Domain und adversarial.
+
+Was LoCoMo enthüllt, ist das Muster, um das herum man entwerfen sollte: Systeme schlagen sich bei Single-Hop-Faktenwiedergabe gut und **fallen bei zeitlichen und mehrstufigen** Fragen auseinander. Genau dieser Fehlermodus ist der Grund, warum Knowledge-Graph-Gedächtnis existiert — es ist das Muster, das diese beiden Kategorien am meisten hebt. Wenn du das Gedächtnis deines eigenen Agenten evaluierst, gewichte die Multi-Hop- und zeitlichen Fälle stark; Single-Hop-Wiedergabe schmeichelt fast allem.
+
+<VerifyNote lastVerified="2026-07-03" source="https://snap-research.github.io/locomo/">
+LoCoMo ist die akademische Standardreferenz (arXiv 2402.17753). Anbieter-Ranglisten, die konkrete LoCoMo-Scores behaupten, bewegen sich schnell und sind oft selbstberichtet — verifiziere gegen die Methodik des Papers, bevor du eine Schlagzeilenzahl als Fakt behandelst.
+</VerifyNote>
+
+## Einen Ansatz wählen, ohne zu überkonstruieren
+
+<Steps
+  items={[
+    {title: "Kurzer Assistent, eine Sitzung?", body: "Tu nichts. Arbeitsgedächtnis (das Kontextfenster) reicht aus. Hier einen Gedächtnisspeicher hinzuzufügen ist reiner Overhead."},
+    {title: "Soll er sich sitzungsübergreifend an mich erinnern?", body: "Beginne mit Notizenmachen in eine externe Datei oder mit dem eingebauten Gedächtnis des Produkts. Das deckt die meisten 'erinnere dich an meine Präferenzen'-Bedürfnisse zu nahezu null Kosten ab."},
+    {title: "Wachsende Historie, die das Fenster sprengt?", body: "Füge Compaction/Zusammenfassung hinzu. Behalte die tragenden Fakten, lass das Zug-für-Zug-Protokoll fallen. Hier leben langlaufende Agenten."},
+    {title: "Fakten aus einer großen Historie abrufen?", body: "Füge Vector-/RAG-Gedächtnis hinzu. Rufe pro Zug die Top-k relevanten Erinnerungen ab, statt alles erneut zu schicken."},
+    {title: "Zeitliche oder mehrstufige Fragen scheitern?", body: "Erst jetzt greif zu einem Knowledge Graph — oder zu einem verwalteten Framework (Mem0, Letta, Zep, LangMem), das dir einen gibt, ohne Extraktion und Entitätsauflösung selbst zu bauen."}
+  ]}
+/>
+
+Die Falle ist, bei Schritt fünf anzufangen. Graph-Gedächtnis ist in Demos beeindruckend und in der Produktion teuer. Erklimme die Leiter; halte an der ersten Sprosse an, die dein tatsächliches Problem löst.
+
+<Quiz
+  questions={[
+    {
+      q: "Warum ist ein großes Kontextfenster nicht dasselbe wie Agenten-Gedächtnis?",
+      options: [
+        "Kontextfenster sind langsamer zu lesen als Gedächtnis",
+        "Das Kontextfenster wird bei jedem Zug von Grund auf neu befüllt, ist endlich und wird bei jedem Aufruf bezahlt — Gedächtnis persistiert günstig außerhalb davon",
+        "Gedächtnis kann nur Text speichern, während Kontextfenster auch Bilder speichern",
+        "Es gibt keinen echten Unterschied; 'Gedächtnis' ist nur Marketing für ein größeres Fenster"
+      ],
+      answer: 1,
+      explain: "Das Fenster ist Arbeitsraum für einen Zug — flüchtig, größenbegrenzt und bei jeder Anfrage erneut bezahlt. Gedächtnis ist ein externer Speicher: einmal geschrieben, günstig referenziert und über Sitzungen hinweg persistent. Die Kernfähigkeit besteht darin, die richtigen Fakten zwischen den beiden zu verschieben."
+    },
+    {
+      q: "Ein Nutzer fragt: 'Was haben wir direkt nach der Budgetkürzung entschieden?' Welcher Gedächtnisansatz beantwortet das am wahrscheinlichsten korrekt?",
+      options: [
+        "Reine Vector-/RAG-Ähnlichkeitssuche",
+        "Full-Context-Reinstopfen mit einer Zusammenfassung obendrauf",
+        "Knowledge-Graph-Gedächtnis mit Zeitstempeln an den Beziehungen",
+        "Prozedurales Gedächtnis"
+      ],
+      answer: 2,
+      explain: "Das ist eine zeitliche, mehrstufige Frage — 'nach X' und das Verketten zweier Ereignisse. Die Kosinus-Ähnlichkeit hat keinen Sinn für Reihenfolge. Zeitgestempelte Graphtraversierung ist das Muster, das genau dafür gebaut ist, weshalb Graph-Gedächtnis LoCoMos zeitliche und mehrstufige Kategorien am meisten hebt."
+    },
+    {
+      q: "Welche Einordnung ist korrekt für 'der Nutzer bevorzugt metrische Einheiten'?",
+      options: [
+        "Episodisches Gedächtnis — es passierte zu einem Zeitpunkt",
+        "Arbeitsgedächtnis — es wird nur für diesen Zug gebraucht",
+        "Semantisches Gedächtnis — ein atemporaler Fakt darüber, was derzeit wahr ist",
+        "Prozedurales Gedächtnis — es ist eine Fähigkeit"
+      ],
+      answer: 2,
+      explain: "Es ist ein dauerhafter Fakt, losgelöst davon, wann du ihn gelernt hast — die Definition von semantischem Gedächtnis. Wäre die Frage 'wann hat mir der Nutzer gesagt, dass er metrisch bevorzugt?', wäre das episodisch."
+    },
+    {
+      q: "Du baust einen kurzen Helfer-Bot für eine einzelne Sitzung. Was ist das richtige Gedächtnisdesign?",
+      options: [
+        "Ein zeitgestempelter Knowledge Graph von Tag eins an, zur Zukunftssicherung",
+        "Nichts über das Kontextfenster hinaus — einen Speicher hinzuzufügen ist unnötiger Overhead",
+        "Eine Vektordatenbank, geimpft mit jedem möglichen Fakt",
+        "Vollständige episodische + semantische + prozedurale Speicher parallel"
+      ],
+      answer: 1,
+      explain: "Erklimme die Leiter nur so weit, wie dein Problem es erfordert. Das Arbeitsgedächtnis eines Single-Session-Bots ist das Kontextfenster selbst. Hier Persistenz zu bauen fügt Kosten und Fehlermodi ohne Gegenwert hinzu."
+    }
+  ]}
+/>
+
+<Flashcards title="Vokabular des Agenten-Gedächtnisses" cards={[{front: "Arbeitsgedächtnis", back: "Was gerade im Kontextfenster ist — der Notizblock des aktuellen Zugs. Flüchtig, bei jedem Aufruf erneut bezahlt, keine Persistenz."}, {front: "Episodisches Gedächtnis", back: "Konkrete zeitgestempelte Ereignisse. 'Am Dienstag sagte der Nutzer X.' Zeitlich — die Reihenfolge und das Wann sind wichtig."}, {front: "Semantisches Gedächtnis", back: "Dauerhafte, atemporale Fakten und Präferenzen. 'Der Nutzer bevorzugt metrisch.' Was der Agent für derzeit wahr hält."}, {front: "Prozedurales Gedächtnis", back: "Wie man etwas tut — wiederverwendbare Fähigkeiten und Workflows. Am wenigsten ausgereift; lebt oft als Instruktionsdateien / Skills."}, {front: "Vector-/RAG-Gedächtnis", back: "Erinnerungen als Embeddings speichern, Top-k nach Ähnlichkeit abrufen. Großartig für Fakten; schwach bei zeitlich und mehrstufig."}, {front: "Knowledge-Graph-Gedächtnis", back: "Entitäten + zeitgestempelte Beziehungen, die du durchläufst. Löst mehrstufige und zeitliche Fragen; kostet echte Entwicklungsarbeit."}, {front: "Compaction", back: "Die Historie periodisch zusammenfassen und von der destillierten Version aus weitermachen. Günstigstes Langzeitgedächtnis; riskiert, ein gebrauchtes Detail fallen zu lassen."}, {front: "LoCoMo", back: "Der Standard-Benchmark für Langzeit-Konversationsgedächtnis. Systeme bestehen Single-Hop-Wiedergabe und scheitern zeitlich/mehrstufig — entwirf danach."}]} />
+
+## Das Fazit
+
+Gedächtnis ist nicht ein Feature, das du einschaltest — es ist ein **Fluss, den du entwirfst**: was das Fenster verlässt, wo es gespeichert wird und wie es zurückkommt. Benenne die vier Gedächtnistypen, damit du nicht einen einzigen Klumpen für alle baust. Beginne beim günstigsten Speichermuster, das dein Problem löst, und klettere erst weiter, wenn du den Schmerz des nächsten spürst. Und miss mit zeitlichen und mehrstufigen Fällen, denn Single-Hop-Wiedergabe lässt alles klüger aussehen, als es ist.
+
+Gedächtnis ist die andere Hälfte von [Context Engineering](/docs/frontiers/context-engineering): Context Engineering entscheidet, was das Fenster *in diesem Zug* füllt; Gedächtnis entscheidet, was *zwischen* den Zügen überlebt. Zusammen sind sie es, was einen Chatbot von einem Agenten unterscheidet, der besser wird, je länger du mit ihm arbeitest.
+
+## Quellen & weiterführende Lektüre
+
+- [Evaluating Very Long-Term Conversational Memory of LLM Agents (LoCoMo)](https://arxiv.org/abs/2402.17753) — der kanonische Benchmark; [Projektseite](https://snap-research.github.io/locomo/).
+- [Effective context engineering for AI agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) — Anthropic über Compaction, Notizenmachen und Just-in-Time-Retrieval.
+- [Claude memory tool & context editing docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool) — das entwicklerseitige Primitiv.
+- [Agent Memory Techniques](https://github.com/NirDiamant/Agent_Memory_Techniques) — 30 lauffähige Notebooks zu Konversationspuffern, Vector Stores, Knowledge Graphs, episodischem/semantischem Gedächtnis, Mem0, Letta, Zep, Graphiti und LoCoMo.
+- [The State of AI Agent Memory 2026](https://mem0.ai/blog/state-of-ai-agent-memory-2026) — Anbieterbericht über Gedächtnisarchitekturen und Benchmarks (mit der üblichen Vorsicht vor selbstberichteten Zahlen lesen).
+- Verwandtes auf AILmanac: [Context Engineering](/docs/frontiers/context-engineering) · [Long-Running Agent Harnesses](/docs/frontiers/long-running-agent-harnesses) · [RAG](/docs/foundations/rag) · [Claude app memory](/docs/claude-app/memory) · [Memory & Context Editing (API)](/docs/api/memory-and-context-editing).

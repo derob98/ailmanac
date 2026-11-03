@@ -1,0 +1,86 @@
+# Конфигурация MCP и каркасы серверов
+
+> Source: https://derob98.github.io/ailmanac/ru/docs/templates/mcp-config · AILmanac (CC BY 4.0) · last verified 2026-08-10
+
+.mcp.json плюс минимальные стартеры stdio- и удалённого сервера.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-10" source="https://modelcontextprotocol.io">
+Ключи конфигурации MCP и API SDK меняются — сверяйтесь с официальной документацией MCP и документацией MCP для Claude Code.
+</VerifyNote>
+
+Готовые к копированию стартеры для подключения Claude к инструментам через [MCP](/docs/claude-code/mcp). Оставьте только то, что вам нужно.
+
+## `.mcp.json` — объявление серверов (общее для проекта)
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "${DATABASE_URL}"]
+    }
+  }
+}
+```
+
+:::warning[Не храните секреты в файле]
+Ссылайтесь на переменные окружения (`${GITHUB_TOKEN}`) — не зашивайте токены жёстко в закоммиченный файл.
+:::
+
+## Минимальный stdio-сервер (TypeScript)
+
+Крошечный сервер, предоставляющий один инструмент. Адаптируйте обработчик под свои данные.
+
+```ts
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { z } from "zod";
+
+const server = new McpServer({ name: "echo", version: "1.0.0" });
+
+server.registerTool(
+  "echo",
+  {
+    description: "Echo back the provided text",
+    inputSchema: z.object({ text: z.string().describe("Text to echo back") }),
+  },
+  async ({ text }) => ({ content: [{ type: "text", text: `You said: ${text}` }] }),
+);
+
+await server.connect(new StdioServerTransport());
+```
+
+## Минимальный stdio-сервер (Python)
+
+```python
+from mcp.server import MCPServer
+
+mcp = MCPServer("echo")
+
+@mcp.tool()
+def echo(text: str) -> str:
+    """Echo the text back."""
+    return f"You said: {text}"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
+
+## Прежде чем выпускать сервер
+
+- **Минимум привилегий** — только те данные/действия, которые ему нужны ([Защита агентов](/docs/security/securing-agents)).
+- **Валидируйте входные данные**; возвращайте ошибки как результаты, не аварийно завершайтесь.
+- **Проверяйте сторонние серверы** перед подключением ([Проверка стороннего кода](/docs/security/reviewing-third-party-code)).
+
+## Дальше
+
+- [MCP-серверы в Claude Code](/docs/claude-code/mcp)
+- [Создание и подключение вашего первого MCP-сервера](/docs/walkthroughs/first-mcp-server)
+- [Рецепты хуков и settings.json](/docs/templates/hooks-settings)

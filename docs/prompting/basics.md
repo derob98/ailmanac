@@ -1,0 +1,71 @@
+# Prompting Basics
+
+> Source: https://derob98.github.io/ailmanac/docs/prompting/basics · AILmanac (CC BY 4.0)
+
+The clear-and-direct framework that gets you 80% of the way, on any AI.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={[
+  "The clear-and-direct framework — goal, audience, context, format, tone",
+  "Why most bad results are underspecified prompts, not a weak model",
+  "How to turn a vague request into a precise one, with a before/after",
+]} />
+
+Most "bad AI results" are really **underspecified prompts**. Fix the prompt and the output transforms — no tricks required. This is the foundation; everything in [Prompting](/docs/prompting) builds on it, and it transfers to any AI.
+
+## The one habit: be clear and direct
+
+Treat the model like a brilliant, literal new colleague who can't read your mind. Tell it five things:
+
+| Element | Ask yourself | Example |
+|---|---|---|
+| **Goal** | What do I actually want? | "Write a cold email…" |
+| **Audience** | Who is it for? | "…to a busy hospital procurement manager" |
+| **Context** | What does it need to know? | "We sell scheduling software; we save them ~6 hrs/week" |
+| **Format** | What shape should the output take? | "Under 120 words, 3 short paragraphs, one CTA" |
+| **Tone** | How should it sound? | "Professional, warm, not pushy" |
+
+Put together:
+
+> "Write a cold email to a busy hospital procurement manager. We sell scheduling software that saves them about 6 hours a week. Under 120 words, three short paragraphs, professional and warm but not pushy, ending with a single clear call to action."
+
+<PromptCard title="Cold email — clear & direct">{`Write a cold email to a busy hospital procurement manager. We sell scheduling software that saves them about 6 hours a week. Under 120 words, three short paragraphs, professional and warm but not pushy, ending with a single clear call to action.`}</PromptCard>
+
+That prompt will outperform "write a cold email" every time.
+
+## Five upgrades that punch above their weight
+
+1. **Show an example.** One sample of the style or format you want ("match the voice of this: …") teaches faster than describing it. This is *few-shot* prompting — see [Few-Shot Done Right](/docs/prompting).
+2. **Name the audience and the vocabulary.** "Review this the way a meticulous copy editor would" primes the right behaviour. Keep it thin — an invented biography ("world-class, 20 years' experience") adds nothing.
+3. **Ask for the thinking only when you want to read it.** Today's models reason internally before answering, so "think step by step" is usually redundant — ask for the reasoning when *you* need to audit it. Which classic tricks still pay: [Named Techniques, Judged](/docs/prompting/named-techniques).
+4. **Constrain the output.** "Reply with only the JSON, no preamble." "Exactly 5 bullets." Specific shapes are easier to use.
+5. **Iterate.** Your first prompt is a draft. Refine in plain language: "shorter," "more technical," "add a counterargument."
+
+## Anti-patterns to drop
+
+- ❌ **Keyword-ese** ("email customer discount") — you're not using a search engine. Write full sentences.
+- ❌ **Burying the ask** in a wall of context. Put the instruction up top *and* restate it at the end for long inputs.
+- ❌ **Vague quality words** ("make it good/professional") without saying what that means to you.
+- ❌ **Assuming it remembers** prior chats. By default it doesn't — see [Tokens, Context & Memory](/docs/foundations).
+
+## Try it now
+
+Build a structured prompt below, then copy it into Claude. Notice how naming the role, goal, format, and tone changes everything:
+
+<PromptBuilder />
+
+Then take a prompt you'd normally type, rebuild it here, and compare the two outputs side by side. That contrast is the whole lesson.
+
+<Quiz title="Check yourself" questions={[
+  {q: "What usually causes bad AI results?", options: ["The model is too small", "An underspecified prompt", "Not enough compute"], answer: 1, explain: "Most bad results are underspecified prompts — fix the prompt and the output transforms."},
+  {q: "Which is NOT one of the five things to specify?", options: ["Goal", "Audience", "Model temperature", "Format"], answer: 2, explain: "Goal, audience, context, format, and tone. Temperature is an API setting, not part of clear-and-direct prompting."},
+  {q: "How should you treat the model when prompting?", options: ["Like a mind-reader", "Like a brilliant but literal new colleague", "Like a search engine"], answer: 1, explain: "It can't read your mind — spell out what a literal new colleague would need to know."},
+]} />
+
+## Next
+
+- The reusable toolkit → [Prompt Patterns Library](/docs/prompting/pattern-library)
+- Set the rules once instead of every turn → [System Prompts](/docs/prompting/system-prompts)
+- What's genuinely different about Claude → [Prompting Claude Specifically](/docs/prompting/prompting-claude)
+- Grab-and-go → [Reusable Prompt Templates](/docs/templates/prompts)

@@ -1,0 +1,260 @@
+# Effort tuning: 5 levels, model defaults, and the cache trap
+
+> Source: https://derob98.github.io/ailmanac/docs/api/effort-tuning · AILmanac (CC BY 4.0) · last verified 2026-10-19
+
+The July 2026 effort parameter has five levels — low, medium, high, xhigh, max — and lives inside output_config, not at the top level. It affects tool calls (not just thinking), invalidates prompt cache when changed mid-conversation, and each model has a different recommended starting point. The practical tuning guide.
+
+<LevelBadge level="intermediate" />
+
+On **22 July 2026** Anthropic rolled `effort` into Claude Managed Agents' model configuration, closing the loop on a control the Messages API has quietly grown to five levels. If you're still copying `effort="high"` at the top level of `messages.create` from an early-2026 blog post, your request looks valid but Claude may not be honoring the field you think it is — the parameter lives inside `output_config` now, and the API only enforces the levels documented on the model's card.
+
+This is the practical tuning guide: where `effort` actually goes in a request, what the five levels really do (they change tool-call count, not just thinking depth), the per-model defaults that will surprise you, and the one gotcha that quietly blows up spend — changing effort mid-conversation invalidates prompt cache.
+
+<Callout type="objectives" items={[
+  "Place the effort field correctly — inside output_config on the Messages API, in the model object on Managed Agents, via /effort or CLAUDE_CODE_EFFORT_LEVEL in Claude Code",
+  "Pick a starting level per model — high is the API default on most models but NOT on Opus 5.5 and Haiku 5.5, which default to medium, and the recommended starting effort varies again on top of that (Sonnet 5.5 medium for agentic coding, Sonnet 4.6 medium, Opus 4.7/4.8 xhigh, Fable 5.1 high)",
+  "Understand that effort affects ALL tokens — text, tool calls, and (when active) thinking — so lowering effort reduces tool-call count, not just verbosity",
+  "Avoid the cache trap — varying effort inside one conversation invalidates prompt caching and can double your bill silently",
+  "Know the Claude Code effort surface — /effort, ultrathink (one-turn), ultracode (xhigh + standing multiagent permission), CLAUDE_CODE_EFFORT_LEVEL env override",
+]} />
+
+<VerifyNote lastVerified="2026-10-19" source="https://platform.claude.com/docs/en/build-with-claude/effort">
+Verified against Anthropic's official effort docs. Per-model defaults, the `xhigh`/`max` availability lists, and per-message effort's beta status and model coverage all change between releases — re-check the source before pinning behavior in production.
+</VerifyNote>
+
+## The five levels (and where "ultracode" fits)
+
+The effort scale as of 22 July 2026 has **five** values that the API accepts:
+
+| Level | What it does | When to reach for it |
+|---|---|---|
+| `low` | Most efficient. Significant token savings with some capability reduction. Fewer tool calls, terse confirmations, no preamble. | Simple classification, high-volume workloads, chat, latency-sensitive UX, subagents doing scoped work |
+| `medium` | Balanced. Moderate token savings vs high. | Agentic tasks that need speed + cost + quality in balance; cost-conscious step-down from high |
+| `high` | High capability. **Equivalent to omitting the parameter — on every model except Opus 5.5 and Haiku 5.5, which default to `medium`.** | Complex reasoning, difficult coding, agentic tasks where quality matters more than speed |
+| `xhigh` | Extended capability for long-horizon work. Expect meaningfully higher token usage than high. | Long-running (30+ min) agentic and coding tasks, token budgets in the millions, deep multi-file refactors |
+| `max` | Absolute maximum capability, no constraint on token spend. | Genuine frontier problems only. Can overthink on structured-output tasks. |
+
+Neither `max` nor `xhigh` is universal — check the level against the model before you ship it. `xhigh` is supported on **Fable 5.1, Mythos 5.1, Fable 5, Mythos 5, Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Sonnet 5, and Haiku 5.5**. `max` covers all of those plus **Mythos Preview, Opus 4.6, and Sonnet 4.6**. Opus 4.5 supports effort but neither of the top two levels. In Anthropic's words: "Not every model that supports `max` supports `xhigh`."
+
+<Callout type="tip" items={[
+  "Setting effort to the model's own default produces exactly the same behavior as omitting the parameter — that's 'high' on most models, but 'medium' on Opus 5.5 and Haiku 5.5. Don't set it 'just to be explicit' in a cached conversation, because writing the field on some requests and not others invalidates the cache.",
+  "'ultracode' is not a sixth level. It is xhigh + a standing permission for Claude Code to launch multiagent workflows, granted through mid-conversation system messages. The API accepts five values.",
+]} />
+
+## The field structure most blog posts get wrong
+
+Early-2026 write-ups of the effort parameter show a top-level field:
+
+```python
+# WRONG on current models — silently ignored or 400
+client.messages.create(
+    model="claude-opus-4-8",
+    effort="medium",
+    ...
+)
+```
+
+The current API places `effort` inside an `output_config` object, and passes it as a sibling of `messages`/`model`:
+
+<PromptCard title="Correct effort placement — Messages API">
+{`import anthropic
+
+client = anthropic.Anthropic()
+
+response = client.messages.create(
+    model="claude-opus-4-8",
+    max_tokens=4096,
+    output_config={"effort": "medium"},
+    messages=[{
+        "role": "user",
+        "content": "Analyse the trade-offs between microservices and monoliths."
+    }],
+)
+
+print(response.content[0].text)`}
+</PromptCard>
+
+On Claude Managed Agents (the 22 July 2026 change), `effort` goes inside the agent's `model` object at creation time. The session doesn't set it — the agent version does.
+
+<PromptCard title="Correct effort placement — Managed Agents (POST /v1/agents)">
+{`# Effort travels with the versioned agent config,
+# not the per-run session. Every session pinned to
+# this agent version runs at xhigh.
+
+POST https://api.anthropic.com/v1/agents
+{
+  "name": "code-reviewer",
+  "model": {
+    "id": "claude-opus-4-8",
+    "effort": "xhigh"
+  },
+  "system_prompt": "You review pull requests for security issues.",
+  "tools": [...],
+  "mcp_servers": [...]
+}`}
+</PromptCard>
+
+## Effort is not a thinking control
+
+This is the second big misconception. Effort works **whether or not thinking is enabled**, and it changes tokens Claude spends on parts of the response that aren't thinking:
+
+- **Tool calls.** Lower effort → fewer tool calls. Claude combines operations into single calls, skips optional exploration, and proceeds to action without preamble.
+- **Text length.** Lower effort → tighter output. Terse confirmations after tool calls rather than detailed summaries. Fewer code comments.
+- **Thinking depth** (when thinking is on). Lower effort → skips thinking on easy prompts entirely; still thinks on genuinely hard ones, just less.
+
+That last point matters: at `low` effort Claude will still think on a proof problem, because the task demands it. Effort is a *behavioral signal*, not a strict token budget. Don't expect a hard cap.
+
+The `thinking` parameter and the `effort` parameter answer different questions. `thinking` decides whether Claude produces thinking blocks at all. `effort` decides how much work goes into the whole response — including how often and how deeply Claude thinks when adaptive thinking is on. Passing `effort="adaptive"` is a common mistake; `adaptive` is a *thinking mode*, not an effort level.
+
+<Callout type="tip">
+On <strong>Opus 4.5</strong> — the only extended-thinking-only model that supports effort — you set effort <em>and</em> `budget_tokens` together. Pick the effort level for your task, then size the thinking token budget for the reasoning depth. Every other effort-capable model uses adaptive thinking and doesn't take `budget_tokens`.
+</Callout>
+
+## Per-model starting points that surprise teams
+
+The API default is `high` on most effort-capable models — **but not all of them. Opus 5.5 and Haiku 5.5 default to `medium`.** On top of that, Anthropic's *recommended starting effort* varies by model, and the mismatch is where teams over- or under-spend.
+
+<Steps items={[
+  {title: "Opus 5.5 — the default is medium, not high", body: "Opus 5.5 is the only Opus that defaults to medium, so a request that omits effort runs one level LOWER than the same code did on Opus 5. If you migrated and quality dropped, this is the first thing to check. Adaptive thinking is always on and cannot be disabled (thinking: {type: 'disabled'} returns 400 at every level), so effort is your only control over how much it reasons and what the request costs. Run a fresh effort sweep rather than carrying settings over — at a given level it thinks more per turn than Opus 5 did."},
+  {title: "Haiku 5.5 — also defaults to medium, and low is the money level", body: "The other medium-defaulting model, and the first Haiku to support effort at all. Start at medium for most work including agentic coding. Use low — cheapest and fastest — for chat, short tool tasks, and simple high-volume requests, but know the trade: in long agent prompts at low it is more likely to skip a search, stop early, or skip a check. Step to high for knowledge work, longer agent tasks, and strict instruction following. Compare xhigh/max against Sonnet 5.5 on cost and speed before committing."},
+  {title: "Fable 5.1 and Sonnet 5.5 — high is still the default", body: "Both default to high and support all five levels. On Fable 5.1 start at high, step up to xhigh/max for the most capability-sensitive agentic and coding work, and down to medium/low once your evals show quality holds. Sonnet 5.5's levels are RECALIBRATED against Sonnet 5 — a level no longer buys the same amount of thinking, so re-sweep. For agentic coding on Sonnet 5.5 start at medium for well-specified tasks and move to high for harder ones; for agentic coding set max_tokens to 128,000, the model's maximum, and stream."},
+  {title: "Sonnet 5 — start at high (the default)", body: "Sonnet 5 defaults to high on both the API and Claude Code, and the recommendation matches. Step up to xhigh only for the hardest coding and agentic tasks. Step down to medium as a cost-saving move — Sonnet 5 medium is comparable to Sonnet 4.6 at high. Use low for chat and non-coding, latency-sensitive workloads."},
+  {title: "Sonnet 4.6 — start at medium, override the default", body: "Sonnet 4.6 defaults to high but Anthropic's own guidance recommends medium as the balanced default for most applications, including agentic coding. Explicitly set effort='medium' — otherwise you inherit high and pay for latency you didn't ask for."},
+  {title: "Opus 4.7 and 4.8 — start at xhigh for coding, high for everything else", body: "The default is high but the recommendation for coding and agentic work is xhigh. Use high as the minimum for intelligence-sensitive workloads. Step to medium only when your evals show quality holds. Reserve max for genuinely frontier problems — on most workloads max adds significant cost for small quality gains, and on structured-output tasks it can overthink."},
+  {title: "Opus 4.7 respects low/medium more strictly — prompt for depth if you need it", body: "Opus 4.7 (and 4.8) scope work more tightly at low/medium than Opus 4.6 did. If you observe shallow reasoning on a complex prompt at low, raise effort rather than prompting around it. If latency forces you to stay at low, add a targeted line like 'This task involves multistep reasoning. Think carefully before responding.'"},
+  {title: "Fable 5 and Mythos 5 — high is the primary control", body: "Effort is the primary intelligence/latency/cost lever on Fable 5. Start at high (the default), use xhigh for the most capability-sensitive work, and drop to medium or low for routine tasks — lower levels on Fable 5 still exceed prior models at xhigh. Set a large max_tokens at high/xhigh since it caps thinking plus response text combined."},
+  {title: "Opus 4.7/4.8 at xhigh or max — raise max_tokens to at least 64k", body: "Both models can spend heavily across subagents and tool calls at xhigh/max. Anthropic recommends starting max_tokens at 64k and tuning from there. Leave it at 4096 and you'll get a truncated response with stop_reason='max_tokens' after a promising start."},
+]} />
+
+## The cache trap — the one that silently doubles your bill
+
+Prompt caching gives you cache reads at a fraction of standard input price (a tenth on most models, less on the newest — see [Pricing](https://platform.claude.com/docs/en/about-claude/pricing)). Changing the **top-level** `output_config.effort` between requests in the same conversation **invalidates the cache**, exactly like switching models does: top-level effort shapes the rendered prompt, so a new value means no cached prefix matches. On a long context that's a full-price re-read of your entire history, on every single follow-up turn.
+
+### The escape hatch: per-message effort (beta)
+
+The newest models let you change effort *without* losing the cache. Add a `role: "system"` message with empty `content` carrying the new level in `output_config.effort`, and everything before it stays byte-identical — so the cached prefix still matches.
+
+<PromptCard title="Change effort mid-conversation without a cache miss">
+{`# Beta header required:
+#   anthropic-beta: mid-conversation-output-config-2026-07-01
+
+{
+  "model": "claude-fable-5-1",
+  "max_tokens": 4096,
+  "output_config": {"effort": "high"},
+  "messages": [
+    {"role": "user", "content": "Plan a migration from SQLite to PostgreSQL."},
+    {"role": "assistant", "content": "1. Export... 2. Create schema... 3. Import."},
+    {"role": "system", "content": [], "output_config": {"effort": "low"}},
+    {"role": "user", "content": "Summarize the plan in one sentence."}
+  ]
+}`}
+</PromptCard>
+
+Availability as of 19 October 2026: on the Claude API and Google Cloud it works on **Fable 5.1, Mythos 5.1, Opus 5.5, Opus 5, Sonnet 5.5, and Haiku 5.5**; on Amazon Bedrock only **Fable 5.1, Mythos 5.1, and Opus 5.5**. It needs the beta header `mid-conversation-output-config-2026-07-01` — without it a per-message `output_config` returns `400 messages.N.output_config: Extra inputs are not permitted`. With the header but an unsupported model (Fable 5 among them) you get `400 output_config.effort requires a model that supports per-turn effort; this model does not`.
+
+Two models refuse to change effort per-turn once thinking is pinned: **Sonnet 5.5 with `thinking: {"type": "between_tools"}`** and **Haiku 5.5 with `thinking: {"type": "disabled"}`** return 400 if a per-message level differs from the one in effect. Use adaptive thinking to vary effort there.
+
+On everything else, the old rule still binds — pick a level and hold it:
+
+<Callout type="tip" items={[
+  "On models without per-message effort, vary effort ACROSS workloads, not WITHIN a cached conversation. Pick the level at conversation start; keep it constant until you /clear.",
+  "Prefer per-message effort over a top-level change even when both work: on Fable 5.1 a top-level flip also steers the model less reliably, because its earlier replies were written at the old level and it tends to stay consistent with them.",
+  "In Claude Code, /effort mid-session is the equivalent of switching models — expect a big cache miss on the next turn.",
+  "If you need to escalate depth for one turn only, use 'ultrathink' in Claude Code (a one-turn deeper-reasoning bump) rather than /effort xhigh — it avoids changing session config.",
+  "If you must escalate for the rest of the session, do it early. A switch at turn 3 is cheap; a switch at turn 30 re-reads 30 turns of context at full price.",
+]} />
+
+The corollary: setting `effort="high"` explicitly on some cached requests and omitting it on others invalidates cache the same way — since the two are *behaviorally* equivalent but *textually* different. Pick one convention (always set, or always omit) and hold it.
+
+## Claude Code — the CLI surface
+
+Claude Code exposes effort as an interactive command, a launch flag, and an environment variable (highest priority wins in that reverse order):
+
+```bash
+# In-session (interactive slider, or direct)
+/effort
+/effort xhigh
+/effort auto           # reset to model default
+
+# At launch
+claude --effort low
+
+# Environment (overrides everything else)
+CLAUDE_CODE_EFFORT_LEVEL=high claude
+```
+
+Two related commands are worth knowing because they're not effort levels but they behave adjacent to them:
+
+- **`ultrathink`** — a one-turn deeper reasoning bump that does *not* change session effort. Use it when you want the next turn to think harder without invalidating cache on all subsequent turns.
+- **`ultracode`** — sets session-wide `xhigh` **and** grants standing permission for Claude Code to launch multi-agent workflows (via mid-conversation system messages). The API has no `ultracode` value — it's a CLI convenience that composes `xhigh` with an orchestration permission.
+
+Persistence rules to remember: `low`, `medium`, `high`, and `xhigh` persist across Claude Code sessions once you set them. `max` applies to the current session only — you have to reapply it next time.
+
+## A tuning walkthrough — one prompt, three efforts
+
+To calibrate intuition, run the *same* prompt at three levels and compare the output shape:
+
+<PromptCard title="Tuning-calibration prompt (run at low, high, xhigh)">
+{`Task: Review this pull request for security issues.
+
+<pr_diff>
+[paste a real diff — 300+ lines, multi-file, at least one auth-touching change]
+</pr_diff>
+
+Report: severity-tagged findings + a one-line fix per finding.
+Do not restate what the diff does.`}
+</PromptCard>
+
+Expect roughly:
+
+- **low** — catches the obvious high-severity issues (SQL string concatenation, unchecked user input in a header). Misses subtle logic bugs. 1-2 tool calls if tools are available. Short output. Fast.
+- **high** — full analysis. Catches most vulnerabilities including subtle ones. Multiple targeted tool calls to read related files. Structured findings. This is where most teams stop.
+- **xhigh** — exhaustive. Considers novel attack vectors and defence-in-depth. Reads adjacent files that low/high didn't touch. Many more tool calls. Meaningfully higher token usage.
+
+If your evals show `high` and `xhigh` produce the same findings on your codebase, ship at `high`. Xhigh's value shows up specifically when the task benefits from repeated tool calls and detailed exploration — which is exactly when Anthropic recommends it.
+
+## Sonnet 5 shifted the calibration — don't port levels blindly
+
+If you were running Sonnet 4.6 at `high` and migrated to Sonnet 5, keeping the same level makes Sonnet 5 spend closer to what Sonnet 4.6 spent at `max` — Sonnet 5's effort scale is *shifted*. Anthropic's own guidance: **Sonnet 5 medium ≈ Sonnet 4.6 high**. That's a per-request-cost swing worth checking if you replayed traffic without adjusting effort. See the [Sonnet 5 field guide](/docs/models/sonnet-5-field-guide) for the full migration story.
+
+## Lock it in
+
+<Flashcards cards={[
+  {front: "Where does the effort field go on the Messages API?", back: "Inside an output_config object at the top level of messages.create — output_config: {effort: 'medium'}. Not a top-level effort argument."},
+  {front: "What are the five effort levels?", back: "low, medium, high, xhigh, max. high is the default on most models — but Opus 5.5 and Haiku 5.5 default to medium."},
+  {front: "Which models default to medium effort instead of high?", back: "Opus 5.5 and Haiku 5.5. On Opus 5.5 that means code migrated from Opus 5 runs one level LOWER unless you set effort explicitly."},
+  {front: "Does effort affect anything other than thinking?", back: "Yes — it affects ALL tokens in the response: text, tool calls (lower effort → fewer calls), and thinking when active."},
+  {front: "What happens if you change effort mid-conversation?", back: "A TOP-LEVEL change invalidates prompt caching, just like switching models does. The per-message form — a role:'system' message with empty content and the new output_config.effort, behind the mid-conversation-output-config-2026-07-01 beta header — preserves the cache on Fable 5.1, Mythos 5.1, Opus 5.5, Opus 5, Sonnet 5.5, and Haiku 5.5."},
+  {front: "Is 'ultracode' a sixth effort level?", back: "No. Ultracode is a Claude Code CLI convenience that sets xhigh AND grants standing permission for multi-agent orchestration. The API accepts only the five documented levels."},
+  {front: "What's the recommended effort for Opus 4.7/4.8 on coding tasks?", back: "xhigh — and raise max_tokens to at least 64k so the model has room to reason and call tools across subagents."},
+  {front: "How does the Sonnet 5 effort scale compare to Sonnet 4.6?", back: "Shifted. Sonnet 5 medium is roughly equivalent to Sonnet 4.6 at high. Don't port effort levels 1:1 across the migration."},
+  {front: "Where does effort go on Claude Managed Agents?", back: "Inside the model object on the versioned agent config at agent creation (POST /v1/agents) — not per-session. Rolled out 22 July 2026."},
+]} />
+
+<Quiz title="Check yourself" questions={[
+  {q: "Which of these is NOT a valid effort value on the Messages API?", options: ["low", "medium", "adaptive", "xhigh"], answer: 2, explain: "'adaptive' is a thinking mode, not an effort level. The five valid values are low, medium, high, xhigh, max."},
+  {q: "You're running a cached 20-turn conversation and flip the TOP-LEVEL effort from high to xhigh on turn 21. What happens?", options: ["Nothing — effort is a runtime hint that doesn't touch cache", "The next request costs slightly more because Claude thinks more", "The next request invalidates cache and re-reads all 20 prior turns at full input price", "The API returns a 400 because effort can't change mid-conversation"], answer: 2, explain: "Top-level effort shapes the rendered prompt, so changing it invalidates prompt caching like switching models. On a long history that can 10x the input bill of the next turn. The per-message form (a role:'system' message behind the mid-conversation-output-config-2026-07-01 beta) avoids this on the newest models."},
+  {q: "You're on Opus 5.5 and omit the effort parameter entirely. What level runs?", options: ["high — the API default on every model", "medium — Opus 5.5 is one of two models that default to medium", "low — omitting effort minimizes spend", "xhigh — Opus models default to xhigh for coding"], answer: 1, explain: "Opus 5.5 and Haiku 5.5 default to medium; every other effort-capable model defaults to high. Code moved over from Opus 5 therefore runs one level lower than it used to unless you set effort explicitly."},
+  {q: "You're on Claude Code and want just the NEXT turn to reason harder without touching your session's effort setting. Best move?", options: ["/effort max, then /effort auto after the turn", "Use ultrathink for that one turn", "Restart Claude Code with --effort xhigh", "Set CLAUDE_CODE_EFFORT_LEVEL=max in a subshell"], answer: 1, explain: "ultrathink is exactly this — a one-turn deeper-reasoning bump that doesn't change session effort, so it doesn't invalidate cache on subsequent turns."},
+  {q: "On Opus 4.8 at effort='xhigh', your responses keep truncating with stop_reason='max_tokens' after long thinking. Most likely fix?", options: ["Drop effort to high", "Raise max_tokens to 64k or higher", "Turn thinking off", "Switch to Opus 4.7"], answer: 1, explain: "max_tokens caps thinking plus response text combined. At xhigh, Anthropic recommends starting max_tokens at 64k. A limit sized for 'just the answer' truncates responses that involve heavy internal reasoning."},
+  {q: "Where does effort go when creating a Claude Managed Agents agent (the July 2026 update)?", options: ["On each session at POST /v1/sessions", "As a top-level field on POST /v1/agents", "Inside the model object on POST /v1/agents", "In the mid-conversation system message"], answer: 2, explain: "The 22 July 2026 update lets you pass 'effort' inside the model object at agent creation. Sessions inherit the pinned agent version's effort — you don't set it per run."},
+  {q: "Which change makes Sonnet 5 'medium' behave closest to Sonnet 4.6 at 'high'?", options: ["Sonnet 5 uses a smaller context window", "The effort scale shifted between the two models", "Sonnet 5 disables tool use at medium", "medium was renamed on Sonnet 5"], answer: 1, explain: "Anthropic's own guidance: Sonnet 5 medium ≈ Sonnet 4.6 high. Don't port effort levels 1:1 across the migration."}
+]} />
+
+## Sources & further reading
+
+- [Anthropic — Effort (build-with-claude/effort)](https://platform.claude.com/docs/en/build-with-claude/effort) — authoritative reference for the five levels, `output_config.effort`, and per-model recommendations
+- [Anthropic — Thinking (build-with-claude/thinking)](https://platform.claude.com/docs/en/build-with-claude/thinking) — how effort interacts with adaptive thinking and when to reach for which control
+- [Anthropic Platform release notes — 22 July 2026 entry](https://platform.claude.com/docs/en/release-notes/overview) — the Managed Agents `effort` rollout and the webhook / session-seeding changes shipped the same day
+- [Prompting Claude Sonnet 5 — calibrating effort and thinking depth](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-sonnet-5) — the Sonnet 5 effort scale shift and when to reach for xhigh
+- [Anthropic — Task budgets](https://platform.claude.com/docs/en/build-with-claude/task-budgets) — advisory token budgets for full agentic loops, a complement to effort for long runs
+- [AILmanac — Extended Thinking & Effort](/docs/api/thinking-and-effort) — the introductory framing this page assumes
+- [AILmanac — Claude Sonnet 5: The Field Guide](/docs/models/sonnet-5-field-guide) — the migration and re-calibration story
+- [AILmanac — Prompt caching](/docs/api/prompt-caching) — the cache economics that make the mid-conversation effort change so expensive
+
+
+## Next
+
+- [Code erosion: what higher effort actually buys on long-horizon coding](/docs/frontiers/code-erosion-slopcodebench) — measured, not assumed: every medium campaign beat every xhigh campaign on cost per passing checkpoint, and Opus 5.5 at xhigh wrote cleaner code that passed fewer tests
+- [The advisor tool: Sonnet does the work, Fable does the thinking](/docs/api/advisor-tool)

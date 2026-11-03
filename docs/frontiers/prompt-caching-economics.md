@@ -1,0 +1,144 @@
+# Prompt Caching Economics
+
+> Source: https://derob98.github.io/ailmanac/docs/frontiers/prompt-caching-economics · AILmanac (CC BY 4.0) · last verified 2026-08-09
+
+Reusing a stable prefix across API calls can meaningfully cut both cost and latency. Here's the mental model, when it actually helps, and when it doesn't.
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-08-09" source="https://platform.claude.com/docs/en/build-with-claude/prompt-caching" />
+
+Cache mechanics, pricing tiers, TTL durations, and minimum token thresholds change as Anthropic updates the platform. Do not rely on any specific numbers from third-party guides. Always check the [official prompt caching docs](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) and the [Models & Pricing](/docs/whats-new/models-and-pricing) page for current values.
+
+# Prompt Caching Economics
+
+<Callout type="objectives" items={["Why the naive API call over-pays: the same stable prefix processed from scratch, every time","The mental model — stable prefix, volatile suffix — and the one ordering rule that makes caching possible","The three-way input pricing split (cache write, cache read, regular input) and when the crossover pays back","When caching earns its keep, and the four scenarios where it silently doesn't","The five cache-invalidation rules that decide whether your hit rate is 90% or 0%","How to pre-warm the cache and read the usage fields to prove your savings are real"]} />
+
+Every time you call the Claude API, you pay for every input token you send — including your system prompt, your tool definitions, and any context you inject. If you're making many calls with the same large prefix, you're paying to process that prefix from scratch every single time.
+
+Prompt caching changes that. You mark a stable portion of your prompt as cacheable. The first call processes it and stores it. Subsequent calls that hit the cache skip that processing — and pay a fraction of the normal rate for those tokens.
+
+The savings are not cosmetic. For applications with large, stable system prompts or heavy context, caching can change the economics of a feature from "too expensive to ship" to "basically free to run."
+
+## The mental model: stable prefix, volatile suffix
+
+Think of every API call as two parts:
+
+**The stable prefix** — content that does not change across calls. This is where caching applies. Examples:
+- Your system prompt
+- Tool definitions
+- A large reference document or codebase you inject on every call
+- A long few-shot example block
+
+**The volatile suffix** — content that changes per call. This is where caching does not apply. Examples:
+- The current user message
+- Real-time data you inject per request
+- Conversation history that grows with each turn
+
+The rule is simple: **structure your prompts so that the stable content comes first, and the changing content comes last.** Cache breakpoints are positional — everything before the marked breakpoint is eligible for caching; everything after is not.
+
+If you put dynamic content before static content, you break the cache, because the prefix changes on every request.
+
+## How the cost model works
+
+Prompt caching introduces a three-way split in how input tokens are priced:
+
+| Token type | When it occurs | Cost relative to normal input |
+|---|---|---|
+| Cache write | First call, or after cache expires | Higher than normal input |
+| Cache read | Subsequent calls that hit the cache | Much lower than normal input |
+| Regular input | Tokens after the last cache breakpoint | Normal rate |
+
+The exact multipliers are on the [official pricing page](https://platform.claude.com/docs/en/models/overview) and fluctuate — check them directly. What does not change is the structure: writes cost more than normal, reads cost much less. The crossover point — when you've made enough cached calls to recoup the write overhead — comes quickly on any prompt with substantial stable content.
+
+Latency follows the same pattern. Cache reads skip the full processing of the cached portion, which reduces time-to-first-token meaningfully on calls with large prefixes.
+
+## When prompt caching helps
+
+Caching pays off when **two conditions are both true**:
+
+1. You have a substantial stable prefix (there is a minimum token threshold below which caching is not available — check current docs for the exact number by model).
+2. You make that prefix is reused frequently enough to hit the cache more than occasionally.
+
+Scenarios where caching is a natural fit:
+
+- **Document Q&A** — the same large document is injected for many user questions.
+- **Coding assistants** — a large codebase or file tree is included in every request.
+- **Agentic loops** — the same system prompt and tool definitions are sent on every step of a multi-step workflow.
+- **Conversational agents with long instructions** — a detailed persona, rule set, or knowledge base that never changes call-to-call.
+- **Batch processing** — many inputs run against the same template.
+
+## When prompt caching does not help
+
+Caching is not useful when:
+
+- Your prompts are short (below the minimum cacheable token threshold).
+- Your prefix changes on every call — injecting a timestamp, a user-specific context, or any personalization into the "stable" part invalidates the cache.
+- You make infrequent calls with long gaps between them. Cached content expires after a TTL (a duration you can configure, within the limits the API supports). If your traffic is sparse, you'll mostly be paying write costs with few reads.
+- Your prefix is small relative to the per-call dynamic content. The savings scale with the size of what's cached.
+
+## Structuring prompts to be cache-friendly
+
+The only structural requirement is ordering: **stable content must come before volatile content.**
+
+<Steps items={[{title: "Put the system prompt first", body: "Instructions, persona, rules — the parts that never change per user request."}, {title: "Then tool definitions (if static)", body: "If your tool set is stable across calls, keep it before the breakpoint so it stays cached."}, {title: "Then large injected context", body: "The reference document, code file tree, or long few-shot block that gets replayed on every call."}, {title: "Mark the breakpoint", body: "Add cache_control on the LAST block you want cached. Everything before is eligible; everything after is not."}, {title: "Volatile content last", body: "User message, retrieved chunks specific to this call, real-time data, conversation history — everything that changes per request goes AFTER the breakpoint."}]} />
+
+<PromptCard title="Cache-friendly prompt shape">{`[System prompt — instructions, persona, rules]
+[Tool definitions — if static]
+[Large injected documents or context — same across calls]
+--------- cache breakpoint here ---------
+[Dynamic per-call content — user message, retrieved chunks]`}</PromptCard>
+
+You mark the breakpoint with a `cache_control` field on the last block you want to include in the cache. Everything before that marker is eligible for caching; everything after is regular input.
+
+You can place up to four explicit breakpoints in a single request. This is useful when different parts of your prompt change at different frequencies — for example, tool definitions change rarely, conversation history changes every turn. Each section can have its own breakpoint.
+
+## Cache invalidation rules
+
+The cache is sensitive to ordering. Any change to a cached block, or to any block that comes before it in the prompt, invalidates the cache at that breakpoint and all subsequent ones.
+
+<Callout type="warning" items={["Changes to tool definitions invalidate ALL caches — treat the tool list as maximally stable.","Changes to the system prompt invalidate the system and message caches.","Changes mid-conversation only affect the message cache.","Injecting a timestamp, user ID, or per-request personalization into a 'stable' section silently kills your hit rate — that content belongs AFTER the last breakpoint.","Whitespace, punctuation, and ordering matter to the byte — 'small' edits still invalidate."]} />
+
+The practical implication: if you're injecting anything that changes per request, make absolutely sure it lives *after* the last cache breakpoint, not before or within it.
+
+## Pre-warming and monitoring
+
+You can pre-warm the cache before user traffic arrives by sending a request with `max_tokens: 0` — this writes the cache without generating output. Useful for batch jobs or for front-loading the write cost during off-peak hours.
+
+The API response's `usage` field tells you how many tokens were read from cache (`cache_read_input_tokens`), written to cache (`cache_creation_input_tokens`), and billed as regular input. Monitor these to verify your caching is actually hitting and to measure the savings you're realizing.
+
+<PromptCard title="Read the usage field to prove caching is working">{`# From any Claude API response, inspect response.usage:
+{
+  "usage": {
+    "input_tokens": 42,                    # billed at normal rate
+    "cache_creation_input_tokens": 0,      # tokens written on this call
+    "cache_read_input_tokens": 8912,       # tokens served from cache (cheap)
+    "output_tokens": 384
+  }
+}
+# Healthy state after warm-up: cache_read >> cache_creation, run over run.
+# If cache_creation stays high, something upstream of your breakpoint is changing.`}</PromptCard>
+
+Use the [Cost Calculator](/docs/tools/cost-calculator) to model expected savings before committing to a caching architecture.
+
+## The bottom line
+
+Prompt caching is not a micro-optimization. For any application that sends the same large prefix repeatedly, it's a structural economic decision. The model for thinking about it is straightforward: stable content goes first, volatile content goes last, put the breakpoint at the boundary.
+
+If you're building against the API and haven't looked at caching yet, check your current prompts for large stable sections. If they exist, enabling caching is usually low-effort and the savings are real.
+
+<Quiz title="Check yourself" questions={[{q: "Where in a request must the cache breakpoint sit for caching to work?", options: ["After the volatile per-request content, so only the response is cached", "Between the stable prefix and the volatile suffix — everything BEFORE is eligible for caching", "Anywhere; ordering does not affect cache eligibility"], answer: 1, explain: "Cache breakpoints are positional. Everything BEFORE the breakpoint is eligible for caching; everything after is regular input. If dynamic content leaks in front of the breakpoint, the cache is invalidated on every request."}, {q: "Which cost is HIGHER than a normal input token?", options: ["Cache read", "Cache write", "Both cost less than normal input"], answer: 1, explain: "Cache writes cost MORE than normal input (you're paying to process + store the prefix). Cache reads cost much LESS. The crossover — where accumulated read savings pay back the write premium — comes quickly on any prompt with substantial stable content."}, {q: "You inject the current timestamp at the top of every request 'so the model knows the time.' What happens to caching?", options: ["Caching still works — timestamps are ignored for cache key purposes", "The cache is invalidated on every call — the 'stable' prefix now changes each request", "The cache is fine, but only if the timestamp changes by less than a second"], answer: 1, explain: "The cache is byte-sensitive. Any content that varies per call — timestamps, user IDs, personalization — must live AFTER the last cache breakpoint. Otherwise the prefix mutates and you pay write costs on every request with zero read benefit."}, {q: "How do you prove caching is actually saving you money in production?", options: ["Read cache_read_input_tokens vs cache_creation_input_tokens in the response usage field over time — healthy state is reads greatly exceeding writes", "Compare monthly bills before and after enabling cache_control — no per-request signal is available", "Call a separate /cache/stats endpoint"], answer: 0, explain: "Every response's usage field reports cache_read_input_tokens and cache_creation_input_tokens. Once warmed up, reads should dwarf writes. Sustained high creation counts mean something upstream of your breakpoint is still changing."}, {q: "You change a single word in your tool definitions. What is invalidated?", options: ["Only the message cache", "All caches downstream of tools (tool defs sit early in the prompt, so all breakpoints below are invalidated)", "Nothing — tool definitions are cached separately"], answer: 1, explain: "Any change to a cached block, or to any block that comes before it in the prompt, invalidates the cache at that breakpoint AND all subsequent ones. Because tool definitions live at the top, editing them is the fastest way to blow up your entire cache."}]} />
+
+<Callout type="takeaways" items={["Caching splits input pricing three ways: cache write (premium), cache read (cheap), regular input (normal) — the payoff scales with prefix size × reuse frequency.","One rule shapes cache-friendly prompts: stable content BEFORE the breakpoint, volatile content AFTER — invert this and the cache dies every request.","You can place up to four breakpoints so tools, system prompt, docs, and history each cache at their own frequency.","Any change to a cached block — or to any block earlier in the prompt — invalidates that breakpoint and all subsequent ones.","Prove savings with cache_read_input_tokens vs cache_creation_input_tokens in the usage field, and pre-warm with max_tokens: 0 for batch jobs.","Skip caching when prefixes are short, traffic is sparse (cached content expires), or the prefix is small relative to per-call dynamic content."]} />
+
+## Related
+
+- [Models & Pricing](/docs/whats-new/models-and-pricing)
+- [Cost Calculator](/docs/tools/cost-calculator)
+- [Context Engineering](/docs/frontiers/context-engineering)
+
+
+## Next
+
+- [Prompt caching across providers](/docs/models/prompt-caching-across-providers) — the same economics on OpenAI, Gemini and DeepSeek, plus the portable break-even formula for the write premium
+- [Harnesses for Long-Running Agents](/docs/frontiers/long-running-agent-harnesses)

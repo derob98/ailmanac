@@ -1,0 +1,58 @@
+# 환영합니다 & 왜 이것이 존재하는가
+
+> Source: https://derob98.github.io/ailmanac/ko/docs/start-here/welcome · AILmanac (CC BY 4.0)
+
+AILmanac이 무엇이고, 누구를 위한 것이며, 의도적으로 대체하려 하지 않는 것은 무엇인지.
+
+<LevelBadge level="all" />
+
+**AILmanac**는 **Claude — 그리고 모든 AI — 를 최대한 활용하기 위한** 무료, 커뮤니티가 만드는 연감(almanac)입니다. 연감은 여러분이 다시 찾게 되는 참고서입니다: 완전하고, 쉬운 말로 되어 있으며, 최신으로 유지됩니다. 그것이 여기서의 목표입니다.
+
+<Callout type="objectives" items={["AILmanac가 무엇인지 — 그리고 의도적으로 무엇이 아닌지 이해하기", "나에게 맞는 수준 찾기: 입문, 중급, 고급", "가장 빠른 진입로를 골라 1분 안에 읽기 시작하기"]} />
+
+## 누구를 위한 것인가
+
+의도적으로 모두를 위한 것이며 — 모든 페이지의 수준을 알려 드려 여러분이 길을 잃거나 무시당한다고 느끼지 않게 합니다:
+
+| 수준 | 이것이 여러분이라면… |
+| --- | --- |
+| <LevelBadge level="beginner" /> | AI를 거의 안 써 봤고 확실한 첫 성과를 원합니다. |
+| <LevelBadge level="intermediate" /> | 이미 Claude를 쓰며 눈에 띄게 더 나은 결과를 원합니다. |
+| <LevelBadge level="advanced" /> | Claude Code, API, 에이전트, MCP로 무언가를 만듭니다. |
+
+## 무엇이 다른가
+
+이미 훌륭한 자료들이 있습니다([전체 지도](/docs/start-here/landscape-map) 참고). AILmanac는 링크 모음도 **아니고** 공식 문서의 복사본도 **아닙니다**. 이것은:
+
+- **의견 있음** — *추천하는 하나의 방법*을 먼저, 그다음 대안을 알려 줍니다.
+- **수준 태그됨** — 모든 페이지에 배지가 붙어 여러분에게 맞는 것을 읽습니다.
+- **템플릿 풍부** — 30초 만에 쓸 수 있는 [복사해 붙일 스타터](/docs/templates).
+- **최신성에 정직함** — 변하는 사실(모델명, 가격, 기능)은 "마지막 검증" 날짜와 출처 링크를 답니다.
+
+## 무엇이 아닌가
+
+:::warning[공식 문서가 진실의 출처입니다]
+AILmanac와 [공식 Anthropic 문서](https://platform.claude.com/docs)가 엇갈릴 때는 **공식 문서가 이깁니다**. AI 도구는 빠르게 변합니다. 우리는 최신을 유지하려 애쓰지만, 중요한 것은 항상 우리가 링크한 출처에 대조해 확인하세요.
+:::
+
+또한 우리는 여러분의 데이터를 저장하지 않고, 계정을 볼 수 없으며, 고위험 작업에서 여러분을 대신해 결정하지 않습니다 — [책임 있는 사용](/docs/security)을 참고하세요.
+
+## 세 가지 진입로
+
+지금 여러분이 있는 곳에 맞는 문을 고르세요:
+
+<Steps items={[{title: "완전히 처음이신가요?", body: "확실한 첫 성과를 위해 첫 5분으로 시작하세요 — /docs/start-here/your-first-5-minutes."}, {title: "계획을 원하시나요?", body: "구조화된 경로를 따르도록 학습 경로를 고르세요 — /docs/start-here/learning-paths."}, {title: "용어가 헷갈리나요?", body: "쉬운 말 정의를 위해 용어집으로 이동하세요 — /docs/start-here/glossary."}]} />
+
+- **완전히 처음이신가요?** → [첫 5분](/docs/start-here/your-first-5-minutes)
+- **계획을 원하시나요?** → [학습 경로 고르기](/docs/start-here/learning-paths)
+- **용어가 헷갈리나요?** → [용어집](/docs/start-here/glossary)
+
+## 성장을 도와주세요
+
+AILmanac는 사람들이 더해 주기에 완전한 상태를 유지합니다. 빈틈, 오류, 또는 새로 출시된 것을 발견했나요? [기여는 10분이면 됩니다](/docs/contribute/contribute-in-10-minutes).
+
+<Quiz title="스스로 점검하기" questions={[{q: "AILmanac와 공식 Anthropic 문서가 엇갈릴 때, 어느 쪽이 이기나요?", options: ["AILmanac, 의견이 있으니까", "공식 Anthropic 문서", "먼저 갱신된 쪽"], answer: 1, explain: "공식 문서가 진실의 출처입니다. AILmanac는 최신을 유지하려 애쓰지만, 중요한 사실은 항상 링크된 출처에 대조해 확인하세요."}, {q: "AI가 완전히 처음입니다. 어느 문을 먼저 택해야 하나요?", options: ["첫 5분", "학습 경로 고르기", "용어집"], answer: 0, explain: "첫 5분은 완전한 초보 사용자에게 확실한 첫 성과를 주도록 만들어졌습니다."}, {q: "AILmanac는 여러분의 데이터와 계정을 어떻게 다루나요?", options: ["페이지를 개인화하려고 데이터를 저장한다", "조언을 주려고 계정을 볼 수 있다", "아무것도 저장하지 않고 계정을 볼 수 없다"], answer: 2, explain: "AILmanac는 여러분의 데이터를 저장하지 않고, 계정을 볼 수 없으며, 고위험 결정을 대신하지 않습니다 — 책임 있는 사용을 참고하세요."}]} />
+
+<Callout type="takeaways" items={["AILmanac는 Claude와 모든 AI를 최대한 활용하기 위한 무료, 커뮤니티가 만드는, 의견 있고, 수준 태그된 참고서입니다", "모든 페이지에 입문, 중급, 고급 배지가 붙어 여러분에게 맞는 것을 읽습니다", "공식 Anthropic 문서가 항상 진실의 출처입니다", "세 가지 진입로: 첫 5분, 학습 경로, 또는 용어집"]} />
+
+**다음:** [첫 5분](/docs/start-here/your-first-5-minutes) · [학습 경로 고르기](/docs/start-here/learning-paths) · [용어집](/docs/start-here/glossary)
