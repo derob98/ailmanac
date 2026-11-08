@@ -7,7 +7,7 @@
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [日本語](./README.ja.md) · [Español](./README.es.md) · [Italiano](./README.it.md)
 
 <!-- stats:start -->
-**331 pages** · **291 interactive lessons** · **12 languages** · **51 pages re-verified in the last 30 days**
+**331 pages** · **291 interactive lessons** · **12 languages** · **37 pages re-verified in the last 30 days**
 <!-- stats:end -->
 
 <p>
@@ -82,12 +82,12 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 <!-- fresh:start -->
 - 2026-11-03 — [Message Threads — Send Only the New Turn](https://derob98.github.io/ailmanac/docs/api/message-threads)
 - 2026-11-03 — [Server-Side Conversation State Across Providers](https://derob98.github.io/ailmanac/docs/models/server-side-conversation-state)
+- 2026-11-03 — [Weight-Space Programming: When One Model Debugs Another's Weights](https://derob98.github.io/ailmanac/docs/frontiers/weight-space-programming)
 - 2026-11-02 — [Desktop Agents Without Pixels](https://derob98.github.io/ailmanac/docs/models/desktop-agents-accessibility-tree)
 - 2026-11-02 — [The Usage & Cost Analytics API: Attribute Every Dollar](https://derob98.github.io/ailmanac/docs/api/usage-cost-analytics)
 - 2026-11-02 — [User Profiles & Enforcement: Don't Let One Customer Ban Your Whole Org](https://derob98.github.io/ailmanac/docs/api/user-profiles-and-enforcement)
 - 2026-11-02 — [Your Stack Choice Is an Agent Cost Lever](https://derob98.github.io/ailmanac/docs/playbooks/framework-choice-agent-cost)
 - 2026-10-26 — [Capability Redaction: What Kimi K3.1 Pro's Cyber Cut Actually Bought](https://derob98.github.io/ailmanac/docs/security/capability-redaction-open-weights)
-- 2026-10-26 — [Cloud Sessions: the VM Claude Code runs in when it isn't your laptop](https://derob98.github.io/ailmanac/docs/claude-code/cloud-sessions)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).
