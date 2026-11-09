@@ -1,14 +1,16 @@
 ---
 sidebar_position: 19
 title: "Inference Hooks: inline DLP for Claude Enterprise"
-description: "The operator's guide to Claude Enterprise Inference Hooks — the HTTPS webhook that lets your DLP server allow or deny every prompt across chat, Claude Code, and Cowork, before the model sees it. Full spec, verdict schema, signing, rollout playbook."
-keywords: [claude inference hooks, claude enterprise dlp, anthropic inference hooks, standard webhooks, ai security server, claude compliance, prompt firewall, dlp claude code, claude cowork governance, whsec_ signing]
+description: "The operator's guide to Claude Enterprise Inference Hooks, now GA — the HTTPS webhook that lets your DLP server allow or deny every prompt AND every tool call across chat, Claude Code, Cowork, M365 and Chrome, before the model acts. Full spec, verdict schema, signing, rollout playbook."
+keywords: [claude inference hooks, claude enterprise dlp, anthropic inference hooks, pre-tool-call hook, standard webhooks, ai security server, claude compliance, prompt firewall, dlp claude code, claude cowork governance, whsec_ signing, claude security center]
 ---
 
 <LevelBadge level="advanced" />
 
 <Callout type="objectives" items={[
   "What Inference Hooks actually are — an HTTPS POST from Anthropic to a server you run, not a WebSocket and not an on-device agent",
+  "The TWO hook events now that hooks are GA: a prompt hook before inference, and a pre-tool-call hook before any tool in a response runs",
+  "Why one tool_call verdict covers EVERY tool call in that response — you cannot allow some and deny others",
   "The prompt frame schema — exactly what your AI security server sees (and what it never sees: system prompts, hidden reasoning, raw bytes)",
   "The verdict JSON: allow, deny with deny_reason, and why there is deliberately no redact action today",
   "The signing model — Standard Webhooks HMAC-SHA256, the two verification bugs that catch every first integration, and the whsec_ secret format",
@@ -16,15 +18,35 @@ keywords: [claude inference hooks, claude enterprise dlp, anthropic inference ho
   "A rollout playbook that doesn't blow up on day one — shadow mode → percentage rollout → role exclusions → enforce, in that order",
 ]} />
 
-<VerifyNote lastVerified="2026-08-06" source="https://claude.com/blog/claude-enterprise-inference-hooks">
-Beta launched **August 5, 2026**. Field names, request shapes, and headers may change before general availability — always cross-check the [Inference Hooks endpoint reference](https://platform.claude.com/docs/en/manage-claude/inference-hooks-endpoint) before you ship a hard cutover. Beta scope is Claude Enterprise on claude.ai, Cowork, and Claude Code; **not** available for API access via Claude Platform, Bedrock, Google Cloud, or voice mode.
+<VerifyNote lastVerified="2026-11-09" source="https://platform.claude.com/docs/en/manage-claude/inference-hooks">
+**Inference hooks are now generally available.** Anthropic's platform release notes recorded them leaving beta on **October 20, 2026**, and the **November 5, 2026** Claude Enterprise security announcement confirms *both* hook kinds — prompt hooks and pre-tool-call hooks — as GA. They are available **only to Claude Enterprise organizations**; configuring them needs the `organization:manage` permission, held only by Owner and Primary Owner. Still out of scope: **Claude Platform (API) organizations**, **Amazon Bedrock**, and **Google Cloud**. Voice mode is now *partially* covered — see the coverage matrix, and do not treat hooks as your only voice control. Canonical spec: [Inference hooks](https://platform.claude.com/docs/en/manage-claude/inference-hooks) · [Configure](https://platform.claude.com/docs/en/manage-claude/inference-hooks-configuration) · [Endpoint reference](https://platform.claude.com/docs/en/manage-claude/inference-hooks-endpoint).
 </VerifyNote>
 
-Announced August 5, 2026, **Inference Hooks** are Anthropic's first-party answer to the question every security team asks after they roll out a Claude Enterprise seat: *how do I stop a prompt with regulated data from ever reaching the model?* The answer, until now, was a corporate proxy that intercepted TLS traffic to `claude.ai` — brittle, incomplete, and blind to the Claude Code CLI. Inference Hooks moves the enforcement point inside Anthropic's perimeter: for every governed prompt, Anthropic pauses inference, POSTs the transcript to a server your organization operates, and waits for an `allow` or `deny` before the model sees anything.
+Announced in beta on August 5, 2026 and **generally available since October 2026**, **Inference Hooks** are Anthropic's first-party answer to the question every security team asks after they roll out a Claude Enterprise seat: *how do I stop a prompt with regulated data from ever reaching the model?* The answer, until now, was a corporate proxy that intercepted TLS traffic to `claude.ai` — brittle, incomplete, and blind to the Claude Code CLI. Inference Hooks moves the enforcement point inside Anthropic's perimeter: for every governed prompt, Anthropic pauses inference, POSTs the transcript to a server your organization operates, and waits for an `allow` or `deny` before the model sees anything.
+
+GA brought the change that matters most for agentic work: a **second hook event** that fires on tool calls, *after* the model has decided to act but *before* anything runs.
 
 ## The one paragraph version
 
-Your organization stands up an HTTPS endpoint. Anthropic sends it every governed prompt as a signed `POST` (Standard Webhooks HMAC-SHA256). Your server returns `{"action": "allow"}` and inference proceeds, or `{"action": "deny", "deny_reason": "..."}` and the user sees the reason and never hits the model. The endpoint covers Claude Enterprise chat, Claude Code, and Cowork with one configuration. If your server times out or 500s, your **failure handling** setting decides whether the request blocks or proceeds uninspected. Roll it out gradually with shadow mode + percentage rollout + role exclusions before you flip **Enforce verdicts** on.
+Your organization stands up an HTTPS endpoint. Anthropic sends it every governed prompt — and, if you enable **Validate tool calls**, every tool-call batch — as a signed `POST` (Standard Webhooks HMAC-SHA256). Your server returns `{"action": "allow"}` and inference proceeds, or `{"action": "deny", "deny_reason": "..."}` and the user sees the reason and never hits the model. One configuration covers every Claude product in the org: chat, Claude Code, Cowork, Claude for Microsoft 365, Claude Tag, Claude in Chrome. If your server times out or 500s, your **failure handling** setting decides whether the request blocks or proceeds uninspected. Roll it out gradually with shadow mode + percentage rollout + role exclusions before you flip **Enforce verdicts** on.
+
+## The two hook events
+
+<Steps items={[
+  {title: "Prompt hook — type: \"prompt\"", body: "Fires once for each governed inference request, before inference starts. The verdict covers the whole transcript. This is the event that existed in beta and the one most integrations begin with."},
+  {title: "Pre-tool-call hook — type: \"tool_call\"", body: "Fires when Claude's response contains tool calls, before ANY of them runs. Only fires in organizations that have the Validate tool calls setting on — it is not implied by enabling hooks."},
+  {title: "The constraint that shapes your rules", body: "One tool_call verdict applies to EVERY tool call in that response. Anthropic is explicit: you cannot allow some tool calls and deny others. Your rule has to be a judgement about the batch — if any call in it is unacceptable, you deny the whole response."},
+  {title: "Tool results come back through the PROMPT hook", body: "There is no separate tool-result event. Results arrive as tool_result blocks inside the next prompt frame, so exfiltration-shaped content returning from a tool is caught on the following turn, not on the call."}
+]} />
+
+On a `tool_call` frame, each `tool_use` block also carries a `tool_info` object whose kind tells you where the tool came from: `platform`, `application`, `third_party`, or `client`. That is the field to branch your policy on — a `third_party` MCP tool and a first-party platform tool deserve very different scrutiny. See [MCP tool poisoning & rug pulls](/docs/security/mcp-tool-poisoning-and-rug-pulls) for why.
+
+Tool calls made through skills, plugins, connected tools, local MCP servers, and code run inside the code execution tool are all in scope.
+
+<Callout type="warning" items={[
+  "A handful of claude.ai internal tool calls can be omitted from tool_call events — listing connectors or skills, a web-search suggestion, a model switch, reading the local time, reading past chats and memory. They reappear as tool_use blocks in the NEXT prompt frame, so you still see them; you just cannot block them at call time.",
+  "Anthropic-run features that make their own model calls are not governed at all: Claude Security scans (beta), Code Review (research preview), and smart reports. Do not assume org-wide inspection means literally every inference in your tenant."
+]} />
 
 ## Inference Hooks vs the Compliance API
 
@@ -42,7 +64,7 @@ Most enterprises will run both. Hooks are the tripwire; the Compliance API is th
 ## How the verdict round trip works
 
 <Steps items={[
-  {title: "User submits a prompt on a governed surface", body: "That's claude.ai chat, Claude Code (web, desktop, CLI), or Claude Cowork. Ancillary requests like conversation-title generation are NOT sent. Voice mode is out of scope for the beta."},
+  {title: "User submits a prompt on a governed surface", body: "One hook governs every Claude product in the org — claude.ai chat, Claude Code (web, desktop, CLI), Cowork, Claude for Microsoft 365, Claude Tag, Claude in Chrome — across web, desktop, mobile, CLI and Slack. Ancillary requests like conversation-title generation are NOT sent."},
   {title: "Anthropic pauses inference and POSTs the transcript to your endpoint", body: "One HTTPS POST to the URL your admin configured. Headers include Content-Type: application/json, User-Agent: anthropic-dlp/1, and the three Standard Webhooks signature headers (webhook-id, webhook-timestamp, webhook-signature)."},
   {title: "Your AI security server verifies the signature and evaluates the transcript", body: "Compute HMAC-SHA256 over `{webhook-id}.{webhook-timestamp}.{raw body bytes}` with the base64-decoded whsec_ secret. Reject anything more than 5 minutes off your clock or without a matching signature."},
   {title: "Your server returns a JSON verdict with HTTP 200", body: "Either {\"action\": \"allow\"} or {\"action\": \"deny\", \"deny_reason\": \"...\"}. Anthropic reads at most 64 KiB of the response body and does NOT follow redirects."},
@@ -57,11 +79,11 @@ Every request is a JSON body with these top-level fields:
 
 | Field        | Type          | Description                                                                                                                                                                                                                              |
 | ------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`       | string        | Always `"prompt"` today. New event types will appear — return `allow` on unrecognized values so you don't trip the circuit breaker.                                                                                                      |
+| `type`       | string        | `"prompt"` or `"tool_call"` — see [the two hook events](#the-two-hook-events). Still an open enum: return `allow` on unrecognized values so you don't trip the circuit breaker.                                                                                                      |
 | `request_id` | string        | Opaque per-inference-call identifier. Equals the `webhook-id` header — use it as your idempotency key.                                                                                                                                    |
 | `tenant_id`  | string \| null | Opaque identifier for the org.                                                                                                                                                                                                           |
 | `actor`      | object        | Discriminated on `type` (`"user"` is the only value today). Carries a tagged `id` stable across a user's requests and `email_address` when available. Both fields can be null.                                                            |
-| `source`     | object        | `{"application": "..."}`. Known values: `claude-ai`, `claude-code`, `config-test` (used by the admin "Test connection" button). Open enum — new values will appear.                                                                       |
+| `source`     | object        | `{"application": "..."}`. Known values: `claude-ai`, `claude-code`, `cowork`, `config-test` (used by the admin "Test connection" button and by circuit-breaker recovery probes). Open enum — new values will appear.                                                                       |
 | `session_id` | string \| null | Opaque conversation identifier. Don't parse it. Best-effort for Claude Code.                                                                                                                                                             |
 | `model`      | string \| null | Public model identifier for this request when available.                                                                                                                                                                                 |
 | `messages`   | array         | The conversation transcript up to the point of inference — see [Content blocks](#content-blocks).                                                                                                                                        |
@@ -126,7 +148,9 @@ The transcript is the conversation *as the end user sees it*, plus tool traces. 
 
 ### One size gotcha
 
-Transcripts are sent untruncated up to a **10 MB** ceiling. Common defaults are much smaller — nginx `client_max_body_size` is **1 MB**, Express `express.json()` is **100 kB**, most PaaS reverse proxies cap at a few MB. A body your server rejects is a webhook failure, which under **Allow the request** failure handling means the oversized prompt reaches the model **uninspected**. Raise your body limits before you enforce.
+Transcripts are sent **untruncated**. The protocol itself allows up to **64 MiB**; Anthropic's guidance is that the model's context window keeps real bodies **under about 10 MB** in practice. Size your limits to the practical figure and your error handling to the protocol one.
+
+Common defaults are far smaller — nginx `client_max_body_size` is **1 MB**, Express `express.json()` is **100 kB**, most PaaS reverse proxies cap at a few MB. A body your server rejects is a webhook failure, which under **Allow the request** failure handling means the oversized prompt reaches the model **uninspected**. Raise your body limits before you enforce.
 
 ## The verdict schema
 
@@ -256,7 +280,11 @@ Everything else that isn't a clean 200-with-verdict is a **webhook failure**: ti
 
 ### Circuit breaker
 
-Sustained webhook failures attributable to your AI security server **trip a circuit breaker** that stops enforcement: Anthropic stops calling your server, and failure handling applies to every request. Recovery isn't automatic — fix the server, then have your admin toggle **Enforce verdicts** back on. In practice this means: **an unknown top-level `type` should return `{"action": "allow"}`, not an HTTP 500** — a future new event type would otherwise trip you into circuit-breaker territory on rollout day.
+Sustained webhook failures attributable to your AI security server **trip a circuit breaker** that stops enforcement: Anthropic stops calling your server, and failure handling applies to every request.
+
+**Recovery is automatic.** Anthropic probes a tripped endpoint with synthetic `config-test` requests and resets the breaker once valid verdicts resume — you do not have to toggle **Enforce verdicts** by hand. That is a genuine improvement over the beta behavior, and it has one unpleasant consequence: a server that is *intermittently* broken can flap in and out of enforcement without anyone filing a ticket. Alert on breaker-trip events (`inference_hooks_circuit_breaker_tripped` in the Activity Feed), not on user complaints.
+
+In practice the breaker also means: **an unknown top-level `type` should return `{"action": "allow"}`, not an HTTP 500** — a future new event type would otherwise trip you into circuit-breaker territory on rollout day. The `tool_call` event arriving at GA is exactly the scenario that rule was written for.
 
 ### Latency
 
@@ -288,18 +316,45 @@ Anthropic's docs put it plainly: *blocking employees on day one is how DLP progr
 
 ## Coverage matrix
 
+Anthropic's own phrasing is "**including, but not limited to**" — treat the yes-list as a floor, not a fixed set.
+
 | Surface / access                             | Inspected by Inference Hooks?                                     |
 | -------------------------------------------- | ----------------------------------------------------------------- |
 | claude.ai (web, desktop, mobile)             | ✅ Yes                                                             |
 | Claude Code (web, desktop, CLI)              | ✅ Yes (`session_id` is best-effort, client-asserted)              |
 | Claude Cowork                                | ✅ Yes                                                             |
-| Voice mode                                   | ❌ Not in the beta                                                 |
+| Claude for Microsoft 365                     | ✅ Yes                                                             |
+| Claude Tag                                   | ✅ Yes                                                             |
+| Claude in Chrome                             | ✅ Yes                                                             |
+| Slack                                        | ✅ Yes                                                             |
+| Tool calls via skills, plugins, connectors, local MCP, code execution | ✅ Yes, with **Validate tool calls** on            |
+| Voice mode                                   | ⚠️ **Partial** — prompts and tool calls are sent, but Anthropic warns a small share of tool calls isn't. Not a sufficient sole control for voice. |
+| Some claude.ai internal tool calls           | ⚠️ Omitted from `tool_call` events; visible in the next prompt frame |
+| Claude Security scans, Code Review, smart reports | ❌ Anthropic-run features making their own model calls — not governed |
 | Conversation title generation, other ancillary | ❌ Not sent                                                      |
 | System prompts, tool definitions              | ❌ Never sent                                                      |
 | Raw file / image bytes                       | ❌ Never sent (extracted text is)                                   |
 | Image-only content (e.g. screenshot of doc)  | ❌ Not inspected                                                    |
 | Claude Platform API keys (developer access)  | ❌ Out of scope of Inference Hooks (Platform orgs, not Enterprise) |
 | Amazon Bedrock / Google Cloud deployments    | ❌ Not available on those planes                                    |
+
+## The companion control: the security center
+
+Hooks enforce. The **security center** — shipped **in beta** alongside the GA announcement on November 5, 2026 — tells you whether the rest of your configuration is sane. It is a page in Organization settings that compares your actual settings for chat, Cowork, and Claude Code against Anthropic's recommended configuration.
+
+<Steps items={[
+  {title: "It re-checks on every page load", body: "Not a nightly job. Each visit evaluates current configuration, so it is usable as a pre-change and post-change diff rather than a monthly report."},
+  {title: "Per control, it shows three things", body: "Your current value, Anthropic's recommended value where one exists, and a direct link to the setting. It also flags settings that are new or have recently changed — which is the part that catches drift you did not cause."},
+  {title: "Attestations give the review a workspace", body: "A shared surface for your admins to record control state, accept risks explicitly, and flag issues. This is what turns 'we looked at it' into something auditable."},
+  {title: "The report distinguishes checked from claimed", body: "The downloadable report marks which controls were verified automatically and which an Owner confirmed by hand. Keep that distinction when you hand it to an auditor."},
+  {title: "Read it through the Compliance API if you prefer", body: "Organizations with Compliance API access can pull the same results programmatically instead of loading the page."}
+]} />
+
+<Callout type="warning" items={[
+  "Anthropic states the security center is guidance based on its own recommendations, NOT a certification. It does not attest compliance with any framework, and a clean page is not evidence for an auditor by itself — the attestations and the report are what you hand over."
+]} />
+
+Everything else in that November 5 bundle is still **beta**: centralized management via a parent org console at `admin.claude.com`, Admin API member sign-out everywhere, self-serve IP allowlisting, Claude Desktop settings management, and EDR sensors in Cowork on macOS and Windows (MDM-deployed, running in detection mode). Inference hooks are the only GA item in the set — plan your controls accordingly.
 
 ## Common mistakes
 
@@ -356,13 +411,45 @@ Some orgs still run TLS-intercepting proxies for coverage of *everything* their 
       "They always proceed; failure defaults to fail-open"
     ],
     answer: 1,
-    explain: "500s are webhook failures. Your organization's failure handling setting (Block the request vs Allow the request) picks which side of that trade you're on. Sustained failures also trip the circuit breaker, at which point failure handling applies to every request until an admin re-enables enforcement."
+    explain: "500s are webhook failures. Your organization's failure handling setting (Block the request vs Allow the request) picks which side of that trade you're on. Sustained failures also trip the circuit breaker, at which point failure handling applies to every request — though the breaker now resets automatically once valid verdicts resume, so an intermittently broken server can flap in and out of enforcement silently."
+  },
+  {
+    q: "A tool_call frame arrives containing three tool calls: a read of an internal doc, a third-party MCP search, and a write to an external ticket system. Your policy objects only to the third. What can you return?",
+    options: [
+      "A per-call verdict array allowing the first two and denying the third",
+      "{ \"action\": \"deny\" } — one verdict covers all three, so the whole response is blocked",
+      "{ \"action\": \"redact\" } with the third call removed",
+      "HTTP 207 Multi-Status with individual outcomes"
+    ],
+    answer: 1,
+    explain: "One tool_call verdict applies to every tool call in that response — Anthropic says explicitly that you cannot allow some and deny others. Your rule has to be a judgement about the batch, so a single objectionable call denies the response. Branch your policy on each tool_use block's tool_info kind (platform / application / third_party / client) to decide how strict to be."
+  },
+  {
+    q: "You enabled Inference Hooks org-wide and your prompt hook is receiving traffic, but you never see a single tool_call event even though users run Claude Code with MCP servers. What is the most likely cause?",
+    options: [
+      "Tool calls only fire for third_party tools",
+      "The Validate tool calls organization setting is off",
+      "tool_call events are Claude Platform only",
+      "Your verdict timeout is too low, so tool events are dropped"
+    ],
+    answer: 1,
+    explain: "The tool_call event only fires in organizations that have Validate tool calls turned on. Enabling hooks does not imply it. Note also that tool RESULTS never come as their own event — they return as tool_result blocks in the next prompt frame."
   }
 ]} />
+
+## Sources
+
+- Anthropic — [Inference hooks](https://platform.claude.com/docs/en/manage-claude/inference-hooks) (overview: the two events, surfaces, exclusions, failure handling)
+- Anthropic — [Develop an Inference hooks integration](https://platform.claude.com/docs/en/manage-claude/inference-hooks-endpoint) (frame and verdict schemas, signing)
+- Anthropic — [Configure Inference hooks](https://platform.claude.com/docs/en/manage-claude/inference-hooks-configuration)
+- Anthropic Help Center — [Inference hooks overview](https://support.claude.com/en/articles/16059458-inference-hooks-overview) (plan gating, who can manage)
+- Anthropic — [More visibility and control over Claude Enterprise for security teams](https://claude.com/resources/articles/claude-enterprise-security-updates) (November 5, 2026: GA confirmation, security center, attestations, the beta bundle)
+- Anthropic Help Center — [Review your organization's security posture with the security center](https://support.claude.com/en/articles/18246629-review-your-organization-s-security-posture-with-the-security-center)
+- Anthropic — [Claude Platform release notes](https://platform.claude.com/docs/en/release-notes/overview) (October 20, 2026: hooks out of beta)
 
 ## Next
 
 - [The Admin API: automate your Claude org](/docs/api/admin-api) — Enterprise user management and RBAC endpoints that pair naturally with hooks.
+- [MCP tool poisoning & rug pulls](/docs/security/mcp-tool-poisoning-and-rug-pulls) — the threat the `tool_info` kind field exists to help you triage.
 - [MCP 2026-07-28: The Stateless Spec](/docs/api/mcp-2026-07-28-stateless) — the tool-call side of what your hooks will see in `tool_use` and `tool_result` blocks.
 - [Refusals & Safety](/docs/api/refusals-and-safety) — Claude's own in-model refusal signals, which fire *after* your hook allows a prompt through.
-- [Current Models & Pricing](/docs/whats-new/models-and-pricing)
