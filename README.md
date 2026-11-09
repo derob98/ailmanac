@@ -80,6 +80,7 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 ## Recently added
 
 <!-- fresh:start -->
+- 2026-11-09 — [Personal Finance in Claude: what it reads, and the three privacy edges](https://derob98.github.io/ailmanac/docs/claude-app/personal-finance)
 - 2026-11-03 — [Message Threads — Send Only the New Turn](https://derob98.github.io/ailmanac/docs/api/message-threads)
 - 2026-11-03 — [Server-Side Conversation State Across Providers](https://derob98.github.io/ailmanac/docs/models/server-side-conversation-state)
 - 2026-11-03 — [Weight-Space Programming: When One Model Debugs Another's Weights](https://derob98.github.io/ailmanac/docs/frontiers/weight-space-programming)
@@ -87,7 +88,6 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 - 2026-11-02 — [The Usage & Cost Analytics API: Attribute Every Dollar](https://derob98.github.io/ailmanac/docs/api/usage-cost-analytics)
 - 2026-11-02 — [User Profiles & Enforcement: Don't Let One Customer Ban Your Whole Org](https://derob98.github.io/ailmanac/docs/api/user-profiles-and-enforcement)
 - 2026-11-02 — [Your Stack Choice Is an Agent Cost Lever](https://derob98.github.io/ailmanac/docs/playbooks/framework-choice-agent-cost)
-- 2026-10-26 — [Capability Redaction: What Kimi K3.1 Pro's Cyber Cut Actually Bought](https://derob98.github.io/ailmanac/docs/security/capability-redaction-open-weights)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).
