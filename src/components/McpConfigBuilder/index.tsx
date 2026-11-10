@@ -11,13 +11,20 @@ type Server = {
 
 // Illustrative starters. Package names and availability evolve — verify at
 // modelcontextprotocol.io and the official Claude Code MCP docs.
+//
+// Checked 2026-11-10 against the npm registry: several of the old
+// @modelcontextprotocol/server-* reference servers (github, postgres,
+// puppeteer, slack) are now flagged "Archived and unmaintained; no security
+// guarantees" and were moved to modelcontextprotocol/servers-archived. Only
+// filesystem and memory are still maintained reference servers, so the rest
+// point at the vendor's own server or at a placeholder you must choose.
 const SERVERS: Server[] = [
-  {id: 'github', label: 'GitHub', note: 'needs a token', entry: {command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], env: {GITHUB_TOKEN: '${GITHUB_TOKEN}'}}},
-  {id: 'postgres', label: 'PostgreSQL', note: 'needs a DB URL', entry: {command: 'npx', args: ['-y', '@modelcontextprotocol/server-postgres', '${DATABASE_URL}']}},
+  {id: 'github', label: 'GitHub', note: 'OAuth via /mcp', entry: {type: 'http', url: 'https://api.githubcopilot.com/mcp/'}},
+  {id: 'postgres', label: 'PostgreSQL', note: 'pick a maintained server', entry: {command: 'npx', args: ['-y', 'REPLACE-WITH-A-MAINTAINED-POSTGRES-MCP-SERVER', '${DATABASE_URL}']}},
   {id: 'filesystem', label: 'Filesystem', note: 'scope to a dir', entry: {command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '/path/to/allowed/dir']}},
   {id: 'memory', label: 'Memory', entry: {command: 'npx', args: ['-y', '@modelcontextprotocol/server-memory']}},
-  {id: 'puppeteer', label: 'Browser (Puppeteer)', entry: {command: 'npx', args: ['-y', '@modelcontextprotocol/server-puppeteer']}},
-  {id: 'slack', label: 'Slack', note: 'needs tokens', entry: {command: 'npx', args: ['-y', '@modelcontextprotocol/server-slack'], env: {SLACK_BOT_TOKEN: '${SLACK_BOT_TOKEN}', SLACK_TEAM_ID: '${SLACK_TEAM_ID}'}}},
+  {id: 'playwright', label: 'Browser (Playwright)', entry: {command: 'npx', args: ['-y', '@playwright/mcp@latest']}},
+  {id: 'slack', label: 'Slack', note: 'pick a maintained server', entry: {command: 'npx', args: ['-y', 'REPLACE-WITH-A-MAINTAINED-SLACK-MCP-SERVER'], env: {SLACK_BOT_TOKEN: '${SLACK_BOT_TOKEN}', SLACK_TEAM_ID: '${SLACK_TEAM_ID}'}}},
   {id: 'custom', label: 'Custom (stdio)', note: 'your own server', entry: {command: 'node', args: ['path/to/your/server.js']}},
 ];
 
