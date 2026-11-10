@@ -7,7 +7,7 @@
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [日本語](./README.ja.md) · [Español](./README.es.md) · [Italiano](./README.it.md)
 
 <!-- stats:start -->
-**336 pages** · **297 interactive lessons** · **12 languages** · **45 pages re-verified in the last 30 days**
+**336 pages** · **297 interactive lessons** · **12 languages** · **48 pages re-verified in the last 30 days**
 <!-- stats:end -->
 
 <p>
@@ -81,13 +81,13 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 
 <!-- fresh:start -->
 - 2026-11-10 — [Claude Fable 5.2: The Migration Field Guide](https://derob98.github.io/ailmanac/docs/models/fable-5-2-field-guide)
+- 2026-11-10 — [Muse Ember: The Executor Tier and the Band Nobody Priced](https://derob98.github.io/ailmanac/docs/models/muse-ember-executor-tier)
+- 2026-11-10 — [Your Permission Allowlist Is a Credential Store: 1,122 Leaking settings.local.json Files](https://derob98.github.io/ailmanac/docs/security/permission-allowlists-leak-secrets)
 - 2026-11-09 — [Personal Finance in Claude: what it reads, and the three privacy edges](https://derob98.github.io/ailmanac/docs/claude-app/personal-finance)
 - 2026-11-09 — [Rolling Out a Coding Agent to Non-Engineers](https://derob98.github.io/ailmanac/docs/playbooks/rolling-out-coding-agents)
 - 2026-11-03 — [Message Threads — Send Only the New Turn](https://derob98.github.io/ailmanac/docs/api/message-threads)
 - 2026-11-03 — [Server-Side Conversation State Across Providers](https://derob98.github.io/ailmanac/docs/models/server-side-conversation-state)
 - 2026-11-03 — [Weight-Space Programming: When One Model Debugs Another's Weights](https://derob98.github.io/ailmanac/docs/frontiers/weight-space-programming)
-- 2026-11-02 — [Desktop Agents Without Pixels](https://derob98.github.io/ailmanac/docs/models/desktop-agents-accessibility-tree)
-- 2026-11-02 — [The Usage & Cost Analytics API: Attribute Every Dollar](https://derob98.github.io/ailmanac/docs/api/usage-cost-analytics)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).
