@@ -1,0 +1,112 @@
+---
+sidebar_position: 19
+title: "MCP 的 Token 税"
+description: "为什么连接 MCP 服务器会在你发出第一个请求之前烧掉 5 万到 15 万个 token——以及三种解决办法：Tool Search、代码执行，以及什么时候直接调用 CLI 更划算。"
+---
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-11-10" source="https://www.anthropic.com/engineering/advanced-tool-use">
+Token 数字和功能名称（`defer_loading`、Tool Search Tool、Programmatic Tool Calling）来自 Anthropic 的工程博客文章。Claude Code 自身的工具搜索行为——默认开启、`ENABLE_TOOL_SEARCH` 的取值、模型下限和描述长度上限——来自 [Claude Code MCP 文档](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search)，这部分内容的变化也主要发生在那里。引用确切数字之前，请对照这两处核实。
+</VerifyNote>
+
+Hacker News 和 X 上总在重复一场争论：*同样的事情用 CLI 只要几百个 token，为什么一次 MCP 操作要烧掉几万个？* 听起来像是在抨击 MCP，其实不是。吵得最凶的恰恰是最喜欢智能体的人——他们只是刚刚见到了账单。本页就是这份账单的实用指南：token 究竟花在哪里、几乎没人区分的两种成本，以及把 150,000 token 的工作流变成 2,000 token 的三种办法。
+
+<Callout type="objectives" items={["区分 MCP 两种不同的 token 成本：工具定义的加载和中间结果", "理解为什么 schema 成本是按对话支付的，而不是只付一次", "使用 defer_loading 和 Tool Search Tool 按需加载工具 schema", "使用代码执行 / Programmatic Tool Calling，把大体量的结果挡在上下文之外", "针对每个任务判断：什么时候 MCP 工具值得用，什么时候一次普通的 CLI 调用更划算"]} />
+
+## 两种成本，而不是一种
+
+连接 MCP 服务器时，客户端会向它请求 `tools/list`，拿回**每个工具及其完整的 JSON schema**。整块内容都会被注入模型的上下文。大多数人的心理账本到这里就停了。但实际上有两种独立的税，而第二种通常更大。
+
+**成本 1 — 工具定义。** 每个已连接工具的名称、描述和参数 schema 都占据上下文。Anthropic 自己的说法是：*“如果智能体连接了数千个工具，它们在读取请求之前就需要处理数十万个 token。”* 单个企业级服务器可以发布几十到几百个工具；第三方分析显示，一个有 400 个工具的服务器仅 schema 就大约有 400,000 个 token——是 200k 窗口的两倍，对 1M 窗口来说也仍占 40%，而且这些都是在第一个请求之前就花掉的。（各模型的窗口大小见：[模型与定价](/docs/whats-new/models-and-pricing)。）
+
+**成本 2 — 中间结果。** 当模型直接调用工具时，**每个结果都会回流经过模型的上下文**，即使其中有你根本不想让它读的部分。Anthropic 的例子：用一个工具取出两小时会议的转录文本，再交给另一个工具，完整转录会*两次*经过模型——可能约 50,000 个 token——只为得到一行摘要。
+
+<Callout type="warning" items={["成本 1 在提示词缓存生效之前，每一轮都要支付——schema 会随对话中的每个请求重新发送，而不是只加载一次。庞大的工具目录是对整个会话征收的税，而不是一次性费用。这是定义被加载的工具所产生的成本；把它延迟加载（见下文）才能把它从每轮的账单上拿掉。", "成本 2 随你的数据量增长，而不是随工具数量增长。十个很小的工具可能比一个返回巨大数据块的工具更便宜。"]} />
+
+### 数字，来自一手来源
+
+| 办法 | 任务 | 之前 | 之后 | 降幅 |
+| --- | --- | --- | --- | --- |
+| 结合 MCP 的代码执行 | Google Drive → Salesforce 工作流 | 150,000 | 2,000 | **98.7%** |
+| Tool Search Tool | 在工作开始前加载定义 | ~77,000 | ~8,700 | **85%** |
+| Programmatic Tool Calling | 复杂的研究任务 | 43,588 | 27,297 | **37%** |
+
+三行数据都是 Anthropic 公布的数字。令人意外的不是成本，而是**准确率**：使用 Tool Search Tool 后，工具选择的准确率反而*提高*了（Opus 4.5 从 79.5% 升到 88.1%；Opus 4 从 49% 升到 74%）。上下文里拥挤的工具变少，模型就更常选对。这里成本和质量朝同一个方向变化，这很少见。
+
+## 办法 1 — 按需加载工具 schema
+
+不要一开始就注入所有 schema，而是把它们标记为 `defer_loading: true`。这样 Claude 只会看到一个轻量索引；当它需要 GitHub 时，会调用 **Tool Search Tool**，后者*只*返回匹配的 GitHub schema——而不是其他所有服务器的 50 多个工具。Anthropic 报告称，这样可保留约 191,300 个 token 的上下文，而全部预加载则约为 122,800 个。
+
+### 在 Claude Code 中，它已经开启
+
+如果你在 Claude Code 里使用 MCP 服务器，你此刻看到的就是这种模式。**工具搜索默认开启**：会话开始时只加载工具*名称*和服务器说明，当任务需要时，Claude 才通过一次 `ToolSearch` 调用获取完整的 schema。所以再多接一个服务器，你付出的是它的工具名称，而不是它的 schema——Claude Code 没有为每个服务器设置工具数量上限，并说明实际的限制是你的上下文窗口预算。
+
+有一个流传很广的说法值得纠正，因为它只对了一半。“约占上下文窗口 10%”这个阈值是真实存在的，但它**不是**默认触发条件——它只是环境变量 `ENABLE_TOOL_SEARCH` 的一个需要主动选用的模式：
+
+| `ENABLE_TOOL_SEARCH` | 行为 |
+| --- | --- |
+| *（未设置）* — 默认 | 所有 MCP 工具都被延迟，按需加载 |
+| `true` | 与未设置相同 |
+| `auto` | 阈值模式。只要可延迟工具的定义总量低于上下文窗口的 10%，它们就**预先**加载；达到或超过 10% 时，工具搜索开启 |
+| `auto:N` | 使用你自己百分比的阈值模式（`N` 为 0–100），例如 `auto:5` |
+| `false` | 所有 MCP 工具都预先加载，不做延迟 |
+
+所以，如果你原本指望低于 10% 时工具会预先加载，那你把默认行为想反了——除非你指定 `auto`，否则没有任何东西会预先加载。而且 `auto` 是**粘性的**：一旦总量越过阈值、工具搜索开启，即使总量后来又回落到阈值以下，这些工具也可能继续保持延迟状态。
+
+<Callout type="warning" items={["有三种情况会关闭工具搜索，并完全忽略 ENABLE_TOOL_SEARCH：CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS（从 Claude Code v2.1.227 起，组织可以通过托管设置让它保持开启）、使用 HIPAA 配置的会话（完全无法覆盖），以及托管在 Azure 上的 Microsoft Foundry 部署（在服务端拒绝它）。在权限中拒绝 ToolSearch 工具，同样会让所有工具预先加载。", "存在模型下限：Claude Code 在 Claude Opus 4、Sonnet 4、Haiku 4.5 及更新的模型上使用工具搜索。在更早的模型上，所有工具都预先加载，而 ENABLE_TOOL_SEARCH=true 并不能覆盖这一点。在 Google Cloud 的 Agent Platform 上，下限更高——Opus 4.5、Sonnet 4.5、Haiku 4.5 及更新的模型。"]} />
+
+如果你自己编写 MCP 服务器，延迟加载还会改变你的描述长度预算，而且是不对称的：**预先**加载的工具会在 4,096 个字符处被截断（与服务器说明的上限相同），**通过工具搜索**加载的则在 16,384 个字符处截断。但搜索本身只按较短的那个上限来匹配，所以无论哪种情况，Claude 会搜索的词都必须靠近开头。
+
+<Steps items={[{title: "盘点你连接了什么", body: "列出已启用的服务器，以及每个服务器大致发布了多少个工具。运行 /context：当工具搜索接管某些工具时，它会把它们标注为 (deferred) 或 (loaded on-demand)，这样你就能看出哪些服务器真正在消耗 schema token，哪些只消耗了名称。"}, {title: "断开这个任务用不到的", body: "最便宜的办法是少连几个服务器。只连接任务真正用到的两三个，而不是你的整个目录——即使是延迟加载，每个服务器仍会在每一轮贡献工具名称和服务器说明。"}, {title: "把其余的延迟加载", body: "在 Claude Code 里，这已经是默认行为。在其他环境里，优先选择支持 defer_loading + Tool Search 的客户端/配置，让 schema 只在被搜索时才加载。"}]} />
+
+## 办法 2 — 用代码执行把结果挡在上下文之外
+
+更深层的办法针对的是成本 2。不再由模型逐个调用工具、让每个结果都经过它，而是让模型**编写代码**来调用工具，中间数据留在执行环境里。Anthropic 把 MCP 服务器暴露为**工具的文件树**，智能体像浏览文件系统一样去探索，只加载它需要的定义——并且*“中间结果默认保留在执行环境中……智能体只会看到你明确记录或返回的内容。”*
+
+正是这一个设计改动，让 Drive→Salesforce 工作流从 150,000 个 token 降到了 2,000 个：记录在代码中流转，只有最终的计数回到模型。在 Developer Platform 上，同样的思路以 **Programmatic Tool Calling** 的形式提供——Claude 编写 Python 来编排多个工具，并在输出进入它的上下文之前先做过滤。
+
+<Callout type="tip" items={["经验法则：如果一个工具会返回很大的东西（转录文本、查询导出、文件），你就需要代码执行，让这块数据在上下文之外处理。如果一个工具只是做一件很小的事（创建一个 issue、发送一行数据），直接调用就可以了。"]} />
+
+## 办法 3 — 知道什么时候直接调用 CLI 就赢了
+
+有时正确答案不是更好的 MCP 配置，而是干脆不用 MCP。HN/X 上的争论确有道理：像 `gh pr list` 或 `psql -c '…'` 这样的 shell 命令，一来一回只要几百个 token，而等价的 MCP 路径要为 schema 加上结构化结果买单。如果智能体已经有终端，而且对应的 CLI 存在，这往往就是最精简的路径。
+
+<PromptCard title="当工具本身已经是 CLI 时，优先用 CLI">
+{`# Instead of connecting a GitHub MCP server for read-only work,
+# let the agent use the gh CLI it already has:
+gh pr list --state open --json number,title,author
+
+# ~200 tokens of command + compact output, no schema tax,
+# no server to keep connected across the session.`}
+</PromptCard>
+
+当你需要**有类型、有权限控制、跨界面**的能力时——比如带只读角色的数据库、它能操控的浏览器、使用 OAuth 的 SaaS API——或者同一批工具会在许多轮中反复使用、缓存因此摊薄了 schema 成本时，MCP 的开销才物有所值。当这项能力只用一次、本来就能用脚本调用、返回的东西又很小时，就选 CLI。两者没有谁“更好”；它们只是成本曲线上的不同点。
+
+<Callout type="takeaways" items={["MCP 有两种 token 成本：工具定义 schema（几乎每一轮都要付）和中间结果（随你的数据量增长）。", "Tool Search + defer_loading 把 schema 成本降低约 85%，同时还提高了工具选择的准确率——只在被搜索时才加载 schema。", "在 Claude Code 中，工具搜索默认开启：会话开始时只加载工具名称。人们常引用的约 10% 阈值是需要主动选用的 ENABLE_TOOL_SEARCH=auto 模式，而不是默认行为。", "代码执行 / Programmatic Tool Calling 把大结果留在执行环境中；只有你记录或返回的内容才会到达模型（Anthropic 的例子中是 150k → 2k）。", "最便宜的优化是每个任务少连几个服务器。", "当能力只用一次、返回的东西很小、而且已有 CLI 时，一次 shell 调用（约 200 个 token）胜过一次 MCP 往返。"]} />
+
+<Flashcards title="MCP 经济学术语" cards={[{front: "MCP 的 token 税", back: "花在工具 schema 和中间结果上、而不是花在实际工作上的 token——连接服务器带来的隐性成本。"}, {front: "defer_loading", back: "一个标志，让工具的 schema 保持在上下文之外，直到 Claude 通过 Tool Search Tool 搜索到它。"}, {front: "Tool Search Tool", back: "让 Claude 按需发现工具；搜索“github”只会返回 GitHub 的 schema，而不是所有已连接工具的 schema。按 Anthropic 的数据，schema token 减少约 85%。"}, {front: "Programmatic Tool Calling", back: "Claude 编写代码来编排工具；中间结果在执行环境中被过滤，因此只有最终输出进入上下文。"}, {front: "渐进式披露", back: "通用模式：一开始只公开一个轻量的工具索引，只在需要时才获取完整 schema。"}, {front: "ENABLE_TOOL_SEARCH", back: "Claude Code 的开关。未设置或 true = 全部延迟（默认）。auto / auto:N = 预先加载，直到定义超过窗口的 N%（默认 10%），然后开启并保持开启。false = 全部预先加载。"}]} />
+
+<Quiz title="自测一下" questions={[{q: "为什么工具定义的成本比一次性费用更糟？", options: ["Schema 存在磁盘上，重新读取很慢", "在提示词缓存生效之前，schema 会随对话中的每个请求重新发送", "每次工具调用都会让 schema 的大小翻倍"], answer: 1, explain: "工具 schema 位于每一轮都会发送的上下文中，所以庞大的目录会对整个会话征税——而不仅仅是第一条消息——直到缓存生效。"}, {q: "一个工具取出一份 2 小时的转录文本，并通过直接调用把它交给摘要工具。隐藏的成本是什么？", options: ["没有——只有摘要会消耗 token", "完整转录会经过模型的上下文，可能约 50k 个 token，即使你只想要一份摘要", "转录只在服务器端计费一次，不向模型计费"], answer: 1, explain: "使用直接的工具调用时，每个中间结果都会流经模型。代码执行把转录保留在执行环境中，只有摘要会返回。"}, {q: "在一次编码会话中，你只需要一次只读的“列出打开的 PR”，而且智能体有终端。最精简的选项是什么？", options: ["连接完整的 GitHub MCP 服务器", "直接运行 gh CLI——约 200 个 token，没有 schema 税，也不用保持任何连接", "关闭 defer_loading 并加载所有 GitHub 工具"], answer: 1, explain: "对于只用一次、返回内容很小且已有 CLI 的场景，一次 shell 调用完全避开了 schema 税。MCP 的成本是为可复用、有类型、有权限控制的能力而付的。"}, {q: "使用 Tool Search Tool 时，工具选择的准确率会发生什么出人意料的变化？", options: ["下降，因为 Claude 看到的工具变少了", "保持不变；只有成本变化", "上升——上下文里拥挤的工具变少，Claude 就更常选对"], answer: 2, explain: "Anthropic 报告称，使用 Tool Search 后准确率上升了（Opus 4.5：79.5% → 88.1%）。成本和质量朝同一个方向变化。"}]} />
+
+## AILmanac 上的相关内容
+
+- [Claude Code 中的 MCP 服务器](/docs/claude-code/mcp) — 如何添加、限定范围并保护服务器。
+- [Token 经济学](/docs/power-user/token-economy) — 在命令输出到达模型之前先压缩它。
+- [Dynamic Workflows](/docs/claude-code/dynamic-workflows) — 编排成本出现在哪里，以及如何切分来衡量开销。
+- [API 中的工具使用](/docs/api/tool-use) — 这一切背后的请求/响应结构。
+- [Playwright MCP：深度实战指南](/docs/api/playwright-mcp-deep-guide) — 以人们连接的最重的单个服务器为例（约 3,500 token 的 schema 税），以及什么时候改走 Skill/CLI 路径更划算。
+- [Tool Search 与延迟加载](/docs/api/tool-search-and-deferred-loading) — API 层面的深入解析：regex 对比 BM25、五种 400 错误，以及请求体为什么不会变小。
+
+## 来源与延伸阅读
+
+- [Code execution with MCP: building more efficient AI agents](https://www.anthropic.com/engineering/code-execution-with-mcp) — Anthropic Engineering。150,000 → 2,000 token（98.7%）这一数字以及“中间结果保留在执行环境中”这一模式的出处。
+- [Introducing advanced tool use on the Claude Developer Platform](https://www.anthropic.com/engineering/advanced-tool-use) — Anthropic Engineering。Tool Search Tool（`defer_loading`、约 85% 的降幅、准确率提升）和 Programmatic Tool Calling（43,588 → 27,297 个 token）。
+- [Claude Code MCP 文档](https://code.claude.com/docs/en/mcp) — 连接服务器并限定其范围的官方参考。其中的 [Scale with MCP tool search](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search) 一节，是“工具搜索为默认行为”、`ENABLE_TOOL_SEARCH` 表格、模型下限，以及 4,096 / 16,384 字符描述上限的出处。
+- [modelcontextprotocol — Progressive Tool Discovery discussion](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/1923) — 社区关于按需加载工具的设计讨论。
+- [MCP Progressive Disclosure](https://www.solo.io/blog/mcp-progressive-disclosure)（Solo.io）— 第三方对“轻量索引 / 按需获取 schema”模式的讲解。
+
+
+## 下一步
+
+- [无障碍](/docs/claude-code/accessibility)
