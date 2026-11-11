@@ -7,7 +7,7 @@
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [日本語](./README.ja.md) · [Español](./README.es.md) · [Italiano](./README.it.md)
 
 <!-- stats:start -->
-**339 pages** · **301 interactive lessons** · **12 languages** · **52 pages re-verified in the last 30 days**
+**339 pages** · **301 interactive lessons** · **12 languages** · **53 pages re-verified in the last 30 days**
 <!-- stats:end -->
 
 <p>
@@ -80,14 +80,14 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 ## Recently added
 
 <!-- fresh:start -->
+- 2026-11-11 — [AI Formal Verification: 6.5M Lines of Proof on 26,000 Lines of Trust](https://derob98.github.io/ailmanac/docs/frontiers/ai-formal-verification-alphaproof-code)
+- 2026-11-11 — [llama-modchip: a 284B model on 64 GB of RAM, read honestly](https://derob98.github.io/ailmanac/docs/models/llama-modchip-284b-on-64gb-cpu)
 - 2026-11-11 — [Tool Calling Across Providers](https://derob98.github.io/ailmanac/docs/models/tool-calling-across-providers)
 - 2026-11-10 — [Claude Fable 5.2: The Migration Field Guide](https://derob98.github.io/ailmanac/docs/models/fable-5-2-field-guide)
 - 2026-11-10 — [Muse Ember: The Executor Tier and the Band Nobody Priced](https://derob98.github.io/ailmanac/docs/models/muse-ember-executor-tier)
 - 2026-11-10 — [Your Permission Allowlist Is a Credential Store: 1,122 Leaking settings.local.json Files](https://derob98.github.io/ailmanac/docs/security/permission-allowlists-leak-secrets)
 - 2026-11-09 — [Personal Finance in Claude: what it reads, and the three privacy edges](https://derob98.github.io/ailmanac/docs/claude-app/personal-finance)
 - 2026-11-09 — [Rolling Out a Coding Agent to Non-Engineers](https://derob98.github.io/ailmanac/docs/playbooks/rolling-out-coding-agents)
-- 2026-11-03 — [Message Threads — Send Only the New Turn](https://derob98.github.io/ailmanac/docs/api/message-threads)
-- 2026-11-03 — [Server-Side Conversation State Across Providers](https://derob98.github.io/ailmanac/docs/models/server-side-conversation-state)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).
