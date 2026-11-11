@@ -7,7 +7,7 @@
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [日本語](./README.ja.md) · [Español](./README.es.md) · [Italiano](./README.it.md)
 
 <!-- stats:start -->
-**337 pages** · **299 interactive lessons** · **12 languages** · **50 pages re-verified in the last 30 days**
+**339 pages** · **301 interactive lessons** · **12 languages** · **52 pages re-verified in the last 30 days**
 <!-- stats:end -->
 
 <p>
@@ -80,6 +80,7 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 ## Recently added
 
 <!-- fresh:start -->
+- 2026-11-11 — [Tool Calling Across Providers](https://derob98.github.io/ailmanac/docs/models/tool-calling-across-providers)
 - 2026-11-10 — [Claude Fable 5.2: The Migration Field Guide](https://derob98.github.io/ailmanac/docs/models/fable-5-2-field-guide)
 - 2026-11-10 — [Muse Ember: The Executor Tier and the Band Nobody Priced](https://derob98.github.io/ailmanac/docs/models/muse-ember-executor-tier)
 - 2026-11-10 — [Your Permission Allowlist Is a Credential Store: 1,122 Leaking settings.local.json Files](https://derob98.github.io/ailmanac/docs/security/permission-allowlists-leak-secrets)
@@ -87,7 +88,6 @@ One page of flags, commands, shortcuts, permission modes and file locations. Eve
 - 2026-11-09 — [Rolling Out a Coding Agent to Non-Engineers](https://derob98.github.io/ailmanac/docs/playbooks/rolling-out-coding-agents)
 - 2026-11-03 — [Message Threads — Send Only the New Turn](https://derob98.github.io/ailmanac/docs/api/message-threads)
 - 2026-11-03 — [Server-Side Conversation State Across Providers](https://derob98.github.io/ailmanac/docs/models/server-side-conversation-state)
-- 2026-11-03 — [Weight-Space Programming: When One Model Debugs Another's Weights](https://derob98.github.io/ailmanac/docs/frontiers/weight-space-programming)
 <!-- fresh:end -->
 
 Everything new is listed on the site under [What's New](https://derob98.github.io/ailmanac/docs/whats-new/models-and-pricing).
