@@ -7,7 +7,7 @@
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [日本語](./README.ja.md) · [Español](./README.es.md) · [Italiano](./README.it.md)
 
 <!-- stats:start -->
-**336 pages** · **297 interactive lessons** · **12 languages** · **48 pages re-verified in the last 30 days**
+**337 pages** · **299 interactive lessons** · **12 languages** · **50 pages re-verified in the last 30 days**
 <!-- stats:end -->
 
 <p>
