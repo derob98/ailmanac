@@ -1,0 +1,188 @@
+---
+sidebar_position: 6.5
+title: "When Auto Mode Fails Closed"
+description: "Claude Code v2.1.319 removed the local classifier fallback — and flipped claude -p's exit code. What breaks, and the five other Oct–Nov 2026 changes that quietly change behavior."
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={[
+  "Understand why auto mode stopped falling back to its built-in classifier, and where that bites",
+  "Recognize the three environments that trigger it: telemetry off, feature flags off, and LLM gateways",
+  "Fix an unattended run that started failing — and know which fix is the wrong one",
+  "Catch the five other behavior changes from October–November 2026 that no release summary highlights"
+]} />
+
+<VerifyNote lastVerified="2026-11-12" source="https://code.claude.com/docs/en/changelog">
+Every version, date and setting name on this page comes from Anthropic's official Claude Code changelog. Claude Code ships several releases a week — re-check the changelog for anything newer than v2.1.322 (November 10, 2026).
+</VerifyNote>
+
+[Auto mode](/docs/claude-code/permissions) is the mode most people now run in: instead of prompting you for every action, a **safety classifier** screens each one. In **v2.1.319** (November 6, 2026) Anthropic changed what happens when that classifier can't be reached — and the change is not in anyone's "new features" list, because it isn't a feature. It's an enforcement decision that turns a previously-silent degradation into a hard stop.
+
+If you run Claude Code unattended — cron, CI, a scheduled task, a self-hosted runner — read the next two sections before your next pipeline run.
+
+## What changed
+
+Auto mode's check runs **server-side**. Before v2.1.319, a session that couldn't reach it fell back to a **built-in local classifier** and carried on. Now it doesn't: calls the server can't check are **asked about, or denied**, with no fallback.
+
+| | Before v2.1.319 | From v2.1.319 |
+|---|---|---|
+| Server check reachable | Server classifier screens the call | Unchanged |
+| Server check unreachable | Falls back to the built-in local classifier | **Asks you, or denies** |
+| Unattended session (`-p`, cron, CI) | Kept running on the local classifier | **Turn stops** |
+| `claude -p` exit code in that case | `0` | **`1`** |
+
+That last row is the one that reaches production. The exit-code change is filed as a *fix* — `claude -p` was exiting `0` when its actions had been refused because no safety check was available, and text and JSON output now exit `1`. It is a fix: a pipeline that reported success while doing nothing was lying to you. But the symptom you'll see is a green job turning red after an upgrade, with the real cause sitting one layer away from the error message.
+
+:::warning[Three environments trigger this, and two look nothing like each other]
+- **Telemetry disabled** — the server check travels the same path.
+- **Feature flags not fetched** — same.
+- **Behind an LLM gateway** — the gateway drops the check.
+
+**Bedrock, Vertex and Foundry are explicitly unchanged.** So an org on Bedrock sees nothing while the team next door, behind a gateway, loses every unattended run on the same version.
+:::
+
+Two related repairs landed in the same release, and both tell you that this failure mode had been hiding:
+
+- `/status` used to show **"Auto mode server: Enabled"** when the server-side review wasn't actually reaching the session — for example behind a gateway that drops it. So the diagnostic you'd reach for first was, until v2.1.319, confirming the opposite of the truth.
+- Auto mode used to **fail every turn** when a gateway answered `403` or `422` to the safety check. (A `403` with an `apiKeyHelper` is unchanged.)
+
+## Fixing a run that just started failing
+
+<Steps items={[
+  {
+    title: "Confirm it's this and not something else",
+    body: "Run `/status` in an interactive session on the same machine and network. On v2.1.319+ it reports the auto-mode server check honestly. If the check isn't reaching you, you've found it."
+  },
+  {
+    title: "Decide whether you want the old behavior at all",
+    body: "`CLAUDE_CODE_AUTO_MODE_SERVER=0` restores use of the built-in local classifier. That is the documented escape hatch — but you are choosing a weaker screen, so make it a decision rather than a reflex."
+  },
+  {
+    title: "If you're behind a gateway, try turning the server check ON instead",
+    body: "`CLAUDE_CODE_AUTO_MODE_SERVER=1` enables the server-side check even with `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` set. If your managed settings set that variable, they must set the `1` too — otherwise the override never applies."
+  },
+  {
+    title: "Keep feature flags without re-enabling telemetry",
+    body: "v2.1.319 added `CLAUDE_CODE_DISABLE_FEATURE_FLAGS`, which stops feature-flag fetching *without* turning off telemetry (every flag then uses its built-in default). The two used to be welded together; if you disabled telemetry only to stop flag fetching, you can now separate them."
+  },
+  {
+    title: "For genuinely unattended runs, deny instead of hanging",
+    body: "The same release added the `permissions.denyInsteadOfPrompting` setting: a tool call that would wait on a permission prompt is denied and the turn continues — in terminal sessions, subagents and teammates. That's the right shape for a run with nobody watching, where a prompt is an infinite hang."
+  },
+  {
+    title: "Set it in the process environment, not a settings file",
+    body: "Related trap in the same release: `CLAUDE_CODE_PROXY_RESOLVES_HOSTS` can no longer be set from settings files where the host manages the network. Several of these knobs are now environment-only on purpose."
+  }
+]} />
+
+<PromptCard title="Unattended-run posture (environment)">
+{`# Behind an LLM gateway: keep the server-side safety check
+export CLAUDE_CODE_AUTO_MODE_SERVER=1
+
+# Stop feature-flag fetching WITHOUT disabling telemetry
+export CLAUDE_CODE_DISABLE_FEATURE_FLAGS=1`}
+</PromptCard>
+
+<PromptCard title="Never hang on a prompt nobody can answer (settings.json)">
+{`{
+  "permissions": {
+    "denyInsteadOfPrompting": true
+  }
+}`}
+</PromptCard>
+
+The wrong fix is reaching for `bypassPermissions` because the pipeline went red. That trades a stopped turn for no screen at all — see [Hardening Autonomous Runs](/docs/security/hardening-autonomous-runs) for what unattended actually requires.
+
+## Five other changes that alter behavior quietly
+
+Twenty-five releases shipped between **October 7 and November 10, 2026** (v2.1.293 → v2.1.322). These are the ones that change what your existing setup does, without announcing themselves as breaking.
+
+### 1. Opus 4.8 fast mode is removed on November 30, 2026
+
+Deprecated as of **October 30, 2026** (shipped in v2.1.316). After removal, fast mode requests on Opus 4.8 **return an error and do not fall back** to standard Opus 4.8. Migrating to Opus 5.5 keeps the speedup. A hard date with no graceful degradation is the rarest kind of change in this changelog — see [Models & Pricing](/docs/whats-new/models-and-pricing).
+
+### 2. Skill loading narrowed twice, in two different ways
+
+- **v2.1.319:** with the Bash sandbox on, skills in `.claude/skills` folders *below* your starting folder load only if you start Claude Code there or `/cd` there.
+- **v2.1.321** (November 9): `.claude/skills` folders inside `~/.claude/plugins` **no longer load** when Claude works on files there.
+
+If a [skill](/docs/claude-code/skills) silently stopped being available, this is the first thing to check — the symptom is absence, which produces no error.
+
+### 3. MCP tool calls now background themselves
+
+**v2.1.319** added support for MCP tasks in the terminal: when an MCP server runs a tool call as a task, Claude Code moves it to the background **right away** and tells Claude the result when it finishes. Set `CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND` to make it wait inside the tool call instead.
+
+MCP tasks also now work **without feature-flag fetching** (Bedrock, Vertex, Foundry, LLM gateways, `DISABLE_TELEMETRY`); `CLAUDE_CODE_DISABLE_MCP_TASKS=1` turns them off entirely. See [MCP Servers](/docs/claude-code/mcp) and [Background Tasks](/docs/claude-code/background-tasks).
+
+### 4. Re-reading an unchanged file returns its content again
+
+**v2.1.317** (November 3) removed the Read tool's `"file unchanged since your last Read"` stub. Reading the same file twice now returns the file, not a placeholder. Better for correctness — Claude can no longer act on a stale assumption — and a real change to how fast a long session fills its [context budget](/docs/claude-code/context-budget-audit).
+
+### 5. `sed -i` is a real Bash command now
+
+**v2.1.309** (October 22) changed `sed -i` to get the standard Bash prompt and run as written, rather than as a simulated file-edit preview. Like other Bash edits, **it is no longer restored by `/rewind`**. If your workflow leaned on `/rewind` to undo in-place stream edits, that safety net is gone — see [Checkpoints & Rewind](/docs/claude-code/checkpoints-and-rewind).
+
+A sixth, smaller one worth knowing if you automate: self-paced `/loop` now **ends** when a turn finishes instead of scheduling a fallback wakeup (v2.1.319). `CLAUDE_CODE_LOOP_KEEPALIVE=1` restores the old behavior.
+
+<Quiz questions={[
+  {
+    q: "After upgrading to v2.1.319, your CI job running `claude -p` behind an LLM gateway turns red. What is the most likely cause?",
+    options: [
+      "The gateway started rejecting your API key",
+      "Auto mode can't reach its server-side check, so the turn stops — and `-p` now exits 1 instead of 0",
+      "Feature flags are required for `claude -p` to run at all",
+      "`claude -p` was removed in favor of cloud sessions"
+    ],
+    answer: 1,
+    explain: "v2.1.319 removed the local-classifier fallback and fixed `claude -p` to exit 1 when actions were refused for lack of a safety check. The job was likely already doing nothing — it just used to exit 0 while doing it."
+  },
+  {
+    q: "Which platforms were explicitly NOT affected by the fallback removal?",
+    options: [
+      "Every platform was affected equally",
+      "Only the terminal; VS Code was unaffected",
+      "Bedrock, Vertex and Foundry",
+      "Only sessions on Pro and Max plans"
+    ],
+    answer: 2,
+    explain: "The changelog names Bedrock, Vertex and Foundry as unchanged. That asymmetry is why two teams on the same version can see completely different behavior."
+  },
+  {
+    q: "A long unattended run keeps hanging because a tool call is waiting on a permission prompt nobody will answer. Which v2.1.319 setting is designed for this?",
+    options: [
+      "`permissions.denyInsteadOfPrompting`",
+      "`bypassPermissions`",
+      "`CLAUDE_CODE_DISABLE_FEATURE_FLAGS`",
+      "`CLAUDE_CODE_LOOP_KEEPALIVE`"
+    ],
+    answer: 0,
+    explain: "`permissions.denyInsteadOfPrompting` denies the call and lets the turn continue. `bypassPermissions` would also stop the hang — by removing the screen entirely, which is the wrong trade for an unattended run."
+  },
+  {
+    q: "Why was `/status` an unreliable diagnostic for this problem before v2.1.319?",
+    options: [
+      "`/status` didn't report auto mode at all",
+      "It showed \"Auto mode server: Enabled\" even when the check wasn't reaching the session",
+      "It only worked in VS Code",
+      "It required telemetry to be enabled to display anything"
+    ],
+    answer: 1,
+    explain: "The pre-v2.1.319 `/status` reported the server check as enabled when a gateway was dropping it — so the first diagnostic you'd try actively confirmed the wrong conclusion."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "v2.1.319 (Nov 6, 2026) removed auto mode's local-classifier fallback: unreachable check now means ask or deny, never silently continue",
+  "`claude -p` exits 1 where it used to exit 0 — a pipeline that was quietly doing nothing now fails loudly",
+  "Triggers are telemetry off, feature flags off, or an LLM gateway; Bedrock, Vertex and Foundry are unchanged",
+  "`permissions.denyInsteadOfPrompting` is the unattended-run answer; `bypassPermissions` is not",
+  "Opus 4.8 fast mode returns an error — with no fallback — after November 30, 2026"
+]} />
+
+## Next
+
+- [Permissions & Allowlists](/docs/claude-code/permissions) — how auto mode and the six permission modes work in the first place
+- [Hardening Autonomous Runs](/docs/security/hardening-autonomous-runs) — what an unattended run actually requires
+- [Feature-Flag Gating in Claude Code](/docs/claude-code/feature-flag-gating) — why two machines on the same version behave differently
+- [Troubleshooting Claude Code](/docs/claude-code/troubleshooting) — the broader diagnostic path
