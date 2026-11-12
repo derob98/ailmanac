@@ -1,0 +1,211 @@
+# Context Engineering
+
+> Source: https://derob98.github.io/ailmanac/docs/frontiers/context-engineering · AILmanac (CC BY 4.0) · last verified 2026-08-22
+
+The shift from prompt engineering to treating the model's context window as a curated, scarce workspace — and why what you put in, where you put it, and what you leave out all matter.
+
+<LevelBadge level="intermediate" />
+
+# Context Engineering
+
+Prompt engineering is about the words you choose. Context engineering is about the *workspace* you hand the model — what's in it, what order it's in, and what you deliberately left out.
+
+The distinction matters because a context window is not a notepad. It's a limited, expensive, attentional resource. How you fill it changes what the model focuses on, how much it costs you, and whether it stays useful as sessions grow.
+
+<Callout
+  type="objectives"
+  items={[
+    "Tell context engineering apart from prompt engineering — and know why the field moved",
+    "Treat the context window as an attention budget, not a storage bin",
+    "Spot context rot and 'lost in the middle' before they wreck a long session",
+    "Place instructions where attention actually lands — top, end, never buried in the middle",
+    "Apply the three workhorse tactics: compaction, note-taking, and just-in-time retrieval"
+  ]}
+/>
+
+<VerifyNote lastVerified="2026-08-22" source="https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents">
+Anthropic defines context engineering as curating "the smallest possible set of high-signal tokens that maximize the likelihood of some desired outcome." The tactics and framing below track that official guidance — confirm specifics there, as agent guidance evolves quickly.
+</VerifyNote>
+
+## The context budget
+
+Every model has a maximum context size — a hard ceiling measured in tokens. Think of it as a budget. You spend it on:
+
+- Your system prompt and standing instructions
+- Retrieved documents, codebase snippets, tool definitions
+- Conversation history
+- The model's output (which also counts against the window in multi-turn sessions)
+
+When you run out, something has to give. Either old content gets dropped, or the session hits a wall.
+
+Most beginner guides treat the context window as "more is better." Context engineering treats it as a resource to *allocate carefully*: spend it on what the model actually needs for this turn, not on everything that might be relevant. Anthropic frames the whole discipline as a search for "the smallest possible set of high-signal tokens" — every token you add competes for a finite **attention budget**, a direct consequence of how a transformer relates every token to every other one.
+
+## Context rot and "lost in the middle"
+
+There is a well-documented phenomenon in long-context LLMs: models pay disproportionate attention to content near the *beginning* and *end* of their context, and their recall of content buried in the *middle* degrades. Researchers studying this effect called it "lost in the middle."
+
+The practical consequence: if you stuff a 100,000-token context with documents and bury the most critical instruction at position 60,000, the model may effectively ignore it — not because it's incapable of reading that far, but because attention is not evenly distributed across the window.
+
+"Context rot" is the broader pattern: as a session grows, the quality of responses tends to drift. Early instructions get diluted. Repeated back-and-forth crowds out the original task. The model starts hedging, repeating itself, or losing the thread of what you actually asked for.
+
+These are not bugs you can fully fix with a better prompt. They are structural properties of how attention works at scale. The engineering response is to keep the context *smaller and sharper*, not to fill it and hope.
+
+## Ordering matters
+
+Where you place content is as important as what you include. Established good practice:
+
+| Position | What to put there |
+|---|---|
+| Very top (system prompt) | Stable, durable instructions. Persona, rules, format requirements. |
+| After system prompt | The current task, in plain terms. |
+| Just before the last user turn | The most critical, specific context for this exact request. |
+| Middle | Supporting documents, retrieved chunks — ordered by relevance, not chronology. |
+| Conversation history | Only what's necessary for continuity. Prune aggressively. |
+
+The general rule: the closer to the current turn, the more attention it gets. Critical instructions that live only in the middle of a long history are at risk.
+
+### The "right altitude" for instructions
+
+A system prompt can fail in two opposite ways. Too low and you hardcode brittle, if-this-then-that logic that breaks the moment reality differs. Too high and you write vague guidance that assumes context the model doesn't have. Anthropic calls the target the **"right altitude"** — the Goldilocks zone that is "specific enough to guide behavior effectively, yet flexible enough to provide strong heuristics." Aim there: concrete rules and examples, not a decision tree, and not a vibe.
+
+## Retrieval over stuffing
+
+The temptation is to put everything in: all the docs, the full codebase, the entire conversation. Resist it.
+
+The better approach is *selective retrieval*: identify what the model actually needs for this specific request, and inject only that. A well-retrieved 2,000-token chunk of the right document outperforms a 40,000-token dump where the answer is somewhere in the middle.
+
+This is why retrieval-augmented generation (RAG) exists — not just to overcome context limits, but to improve quality by keeping the context *curated*. The agentic version is **just-in-time retrieval**: instead of pre-loading every document, the agent holds lightweight identifiers (file paths, IDs, queries) and pulls the actual content into context only at the moment it's needed.
+
+For interactive sessions, the same logic applies: instead of accumulating everything, periodically compact or clear history to remove content that is no longer relevant to the current task. Claude Code's `/compact` and `/clear` commands are context engineering tools, not just session management. On the API, the same pattern is automated by [memory and context editing](/docs/api/memory-and-context-editing) — old tool results get pruned from the window while what matters is written to a persistent memory store.
+
+## The three workhorse tactics
+
+For long-horizon work, three techniques do most of the heavy lifting. They compose — most real agents use all three.
+
+<Steps
+  items={[
+    {title: "Compaction", body: "When a session nears the window limit, summarize it and reinitialize with the distilled version. Preserve the load-bearing details — architectural decisions, unresolved bugs, key implementation choices — and drop the play-by-play. This is what /compact does in Claude Code."},
+    {title: "Structured note-taking", body: "Have the agent write durable facts to an external memory (a file, a scratchpad, a CLAUDE.md) and read them back later. This gives persistent memory with minimal in-window overhead — the notes live outside the budget until needed."},
+    {title: "Just-in-time retrieval", body: "Don't pre-stuff every document. Hold lightweight references and load the actual content at runtime, only for the step that needs it. A 2,000-token targeted pull beats a 40,000-token dump."}
+  ]}
+/>
+
+## The cost angle
+
+Tokens you send are tokens you pay for — both in money and latency. Stuffing context with loosely relevant material inflates both. Context engineering and cost efficiency are the same problem.
+
+More concretely:
+
+- A bloated system prompt you copy-paste from a template is paid for on every single call.
+- Old conversation history you carry forward because "it might be useful" is paid for on every single call.
+- Documents you inject "just in case" are paid for on every single call.
+
+Trimming what doesn't need to be there is simultaneously better for quality and cheaper to run.
+
+## Practical tactics for Claude users
+
+**In Claude.ai:**
+- Use distinct conversations for distinct tasks. Don't let an afternoon of tangents pollute the context of a focused project.
+- Summarize long threads before asking a complex question that depends on them. An explicit summary is often more useful than the raw history.
+- Put the specific thing you want at the *end* of a long message, not buried in the middle.
+
+**In Claude Code:**
+- Keep your `CLAUDE.md` file lean. Every line in it is injected into every session. See [CLAUDE.md](/docs/claude-code/claude-md) and [Context Management](/docs/claude-code/context-management).
+- Use `/clear` when switching to a genuinely different task. Use `/compact` when you want to continue but the session is growing.
+- Reference files by path rather than pasting their contents when the full file isn't needed for the current step.
+
+**At the API level:**
+- Design system prompts to contain only what every request truly needs. Move task-specific instructions into the user turn.
+- For document-heavy use cases, retrieve and inject the relevant chunks rather than uploading an entire corpus.
+- Structure the prompt so the stable, reusable prefix comes first — this also enables prompt caching, which is a natural companion to context engineering.
+
+When you want to hand a long document to Claude, the placement rule beats raw volume every time:
+
+<PromptCard title="Instruction-first, restated-last">{`Task: Find every clause where this contract caps our liability, and quote each one verbatim with its section number.
+
+[... paste the full 40-page contract here ...]
+
+Reminder of the task: list every liability-cap clause above, quoted exactly, with section numbers. If there are none, say so explicitly.`}</PromptCard>
+
+The same instruction sits at the top *and* the bottom — the two positions attention favors — so it survives even a very long middle.
+
+## The shift in mindset
+
+Prompt engineering asks: "What should I say?"
+Context engineering asks: "What should the model *see*, in what order, and what should I deliberately keep out?"
+
+The second question is harder, but it's the one that actually determines quality at scale.
+
+<Quiz
+  questions={[
+    {
+      q: "What is the core difference between prompt engineering and context engineering?",
+      options: [
+        "Prompt engineering is for chat, context engineering is for code",
+        "Prompt engineering is the words you choose; context engineering is curating the whole set of tokens the model sees",
+        "Context engineering only matters above 1 million tokens",
+        "They are two names for the same thing"
+      ],
+      answer: 1,
+      explain: "Prompt engineering focuses on phrasing a single prompt. Context engineering is the broader job of curating what fills the window — system prompt, tools, history, retrieved data — and what to leave out."
+    },
+    {
+      q: "You bury the single most important instruction at token 60,000 of a 100,000-token context. What's the likely result?",
+      options: [
+        "The model weights it most heavily because it read it most recently",
+        "It costs less because middle tokens are discounted",
+        "The model may effectively ignore it — attention is weakest in the middle",
+        "Nothing changes; position has no effect"
+      ],
+      answer: 2,
+      explain: "The 'lost in the middle' effect: recall degrades for content buried in the middle of a long context. Put critical instructions at the top or just before the final turn — ideally both."
+    },
+    {
+      q: "A coding agent is about to run out of context on a long task. Which tactic preserves progress best?",
+      options: [
+        "Paste the entire history again to refresh it",
+        "Compaction: summarize into a distilled state that keeps decisions and open bugs, then reinitialize",
+        "Lower the temperature",
+        "Switch to a smaller model"
+      ],
+      answer: 1,
+      explain: "Compaction summarizes the session and reinitializes with the distilled version — preserving architectural decisions and unresolved bugs while shedding the token-heavy play-by-play."
+    }
+  ]}
+/>
+
+<Flashcards
+  title="Lock in the vocabulary"
+  cards={[
+    {front: "Context engineering", back: "Curating the smallest set of high-signal tokens the model sees — system prompt, tools, history, retrieved data — and deliberately leaving the rest out."},
+    {front: "Attention budget", back: "The finite capacity a transformer has to relate tokens to each other. Every extra token spends it, which is why more context can mean worse answers."},
+    {front: "Lost in the middle", back: "Models recall content near the start and end of context far better than content buried in the middle. Drives where you place critical instructions."},
+    {front: "Context rot", back: "The gradual quality drift of a long session as early instructions get diluted and the original task gets crowded out."},
+    {front: "Right altitude", back: "The Goldilocks zone for instructions: specific enough to guide behavior, flexible enough to act as strong heuristics — neither brittle hardcoded logic nor vague hand-waving."},
+    {front: "Just-in-time retrieval", back: "Hold lightweight references (paths, IDs, queries) and load the actual content into context only at the moment a step needs it."}
+  ]}
+/>
+
+<Callout
+  type="takeaways"
+  items={[
+    "The context window is an attention budget, not storage — spend it on high-signal tokens only.",
+    "Position beats volume: critical instructions go at the top and just before the final turn, never buried in the middle.",
+    "Compaction, note-taking, and just-in-time retrieval are the three tactics that keep long agents coherent.",
+    "Curating context is the same lever as cutting cost — fewer tokens, better answers, lower bill."
+  ]}
+/>
+
+## Related
+
+- [How Agent Memory Actually Works](/docs/frontiers/agent-memory-architectures) — the other half: what survives *between* turns, not just within one.
+- [Conversation Compaction](/docs/api/compaction) — compaction as an API feature: the signed summary block, the swap rules, and the two mistakes that fail silently.
+- [Context Management in Claude Code](/docs/claude-code/context-management)
+- [Prompting Basics](/docs/prompting/basics)
+- [Prompt Caching Economics](/docs/frontiers/prompt-caching-economics)
+- [Tokens and Context](/docs/foundations/tokens-and-context)
+
+
+## Next
+
+- [The Capability-Reliability Gap](/docs/frontiers/the-capability-reliability-gap)

@@ -1,0 +1,290 @@
+# Personal Finance in Claude: was es liest und die drei Datenschutzgrenzen
+
+> Source: https://derob98.github.io/ailmanac/de/docs/claude-app/personal-finance · AILmanac (CC BY 4.0) · last verified 2026-11-09
+
+Der Praxisleitfaden zu Personal Finance in Claude (Beta, 5. Nov. 2026) – die genauen Daten, die Plaid übergibt, die Trainingsgrenze zwischen Hub und Rest der App, das Artefakt, das die Konten des BETRACHTERS lesen kann, wo die Zahlen falsch werden und was das Trennen der Verbindung nicht rückgängig macht.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={[
+  "Welche Felder Plaid genau an Claude übergibt – und die drei Kategorien, die es NICHT übergibt, selbst bei einem verknüpften Anlagekonto",
+  "Die Trainingsgrenze, die niemand genau liest: Unterhaltungen im Personal-Finance-Hub sind ausgenommen, Unterhaltungen außerhalb nicht",
+  "Die Freigabe-Kante, die verändern sollte, wie Sie dies nutzen: Ein veröffentlichtes Artefakt kann die verknüpften Konten jeder Person lesen, die es öffnet",
+  "Vier konkrete Gründe, warum eine Claude-Zahl von Ihrer Banking-App abweicht – und welcher Ihnen weismachen kann, Sie hätten mehr Geld, als Sie haben",
+  "Was das Trennen der Verbindung tatsächlich entfernt, was es für immer zurücklässt und die eine Aktion, die ausdrücklich unumkehrbar ist",
+]} />
+
+<VerifyNote lastVerified="2026-11-09" source="https://support.claude.com/en/articles/18185620-use-personal-finance-with-claude">
+Personal Finance wurde am **5. November 2026** angekündigt und ist **in der Beta**, in den Tarifen **Pro, Max und Ultra**, **nur in den USA** und **nur mit US-Banken**. Es ist ausdrücklich *nicht* in Free, Team oder Enterprise verfügbar, und Anthropic sagt, der Rollout erfolge schrittweise – möglicherweise sehen Sie es noch nicht. Alles auf dieser Seite stammt aus Anthropics [Ankündigung](https://claude.com/resources/articles/introducing-personal-finance-in-claude) und dem [Help-Center-Artikel](https://support.claude.com/en/articles/18185620-use-personal-finance-with-claude); Umfang und Grenzen einer Beta verschieben sich, prüfen Sie also beide, bevor Sie sich auf eine bestimmte Zahl verlassen.
+</VerifyNote>
+
+Am **5. November 2026** hat Anthropic die erste Claude-Funktion veröffentlicht, die Ihr tatsächliches Geld liest: **Personal Finance**, ein eigener Hub unter `claude.ai/personal-finance`, in dem Sie Bank-, Kreditkarten-, Kredit- und Anlagekonten über Plaid verknüpfen und Claude dann Fragen zu Ihren eigenen Ausgaben stellen.
+
+Die Berichterstattung konzentrierte sich auf dieselben zwei Fakten – *es nutzt Plaid* und *es ist schreibgeschützt* – und beide stimmen. Sie sind auch die zwei uninteressantesten Fakten dazu. Die Dinge, die Ihre Nutzung tatsächlich verändern werden, stecken im Help-Artikel: eine Trainingsgrenze, die davon abhängt, **in welchem Teil der App Sie sich befinden**, ein Artefakt-Freigabeverhalten, das wirklich überrascht, und vier verschiedene Wege, auf denen die Zahl, die Claude Ihnen zeigt, zu Ihren Gunsten falsch sein kann.
+
+Diese Seite behandelt die Teile, die die Berichterstattung ausgelassen hat.
+
+## Die Ein-Absatz-Version
+
+Sie öffnen den Personal-Finance-Hub, verknüpfen eine Bank über Plaid (Sie melden sich **bei Ihrer Bank** an, Claude erhält also nie Ihr Passwort), und Claude erhält Lesezugriff auf Kontostände, Kreditlimits und bis zu 24 Monate an Transaktionen bei bis zu 16 Banken. Unterhaltungen **im Hub** werden nicht zum Training von Anthropics Modellen verwendet und bleiben aus dem Gedächtnis und Ihrer Monatsübersicht heraus; Unterhaltungen **außerhalb** des Hubs fallen auf Ihre normalen Datenschutzeinstellungen zurück. Claude kann kein Geld bewegen, verwalten oder anlegen, und Anthropic stellt klar, dass die Funktion „nicht dafür ausgelegt ist, Anlageberatung zu geben“. Sie funktioniert nicht in Claude Code, Cowork-Aufgaben, geplanten Aufgaben oder Claude Duet. Das Trennen der Verbindung beendet künftige Lesezugriffe, nimmt aber **nichts** zurück, was Claude bereits gesagt hat.
+
+## Einrichtung
+
+<Steps items={[
+  {title: "Öffnen Sie Personal Finance auf einer unterstützten Oberfläche", body: "Claude im Web, Claude Desktop, Claude für iOS oder Claude für Android – Einstiegspunkt ist claude.ai/personal-finance. Anthropic führt das Fehlen eines Claude-Code-Wegs unter den aktuellen Einschränkungen auf, lesen Sie es also als heutigen Umfang und nicht als dauerhafte Designentscheidung."},
+  {title: "Starten Sie den Plaid-Ablauf und melden Sie sich BEI IHRER BANK an", body: "Plaid öffnet sich im Web in einem neuen Fenster, auf dem Desktop in Ihrem Standardbrowser, auf iOS in der App, auf Android in einem Browser-Tab. Sie authentifizieren sich innerhalb von Plaid direkt bei Ihrer Bank. Anthropic ist eindeutig: Claude fragt nicht nach Ihrem Bankpasswort und sieht es nicht."},
+  {title: "Schließen Sie innerhalb von 10 Minuten ab", body: "Der Help-Artikel nennt ein hartes Zeitfenster für die Plaid-Übergabe. Wenn Sie bei einer Zwei-Faktor-Abfrage hängen bleiben und später zurückkommen, starten Sie den Ablauf neu, statt zu warten."},
+  {title: "Lesen Sie Plaids Einwilligungsbildschirm sorgfältiger, als Ihnen lieb ist", body: "Plaid kann Sie um Einwilligung zur Weitergabe von Anlage-, Kredit- und Darlehensdaten bitten. Das ist Plaids Umfang, nicht Claudes. Claude liest eine engere Menge – siehe nächster Abschnitt. Mehr auf Plaid-Ebene zuzustimmen heißt nicht, dass Claude heute mehr nutzt, aber es heißt, dass Sie es beim Aggregator autorisiert haben."},
+  {title: "Verknüpfen Sie bis zu 16 Banken – und entscheiden Sie über zweite Logins", body: "Sie können zwei Logins bei derselben Bank behalten (etwa ein gemeinsames Konto und ein Geschäftskonto). Tun Sie das bewusst: Zwei Logins bei einem Institut sind die häufigste Ursache doppelt gezählter Kontostände."}
+]} />
+
+Plaid erscheint auch als gewöhnlicher [Konnektor](/docs/claude-app/connectors), den Sie pro Chat steuern können: **+** → **Konnektoren** → **Plaid**, gesetzt auf *Blockiert*, *Immer erlauben* oder *Genehmigung erforderlich*. Wenn Finanzdaten nur dann verfügbar sein sollen, wenn Sie sie bewusst anfordern, ist *Genehmigung erforderlich* die richtige Einstellung.
+
+## Was Claude genau sehen kann
+
+Das ist die Tabelle für den Screenshot, bevor Sie sich entscheiden. Anthropic zählt sie Feld für Feld auf.
+
+| Kategorie | Claude liest | Claude liest **nicht** |
+| --- | --- | --- |
+| Institut | Bankname | — |
+| Kontoidentität | Kontoname, Typ und **letzte vier Ziffern** | Die vollständige Kontonummer |
+| Kontostände | Aktuelle Kontostände und **Kreditlimits** | — |
+| Transaktionen | **Bis zu 24 Monate**, mit Betrag, Datum, Händler, Kategorie und der eigenen Beschreibung Ihrer Bank | — |
+| Anlagekonten | Nur Kontostände und Kreditlimits | **Bestände, Trades, Zinsen oder Konditionen** |
+| Zugangsdaten | Nichts | Ihr Bank-Benutzername oder -Passwort |
+
+Zwei Kanten an dieser Tabelle:
+
+- **„Bis zu zwei Jahre“** in der Ankündigung und **„bis zu 24 Monate“** im Help-Artikel sind dasselbe. Der Help-Artikel zählt die Felder pro Transaktion auf, zitieren Sie also diesen.
+- **Die Garantie der letzten vier Ziffern ist eine Plaid-Garantie, keine Inhaltsgarantie.** Anthropic benennt den Leckpfad selbst: Wenn Ihre Bank eine vollständige Kontonummer in einen *Kontonamen* oder eine *Transaktionsbeschreibung* schreibt, kann Claude sie dort sehen. Plaid übergibt vier Ziffern; die Freitextfelder Ihrer Bank sind daran nicht gebunden.
+
+<Callout type="warning" items={[
+  "Sie können ein Anlagekonto verknüpfen, und Claude liest dessen Kontostand – es kann aber keine Bestände, Trades, Zinsen oder Konditionen sehen. Jede Antwort zu Portfoliozusammensetzung, Rendite oder Gebühren beruht daher überhaupt nicht auf Ihrem Konto. Behandeln Sie sie als Allgemeinwissen-Antwort, die zufällig neben Ihrem echten Kontostand steht."
+]} />
+
+## Was es strukturell nicht kann
+
+- **Keine Geldbewegung.** „Personal Finance kann Ihre Konten nur lesen. Es kann Ihr Geld nicht bewegen, verwalten oder anlegen.“ Der Zugriff ist auf Ebene der Plaid-Berechtigung schreibgeschützt, nicht bloß durch einen Prompt entmutigt.
+- **Keine Beratungshaltung.** Anthropics eigener Satz, auf beiden Seiten identisch: *„Personal Finance hilft Ihnen, Ihr Geld zu verstehen, und ist nicht dafür ausgelegt, Anlageberatung zu geben.“* Bei größeren Entscheidungen verweist Anthropic auf lizenzierte Fachleute, die neben Claude arbeiten, nicht auf Claude allein.
+- **Keine Monetarisierungsfläche.** Keine Werbung, keine gesponserten Empfehlungen und keine Kreditkarten, Kredite oder Sparkonten unter Anthropic-Marke.
+- **Eingeschränkte Werkzeuge in Finanz-Chats.** In einem Chat, der verknüpfte Konten nutzt, kann Claude möglicherweise keinen Code ausführen oder mit Word-, Excel-, PowerPoint- oder PDF-Dateien arbeiten. Es kann weiterhin Text, Tabellen und Klartextdateien wie `.csv` erzeugen – planen Sie Ihre Exporte also auf CSV, nicht auf XLSX. (Vergleichen Sie [das Erzeugen echter Dateien](/docs/claude-app/generating-files) in einem normalen Chat.)
+
+## Die drei Datenschutzkanten
+
+### 1. Die Trainingsgrenze ist ein *Ort*, keine Einstellung
+
+Das ist der Satz zum Verinnerlichen, denn man dreht ihn leicht um:
+
+> Unterhaltungen **im Personal-Finance-Hub** werden nicht zum Training von Anthropics Modellen verwendet. Für alles, was Sie **außerhalb** des Hubs mit Claude teilen, gelten Ihre [Datenschutzeinstellungen](/docs/foundations/privacy).
+
+Einen Kontoauszug in einen gewöhnlichen Chat einzufügen, unterliegt also Ihren normalen Kontoeinstellungen – die Ausnahme reist mit dem Hub, nicht mit dem Thema. Wenn Sie in Ihrem Konto die Modellverbesserung aktiviert haben, ist „Ich habe über Geld gesprochen“ keine Ausnahme.
+
+Der Hub bekommt außerdem zwei leisere Ausschlüsse: Sobald ein Chat Ihre verknüpften Konten nutzt, ist er so ausgelegt, dass er **nichts im [Gedächtnis](/docs/claude-app/memory) speichert**, später nicht durchsucht wird und **aus Ihrer Monatsübersicht – einschließlich des Titels – ausgelassen** wird.
+
+### 2. Artefakte überdauern den Chat und können die Konten des Lesers lesen
+
+Hier ist die wirklich überraschende Kante, direkt aus dem Help-Artikel:
+
+> **Artefakte können die verknüpften Konten der Person lesen, die sie öffnet, wenn diese Person Personal Finance hat und Plaid erlaubt.**
+
+Lesen Sie das zweimal. Ein Budget-Dashboard, das Sie in Ihrem Personal-Finance-Hub bauen und dann veröffentlichen, ist kein statisches Bild *Ihrer* Zahlen – geöffnet von jemand anderem, der ebenfalls Personal Finance hat und Plaid erlaubt, kann es *dessen* Konten abrufen. Das ist für ein wiederverwendbares Werkzeug vernünftiges Verhalten und eine böse Überraschung, wenn Sie es sich als Screenshot vorgestellt haben.
+
+Zwei weitere Artefakt-Fakten aus derselben Familie:
+
+- Claude **fragt nach, bevor es** ein Artefakt aus einem Finanz-Chat veröffentlicht – diese Rückfrage ist der Kontrollpunkt, keine Unterbrechung zum Wegklicken.
+- Ein Artefakt **bleibt bestehen, bis Sie es löschen, auch wenn Sie den Chat löschen.** Die Unterhaltung zu löschen ist keine Bereinigung.
+- Ein **geteilter Chat-Link** legt die Zahlen Ihrer Konten jedem offen, der den Link hat, wie bei jeder anderen [geteilten Claude-Unterhaltung](/docs/claude-app/artifacts).
+
+### 3. Aufbewahrung folgt der gewöhnlichen Verbraucherrichtlinie, keiner besonderen
+
+Die Daten „erscheinen in Ihrer Unterhaltung und bleiben in Ihrem Chatverlauf, bis Sie den Chat löschen“, vorbehaltlich Anthropics allgemeiner Aufbewahrungspraxis. Es gibt keinen Personal-Finance-spezifischen Aufbewahrungsartikel – es gilt die Verbraucherseite des Anthropic-[Privacy-Centers](https://privacy.claude.com/en/articles/10023548-how-long-do-you-store-my-data), und sie besagt, dass gelöschte Unterhaltungen den Verlauf sofort und den Back-End-Speicher innerhalb von 30 Tagen verlassen. Plaid verarbeitet die Bankdaten nach **seinen eigenen** Bedingungen und seiner Datenschutzerklärung, und auch Anthropics Hosting-Anbieter sehen sie.
+
+<VerifyNote lastVerified="2026-11-09" source="https://privacy.claude.com/en/articles/10023548-how-long-do-you-store-my-data">
+Das 30-Tage-Löschfenster, die Angabe von bis zu 5 Jahren für die de-identifizierte Modelltraining-Pipeline und die Angabe von bis zu 2 Jahren für die Aufbewahrung nach der Usage Policy stammen von Anthropics **allgemeiner** Verbraucher-Aufbewahrungsseite (Stand 1. Juli 2026), die Personal Finance oder Finanzdaten nicht gesondert erwähnt. Zitieren Sie sie nicht als finanzspezifische Zusagen.
+</VerifyNote>
+
+## Wo die Zahlen falsch sein werden
+
+Anthropic dokumentiert das, statt es zu verstecken, was ihm zur Ehre gereicht – und der vierte Fall scheitert in die gefährliche Richtung.
+
+<Steps items={[
+  {title: "Kontostände können ein bis zwei Tage alt sein", body: "Plaid synchronisiert, es streamt nicht. Ein Kontostand, der aktuell aussieht, kann vor den Transaktionen von gestern liegen. Jede Entscheidung am selben Tag braucht die Banking-App, nicht Claude."},
+  {title: "Eine über zwei Logins verknüpfte Bank kann doppelt gezählt werden", body: "Deshalb zählt die Entscheidung „beide Logins behalten“ bei der Einrichtung. Dasselbe Konto über zwei Wege erreicht, bläht jede darauf aufgebaute Summe auf."},
+  {title: "Eine nicht lesbare Bank wird stillschweigend ausgelassen", body: "Wenn ein Institut nicht gelesen werden kann, fehlen seine Ausgaben schlicht in der Zahl – und ein Budget-Widget zeigt dann MEHR übriges Geld, als Sie tatsächlich haben. Das ist der einzige Fehlermodus, der Ihnen schmeichelt, und damit der, den Sie prüfen sollten."},
+  {title: "Claude ist weiterhin ein Sprachmodell", body: "Anthropics eigene Anweisung ist die richtige Gewohnheit: Fragen Sie, welche Transaktionen hinter einer Zahl stehen, und prüfen Sie wichtige Zahlen mit der App oder den Kontoauszügen Ihrer Bank."}
+]} />
+
+<PromptCard title="Der Verifizierungs-Prompt, den man sich zur Gewohnheit machen sollte">
+{`Before I act on this: list the individual transactions that make up that number,
+with date, merchant and amount, and give me the subtotal per linked account.
+Flag any account you could not read for this period, and tell me the date of
+the most recent transaction you can see per account.`}
+</PromptCard>
+
+Dieser Prompt macht aus jeder Antwort etwas, das Sie abstimmen können, und bringt die oben genannten Fehler – veraltete Synchronisierung und ausgelassene Bank – ans Licht, ohne dass Sie sie zuerst vermuten müssen.
+
+## Prompts, die seine Stärken ausspielen
+
+Die Funktion ist gut in der *Beschreibung* von 24 Monaten echter Transaktionen und schwach bei allem, was Daten verlangt, die sie nicht hat. Zielen Sie entsprechend.
+
+<PromptCard title="Kategorisierungs-Audit – falsch zugeordnete wiederkehrende Abbuchungen finden">
+{`Group every recurring charge over the last 12 months by merchant. For each,
+show the typical amount, the cadence, whether the amount changed and when, and
+the category my bank assigned. List separately any subscription that charged me
+in the last 12 months but not in the last 2 months.`}
+</PromptCard>
+
+<PromptCard title="Jahresvergleich, mit ausdrücklich gemachtem Vergleich">
+{`Compare the last 6 months to the same 6 months a year earlier, by category.
+Show absolute change and percent change, sort by absolute change, and exclude
+transfers between my own linked accounts so they do not double-count.
+Name any category where the earlier period has incomplete data.`}
+</PromptCard>
+
+<PromptCard title="Eine CSV, die Sie woanders verwenden können (Codeausführung ist hier eingeschränkt)">
+{`Produce a plain-text CSV of every transaction over $200 in the last 90 days
+with columns: date, account_name, merchant, bank_description, category, amount.
+Do not summarize — I want the rows.`}
+</PromptCard>
+
+## Verbindung trennen: was verschwindet und was nie
+
+<Steps items={[
+  {title: "Eine Bank trennen", body: "Personal Finance → Drei-Punkte-Menü → „Verknüpfte Konten verwalten“ im Web und auf dem Desktop, oder das Zahnrad-Symbol auf iOS und Android → Trennen → bestätigen. Sie können Claude auch unter my.plaid.com trennen."},
+  {title: "Akzeptieren Sie, dass es pro LOGIN gilt, nicht pro Konto", body: "Jedes Konto, das Sie mit diesem Bank-Login verknüpft haben, wird gemeinsam getrennt. Anthropic sagt es ausdrücklich: Sie können nicht ein einzelnes Konto trennen."},
+  {title: "Wissen Sie, was bleibt", body: "Claude liest diese Bank künftig nicht mehr. Was Claude bereits GESAGT hat, bleibt in Ihren Chats und in allen Artefakten oder geteilten Links, bis Sie es selbst entfernen. Das Trennen ist kein Widerruf."},
+  {title: "Überlegen Sie zweimal, bevor Sie die LETZTE Bank entfernen", body: "Das Entfernen Ihrer letzten verknüpften Bank setzt das Dashboard zurück: Ihre Widgets, deren Einstellungen einschließlich Budgets und Ihre Einrichtungsantworten werden gelöscht, und Anthropic sagt, dass sich das nicht rückgängig machen lässt."}
+]} />
+
+Drei angrenzende Lebenszyklusregeln, die man kennen sollte, bevor sie einen überraschen:
+
+- **Ihr bezahlter Tarif endet.** Sie können Personal Finance nicht mehr öffnen, und Claude kann Ihre Konten in Chats nicht mehr lesen – aber **Ihre Banken bleiben verknüpft**, bis Sie sie trennen. Räumen Sie über Anpassen/Plugins → Konnektoren → Plaid → Trennen oder unter `my.plaid.com` auf.
+- **Sie wechseln zu einem Team- oder Enterprise-Tarif.** Claude trennt Ihre Banken, wenn der Wechsel *beginnt*. Planen Sie die Lücke ein.
+- **Sie löschen Ihr Claude-Konto.** Banken werden automatisch getrennt, nachdem die Löschung verarbeitet wurde.
+- **Datenexporte enthalten Ihr gespeichertes Personal-Finance-Dashboard noch nicht.** Wenn Ihnen die Widget-Konfiguration wichtig ist, schreiben Sie sie auf.
+
+## Wo es läuft und wo nicht
+
+| Oberfläche | Personal Finance? |
+| --- | --- |
+| Claude im Web (`claude.ai/personal-finance`) | ✅ Ja |
+| Claude Desktop | ✅ Ja |
+| Claude für iOS / Android | ✅ Ja |
+| Claude Code | ❌ Nein |
+| [Cowork-Aufgaben und geplante Aufgaben](/docs/claude-app/cowork-scheduled-tasks) | ❌ Nein |
+| Claude Duet | ❌ Nein |
+| Projekte | ⚠️ „Funktioniert möglicherweise nicht“ – als nicht unterstützt behandeln |
+| Free-, Team-, Enterprise-Tarife | ❌ Nein |
+| Außerhalb der USA oder mit VPN, das in einem anderen Land ausleitet | ❌ Hub verschwindet, bis Sie zurück sind; Banken bleiben verknüpft |
+
+Die Ausschlüsse von Claude Code und geplanten Aufgaben sind die, über die Entwickler stolpern: Es gibt keinen Weg, darauf einen unbeaufsichtigten Agenten zu bauen, was auch der Grund ist, warum die [Prompt-Injection](/docs/security/prompt-injection)-Fläche hier viel kleiner ist, als sie es sonst wäre – ein Mensch ist in jeder Schleife.
+
+## Die eine Kontrolle, die jeden Assistenten umspannt
+
+Claude ist nicht der erste Assistent, der ein Bankkonto liest. OpenAI hat Anfang 2026 eine vergleichbare Personal-Finance-Erfahrung in ChatGPT veröffentlicht, ebenfalls auf Plaid aufgebaut, und diese gemeinsame Infrastruktur hat eine praktische Folge, die man kennen sollte:
+
+**Plaid, nicht der Assistent, ist der Ort, an dem Ihre Berechtigungen tatsächlich liegen.** Welches KI-Produkt Sie auch verbunden haben, die Freigabe ist eine Plaid-Verbindung, und Sie können sie unter **`my.plaid.com`** einsehen und widerrufen – unabhängig davon, ob Sie das Abo noch haben, die App noch installiert ist oder Sie die Funktion noch erreichen können. Für Claude ist das besonders wichtig, weil ein abgelaufener Tarif Ihre Banken verknüpft lässt; das Plaid-Portal ist das Sicherheitsnetz.
+
+<VerifyNote lastVerified="2026-11-09" source="https://plaid.com/blog/chatgpt-personal-finance-plaid/">
+Plaid bestätigt, dass **ChatGPT-Pro-Nutzer in den USA Finanzkonten über Plaid verbinden können**, und beschreibt den Start als Vorschau; die Fachpresse datiert ihn auf den **15. Mai 2026** und beruft sich auf OpenAIs Mitteilung für **über 12.000 unterstützte Institute** (das ist die Größe von Plaids Netzwerk, keine integrationsspezifische Zahl). Wir haben OpenAIs eigene Dokumentation hier **nicht** unabhängig verifiziert: `openai.com` und `help.openai.com` blockieren automatisches Abrufen, daher sind die vergleichbare feldweise Datenliste, der Schreibschutz-Status, die Verlaufstiefe und die Modelltraining-Richtlinie für ChatGPT durch die auf dieser Seite zitierten Quellen **nicht** belegt. Lesen Sie OpenAIs eigene Ankündigung und das Help Center, bevor Sie einen Vergleich ziehen. Google hat, soweit wir es belegen konnten, keine gleichwertige direkte Bankanbindung angekündigt.
+</VerifyNote>
+
+Die übertragbare Gewohnheit, unabhängig vom Assistenten: beim Aggregator erteilen, beim Aggregator prüfen, beim Aggregator widerrufen – und den Schalter des Assistenten als Bequemlichkeit behandeln, nicht als Grenze. Dieselbe Disziplin „pro Anbieter selbst prüfen“ auf die Abrechnung angewandt finden Sie unter [was KI bei verschiedenen Anbietern kostet](/docs/models/what-ai-costs-across-providers).
+
+## Häufige Fehler
+
+<Callout type="warning" items={[
+  "Ein veröffentlichtes Artefakt wie einen Screenshot Ihrer Zahlen behandeln. Es ist ein lebendes Werkzeug: Geöffnet von jemandem, der ebenfalls Personal Finance hat und Plaid erlaubt, kann es DESSEN Konten lesen. Entscheiden Sie das bewusst.",
+  "Den Chat zum Aufräumen löschen. Artefakte überleben das Löschen des Chats. Löschen Sie das Artefakt.",
+  "Annehmen, das Versprechen ohne Training folge dem Thema. Es folgt dem HUB. Einen Kontoauszug in einen gewöhnlichen Chat einzufügen, unterliegt Ihren normalen Datenschutzeinstellungen.",
+  "Einem Budget trauen, das sagt, Sie hätten noch Geld übrig. Eine nicht lesbare Bank wird stillschweigend ausgelassen, was das „Verbleibende“ aufbläht statt es zu senken. Prüfen Sie, welche Konten im Zeitraum lesbar waren.",
+  "Zwei Logins bei einer Bank behalten, ohne es zu merken. Summen werden doppelt gezählt. Wenn Sie beide brauchen, sagen Sie es Claude im Prompt und schließen Sie interne Überweisungen aus.",
+  "Portfolio-Antworten von einem verknüpften Anlagekonto erwarten. Nur Kontostände – keine Bestände, Trades, Zinsen oder Konditionen. Die selbstsichere Antwort zu Ihrer Vermögensaufteilung liest Ihr Konto nicht.",
+  "Eine .xlsx anfordern. Codeausführung und Office-Dateiverarbeitung sind in Finanz-Chats eingeschränkt. Fordern Sie CSV oder eine Tabelle an.",
+  "Reflexhaft dem weitesten Plaid-Umfang zustimmen. Plaid kann Anlage-, Kredit- und Darlehensberechtigungen anfordern, die breiter sind als das, was Claude heute liest."
+]} />
+
+## Karteikarten
+
+<Flashcards cards={[
+  {front: "Wie weit zurück kann Claude Transaktionen lesen?", back: "Bis zu 24 Monate („bis zu zwei Jahre“), mit Betrag, Datum, Händler, Kategorie und der eigenen Beschreibung der Bank."},
+  {front: "Wie viele Banken können Sie verknüpfen?", back: "Bis zu 16. Sie können auch zwei getrennte Logins bei derselben Bank behalten – um den Preis einer möglichen Doppelzählung."},
+  {front: "Welche Unterhaltungen sind vom Modelltraining ausgenommen?", back: "Die im Personal-Finance-Hub. Außerhalb des Hubs gelten Ihre normalen Datenschutzeinstellungen."},
+  {front: "Was kann Claude bei einem verknüpften Anlagekonto sehen?", back: "Nur Kontostände und Kreditlimits – keine Bestände, Trades, Zinsen oder Konditionen."},
+  {front: "Was passiert, wenn Sie eine Bank trennen?", back: "Claude liest sie nicht mehr, und jedes Konto unter diesem Login geht auf einmal. Alles, was Claude bereits gesagt hat, bleibt in Ihren Chats, Artefakten und geteilten Links."},
+  {front: "Welche Aktion ist ausdrücklich unumkehrbar?", back: "Das Entfernen Ihrer letzten verknüpften Bank – das Dashboard wird zurückgesetzt, und Widgets, Budgeteinstellungen und Einrichtungsantworten werden gelöscht."},
+  {front: "Sieht Claude jemals Ihr Bankpasswort?", back: "Nein. Sie authentifizieren sich innerhalb von Plaid bei Ihrer Bank; Anthropic erklärt, dass Claude es weder anfordert noch sieht."},
+  {front: "Welcher Fehlermodus schmeichelt Ihnen?", back: "Eine Bank, die nicht gelesen werden kann, wird stillschweigend ausgelassen, sodass ein Budget mehr übriges Geld zeigen kann, als Sie tatsächlich haben."}
+]} />
+
+## Quiz
+
+<Quiz questions={[
+  {
+    q: "Sie bauen in Ihrem Personal-Finance-Hub ein Ausgaben-Dashboard als Artefakt und senden den veröffentlichten Link an einen Freund, der ebenfalls Claude Pro mit eingerichtetem Personal Finance hat. Was kann dieses Artefakt tun?",
+    options: [
+      "Einen statischen Schnappschuss nur Ihrer Kontostände rendern",
+      "Nichts – Artefakte sind in Finanz-Chats blockiert",
+      "Die verknüpften Konten Ihres Freundes lesen, wenn er Personal Finance hat und Plaid erlaubt",
+      "Ihren Freund zum Verknüpfen von Konten auffordern und die Daten dann an Sie mailen"
+    ],
+    answer: 2,
+    explain: "Anthropic dokumentiert das direkt: Artefakte können die verknüpften Konten der Person lesen, die sie öffnet, wenn diese Personal Finance hat und Plaid erlaubt. Ein veröffentlichtes Artefakt ist ein wiederverwendbares Werkzeug, kein Bild. Es überlebt auch das Löschen des Chats, aus dem es stammt – Sie müssen das Artefakt selbst löschen."
+  },
+  {
+    q: "Ihr Budget-Widget sagt, Sie haben diesen Monat noch 600 $ übrig, aber Sie fühlen sich pleite. Welchen dokumentierten Fehlermodus sollten Sie ZUERST prüfen?",
+    options: [
+      "Claude hat eine Bank doppelt gezählt, die Sie mit zwei Logins verknüpft haben",
+      "Eine Ihrer Banken konnte nicht gelesen werden, sodass ihre Ausgaben komplett ausgelassen wurden",
+      "Kontostände sind ein bis zwei Tage alt",
+      "Claude kann Kreditlimits nicht lesen, daher fehlt die Karte"
+    ],
+    answer: 1,
+    explain: "Alle ersten drei Optionen sind real, aber nur der Fall der ausgelassenen Bank treibt die Zahl NACH OBEN. Anthropics Formulierung: Wenn eine Bank nicht gelesen werden kann, werden ihre Ausgaben weggelassen, sodass ein Budget „mehr übriges Geld zeigen kann, als Sie haben“. Doppelzählung und Veralterung verzerren in beide Richtungen; Kreditlimits WERDEN gelesen."
+  },
+  {
+    q: "Sie fügen ein Kontoauszugs-PDF in einen normalen Claude-Chat ein – nicht in den Personal-Finance-Hub – in einem Pro-Konto mit aktivierter Modellverbesserung. Was regelt diesen Inhalt?",
+    options: [
+      "Die Personal-Finance-Ausnahme – Finanzdaten werden nie zum Training verwendet",
+      "Nichts; PDFs sind standardmäßig vom Training ausgenommen",
+      "Ihre gewöhnlichen Kontodatenschutzeinstellungen, die Modellverbesserung gilt also",
+      "Plaids Datenschutzerklärung, weil es Bankdaten sind"
+    ],
+    answer: 2,
+    explain: "Die Zusage ohne Training haftet am Hub, nicht am Thema. Anthropics Satz ist eindeutig: Für alles, was Sie außerhalb des Hubs teilen, gelten Ihre Datenschutzeinstellungen. Der Hub hält Chats außerdem aus dem Gedächtnis und Ihrer Monatsübersicht heraus – ein weiterer Schutz, den Sie verlieren, wenn Sie außerhalb arbeiten."
+  },
+  {
+    q: "Ihr Claude-Pro-Abonnement läuft aus. In welchem Zustand sind Ihre verknüpften Banken?",
+    options: [
+      "Automatisch getrennt, wenn die Abrechnung fehlschlägt",
+      "Weiterhin verknüpft – Claude kann Personal Finance nur nicht öffnen oder sie in Chats lesen",
+      "Nach 30 Tagen getrennt",
+      "Bei Plaid in Lesezugriff umgewandelt"
+    ],
+    answer: 1,
+    explain: "Der Zugriff endet, die Verknüpfung nicht. Anthropic ist eindeutig, dass Ihre Banken verknüpft bleiben, bis Sie sie trennen – über Anpassen/Plugins → Konnektoren → Plaid, unter my.plaid.com oder über den Support. Das Löschen Ihres Claude-Kontos trennt sie automatisch, das bloße Auslaufen aber nicht."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Schreibgeschützt über Plaid, Beta, Pro/Max/Ultra, nur USA, nur US-Banken, bis zu 16 Banken, bis zu 24 Monate Transaktionen.",
+  "Die Garantie ohne Training gilt für den Personal-Finance-HUB – nicht für Finanzthemen irgendwo in Claude.",
+  "Ein veröffentlichtes Artefakt kann die Konten dessen lesen, der es öffnet, und überlebt das Löschen seines Chats. Das ist der Fakt, den man anderen sagen sollte.",
+  "Vier dokumentierte Genauigkeitslücken; die ausgelassene nicht lesbare Bank bläht auf, was Ihnen bleibt. Fragen Sie immer, welche Transaktionen hinter einer Zahl stehen.",
+  "Das Trennen gilt pro Bank-Login, nicht pro Konto, ist nicht rückwirkend, und das Entfernen der letzten Bank löscht Ihr Dashboard unumkehrbar.",
+  "Kein Claude Code, kein Cowork, keine geplanten Aufgaben, kein Duet – Anthropic führt sie als aktuelle Einschränkungen auf, es gibt hier heute also keinen unbeaufsichtigten Weg."
+]} />
+
+## Quellen und weiterführende Literatur
+
+- Anthropic – [Introducing Personal Finance in Claude](https://claude.com/resources/articles/introducing-personal-finance-in-claude) (Ankündigung, 5. November 2026)
+- Anthropic Help Center – [Use Personal Finance in Claude](https://support.claude.com/en/articles/18185620-use-personal-finance-with-claude) (die maßgebliche feldweise Referenz für alles auf dieser Seite)
+- Anthropic – [Claude release notes](https://support.claude.com/en/articles/12138966-release-notes) (der Eintrag vom 5. November 2026: Pro, Max, Ultra, nur USA)
+- Anthropic Privacy Center – [How long do you store my data](https://privacy.claude.com/en/articles/10023548-how-long-do-you-store-my-data) (allgemeine Verbraucher-Aufbewahrung, 1. Juli 2026 – nicht finanzspezifisch)
+- Verwandt auf AILmanac: [Datenschutz & Datenhandhabung](/docs/foundations/privacy) · [Konnektoren (MCP) in den Apps](/docs/claude-app/connectors) · [Artefakte](/docs/claude-app/artifacts) · [Gedächtnis über Chats hinweg](/docs/claude-app/memory) · [Tarife, Limits & Abrechnung](/docs/claude-app/plans-and-billing)
+
+## Weiter
+
+- [Datenschutz & Datenhandhabung](/docs/foundations/privacy) – die allgemeine Version der Grenze, die diese Seite konkret macht
+- [Konnektoren (MCP) in den Apps](/docs/claude-app/connectors) – Plaid ist ein Konnektor unter vielen; dieselbe Steuerung pro Chat gilt für alle
+- [Wer Ihre KI-Chats liest](/docs/security/who-reads-your-ai-chats-safety-review-escalation) – was mit einer Unterhaltung passiert, nachdem Sie fertig sind

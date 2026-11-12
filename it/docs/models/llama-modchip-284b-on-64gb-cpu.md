@@ -1,0 +1,294 @@
+# llama-modchip: un modello da 284B su 64 GB di RAM, letto con onestà
+
+> Source: https://derob98.github.io/ailmanac/it/docs/models/llama-modchip-284b-on-64gb-cpu · AILmanac (CC BY 4.0) · last verified 2026-11-11
+
+483 punti su Hacker News per far girare DeepSeek-V4-Flash sulla CPU di un laptop, senza GPU. Il meccanismo è reale e davvero ingegnoso — due nuovi tipi di tensore a blocchi da 64 con decodifica SIMD a istruzione singola, la ricerca di un motore scacchistico usata come speculatore senza modello draft, e le huge page che riducono i dTLB miss per token da 18,42M a 0,31M. Ma è una quantizzazione a 1,69 bit, i numeri «lossless» sono misurati rispetto al file già a 1,7 bit e non rispetto al BF16, e in un thread di 208 commenti nessuno ha riprodotto il titolo su 64 GB di x86. Che cos'è, cosa eseguire e cosa non credere.
+
+<LevelBadge level="advanced" />
+
+L'**8 novembre 2026** un progetto GitHub chiamato [llama-modchip](https://github.com/synchopate/llama-modchip) ha raggiunto **483 punti e 208 commenti** su Hacker News con il titolo *«284B DeepSeek on 64GB RAM, no GPU.»* Ora ha **926 stelle**, ed è stato creato solo il 29 ottobre.
+
+L'affermazione è di quelle che fanno aprire una nuova scheda: un MoE da 284 miliardi di parametri di classe frontier, in esecuzione a **9–10 token al secondo di pura decodifica** sulla CPU a 16 core di un laptop, con **zero GPU e zero swap**. E l'ingegneria sottostante è reale — qui ci sono due nuovi tipi di tensore GGML, un decodificatore speculativo preso in prestito dai motori scacchistici e un'intuizione sul paging della memoria che la maggior parte del lavoro sull'inferenza su CPU trascura.
+
+C'è anche un divario tra ciò che il README afferma e ciò che qualcuno ha misurato in modo indipendente, e il thread non l'ha mai inchiodato del tutto. Due dei commenti più votati erano *scettici sulla qualità*, una delle *difese* più votate descriveva un meccanismo che il progetto non usa, e la classifica della community del progetto, con 20 voci, riguarda — quasi interamente — un **modello diverso e molto più piccolo**.
+
+Questa pagina separa le tre cose.
+
+<Callout type="objectives" items={[
+  "Partire dal numero che il titolo omette: è una quantizzazione mista di circa 1,69 bit per peso, con la maggior parte dei pesi degli expert a 1,5–2 bit",
+  "Capire il meccanismo reale — e perché lo «SSD streaming» (la difesa più votata nel thread) è esattamente al contrario",
+  "Conoscere i due pezzi davvero nuovi: tipi di tensore a blocchi da 64 decodificati con UNA sola istruzione SIMD, e uno speculatore senza draft costruito dalla ricerca di un motore scacchistico",
+  "Vedere perché le transparent huge page, non l'aritmetica, sono il collo di bottiglia dominante dei MoE su CPU — da 18,42M dTLB miss per token a 0,31M",
+  "Riconoscere la trappola di misurazione: le cifre «lossless» e «KLD 1.00000» sono relative al file già quantizzato, non al BF16. Non esiste da nessuna parte una tabella di perplexity rispetto al BF16 per il 284B",
+  "Sapere che nessuno ha riprodotto il titolo su 64 GB di CPU x86, e perché la classifica della community non dice ciò che sembra dire",
+  "Eseguirlo comunque, se vuoi — con i flag giusti, le aspettative giuste e un'impostazione che porta il richiamo a lungo contesto da perfetto a zero"
+]} />
+
+## La versione in una frase
+
+`llama-modchip` è un **insieme di patch per llama.cpp** più un transcoder GGUF offline, che riconfeziona `DeepSeek-V4-Flash-0731` (284,33B totali, **13,17B attivi**, MoE) in una quantizzazione mista con media di **1,69 bpw** e **56,56 GiB su disco**, così che tutti i pesi restino **residenti in RAM** su una macchina da 64 GB — e poi investe la sua ingegnosità nei pattern di accesso alla memoria e nella speculazione anziché nell'aritmetica.
+
+## 1. Il numero che il titolo omette
+
+Prima di tutto: **questo è un modello sotto i 2 bit.** Il mix non è uniforme, ed è la parte interessante, ma la maggior parte è a precisione molto bassa:
+
+| Componente | Formato | Bit/peso |
+|---|---|---|
+| 256 expert instradati (la parte più grande, ~48,2 GiB) | `IQ1_S`, con livelli ancorati alla sensibilità a `IQ1_M` / `IQ2_XXS` | **1,5625** / 1,75 / 2,06 |
+| Tensori MLA `attn_k_b` + sparse-indexer | **Fractal-64** (`GGML_TYPE_Q2_0`), transcodificato da Q5_K | 3,75 |
+| Alcune proiezioni dense/condivise attive (v2.5.0) | **LUT-VQ3-64** (`GGML_TYPE_VQ3_0`) | 3,00 |
+| Proiezioni MLA dense, expert condivisi, blocchi 0–2, embedding | `Q5_K` / `Q6_K` / `F32` | 5–32 |
+| **Media effettiva** | — | **1,69** |
+
+Due commentatori di Hacker News hanno fatto i conti che il README non fa. Uno, che aveva usato a lungo `DeepSeek-V4-Flash-0731`, ha detto che servono circa 150 GB di RAM per farlo girare come si deve con KV non quantizzata, che persino una build Q2XS da 97 GB mostra «una divergenza molto significativa», e che far girare un modello lobotomizzato solo per dire di averlo fatto non è niente di notevole. Un altro ha osservato che il GGUF finale è circa il **75% della dimensione della più piccola build `IQ1_S` della community** — «il che da solo dovrebbe dirti molto sulla sua qualità» — e che il punto di partenza dichiarato dal progetto, `IQ2_XXS` da 76,87 GiB, non corrisponde a nessuna quantizzazione pubblicata dalla community, il che suggerisce che `IQ1_S` e `IQ2_XXS` siano stati confusi da qualche parte.
+
+Nel thread c'è un vero controargomento, che merita pari visibilità: una quantizzazione sotto i 4 bit di un modello *molto più grande* spesso batte una a 4 bit di un modello più piccolo, e un commentatore ha sostenuto che, poiché questo modello è nativamente a 4 bit, una sua quantizzazione a 2 bit è più vicina a una quantizzazione a 4 bit di un modello BF16 di quanto suggerisca il numero grezzo. Se è vero, cambia in modo sostanziale il quadro sulla qualità. **Nessuno nel thread ha portato prove in un senso o nell'altro.**
+
+<Callout type="warning">
+Le prove di qualità del progetto non risolvono la questione, per via di ciò rispetto a cui sono misurate. L'affermazione «lossless» e le cifre `1.00000` di cosine similarity dei logit / KLD confrontano il runtime con le patch con il **runtime senza patch sullo stesso file già a 1,7 bit** — cioè dimostrano che le patch non corrompono la decodifica. Non sono un confronto con il BF16. Non esiste **nessuna tabella di perplexity rispetto al BF16 per il 284B** da nessuna parte nel repository. L'unica cifra di perplexity pubblicata riguarda il modello Nemotron da 30B (2,086 ± 0,037, fornita dalla community).
+</Callout>
+
+## 2. È l'opposto dello SSD streaming
+
+La *difesa* più votata nel thread lodava il «prefill su SSD streaming» del progetto. È un'interpretazione sbagliata, e vale la pena correggerla perché inverte il progetto.
+
+Tutto lo scopo è **stare sotto il tetto della RAM in modo che nulla venga letto in streaming dal disco.** La premessa della model card è esplicita: un file da 76,87 GiB su una macchina da 64 GB o fa scattare l'OOM killer di Linux o viene letto in streaming da NVMe, e lo streaming fa crollare il throughput. L'affermazione è **0 byte di swap**, con memoria residente di circa **57,6–58,9 GiB** (le fonti non concordano; vedi §7). NVMe compare esattamente una volta nella pipeline — come il luogo da cui viene letto il GGUF sorgente durante la transcodifica offline. Non fa parte del percorso di inferenza.
+
+Se vuoi il vero approccio di expert-streaming da SSD, è un'architettura diversa con compromessi diversi — vedi [Colibrì: esegui un MoE da 744B dal tuo SSD](/docs/models/colibri-stream-frontier-moe-from-ssd).
+
+## 3. Cosa c'è davvero di nuovo
+
+Tre elementi qui non sono semplice messa a punto, e sono il motivo per cui il progetto ha attirato l'attenzione di chi costruisce motori di inferenza.
+
+### Tipi di tensore a blocchi da 64 che decodifichi con una sola istruzione
+
+I K-quant a pochi bit di llama.cpp standard usano un **super-blocco da 256 pesi** e li decomprimono con una sequenza di shift e maschere. `llama-modchip` aggiunge invece due tipi a blocchi da 64:
+
+- **Fractal-64** (`GGML_TYPE_Q2_0 = 40`): 30 byte ogni 64 pesi = **3,75 bpw**. Una super-scala FP16, sotto-scale a 4 bit e una tabella di lookup non lineare a 8 livelli — decodificata con un singolo `VPSHUFB`.
+- **LUT-VQ3-64** (`GGML_TYPE_VQ3_0 = 43`): 24 byte ogni 64 pesi = **3,00 bpw**. 128 centroidi Lloyd–Max tridimensionali tenuti in modo permanente in **sei registri ZMM**, decodificati con il `VPERMI2B` di AVX-512 VBMI.
+
+La ragione dichiarata per il blocco da 64 è piacevolmente concreta: il super-blocco da 256 pesi di Q3_K non divide la dimensione intermedia **1856** di Nemotron. Una dimensione di blocco scelta per adattarsi al modello anziché alla convenzione.
+
+Anche la metrica di importanza degli expert usata durante la transcodifica non richiede calibrazione — un proxy in forma chiusa del secondo momento di SwiGLU che l'autore chiama SwiGLU-H2, calcolato come `‖W_gate[j,:]‖² · ‖W_up[j,:]‖²`. Nessun dataset di calibrazione, il che elimina un'intera classe di errori del tipo «quantizzato sui dati sbagliati».
+
+### Un motore scacchistico come decodificatore speculativo
+
+La decodifica speculativa di solito richiede un piccolo modello draft. Il progetto sostiene che su CPU sia impossibile, con l'aritmetica alla mano: un modello draft da 1B parametri e 600 MB che esegue 5 passi significa **3,0 GB di letture DDR5 ≈ 40 ms**, contro un forward pass del target di 25 ms. Il draft costa più di ciò per cui sta facendo la bozza.
+
+Quindi non c'è alcun modello draft. C'è invece una struttura da **1,64 MB** che resta residente in L2/L3: una cascata di hash FNV-64, un predittore PPM, skip-gram, un codebook di macro da 11.382 voci, una sonda lineare sui logit «caldi» — e poi, sopra, una **tabella di trasposizione Zobrist con principal-variation search ed estensione dell'orizzonte singolare**, presa direttamente dal design dei motori scacchistici. L'autore la chiama «Stockfish-PVS».
+
+Effetto dichiarato: la decodifica passa da 9,06–9,95 tok/s a **11,5–14,7 tok/s**, e nel caso v2.5.0 «agentic tool burst» a **19,4–25,3 tok/s** — il che ha senso, perché le trascrizioni degli agenti sono testo estremamente prevedibile.
+
+### Le huge page, non i FLOP, sono il collo di bottiglia
+
+Il numero che dovrebbe cambiare il modo in cui pensi all'inferenza MoE su CPU: abilitare `MADV_HUGEPAGE` (transparent huge page da 2 MB) sull'arena dei pesi riduce, a quanto dichiarato, i **dTLB load miss da 18,42 milioni per token a 0,31 milioni** — una riduzione di circa 59 volte.
+
+È un problema di traduzione della memoria, non di calcolo. Il resto del lavoro microarchitetturale segue lo stesso tema: prefetch non temporale (`_MM_HINT_NTA`) per i flussi freddi di KV e pesi MoE, riconfezionamento in memoria `q4_0_8x8` con AVX-512 VNNI, pinning 1:1 sui core fisici tramite `OMP_PROC_BIND=close`, posizionamento dei thread consapevole dei CCD, tiling del prefill su quattro livelli registro/L1D/L2/L3 e un kernel FlashAttention AVX-512 con registri stazionari.
+
+### L'unico trucco che si trasferisce comunque
+
+Anche se non eseguirai mai questo progetto, ruba questo: **gli snapshot della KV cache in `/dev/shm`.** Avvia `llama-server` con `--slot-save-path /dev/shm`, poi usa `POST /slots/0?action=restore` per ricaricare un prefisso salvato. L'effetto dichiarato su un prefisso di prompt da 85 MB in stile Claude Code con 40 tool è un ripristino in **decine di millisecondi** contro una **valutazione del prompt a freddo di 65,8 secondi**.
+
+È l'impostazione a più alta leva per chiunque esegua un modello locale dietro un harness per agenti, perché i prefissi degli agenti sono lunghi, identici a ogni chiamata e altrimenti rivalutati da zero. (Il tempo di ripristino riportato varia enormemente nella documentazione stessa del progetto — compaiono 10,4, 13, 13,06, 17,2–39,3, 18,9 e 32,6 ms. Considera l'*ordine di grandezza* come l'affermazione.)
+
+## 4. Il problema della riproduzione
+
+Questa è la parte di cui un lettore attento ha più bisogno, e non è in nessuna delle coperture.
+
+Il repository ha una classifica della community con circa **20 voci**, ciascuna collegata a una issue di GitHub — il che sembra una forte validazione indipendente. **Quasi ogni voce riguarda il modello Nemotron da 30B, non il DeepSeek da 284B.** Il tracker delle issue funziona da classifica anziché da coda di bug: 18 delle 20 issue aperte sono invii di benchmark.
+
+Per il 30B le riproduzioni sono reali e ampie, il che di per sé vale la pena di sapere — un Threadripper PRO 7985WX ha raggiunto 73,84–80,14 tok/s di decodifica, AWS Graviton3 su 8 vCPU ~41–45, un EPYC 7402P solo AVX2 27,29 e un laptop Ryzen 7 5700U 13,04–14,48. È un ventaglio davvero utile.
+
+Per il **284B su 64 GB di CPU x86 — il vero titolo — c'è esattamente un dato di terze parti, e non è quella configurazione**: un **Apple M5 Max con 64 GB di memoria unificata**, che riporta 20,70–23,60 tok/s da `llama-server` con cinque layer MoE puri `IQ1_S` fissati sulla CPU e il resto su **Metal**. È accelerato da GPU, su un'ISA diversa. Ogni numero 284B puramente su CPU risale al Ryzen 9 9955HX dell'autore stesso.
+
+<Callout type="key">
+Una classifica di 20 voci che convalida un *modello diverso* è il modo più comune in cui le affermazioni sull'inferenza locale sembrano verificate senza esserlo. Quando ne leggi una: controlla che le riproduzioni riguardino la configurazione del titolo, non il caso facile del progetto. Qui il caso facile è 25 volte più piccolo.
+</Callout>
+
+Altre due cose da portarsi via dal thread:
+
+- **I binari precompilati non girano ovunque.** Almeno due persone hanno riportato fallimenti su hardware pre-AVX-512 — «Illegal instruction (core dumped)» per una, e nessuno dei binari funzionante su uno Xeon dell'era Haswell per un'altra, con la documentazione di ricompilazione giudicata insufficiente. Nelle patch esistono fallback AVX2; i binari distribuiti presuppongono di più.
+- **I commenti «è inutilizzabilmente lento» riguardano un'altra configurazione.** Un sotto-thread che riporta ~116 s per una breve traduzione e ~4 s per 43 token in ingresso dipende da una demo che qualcuno ha eseguito su una macchina con 128 GB di memoria unificata — e non viene mai detto che `llama-modchip` fosse coinvolto. L'autore della demo ha risposto che la latenza dipendeva dai default di max-thinking e non dalla velocità di inferenza. Non attribuire quei numeri a questo progetto.
+- **Il README sembra scritto da una macchina**, e almeno sei commentatori lo hanno detto in modo indipendente. È una critica di stile, non tecnica, ma è il motivo per cui il thread ha dedicato più tempo alle impressioni che all'aritmetica che davvero conta.
+
+## 5. Cosa misura sulla macchina di riferimento
+
+Tutte le cifre sotto sono dell'autore, su un **AMD Ryzen 9 9955HX** (Zen 5, 16 core / 32 thread, 2 CCD, 64 MB di L3), **64 GB di DDR5 dual-channel** (~71,7 GB/s di lettura multi-core sostenuta), **senza GPU, senza swap**, Linux.
+
+| Configurazione | Prefill | Decodifica |
+|---|---|---|
+| Baseline `UD-IQ1_S` senza patch, stessa macchina | **OOM / swap** | 5,91 tok/s |
+| v2.5.0, Top-6 lossless | ~41,1 tok/s | **9,05 tok/s** |
+| v2.4.0 Fractal-64, Top-6 | 43,2–44,4 tok/s | 7,74–9,95 tok/s |
+| Top-5 (`LLAMA_MOE_TOP_K=5`) | — | 9,68–10,15 tok/s |
+| Top-4 + SwiGLU gate-first | — | 10,12–10,74 tok/s |
+| Con speculazione Stockfish-PVS | — | **11,5–14,7 tok/s** |
+| v2.5.0 agentic tool burst | — | 19,4–25,3 tok/s |
+
+**Leggi la colonna del prefill, non quella della decodifica, se pensi di usarlo per programmare.** A ~43 tok/s di valutazione del prompt, un file da 2.000 token richiede circa **45 secondi** prima del primo token in uscita — a meno che non colpisca la cache del prefisso in `/dev/shm`. Per il lavoro interattivo con gli agenti questo è il vincolo determinante, non i 9–14 tok/s di decodifica. La stessa lezione, nel mondo ospitato, è [perché gli agenti bruciano token](/docs/models/why-agents-burn-tokens).
+
+## 6. Eseguirlo, e l'unica impostazione che distrugge in silenzio il richiamo
+
+<Steps items={[
+  {title: "Controlla prima onestamente la tua CPU", body: "Il percorso del titolo richiede AVX-512 con VBMI (Zen 5 o equivalente). AVX2 funziona ma è più lento, e i binari precompilati hanno fallito per utenti con hardware più vecchio. Il repository include scripts/check_cpu_readiness.py — nota che l'invocazione documentata passa uno script remoto direttamente a python3, quindi scaricalo e leggilo prima di eseguirlo invece di fare curl-piping."},
+  {title: "Prendi il modello quantizzato, non l'originale", body: "L'artefatto eseguibile è Synchopate/DeepSeek-V4-Flash-0731-Fractal-64GB-CPU-GGUF su Hugging Face (3 shard, con tag MIT, ~601 download nell'ultimo mese). Include i binari precompilati llama-server-modchip e llama-cli-modchip per linux-x86_64."},
+  {title: "Non provarlo con Ollama o LM Studio", body: "Falliranno con 'unknown tensor type 40'. I nuovi tipi esistono solo nel runtime con le patch. Non c'è nemmeno uno shader Vulkan o CUDA per Q2_0, quindi in una configurazione GPU ibrida quei tensori devono restare su CPU — usa MXFP4 o Q4_0 per tutto ciò che vuoi sulla GPU."},
+  {title: "Avvia il server con i thread corrispondenti ai core fisici", body: "Imposta -t e -tb al numero di core fisici (16 sulla macchina di riferimento), -fa on, e tieni -c modesto all'inizio. Il quickstart 284B del progetto usa -c 32768, non il 262144 usato per le affermazioni sulla RAM residente — la lunghezza del contesto è dove va a finire la RAM che ti resta."},
+  {title: "Attiva la cache del prefisso prima di fare qualsiasi benchmark", body: "Aggiungi --slot-save-path /dev/shm e ripristina il prefisso con le definizioni dei tool del tuo agente tramite POST /slots/0?action=restore. È la differenza tra una valutazione del prompt a freddo di 65 secondi e un avvio a caldo, e domina qualsiasi altra manopola di ottimizzazione per i carichi di lavoro degli agenti."},
+  {title: "Lascia LLAMA_ATTN_WINDOW a 0 a meno che tu non abbia misurato che puoi permetterti di non farlo", body: "Impostarlo a 4096 fa risparmiare circa il 24% di traffico DDR5 per token e ottiene 0,0 su 10,0 nel recupero di passkey fuori finestra — contro 10,0 su 10,0 con la finestra disabilitata. O richiamo completo o velocità; il progetto è esplicito sul compromesso, e il default è quello sicuro."},
+  {title: "Tratta la riduzione del top-k MoE come una manopola con un precipizio", body: "Da Top-6 a 4 è presentato come sicuro ed è disattivato per impostazione predefinita per il numero del titolo. Le note del progetto stesso descrivono un top-k di 2 come causa di collasso direzionale del sottospazio e di generazione fuori controllo. Verifica la qualità sul tuo compito a ogni gradino in discesa invece di fidarti della scala."}
+]} />
+
+<PromptCard title="Esegui il 284B su Linux x86-64 con il binario precompilato e un prefisso agente a caldo">
+{`# 1. Fetch the quantised model (~56.6 GiB, 3 shards)
+hf download Synchopate/DeepSeek-V4-Flash-0731-Fractal-64GB-CPU-GGUF --local-dir ./dsv4
+
+# 2. Serve it. -t/-tb = PHYSICAL cores. Pin threads to cores.
+chmod +x ./dsv4/llama-server-modchip-linux-x86_64
+OMP_PROC_BIND=close OMP_PLACES=cores \\
+LLAMA_ATTN_WINDOW=0 \\
+./dsv4/llama-server-modchip-linux-x86_64 \\
+  -m ./dsv4/DeepSeek-V4-Flash-0731-Fractal-00001-of-00003.gguf \\
+  -c 32768 -t 16 -tb 16 -b 2048 -ub 512 -fa on --jinja \\
+  --slot-save-path /dev/shm --port 8080
+
+# 3. After the first call establishes your tool-definition prefix, snapshot it:
+curl -X POST "http://localhost:8080/slots/0?action=save" -d '{"filename":"agent-prefix.bin"}'
+
+# 4. On every later cold start, restore instead of re-evaluating the prefix:
+curl -X POST "http://localhost:8080/slots/0?action=restore" -d '{"filename":"agent-prefix.bin"}'
+
+# Verify the claim yourself, on YOUR task — not on the bundled quality gate:
+#   - a long-context recall probe with LLAMA_ATTN_WINDOW=0 and =4096
+#   - your real prompts, compared against the same model via a hosted API`}
+</PromptCard>
+
+## 7. Le incoerenze interne, in elenco
+
+Un progetto che pubblica così tanti numeri finirà per contraddirsi, e questo lo fa. Nessuna di queste è motivo di squalifica; tutte significano che dovresti misurare anziché citare.
+
+| Grandezza | Valori trovati tra README / FAQ / model card / tabelle di benchmark |
+|---|---|
+| Byte su disco | 60.729.886.080 contro 60.730.782.208 |
+| Memoria residente (VmRSS) | 57,61 contro 58,31 contro 58,80 contro 58,9 GiB |
+| Dimensione su disco | 56,56 GiB (v2.4.0) contro 56,07 GiB (v2.5.0) |
+| SQNR di Fractal-64 | 17,75 dB / +1,45 dB rispetto a Q3_K — oppure 17,78 dB / +1,53 dB |
+| Tempo di ripristino KV | 10,4 / 13 / 13,06 / 17,2–39,3 / 18,9 / 32,6 ms |
+| **Architettura del modello base** | **«61 layer, 256 expert instradati, top-8 attivi»** contro **«43L MLA + 256+1s MoE … tutti i 6 expert instradati + 1 condiviso (Top-6)»** — le due non possono essere entrambe giuste |
+
+Quell'ultima riga è quella che conta, perché la cifra del top-k è il riferimento della scala di potatura del §6. E nota che il thread discuteva la **v2.4.0**; il README è nel frattempo passato alla **v2.5.0**, quindi diversi numeri citati dai commentatori non corrispondono più alla documentazione attuale.
+
+<Callout type="note">
+La directory `paper/` del repository contiene un PDF autopubblicato. Non è stato sottoposto a peer review, e almeno un commentatore lo ha liquidato senza appello. Il lavoro sui tipi di tensore e sui kernel è verificabile leggendo le patch; le affermazioni sulla qualità non sono verificabili dal paper.
+</Callout>
+
+## Dovresti eseguirlo?
+
+Una risposta diretta, caso per caso:
+
+- **Per imparare come funziona davvero l'inferenza moderna su CPU** — sì, senza riserve. Le patch sono la dimostrazione pratica più leggibile, pubblicamente disponibile, di decodifica SIMD a blocchi da 64, effetti THP/TLB e speculazione senza draft. Leggi `patches/` e `ARCHITECTURE.md`.
+- **Per eseguire in locale il Nemotron da 30B** — sì. È la configurazione che circa 20 persone indipendenti hanno misurato su un'ampia gamma di hardware, inclusi AVX2-only e Graviton. È il caso ben documentato del progetto.
+- **Per ottenere qualità di classe frontier su un laptop da 64 GB** — no. Una quantizzazione a 1,69 bpw senza alcun confronto BF16 pubblicato, un solo dato di terze parti su hardware diverso e obiezioni credibili da parte di chi ha usato il modello base non sono una base per fidarsi di un output che non verificherai. Se ti serve la qualità vera del modello, chiamalo ospitato e usa questo per le cose in cui i modelli locali sono davvero migliori — vedi [Claude più modelli locali](/docs/models/claude-plus-local-models) e [Uno stack AI locale privato](/docs/models/private-local-ai-stack).
+- **Per ridurre il costo degli agenti** — misura il prefill, non la decodifica, e attiva la cache del prefisso in `/dev/shm` prima di decidere. Quella sola impostazione può contare più della scelta del modello.
+
+<Flashcards title="Vocabolario dell'inferenza su CPU da questo progetto" cards={[
+  {front: "bpw (bit per peso)", back: "La vera valuta dell'inferenza locale. Il 284B di questo progetto ha una media di 1,69 bpw — il titolo «gira su 64 GB» è un'affermazione sui bpw, non sul modello."},
+  {front: "Fractal-64 / GGML_TYPE_Q2_0 = 40", back: "30 byte ogni 64 pesi (3,75 bpw): super-scala FP16, sotto-scale a 4 bit, LUT non lineare a 8 livelli, decodificata con un singolo VPSHUFB. Sconosciuto ai runtime standard — Ollama e LM Studio falliscono con 'unknown tensor type 40'."},
+  {front: "LUT-VQ3-64 / GGML_TYPE_VQ3_0 = 43", back: "24 byte ogni 64 pesi (3,00 bpw): 128 centroidi Lloyd–Max tridimensionali tenuti in sei registri ZMM, decodificati con il VPERMI2B di AVX-512 VBMI."},
+  {front: "Perché blocchi da 64 invece che da 256", back: "Il super-blocco da 256 pesi di Q3_K non divide la dimensione intermedia 1856 di Nemotron. Dimensione di blocco scelta per adattarsi alle forme del modello anziché alla convenzione."},
+  {front: "MADV_HUGEPAGE / pressione sul dTLB", back: "Transparent huge page da 2 MB sull'arena dei pesi. Dichiarato come riduzione dei dTLB load miss per token da 18,42M a 0,31M — prova che l'inferenza MoE su CPU è limitata dalla traduzione degli indirizzi, non dai FLOP."},
+  {front: "Decodifica speculativa senza draft", back: "Nessun piccolo modello draft (un draft da 1B su 5 passi = ~3,0 GB di letture DDR5 ≈ 40 ms, più dei 25 ms del pass del target). Sostituito da un ensemble da 1,64 MB residente in L2/L3 più una tabella di trasposizione Zobrist e una principal-variation search dei motori scacchistici."},
+  {front: "LLAMA_ATTN_WINDOW", back: "Attenzione a finestra scorrevole. 4096 risparmia ~24% di traffico DDR5 per token e ottiene 0,0/10,0 nel recupero di passkey fuori finestra; 0 (il default) ottiene 10,0/10,0. Non impostarlo mai senza un test di richiamo."},
+  {front: "--slot-save-path /dev/shm", back: "Snapshot e ripristino della KV cache. Trasforma una valutazione del prompt a freddo di 65,8 secondi su un lungo prefisso agente in un ripristino in decine di millisecondi. L'idea più trasferibile del progetto."},
+  {front: "SwiGLU-H2", back: "Un proxy di importanza degli expert senza calibrazione — il prodotto delle norme di riga al quadrato di W_gate e W_up — usato per decidere quali expert ricevono più bit. Nessun dataset di calibrazione, quindi nessun errore del tipo «quantizzato sui dati sbagliati»."},
+  {front: "«Lossless» (come usato qui)", back: "Significa che il runtime con le patch coincide con il runtime SENZA patch sullo stesso file già a 1,7 bit. NON significa lossless rispetto al BF16. Non è pubblicato alcun confronto di perplexity BF16 per il 284B."}
+]} />
+
+<Quiz questions={[
+  {
+    q: "Come fa llama-modchip a far stare un modello da 284B in 64 GB di RAM?",
+    options: [
+      "Leggendo in streaming gli expert inattivi da NVMe man mano che il router li chiama",
+      "Mappando il file in memoria e lasciando che il sistema operativo lo carichi e scarichi",
+      "Riconfezionandolo in una quantizzazione mista con media di 1,69 bpw, così che ogni peso resti residente in RAM",
+      "Tenendo in memoria solo i 13,17B di parametri attivi alla volta"
+    ],
+    answer: 2,
+    explain: "È l'opposto dello SSD streaming — un'interpretazione sbagliata molto votata nel thread di HN. Lo scopo è portare il file sotto il tetto della RAM (56,56 GiB su disco, ~58 GiB residenti, 0 swap) in modo che nulla venga letto in streaming. L'instradamento MoE può chiamare qualsiasi expert su qualsiasi token, quindi il numero di parametri attivi non riduce mai l'ingombro in memoria."
+  },
+  {
+    q: "Il repository riporta cosine similarity dei logit e KLD pari a 1.00000 e definisce il risultato lossless. Lossless rispetto a cosa?",
+    options: [
+      "Rispetto ai pesi originali BF16",
+      "Rispetto al runtime llama.cpp senza patch che legge lo stesso file già a 1,7 bit",
+      "Rispetto all'API DeepSeek ospitata",
+      "Rispetto a una quantizzazione Q4_0 dello stesso modello"
+    ],
+    answer: 1,
+    explain: "Dimostra che le patch non corrompono la decodifica — un controllo reale e necessario, ma non un'affermazione sulla qualità. Non esiste da nessuna parte nel progetto una tabella di perplexity rispetto al BF16 per il 284B. L'unica cifra di perplexity pubblicata è fornita dalla community e riguarda il modello Nemotron da 30B."
+  },
+  {
+    q: "La classifica del repository ha circa 20 voci della community. Qual è il problema?",
+    options: [
+      "Le voci sono auto-dichiarate senza link alle issue",
+      "Quasi tutte fanno il benchmark del modello Nemotron da 30B, non della configurazione 284B del titolo",
+      "Sono state tutte eseguite dall'autore con nomi utente diversi",
+      "Tutte usavano GPU"
+    ],
+    answer: 1,
+    explain: "Le riproduzioni sul 30B sono genuine e ampie — Threadripper, Graviton3, EPYC solo AVX2, diversi laptop. Ma per il 284B su 64 GB di CPU x86 c'è esattamente un dato di terze parti, ed è un Apple M5 Max che usa Metal. Ogni numero 284B puramente su CPU risale alla macchina dell'autore."
+  },
+  {
+    q: "Vuoi usarlo dietro un agente di coding. Quale numero dovrebbe guidare la tua decisione?",
+    options: [
+      "Il throughput di decodifica, 9–14 tok/s",
+      "Il throughput di prefill, ~43 tok/s",
+      "La memoria residente, ~58 GiB",
+      "I bit effettivi per peso, 1,69"
+    ],
+    answer: 1,
+    explain: "A ~43 tok/s di valutazione del prompt, un file da 2.000 token costa circa 45 secondi prima del primo token in uscita. Per il lavoro con gli agenti questo domina la velocità di decodifica di 9–14 tok/s — ed è esattamente per questo che il trucco dello snapshot KV in /dev/shm, che trasforma una valutazione di prefisso a freddo di 65,8 secondi in un ripristino in decine di millisecondi, è l'impostazione a più alta leva del progetto."
+  },
+  {
+    q: "Cosa ti costa impostare LLAMA_ATTN_WINDOW=4096?",
+    options: [
+      "Circa il 24% di banda di memoria in più per token",
+      "Nulla di misurabile; è una pura ottimizzazione",
+      "Il richiamo fuori finestra: 0,0 su 10,0 nel recupero di passkey, contro 10,0 su 10,0 con la finestra disabilitata",
+      "La compatibilità con i binari precompilati"
+    ],
+    answer: 2,
+    explain: "Fa risparmiare circa il 24% del traffico DDR5 per token e distrugge il richiamo esatto oltre la finestra — il test dell'ago del progetto stesso lo valuta 0,0/10,0 contro un perfetto 10,0/10,0 con finestra 0. Il default è l'impostazione sicura; quella veloce è sicura solo se il tuo compito non ha mai bisogno di recuperare qualcosa da prima nel contesto."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Parti dai bpw, non dal numero di parametri: 284B a 1,69 bit per peso, con la maggior parte degli expert a 1,5–2 bit. «Gira su 64 GB» è un'affermazione sulla quantizzazione.",
+  "Non è offload su SSD — è l'opposto. L'obiettivo del design è stare sotto il tetto della RAM in modo che nulla venga letto in streaming. La difesa più votata nel thread l'ha capito al contrario.",
+  "L'ingegneria è davvero buona: tipi di tensore a blocchi da 64 decodificati con una sola istruzione SIMD, la PVS di un motore scacchistico e una tabella Zobrist come speculatore senza draft, e huge page che riducono i dTLB miss per token di 59 volte. Quella parte è leggibile nelle patch e merita il tuo tempo.",
+  "«Lossless» qui significa rispetto al runtime senza patch sullo stesso file a 1,7 bit, non rispetto al BF16. Non esiste alcun confronto di perplexity BF16 per il 284B. Misura sul tuo compito prima di fidarti dell'output.",
+  "La classifica da 20 voci convalida il Nemotron da 30B, non il 284B. Esiste un solo dato 284B di terze parti e usava Metal su un M5 Max. Controlla che una riproduzione corrisponda alla configurazione del titolo, non al caso facile.",
+  "LLAMA_ATTN_WINDOW=4096 porta il recupero di passkey fuori finestra da 10,0/10,0 a 0,0/10,0 per circa il 24% di banda in meno. Lascialo a 0 a meno che tu non abbia misurato che il tuo compito non ha mai bisogno di richiamo a lungo raggio.",
+  "Il vantaggio trasferibile a prescindere dal modello: --slot-save-path /dev/shm più un ripristino dello slot trasforma una valutazione a freddo del prefisso dell'agente di 65,8 secondi in decine di millisecondi. Per i carichi di lavoro degli agenti il prefill è il vincolo e questa è la soluzione."
+]} />
+
+<VerifyNote lastVerified="2026-11-11" source="https://github.com/synchopate/llama-modchip">
+Numero di stelle (926), numero di fork (71), data di creazione (29 ottobre 2026) e licenza (Apache-2.0) provengono dall'API di GitHub dell'11 novembre 2026 — il progetto si muove in fretta e il README è già passato dalla v2.4.0 alla v2.5.0 dopo il thread di Hacker News, quindi diverse cifre citate in quel thread non corrispondono più alla documentazione attuale. Definizioni dei tipi di tensore, cifre dei bpw, tabelle di benchmark, numeri su dTLB e test dell'ago, e tutti i flag di ottimizzazione sono dell'autore, tratti dal README, da `FAQ.md` e da `ARCHITECTURE.md`; nessuno è verificato in modo indipendente. Il repository del modello quantizzato ha tag MIT mentre il repository del codice è Apache-2.0. Le contraddizioni elencate nel §7 erano presenti al momento della stesura e potrebbero essere riconciliate in seguito.
+</VerifyNote>
+
+## Fonti e approfondimenti
+
+- [synchopate/llama-modchip](https://github.com/synchopate/llama-modchip) — il progetto. Apache-2.0, 926 stelle, creato il 29 ottobre 2026, README alla v2.5.0. Fonte per le definizioni dei tipi di tensore, le tabelle di benchmark, le specifiche della macchina di riferimento, le variabili d'ambiente di ottimizzazione e la classifica della community
+- [patches/](https://github.com/synchopate/llama-modchip/tree/main/patches) — i diff veri e propri contro llama.cpp, comprese le varianti per Apple Silicon e Zen 5. Il modo onesto di valutare le affermazioni sull'ingegneria: leggi queste anziché il README
+- [Synchopate/DeepSeek-V4-Flash-0731-Fractal-64GB-CPU-GGUF](https://huggingface.co/Synchopate/DeepSeek-V4-Flash-0731-Fractal-64GB-CPU-GGUF) — l'artefatto 284B eseguibile: 3 shard, con tag MIT, 284,33B totali / 13,17B attivi, con binari Linux x86-64 precompilati. Fonte per il mix di quantizzazione e per le cifre della memoria residente
+- [Synchopate/NVIDIA-Nemotron-3.5-30B-A3B-Fractal-64-CPU-GGUF](https://huggingface.co/Synchopate/NVIDIA-Nemotron-3.5-30B-A3B-Fractal-64-CPU-GGUF) — il modello da 30B che la classifica della community misura davvero, e il caso ben documentato del progetto
+- [Issue tracker](https://github.com/synchopate/llama-modchip/issues) — 18 delle 20 issue aperte sono invii `[Benchmark]`, ciascuna a supporto di una riga della classifica. Vale la pena scorrerlo per vedere di quale modello parla davvero ogni riga
+- [Hacker News: «Llama-modchip: 284B DeepSeek on 64GB RAM, no GPU»](https://news.ycombinator.com/item?id=50411961) — 483 punti, 208 commenti, 8 novembre 2026. Fonte per le obiezioni sulla qualità, l'aritmetica sulla dimensione del GGUF, il controargomento che una quantizzazione a 2 bit di un modello nativamente a 4 bit è più vicina ai 4 bit di quanto sembri, le segnalazioni di istruzione illegale e l'equivoco sullo SSD streaming. Nota che chi l'ha inviato non è l'autore, e l'autore non ha commentato
+- [deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) — il modello base che viene quantizzato
+- Correlati su AILmanac: [Eseguire modelli in locale con Ollama](/docs/models/run-models-locally-ollama) · [Colibrì: esegui un MoE da 744B dal tuo SSD](/docs/models/colibri-stream-frontier-moe-from-ssd) — la vera architettura di expert-streaming che questa evita deliberatamente · [Quantizzazione ternaria in pratica: Bonsai 2 27B in 5,95 GB](/docs/models/ternary-quantization-bonsai-2-27b) — la stessa domanda «fino a quanto possono scendere i bit» con una risposta diversa · [Strata: un MoE da 125B a 94 tok/s su una scheda da 12 GB](/docs/models/strata-qwen-flash-next-gaming-gpu) · [Perché un system prompt da 35 KB si rompe su un modello locale](/docs/models/large-system-prompts-on-local-models) · [Come leggere un benchmark AI senza farsi ingannare](/docs/models/reading-ai-benchmarks)
+
+## Prossimi passi
+
+- [Colibrì: esegui un MoE da 744B dal tuo SSD](/docs/models/colibri-stream-frontier-moe-from-ssd) — l'architettura di cui questo progetto è l'opposto: quanto costa davvero in tok/s quando si legge in streaming gli expert dal disco
+- [Quantizzazione ternaria in pratica: Bonsai 2 27B in 5,95 GB](/docs/models/ternary-quantization-bonsai-2-27b) — l'altro estremo della questione dei pochi bit, incluso perché llama.cpp standard lo carica ed emette silenziosamente spazzatura
+- [Claude più modelli locali](/docs/models/claude-plus-local-models) — la conclusione realistica di questa pagina: quali lavori dare al modello locale a 1,69 bit e quali inviare a uno ospitato

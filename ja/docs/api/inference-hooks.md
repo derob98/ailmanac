@@ -1,0 +1,456 @@
+# Inference Hooks: Claude Enterprise 向けインライン DLP
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/api/inference-hooks · AILmanac (CC BY 4.0) · last verified 2026-11-09
+
+Claude Enterprise Inference Hooks のオペレーターガイド(GA 済み) — チャット、Claude Code、Cowork、M365、Chrome のすべてのプロンプトと**すべてのツール呼び出し**を、モデルが動く前に、あなたの DLP サーバーが許可または拒否できる HTTPS webhook。完全な仕様、判定スキーマ、署名、ロールアウトプレイブック。
+
+import Heading from '@theme/Heading';
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={[
+  "Inference Hooks の実体 — Anthropic から、あなたが運用するサーバーへの HTTPS POST。WebSocket でもデバイス内エージェントでもない",
+  "フックが GA になった今の 2 つのフックイベント: 推論の前の prompt フックと、レスポンス内のツールが動く前の pre-tool-call フック",
+  "なぜ 1 つの tool_call 判定がそのレスポンス内のすべてのツール呼び出しを対象にするのか — 一部を許可して一部を拒否することはできない",
+  "プロンプトフレームのスキーマ — あなたの AI セキュリティサーバーが正確に何を見るか(そして絶対に見ないもの: システムプロンプト、隠された推論、生バイト)",
+  "判定 JSON: allow、deny_reason 付きの deny、そして意図的に redact アクションが存在しない理由",
+  "署名モデル — Standard Webhooks HMAC-SHA256、最初の統合で必ずハマる 2 つの検証バグ、そして whsec_ シークレット形式",
+  "ユーザーをブロックするか、モデルに検査なしトラフィックを流すかを決める 3 つの運用レバー: 判定タイムアウト、失敗ハンドリング、サーキットブレーカー",
+  "初日に爆発しないロールアウトプレイブック — この順で: シャドウモード → パーセンテージロールアウト → ロール除外 → 施行",
+]} />
+
+<VerifyNote lastVerified="2026-11-09" source="https://platform.claude.com/docs/en/manage-claude/inference-hooks">
+**Inference Hooks は一般提供(GA)になりました。** Anthropic のプラットフォームのリリースノートには、**2026 年 10 月 20 日**にベータを終了したと記録されており、**2026 年 11 月 5 日**の Claude Enterprise のセキュリティ発表で、prompt フックと pre-tool-call フックの*両方*が GA であると確認されました。利用できるのは **Claude Enterprise の組織のみ**で、設定には `organization:manage` 権限が必要です(Owner と Primary Owner だけが持っています)。引き続き対象外: **Claude Platform(API)の組織**、**Amazon Bedrock**、**Google Cloud**。音声モードは今は*部分的に*カバーされています — カバレッジマトリクスを参照し、フックを音声の唯一のコントロールとして扱わないでください。正式な仕様: [Inference hooks](https://platform.claude.com/docs/en/manage-claude/inference-hooks) · [Configure](https://platform.claude.com/docs/en/manage-claude/inference-hooks-configuration) · [Endpoint reference](https://platform.claude.com/docs/en/manage-claude/inference-hooks-endpoint)。
+</VerifyNote>
+
+2026 年 8 月 5 日にベータとして発表され、**2026 年 10 月から一般提供**されている **Inference Hooks** は、あらゆるセキュリティチームが Claude Enterprise の席をロールアウトした後に必ず尋ねる問いへの、Anthropic 初のファーストパーティの回答です: *規制対象データを含むプロンプトが、そもそもモデルに届かないようにするにはどうすればよいか？* これまでの答えは、`claude.ai` への TLS トラフィックを傍受する企業プロキシでした — 壊れやすく、不完全で、Claude Code CLI には盲目です。Inference Hooks は施行ポイントを Anthropic の境界の内側に移します。統制対象のプロンプトごとに、Anthropic は推論を一時停止し、transcript をあなたの組織が運用するサーバーに POST し、モデルが何かを見る前に `allow` または `deny` を待ちます。
+
+GA がもたらした、エージェント的な作業にとって最も重要な変更は、ツール呼び出しで発火する**2 つ目のフックイベント**です。モデルが動くと決めた*後*で、何かが実行される*前*に発火します。
+
+## 一段落バージョン
+
+あなたの組織は HTTPS エンドポイントを立ち上げます。Anthropic は統制対象のプロンプトを — そして **Validate tool calls** を有効にしていれば、ツール呼び出しのバッチも — 署名付き `POST`(Standard Webhooks HMAC-SHA256)で毎回そこに送ります。あなたのサーバーが `{"action": "allow"}` を返せば推論が進み、`{"action": "deny", "deny_reason": "..."}` を返せばユーザーには理由が表示され、モデルには届きません。1 つの設定で、組織内のすべての Claude プロダクトをカバーします: チャット、Claude Code、Cowork、Claude for Microsoft 365、Claude Tag、Claude in Chrome。サーバーがタイムアウトしたり 500 を返したりした場合、**失敗ハンドリング**の設定が、リクエストをブロックするか、未検査のまま進めるかを決めます。**Enforce verdicts** をオンにする前に、シャドウモード + 割合ロールアウト + ロール除外で段階的にロールアウトしてください。
+
+## 2 つのフックイベント
+
+<Steps items={[
+  {title: "Prompt フック — type: \"prompt\"", body: "統制対象の推論リクエストごとに 1 回、推論が始まる前に発火します。判定は transcript 全体を対象にします。ベータにあったイベントで、ほとんどの統合がまず着手するものです。"},
+  {title: "Pre-tool-call フック — type: \"tool_call\"", body: "Claude のレスポンスにツール呼び出しが含まれているとき、そのうちのどれかが実行される前に発火します。Validate tool calls の設定がオンの組織でのみ発火します — フックを有効にしただけでは暗黙には有効になりません。"},
+  {title: "ルールの形を決める制約", body: "1 つの tool_call 判定は、そのレスポンス内のすべてのツール呼び出しに適用されます。Anthropic は明言しています: 一部のツール呼び出しを許可して、別のものを拒否することはできません。ルールはバッチ全体についての判断でなければならず、その中に受け入れられない呼び出しが 1 つでもあれば、レスポンス全体を拒否します。"},
+  {title: "ツールの結果は PROMPT フック経由で戻る", body: "ツール結果専用の別イベントはありません。結果は次のプロンプトフレーム内の tool_result ブロックとして届くため、ツールから戻ってくる情報流出の形をしたコンテンツは、呼び出しの時点ではなく、次のターンで捕捉されます。"}
+]} />
+
+`tool_call` フレームでは、各 `tool_use` ブロックに `tool_info` オブジェクトも付き、その kind はツールの出どころを示します: `platform`、`application`、`third_party`、`client`。これがポリシーを分岐させるフィールドです — `third_party` の MCP ツールとファーストパーティのプラットフォームツールは、まったく異なる精査に値します。理由は [MCP ツールポイズニングとラグプル](/docs/security/mcp-tool-poisoning-and-rug-pulls)を参照してください。
+
+スキル、プラグイン、接続されたツール、ローカルの MCP サーバー、コード実行ツール内で動くコードを通じて行われるツール呼び出しは、すべて対象範囲に含まれます。
+
+<Callout type="warning" items={[
+  "claude.ai の内部ツール呼び出しの一部は、tool_call イベントから省かれることがあります — コネクタやスキルの一覧表示、ウェブ検索の提案、モデルの切り替え、ローカル時刻の読み取り、過去のチャットやメモリの読み取り。それらは次のプロンプトフレームに tool_use ブロックとして再び現れるので見えはしますが、呼び出しの時点でブロックすることはできません。",
+  "独自のモデル呼び出しを行う Anthropic 運用の機能は、まったく統制されません: Claude Security のスキャン(ベータ)、Code Review(リサーチプレビュー)、スマートレポート。組織全体の検査が、テナント内のあらゆる推論を文字通りカバーすると思い込まないでください。"
+]} />
+
+## Inference Hooks と Compliance API の違い
+
+両者とも同じ対象向け — Claude Enterprise のセキュリティ、法務、コンプライアンスチーム — ですが、リクエストライフサイクルの正反対の端で動作します。
+
+|                | Inference Hooks                                             | [Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api) |
+| -------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **いつ**       | 推論実行前のインライン                                       | 事後                                                                                |
+| **何をする**   | 統制対象の各リクエストをリアルタイムで許可・拒否する          | 監査・エクスポートのために活動、チャット、ファイル、プロジェクト、ユーザーを取得する |
+| **方向**       | Anthropic → あなたのサーバー                                 | あなた → Anthropic                                                                  |
+| **使いどころ** | 漏洩を止める                                                 | 何が起きたかを証明する                                                              |
+
+ほとんどの企業は両方を運用します。Hooks はトリップワイヤ、Compliance API は監査ログです。
+
+## 判定ラウンドトリップの流れ
+
+<Steps items={[
+  {title: "ユーザーが統制対象サーフェスでプロンプトを送信", body: "1 つのフックが、組織内のすべての Claude プロダクトを統制します — claude.ai チャット、Claude Code(web、デスクトップ、CLI)、Cowork、Claude for Microsoft 365、Claude Tag、Claude in Chrome — web、デスクトップ、モバイル、CLI、Slack にまたがって。会話タイトル生成のような付随リクエストは送信されません。"},
+  {title: "Anthropic が推論を一時停止し、transcript をあなたのエンドポイントに POST", body: "管理者が構成した URL に 1 回の HTTPS POST。ヘッダには Content-Type: application/json、User-Agent: anthropic-dlp/1、そして 3 つの Standard Webhooks 署名ヘッダ(webhook-id、webhook-timestamp、webhook-signature)が含まれます。"},
+  {title: "あなたの AI セキュリティサーバーが署名を検証し transcript を評価", body: "base64 デコードした whsec_ シークレットで `{webhook-id}.{webhook-timestamp}.{生の body バイト}` の HMAC-SHA256 を計算します。時計から 5 分以上ずれているもの、または一致する署名がないものは拒否します。"},
+  {title: "サーバーが HTTP 200 で JSON 判定を返す", body: "{\"action\": \"allow\"} または {\"action\": \"deny\", \"deny_reason\": \"...\"} のいずれか。Anthropic はレスポンス body を最大 64 KiB まで読み、リダイレクトは追跡しません。"},
+  {title: "Anthropic が判定を施行", body: "allow なら推論は通常通り進みます。deny なら、あなたの deny_reason と管理者が構成した定型メッセージがユーザーに表示され、モデルはプロンプトを一切見ません。すべての拒否は組織の Activity Feed に記録されます。"},
+]} />
+
+ユーザーデバイスではなく Anthropic のサーバー上で動かす真の狙いは*均一性*です: 1 つの設定、1 つのサーバー、そしてあらゆるサーフェス上のすべての統制対象リクエストが同じように検査されます。従業員のラップトップにインストールするものはなく、同期を保つべきアプリごとの統合もありません。
+
+## プロンプトフレーム
+
+各リクエストは以下のトップレベルフィールドを持つ JSON body です:
+
+| フィールド    | 型             | 説明                                                                                                                                                                                                                                    |
+| ------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`       | string        | `"prompt"` または `"tool_call"` — [2 つのフックイベント](#2-つのフックイベント)を参照。引き続きオープン enum: 認識できない値には `allow` を返して、サーキットブレーカーをトリップさせないようにしてください。                                                                                                      |
+| `request_id` | string        | 推論呼び出しごとの不透明識別子。`webhook-id` ヘッダと等しい — べき等キーとして使ってください。                                                                                                                                             |
+| `tenant_id`  | string \| null | 組織の不透明識別子。                                                                                                                                                                                                                     |
+| `actor`      | object        | `type` で判別(現在は `"user"` のみ)。ユーザーのリクエスト間で安定するタグ付き `id` と、利用可能な場合は `email_address` を持つ。両フィールドとも null になりえます。                                                                     |
+| `source`     | object        | `{"application": "..."}`。既知の値: `claude-ai`、`claude-code`、`cowork`、`config-test`(管理者の「Test connection」ボタンが使用)。オープン enum — 新しい値が登場します。                                                                       |
+| `session_id` | string \| null | 不透明な会話識別子。パースしないでください。Claude Code ではベストエフォート。                                                                                                                                                            |
+| `model`      | string \| null | 利用可能な場合、このリクエストの公開モデル識別子。                                                                                                                                                                                       |
+| `messages`   | array         | 推論時点までの会話 transcript — [Content blocks](#content-blocks) を参照。                                                                                                                                                                |
+| `metadata`   | object        | 予約された拡張マップ。現在は空。未知のキーは寛容に扱ってください。                                                                                                                                                                       |
+
+実際のリクエスト最小例:
+
+```json
+{
+  "type": "prompt",
+  "request_id": "req_abc123",
+  "tenant_id": "11111111-1111-1111-1111-111111111111",
+  "actor": {
+    "type": "user",
+    "id": "user_01AbCdEfGhIjKlMnOpQrStUv",
+    "email_address": "alice@example.com"
+  },
+  "source": { "application": "claude-ai" },
+  "session_id": "22222222-2222-2222-2222-222222222222",
+  "model": "claude-sonnet-5",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "Summarize the attached report." },
+        {
+          "type": "attachment",
+          "file_name": "q2-report.pdf",
+          "media_type": "application/pdf",
+          "size_bytes": 48213,
+          "text": "Q2 revenue grew 14% quarter over quarter..."
+        }
+      ]
+    }
+  ],
+  "metadata": {}
+}
+```
+
+<Heading as="h3" id="content-blocks">コンテンツブロック</Heading>
+
+各 `messages[].content[]` エントリは `type` を持ち、公開の Messages API コンテンツモデルに一致します。ツール結果は `user` ロールの下に現れます。
+
+| ブロック `type` | フィールド                                                                                                                                       |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `text`        | `text`                                                                                                                                             |
+| `tool_use`    | `id`、`tool_name`、`input`                                                                                                                         |
+| `tool_result` | `content`(テキスト、改行結合。バイナリ部分はプレースホルダマーカー)、`is_error`、`tool_name`、`tool_use_id`                                       |
+| `attachment`  | `file_name`、`media_type`、`size_bytes`、`text`(抽出テキスト、transcript、またはリンクメタデータ)                                                 |
+
+### transcript が絶対に含まないもの
+
+ここがプライバシーレビューでつまずくポイントです。
+
+- **システムプロンプトなし。** Anthropic の、あなたの(projects/skills 経由)、モデルの constitution — いずれも送信されません。
+- **隠された推論なし。** Claude の extended-thinking chain はあなたのサーバーが見る transcript に含まれません。
+- **ツール定義なし。** 呼び出しとその結果だけです。
+- **生バイトなし。** ファイルと画像はメタデータと抽出テキストで表現されます。画像のみのコンテンツ(ドキュメントのスクリーンショット)は検査されません。
+- **Anthropic 内部コンテキスト**や信頼境界なし。
+
+transcript は*エンドユーザーが見るとおりの*会話と、ツールトレースです。含まれる内容がすべて除外されるブロックやターンは丸ごとドロップされるので、パースするときは**厳密な user/assistant の交互を仮定しないでください**。
+
+### サイズの落とし穴
+
+transcript は**切り詰めなし**で送られます。プロトコル自体は最大 **64 MiB** まで許容しますが、Anthropic のガイダンスでは、モデルのコンテキストウィンドウのおかげで、実際の body は実質的に**約 10 MB 未満**に収まります。上限の設定は実用上の数字に、エラー処理はプロトコル上の数字に合わせてください。
+
+よくあるデフォルトははるかに小さい — nginx `client_max_body_size` は **1 MB**、Express `express.json()` は **100 kB**、多くの PaaS リバースプロキシは数 MB で上限になります。サーバーが拒否した body は webhook 失敗であり、**Allow the request** の失敗ハンドリングの下では、サイズ超過のプロンプトが**未検査のまま**モデルに届くことを意味します。施行する前に body の上限を引き上げてください。
+
+## 判定スキーマ
+
+どちらの結果でも HTTP 200 で応答します。`action` フィールドで判別します。
+
+Allow:
+
+```json
+{ "action": "allow" }
+```
+
+Deny:
+
+```json
+{
+  "action": "deny",
+  "deny_reason": "This prompt appears to contain customer payment card data, which your organization's policy does not allow.",
+  "reference_id": "scan_01HXPT4R9V"
+}
+```
+
+| フィールド        | 型と上限                                                        | セマンティクス                                                                                                                                                                                                                                     |
+| -------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `action`       | `"allow"` または `"deny"`; 必須                                 | `allow` は推論を進める。`deny` はリクエストを拒否する。                                                                                                                                                                                        |
+| `deny_reason`  | string または null。**最大 500 文字、超過分は切り詰められる**    | エンドユーザーに表示され、管理者が構成した定型メッセージに追記される。ユーザー向けに書くこと — スキャナルール名ではなく、ユーザーが何を変えるべきかを伝える。                                                                                     |
+| `reference_id` | string または null。**最大 50 文字、`[A-Za-z0-9._:/-]` から**    | この評価に対するあなた独自の識別子。拒否の `inference_hooks_request_denied` Activity Feed エントリに記録され、エンドユーザーには決して表示されない。不透明に保つこと — リクエスト内容や個人データを含めない。                                        |
+
+### なぜ redact アクションがないのか
+
+判定は意図的にバイナリです。Anthropic は `{"action": "redact", "rewritten_prompt": "..."}` を追加して DLP サーバーが transcript を飛行中にサニタイズできるようにすることもできました — が、それは Anthropic があなたの箱の返したものを、あなたの組織の権威でモデルに送ることを意味します。この設計はその信頼境界を鋭く保ちます: あなたのサーバーはコンテンツを*評価する*のであって*生成しない*。編集が必要なら、ユーザーが送信を押す前にクライアント側で行ってください。
+
+### deny がフォーマット由来で捨てられることはない
+
+特大の `deny_reason` は切り詰められ、不正な `reference_id` は黙って破棄されますが、`action` は尊重されます。逆は成立しません: パース可能な判定を伴う HTTP 200 以外は**webhook 失敗**であり、deny ではありません。もしブロックを `HTTP 403` で伝えていると、あなたの deny は失敗ハンドリング次第で静かに fail-open な allow(またはブロック)に化け、そのすべてがサーキットブレーカーにカウントされます。
+
+## 動作する最小サーバー
+
+<PromptCard title="Python 12 行の全許可 AI セキュリティサーバー">
+{`# Run with: python server.py — expose on an https:// URL your admin configures.
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+class VerdictHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # keep the connection open between verdicts
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        verdict = b'{"action": "allow"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(verdict)))
+        self.end_headers()
+        self.wfile.write(verdict)
+
+ThreadingHTTPServer(("", 8000), VerdictHandler).serve_forever()`}
+</PromptCard>
+
+これを 443 番ポートで TLS 終端リバースプロキシの背後に置き、エンドポイントとして構成し、管理コンソールで**Test connection**を押すと — allow 判定が見えます。これはまさにアーカイブ専用統合の形状です: 無条件に `allow` を返し、応答後にフレームを永続化する — Compliance API のポーリングに対するプッシュ代替。**しかしこれで施行してはいけません** — すべてのリクエスト(署名なしを含む)を受け入れるからです。**Enforce verdicts** をオンにする前に署名検証を追加してください。
+
+## 署名検証
+
+署名は [Standard Webhooks](https://www.standardwebhooks.com/) 仕様に従います。3 つのヘッダ、Anthropic は小文字で送りますが、ルックアップは大文字小文字を区別しません(プロキシがケースを変えるため)。
+
+| ヘッダ               | 内容                                                                                                                                                                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `webhook-id`        | 配信ごとに一意。body の `request_id` と等しい。べき等キーとして使う。                                                                                                                                                             |
+| `webhook-timestamp` | Unix 秒(10 進文字列)。時計から**5 分**以上どちらの方向にでもずれていれば拒否 — これがリプレイウィンドウ。                                                                                                                       |
+| `webhook-signature` | スペース区切りの `v1,<base64>` 値。それぞれはバイト列 `{webhook-id}.{webhook-timestamp}.{生の body バイト}` に対する HMAC-SHA256。いずれかの値が一致すればリクエストを受け入れる — 定数時間比較を使うこと。                          |
+
+### 最初の統合で必ずハマる 2 つのバグ
+
+<Callout type="warning" items={[
+  "生バイトを検証すること。再エンコードされた JSON ではない。パースや再シリアライズより前に、受信したままの body で HMAC を計算する。json.loads() → json.dumps() のラウンドトリップは空白を変えて死ぬ。",
+  "シークレットを**標準**の base64 デコーダでデコードすること。URL-safe ではない。署名シークレットは whsec_ プレフィックスの後の値で、標準アルファベット(+ と /)でエンコードされている。URL-safe デコーダはシークレットに + や / が含まれるたびに誤ったキーバイトを導く — つまりほとんどの場合 — そして失敗は静かな定数時間ミスマッチとなる。"
+]} />
+
+参考 Python 実装(Anthropic のドキュメントから圧縮):
+
+```python
+import base64, hashlib, hmac, time
+
+TOLERANCE_SECONDS = 300
+
+def verify(secret: str, headers: dict[str, str], body: bytes) -> bool:
+    h = {k.lower(): v for k, v in headers.items()}
+    try:
+        msg_id, ts, sigs = h["webhook-id"], h["webhook-timestamp"], h["webhook-signature"]
+    except KeyError:
+        return False  # unsigned, not from Anthropic
+    try:
+        signed_at = int(ts)
+    except ValueError:
+        return False
+    if abs(time.time() - signed_at) > TOLERANCE_SECONDS:
+        return False  # replayed, or clocks disagree
+    try:
+        key = base64.b64decode(secret.removeprefix("whsec_"), validate=True)
+    except ValueError:
+        return False  # misconfigured secret
+    payload = f"{msg_id}.{ts}.".encode() + body
+    expected = b"v1," + base64.b64encode(hmac.new(key, payload, hashlib.sha256).digest())
+    return any(hmac.compare_digest(expected, s.encode()) for s in sigs.split())
+```
+
+### シークレットローテーション
+
+ローテーションは管理者側では即時カットオーバーですが、**その後およそ 1 分間は旧シークレットで署名されたリクエストが届く可能性があり**、既に飛行中のものも同様です。ローテーションウィンドウ中は旧新両方のシークレットの署名を受け入れるようにサーバーを設定して、落ちこぼれが署名なしとして拒否されないようにしてください。
+
+### 一度きりの例外
+
+**組織が初回保存する前に**送られる接続テストは署名なしで届きます。署名シークレットがまだ存在しないからです。管理者がシークレットの存在を確認するまでは署名なしリクエストを受け入れ、その後は拒否してください。
+
+## 運用セマンティクス
+
+### タイムアウト
+
+管理者は判定タイムアウトを **1 ~ 10,000 ms** の間で設定し、デフォルトは **5,000 ms** です。この予算はラウンドトリップ全体をカバーします: 接続、TLS ハンドシェイク、リクエスト body アップロード、レスポンス body ダウンロード。
+
+### リトライ
+
+Anthropic は**接続試行が失敗した場合にのみ、100 ms 遅延の後にちょうど 1 回**リトライします。500 では、タイムアウトでは、パースエラーではリトライしません。サーバーが何かで応答してしまえば — 交換は終わりです。リトライは同じタイムアウト予算を共有し、同じ `webhook-id` と署名を運びます。なので `webhook-id` で重複排除するのが安全です。
+
+### 失敗ハンドリング
+
+判定付きのクリーンな 200 以外はすべて **webhook 失敗**です: タイムアウト、非 200 ステータス(リダイレクトを含む)、パース不可または特大のレスポンス body、到達不能なエンドポイント。失敗時、組織の設定が決定します:
+
+- **リクエストをブロック。** 高規制環境の安全なデフォルト。DLP サーバーがダウンすればユーザーはブロックされる。Claude の可用性 = あなたのスキャナの可用性。
+- **リクエストを許可。** サーバーが回復するまでユーザーは作業を続ける。障害中はプロンプトが検査なしで流れる — 多くの組織にとって受け入れられるトレードオフですが、監査証跡のギャップをどう調整するか計画しておきましょう。
+
+### サーキットブレーカー
+
+あなたの AI セキュリティサーバーに起因する持続的な webhook 失敗は**サーキットブレーカーをトリップ**して施行を止めます: Anthropic はあなたのサーバーを呼ばなくなり、失敗ハンドリングがすべてのリクエストに適用されます。
+
+**復旧は自動です。** Anthropic の現行ドキュメントには、ブレーカーは**有効な判定が戻ればリセットされる**とあります — ベータのときのように **Enforce verdicts** を手動で切り替える必要はありません。これは大きな改善ですが、1 つ不快な帰結があります。*断続的に*壊れているサーバーは、誰もチケットを起こさないまま、施行に入ったり出たりを繰り返しうるのです。アラートは、ユーザーの苦情ではなく、Activity Feed に記録されるブレーカーのトリップに基づいて構築してください — ユーザーが気づくころには、ブレーカーはすでにリセットされ、症状が消えているかもしれません。
+
+実際には、ブレーカーはこうも意味します: **未知のトップレベル `type` には、HTTP 500 ではなく `{"action": "allow"}` を返すべき** — そうしないと、将来の新しいイベントタイプによって、ロールアウト当日にサーキットブレーカーの領域に入ってしまいます。GA で `tool_call` イベントが登場したことは、まさにそのルールが想定していたシナリオです。
+
+### レイテンシ
+
+組織内のあらゆる統制対象リクエストは、あなたの AI セキュリティサーバーのラウンドトリップ分の追加レイテンシを払います。大きな組織にロールアウトする前に負荷テストを — 4 秒のスキャナはチャットプロンプトでは見えませんが、多くのリクエストを連続で発火する Claude Code のツールループでは悪夢です。
+
+### ソース IP 許可リスト
+
+リクエストは `160.79.106.0/24` から発生します — これは Anthropic が公開している [outbound IP ranges](https://platform.claude.com/docs/en/api/ip-addresses) の一部です。このブロックを許可リストに、そのページ上の inbound 範囲は**入れないこと** — 別のリストです。そして許可リストは署名検証の代替にはなりません: このブロックは Inference Hooks を超えた Anthropic の egress も運びます。
+
+## ロールアウトプレイブック
+
+<Steps items={[
+  {title: "シャドウモード — 判定を観察するがブロックしない", body: "最初にオンにするもの。あなたのサーバーがすべてのリクエストを評価するが、deny は施行されない。1 人のユーザーもブロックする前に、実トラフィック 1 週間ぶんに対してルールをチューニングできる。"},
+  {title: "パーセンテージロールアウト — 一部を検査", body: "施行をオンにするとき、たとえば 10% から始めて登っていく。スキャナに誤検知スパイクがあってもブラスト半径を抑えられる。"},
+  {title: "ロールベース除外 — 必要なものを免除", body: "スキャナが追いつけない速度でプロンプトを回すことがわかっているロール(シニアエンジニアリング、オンコール SRE)はチューニング中は免除できる。永遠ではないが、ランプ中は役立つ。"},
+  {title: "Enforce verdicts — 本当に deny する", body: "前の 3 つを定めたソーク期間クリーンに走らせた後だけ。ここでようやくあなたの deny_reason 文字列がユーザーに届き始めるので、スイッチを入れる前にもう一度レビューを。"},
+]} />
+
+Anthropic のドキュメントははっきり言っています: *初日から従業員をブロックすることこそ DLP プログラムが死ぬ道だ。* シャドウモードはそのためにあります。
+
+## 統合を設計する
+
+<Callout type="tip" items={[
+  "webhook-id で重複排除。配信ごとに一意で body の request_id と一致する。接続失敗リトライはこれを再利用するので、きれいなべき等キー。",
+  "すべての判定を reference_id と共に保存。Anthropic は拒否ごとの Activity Feed エントリに reference_id を記録するので、拒否をあなたのシステム内の正確なスキャン決定に紐づけられる。",
+  "常時 allow のアーカイブ統合では、先に応答してから永続化。書き込み前に答えることでラウンドトリップをユーザーのクリティカルパスから外せる — ストレージシステムはホットパス上にない。",
+  "deny_reason は SIEM ではなく人間向けに書く。'PCI_REGEX_2A tripped, reference 4471' より 'プロンプトからクレジットカード番号を削除して再送してください' の方が良い。ユーザーは前者では動かない。"
+]} />
+
+## カバレッジマトリクス
+
+Anthropic 自身の表現は「**including, but not limited to**」です — 「はい」のリストは固定の集合ではなく、最低限のものとして扱ってください。
+
+| サーフェス / アクセス                          | Inference Hooks で検査される?                                     |
+| -------------------------------------------- | ----------------------------------------------------------------- |
+| claude.ai(web、デスクトップ、モバイル)         | ✅ はい                                                             |
+| Claude Code(web、デスクトップ、CLI)           | ✅ はい(`session_id` はベストエフォート、クライアント主張)            |
+| Claude Cowork                                | ✅ はい                                                             |
+| Claude for Microsoft 365                     | ✅ はい                                                             |
+| Claude Tag                                   | ✅ はい                                                             |
+| Claude in Chrome                             | ✅ はい                                                             |
+| Slack                                        | ✅ はい                                                             |
+| スキル、プラグイン、コネクタ、ローカル MCP、コード実行経由のツール呼び出し | ✅ はい、**Validate tool calls** がオンの場合 |
+| Voice mode                                   | ⚠️ **部分的** — プロンプトとツール呼び出しは送信されるが、ツール呼び出しの一部は送信されないと Anthropic は警告している。音声の唯一のコントロールとしては不十分。 |
+| claude.ai の内部ツール呼び出しの一部           | ⚠️ `tool_call` イベントからは省かれ、次のプロンプトフレームで見える |
+| Claude Security のスキャン、Code Review、スマートレポート | ❌ 独自のモデル呼び出しを行う Anthropic 運用の機能 — 統制されない |
+| 会話タイトル生成、その他付随                    | ❌ 送信されない                                                    |
+| システムプロンプト、ツール定義                   | ❌ 決して送信されない                                                |
+| 生ファイル / 画像バイト                         | ❌ 決して送信されない(抽出テキストは送られる)                        |
+| 画像のみのコンテンツ(ドキュメントのスクリーンショットなど) | ❌ 検査されない                                                    |
+| Claude Platform API キー(デベロッパーアクセス)  | ❌ Inference Hooks のスコープ外(Platform 組織、Enterprise ではない) |
+| Amazon Bedrock / Google Cloud デプロイメント    | ❌ それらのプレーンでは利用不可                                        |
+
+## 補完的なコントロール: セキュリティセンター
+
+フックは施行します。**セキュリティセンター**は — GA 発表と同時に**ベータで**、2026 年 11 月 5 日に提供開始 — 残りの設定が健全かどうかを教えてくれます。組織設定の中のページで、チャット、Cowork、Claude Code の実際の設定を、Anthropic の推奨構成と比較します。
+
+<Steps items={[
+  {title: "ページを読み込むたびに再チェックする", body: "夜間のジョブではありません。訪れるたびに現在の設定を評価するので、月次レポートではなく、変更前後の差分として使えます。"},
+  {title: "コントロールごとに 3 つを表示する", body: "現在の値、推奨値(あるものについては Anthropic の推奨値)、そして設定への直接リンクです。新しい設定や最近変更された設定にもフラグを立てます — それは、あなたが原因ではないドリフトを捕捉する部分です。"},
+  {title: "アテステーションがレビューに作業スペースを与える", body: "管理者がコントロールの状態を記録し、リスクを明示的に受け入れ、問題にフラグを立てるための共有の場です。「見ました」を、監査可能なものに変えるのがこれです。"},
+  {title: "レポートは、チェック済みと主張だけのものを区別する", body: "ダウンロードできるレポートは、どのコントロールが自動で検証され、どれを Owner が手動で確認したかを示します。監査人に渡すときも、この区別を保ってください。"},
+  {title: "好みなら Compliance API 経由で読む", body: "Compliance API にアクセスできる組織は、ページを読み込む代わりに、同じ結果をプログラムで取得できます。"}
+]} />
+
+<Callout type="warning" items={[
+  "Anthropic は、セキュリティセンターは自社の推奨に基づくガイダンスであり、認証ではないと述べています。どのフレームワークへの準拠も証明せず、すべて緑のページだけでは監査人への証拠になりません — 渡すべきなのは、アテステーションとレポートです。"
+]} />
+
+11 月 5 日のバンドルのそれ以外は、まだ**ベータ**です: `admin.claude.com` の親組織コンソールによる集中管理、Admin API によるメンバーの全面サインアウト、セルフサービスの IP 許可リスト、Claude Desktop の設定管理、macOS と Windows の Cowork における EDR センサー(MDM で配布され、検知モードで動作)。Inference Hooks は、このセットの中で唯一の GA の項目です — それに応じてコントロールを計画してください。
+
+## よくあるミス
+
+<Callout type="warning" items={[
+  "HTTP 403 でブロックを伝える。それは webhook 失敗であり deny ではない — あなたのポリシー判定は捨てられ、失敗ハンドリングが引き継ぐ。",
+  "'allow' または 'deny' 以外の action を返す。同じ話: webhook 失敗。3 番目の状態を追加したくなったら、判定ではなくあなたの監査ログでやること。",
+  "小さいデフォルト body 上限(Express 100 kB、nginx 1 MB)。大きい PDF の抽出テキストを含む 3 MB の transcript はリバースプロキシで 413 になる。10 MB 上限に合わせて上限を上げる。",
+  "whsec_ シークレットを URL-safe base64 でデコードする。すべてのリクエストで静かな定数時間ミスマッチが続き、全リクエストが「署名なし」だと気づくまで続く。",
+  "HMAC 前に body を再シリアライズする。受信したままの生バイトを検証すること。json.loads + json.dumps は空白を変えて署名を壊す。",
+  "未知のトップレベル `type` を 500 で拒否する。Anthropic が新イベントタイプを出荷した日にサーキットブレーカーをトリップさせる。未知の type には `allow` を返す。",
+  "認識できない `source.application` の値を拒否する。これはオープン enum。新しい値が登場し、古い統合はそれで壊れてはならない。",
+  "user/assistant 交互を仮定する。ブロックがすべて除外されるターンは `messages` からドロップされる。防衛的にパースすること。"
+]} />
+
+## Inference Hooks vs クライアント側プロキシの使い分け
+
+一部の組織は従業員がオンラインで行う*すべて*をカバーするために、まだ TLS 傍受プロキシを運用しています。Inference Hooks はプロキシの代替ではありません — Anthropic の境界の*内側*に座り、暗号化バイトしか見えないプロキシよりも豊かで構造化された会話ビューを見る、Claude 専用の施行ポイントです。
+
+- モデルが実際に見るもの(ツール呼び出し、添付、transcript)への構造化アクセス、チャット + Code + Cowork にわたる均一なカバレッジ、デバイスごとのインストール不要 — こういうときは **Inference Hooks** を使う。
+- 箱の上のそれ以外すべてには**ネットワーク DLP** を維持: 非 Claude サービスへのファイルアップロード、claude.ai 外のブラウザトラフィック、メール添付。両者は重ならない。
+- 事後の監査とエクスポートには **[Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api)** を追加。
+
+## クイズ
+
+<Quiz questions={[
+  {
+    q: "Anthropic はあなたの AI セキュリティサーバーにどうコンタクトしますか?",
+    options: [
+      "組織ごとに 1 本の永続接続で、署名付き WebSocket",
+      "統制対象リクエストごとに 1 回の HTTPS POST、Standard Webhooks に従って署名される",
+      "mTLS の gRPC ストリーム",
+      "ポーリングループ — あなたのサーバーが保留中の判定を取りに行く"
+    ],
+    answer: 1,
+    explain: "統制対象リクエストごとに 1 回の HTTPS POST。HMAC-SHA256 を使う 3 つの Standard Webhooks ヘッダ(webhook-id、webhook-timestamp、webhook-signature)で署名されます。"
+  },
+  {
+    q: "あなたの DLP スキャナがポリシー違反を検知しました。正しい応答はどれ?",
+    options: [
+      "HTTP 403 と { \"error\": \"blocked\" }",
+      "HTTP 200 と { \"action\": \"deny\", \"deny_reason\": \"...\" }",
+      "HTTP 200 と { \"action\": \"redact\", \"rewritten_prompt\": \"...\" }",
+      "HTTP 451 と理由をヘッダで"
+    ],
+    answer: 1,
+    explain: "deny は常に HTTP 200 と { \"action\": \"deny\", \"deny_reason\": \"...\" }。HTTP 403 は webhook 失敗であり — あなたの判定は捨てられて失敗ハンドリングが引き継ぐ。現在は redact アクションはない。判定は意図的にバイナリ。"
+  },
+  {
+    q: "あなたの AI セキュリティサーバーがローリングデプロイでダウンし、90 秒間 500 を返しました。そのウィンドウのユーザープロンプトはどうなりますか?",
+    options: [
+      "Anthropic 側でキューされ、サーバー回復時に処理される",
+      "あなたの失敗ハンドリング設定が決める — ブロックされるか、検査なしで進む",
+      "常にブロックされる。失敗は fail-closed がデフォルト",
+      "常に進む。失敗は fail-open がデフォルト"
+    ],
+    answer: 1,
+    explain: "500 は webhook 失敗。組織の失敗ハンドリング設定(Block the request vs Allow the request)がどちら側のトレードオフを取るかを選びます。持続的な失敗はサーキットブレーカーもトリップし、その時点で失敗ハンドリングがすべてのリクエストに適用されます — ただしブレーカーは、有効な判定が戻れば自動でリセットされるようになったので、断続的に壊れているサーバーは気づかれないまま施行に入ったり出たりしうります。"
+  },
+  {
+    q: "3 つのツール呼び出し(社内ドキュメントの読み取り、サードパーティ MCP の検索、外部チケットシステムへの書き込み)を含む tool_call フレームが届きました。ポリシーが問題にするのは 3 つ目だけです。何を返せますか？",
+    options: [
+      "最初の 2 つを許可し、3 つ目を拒否する、呼び出しごとの判定の配列",
+      "{ \"action\": \"deny\" } — 1 つの判定が 3 つすべてを対象にするので、レスポンス全体がブロックされる",
+      "3 つ目の呼び出しを取り除いた { \"action\": \"redact\" }",
+      "個別の結果を持つ HTTP 207 Multi-Status"
+    ],
+    answer: 1,
+    explain: "1 つの tool_call 判定は、そのレスポンス内のすべてのツール呼び出しに適用されます — Anthropic は、一部を許可して一部を拒否することはできないと明言しています。ルールはバッチについての判断でなければならないので、問題のある呼び出しが 1 つあればレスポンスを拒否します。どれだけ厳しくするかは、各 tool_use ブロックの tool_info の kind(platform / application / third_party / client)でポリシーを分岐させて決めてください。"
+  },
+  {
+    q: "Inference Hooks を組織全体で有効にし、prompt フックはトラフィックを受け取っていますが、ユーザーが MCP サーバー付きで Claude Code を使っているにもかかわらず、tool_call イベントを 1 件も見ません。最も可能性の高い原因は？",
+    options: [
+      "ツール呼び出しは third_party のツールでのみ発火する",
+      "Validate tool calls の組織設定がオフになっている",
+      "tool_call イベントは Claude Platform 専用",
+      "判定のタイムアウトが短すぎて、ツールのイベントが破棄されている"
+    ],
+    answer: 1,
+    explain: "tool_call イベントは、Validate tool calls がオンの組織でのみ発火します。フックを有効にしただけでは、それは暗黙には有効になりません。また、ツールの結果は独立したイベントとしては決して届かず、次のプロンプトフレーム内の tool_result ブロックとして戻ってくる点にも注意してください。"
+  }
+]} />
+
+## 出典
+
+- Anthropic — [Inference hooks](https://platform.claude.com/docs/en/manage-claude/inference-hooks)(概要: 2 つのイベント、サーフェス、除外、失敗ハンドリング)
+- Anthropic — [Develop an Inference hooks integration](https://platform.claude.com/docs/en/manage-claude/inference-hooks-endpoint)(フレームと判定のスキーマ、署名)
+- Anthropic — [Configure Inference hooks](https://platform.claude.com/docs/en/manage-claude/inference-hooks-configuration)
+- Anthropic ヘルプセンター — [Inference hooks overview](https://support.claude.com/en/articles/16059458-inference-hooks-overview)(プランによる制限、管理できる人)
+- Anthropic — [More visibility and control over Claude Enterprise for security teams](https://claude.com/resources/articles/claude-enterprise-security-updates)(2026 年 11 月 5 日: GA の確認、セキュリティセンター、アテステーション、ベータのバンドル)
+- Anthropic ヘルプセンター — [Review your organization's security posture with the security center](https://support.claude.com/en/articles/18246629-review-your-organization-s-security-posture-with-the-security-center)
+- Anthropic — [Claude Platform release notes](https://platform.claude.com/docs/en/release-notes/overview)(2026 年 10 月 20 日: フックがベータを終了)
+
+## 次に
+
+- [Admin API: Claude 組織を自動化する](/docs/api/admin-api) — hooks と自然に組み合わされる Enterprise ユーザー管理と RBAC エンドポイント。
+- [MCP ツールポイズニングとラグプル](/docs/security/mcp-tool-poisoning-and-rug-pulls) — `tool_info` の kind フィールドがトリアージを助けるために存在する、その脅威。
+- [MCP 2026-07-28: The Stateless Spec](/docs/api/mcp-2026-07-28-stateless) — あなたの hooks が `tool_use` と `tool_result` ブロックで見ることになるツール呼び出し側。
+- [Refusals & Safety](/docs/api/refusals-and-safety) — Claude 自身のモデル内拒否シグナル。あなたの hook がプロンプトを通した*後*に発火する。

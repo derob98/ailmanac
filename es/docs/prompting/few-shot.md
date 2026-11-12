@@ -1,0 +1,57 @@
+# Ejemplos few-shot bien hechos
+
+> Source: https://derob98.github.io/ailmanac/es/docs/prompting/few-shot · AILmanac (CC BY 4.0)
+
+Elegir, ordenar y formatear ejemplos que realmente enseñan la tarea.
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Qué es el prompting few-shot y por qué los ejemplos superan a las descripciones", "Cómo leer un prompt few-shot limpio que el modelo completa", "Cómo elegir, formatear y ordenar ejemplos (incluidos los casos límite)", "Cuándo recurrir a zero-shot frente a few-shot", "Por qué un ejemplo descuidado es peor que ningún ejemplo"]} />
+
+El **prompting few-shot** consiste en mostrar al modelo unos cuantos ejemplos resueltos de la tarea antes de pedirle que haga uno nuevo. Bien hecho, es la forma más rápida de fijar un formato, un estilo o un comportamiento ante casos límite — a menudo mejor que describir con palabras lo que quieres.
+
+## Por qué los ejemplos superan a las descripciones
+
+"Sé conciso y amable" es vago. *Mostrar* dos salidas concisas y amables no deja lugar a dudas. El modelo reconoce el patrón de los ejemplos y lo continúa.
+
+## Un prompt few-shot limpio
+
+Fíjate en la forma: varios pares `Message → Label` en formato idéntico, y luego un mensaje final con un `Label:` vacío para que el modelo lo rellene.
+
+<PromptCard title="Prompt de clasificación few-shot">{`Classify each support message as: billing, bug, or feature.
+
+Message: "I was charged twice this month."
+Label: billing
+
+Message: "The app crashes when I upload a photo."
+Label: bug
+
+Message: "Can you add dark mode?"
+Label: feature
+
+Message: "My subscription renewed at the wrong price."
+Label:`}</PromptCard>
+
+El modelo tiene el patrón; completa la última línea.
+
+## Cómo elegir y formatear los ejemplos
+
+<Steps items={[{title: "Cubre la variedad — sobre todo los casos límite", body: "Incluye los casos límite que te importan. Si una categoría es rara o complicada, inclúyela."}, {title: "Mantén los ejemplos consistentes en el formato", body: "Misma estructura, mismas etiquetas, mismos delimitadores. La inconsistencia enseña inconsistencia."}, {title: "Usa 2–5 ejemplos", body: "2–5 suele ser suficiente. Más ayuda en tareas difíciles o variadas, pero cuesta tokens y puede sobreajustarse a las peculiaridades de los ejemplos."}, {title: "Ordena con intención", body: "El orden puede importar — pon primero los ejemplos más claros; para clasificación, no agrupes todos los de una misma etiqueta juntos."}, {title: "Separa los ejemplos de la entrada en vivo", body: "Usa delimitadores (o etiquetas XML) para separar los ejemplos de la entrada que realmente quieres etiquetar."}]} />
+
+El coste en tokens mencionado arriba es real — consulta [Tokens y contexto](/docs/foundations/tokens-and-context). Para el enfoque de delimitadores, las [etiquetas XML](/docs/prompting/xml-tags) son un separador limpio y fiable.
+
+## Zero-shot frente a few-shot
+
+Prueba primero el **zero-shot** (solo pregunta) — los modelos modernos son potentes. Añade ejemplos cuando necesites un **formato/estilo específico** o la tarea sea **ambigua**. Si el zero-shot ya lo clava, no pagues por los ejemplos.
+
+<Callout type="tip" items={["Los ejemplos son datos — mantenlos limpios. Un ejemplo erróneo o descuidado enseña activamente lo equivocado. Cúralos como si fueran datos de entrenamiento."]} />
+
+<Callout type="takeaways" items={["Muestra, no expliques: los ejemplos resueltos superan a las descripciones vagas.", "Cubre la variedad, sobre todo los casos límite, y mantén cada ejemplo en un formato idéntico.", "2–5 ejemplos suele bastar; más puede sobreajustar y cuesta tokens.", "El orden importa — los más claros primero, y no agrupes una misma etiqueta junta.", "Empieza con zero-shot; añade ejemplos solo para un formato/estilo específico o ante la ambigüedad."]} />
+
+<Quiz title="Compruébate" questions={[{q: "¿Por qué los ejemplos suelen superar a una descripción escrita como 'sé conciso y amable'?", options: ["Usan menos tokens que una descripción", "No dejan lugar a dudas — el modelo reconoce el patrón y lo continúa", "Desactivan los filtros de seguridad del modelo", "Fuerzan al modelo al modo zero-shot"], answer: 1, explain: "Una descripción como 'sé conciso y amable' es vaga; mostrar salidas concisas y amables no deja lugar a dudas y el modelo continúa el patrón."}, {q: "¿Cuántos ejemplos 'suelen ser suficientes' para un prompt few-shot?", options: ["Exactamente 1", "2–5", "Al menos 10", "Tantos como quepan en el contexto"], answer: 1, explain: "2–5 suele ser suficiente. Más ayuda en tareas difíciles o variadas, pero cuesta tokens y puede sobreajustarse a las peculiaridades de los ejemplos."}, {q: "Para una tarea de clasificación, ¿cómo deberías ordenar los ejemplos?", options: ["Agrupar todos los ejemplos de una misma etiqueta juntos", "Poner primero los ejemplos más claros y evitar agrupar una misma etiqueta junta", "Siempre por orden alfabético de etiqueta", "El orden no importa en absoluto"], answer: 1, explain: "El orden puede importar — pon primero los ejemplos más claros y, para clasificación, no agrupes todos los de una misma etiqueta juntos."}, {q: "¿Cuándo deberías preferir zero-shot frente a few-shot?", options: ["Nunca — añade ejemplos siempre", "Cuando el zero-shot ya clava la tarea, para que no pagues por los ejemplos", "Solo cuando la tarea es muy ambigua", "Cuando necesitas un formato de salida muy específico"], answer: 1, explain: "Prueba primero el zero-shot; los modelos modernos son potentes. Si ya clava la tarea, no pagues por los ejemplos. Añade ejemplos para un formato/estilo específico o ante la ambigüedad."}, {q: "¿Cuál es el riesgo de un ejemplo descuidado o erróneo?", options: ["El modelo lo ignora", "Enseña activamente lo equivocado", "Solo desperdicia tokens, pero por lo demás es inofensivo", "Mejora la robustez al añadir ruido"], answer: 1, explain: "Los ejemplos son datos — un ejemplo erróneo o descuidado enseña activamente lo equivocado. Cúralos como si fueran datos de entrenamiento."}]} />
+
+## Siguiente
+
+- [Biblioteca de patrones de prompts](/docs/prompting/pattern-library)
+- [Estructurar prompts con etiquetas XML](/docs/prompting/xml-tags)
+- [Plantillas de prompts reutilizables](/docs/templates/prompts)

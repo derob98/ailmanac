@@ -1,0 +1,334 @@
+# Claude Fable 5.2: The Migration Field Guide
+
+> Source: https://derob98.github.io/ailmanac/docs/models/fable-5-2-field-guide · AILmanac (CC BY 4.0) · last verified 2026-11-10
+
+Anthropic shipped Claude Fable 5.2 and Mythos 5.2 on November 9, 2026 — the first Claude flagship point release that costs LESS than the model it replaces ($8/$40, down 20%). Four breaking changes, a prefix check that now applies to every account, prompting lines that stop working, and an official benchmark table with two rows the coverage missed.
+
+<LevelBadge level="intermediate" />
+
+On **November 9, 2026** Anthropic shipped **Claude Fable 5.2** (`claude-fable-5-2`) and its verification-gated twin **Claude Mythos 5.2** (`claude-mythos-5-2`). One thing makes this release structurally different from every Claude flagship before it: **it is cheaper than the model it replaces.** Fable 5.1 cost $10 per million input tokens and $50 per million output; Fable 5.2 costs **$8 and $40** — a 20% cut — while generating output up to 30% faster.
+
+That is the easy half. The hard half is that the single most consequential change in this release is **not** a new feature, and it is the one most likely to take down a working integration: the thinking-block prefix check, which on Fable 5.1 only errored on accounts created on or after August 31, 2026, **now applies to every account**. Code that edits conversation history has been running clean on an older account for two months. It returns a 400 after the model-ID swap.
+
+This page is the migration field guide: what breaks, what the price cut does and does not buy you, which prompt lines you need to delete, and how to read Anthropic's launch benchmarks honestly.
+
+<Callout type="objectives" items={[
+  "Run the four breaking changes against your own code, starting with the prefix check that just widened to every account",
+  "Know what the 20% price cut changes and what it does not — and when fast mode is worth 2x the rate card",
+  "Delete the prompt lines that silently stopped working, including 'answer directly without deliberating'",
+  "Use the ownership sentence that roughly quintuples how often the model merges duplicated code — and know its cost",
+  "Read Anthropic's own benchmark table, including the two rows where Fable 5.2 does not win",
+  "Decide Fable 5.2 vs Opus 5.5 vs staying on Fable 5.1, then run the migration in order",
+]} />
+
+<VerifyNote lastVerified="2026-11-10" source="https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2">
+Model IDs, specs, the four breaking changes, pricing, fast-mode rates, effort guidance, refusal categories, fallback targets, retention status and availability are from Anthropic's official ["What's new in Claude Fable 5.2"](https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2), the [migration guide](https://platform.claude.com/docs/en/models/fable-5-2/migration-guide), the [models overview](https://platform.claude.com/docs/en/models/overview) and [Prompting Claude Fable 5.2](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2), all read on November 10, 2026. Benchmark figures and the "same underlying model" statement are Anthropic's own from the [launch announcement](https://www.anthropic.com/claude-fable-and-mythos-5-2). The behavioral findings quoted as percentages are Anthropic's internal testing results as published, not independent measurements. Beta headers can change shape — re-check them before you ship. For the live model table see [Current Models & Pricing](/docs/whats-new/models-and-pricing).
+</VerifyNote>
+
+## The one-paragraph version
+
+Fable 5.2 is the successor to [Fable 5.1](/docs/models/fable-5-1-field-guide), same Mythos-class tier above Opus, same 1M-token context, same 128K max output, same tokenizer (the one introduced with Opus 4.7), same always-on adaptive thinking, same in-band `stop_reason: "refusal"` behavior, same 30-day retention requirement with no ZDR. Anthropic's guidance is unchanged: **start with the current Opus** — Opus 5.5 — and reach for Fable 5.2 "when your evals on a Claude Opus model at higher effort still don't meet your requirements." What is new: a 20% price cut, output up to 30% faster, an optional fast mode at 2.5x the token rate for 2x the price, four breaking changes, and a set of prompting shifts that make several lines in your existing system prompt either useless or actively expensive.
+
+## Four breaking changes
+
+Each of these is a 400, not a quiet degradation. Work through them in this order — the first is the one that catches people who did nothing wrong.
+
+### 1. The prefix check now applies to every account
+
+This is the change to read twice. Every Fable 5.2 thinking block records the state of everything that came before it: the `system` prompt, the `tools` array, and each earlier message. Send a thinking block back after any of those changed, and the API rejects the request:
+
+```text
+The block is bound to a different conversation
+```
+
+On **Fable 5.1**, that 400 only fired on accounts created **on or after August 31, 2026**. On **Fable 5.2 it fires on every account, whatever its age.** (Mythos 5.1 already behaved this way on the Claude API, so if you are coming from Mythos, this part is not a change for you.)
+
+The consequence is specific and nasty: a harness that rewrites history — injecting a reminder into an earlier turn, trimming old messages, swapping the system prompt mid-session, reordering anything — has been running without errors on an account created before that date. It starts failing the moment you change the model ID, and the failure looks like a regression in the new model rather than a latent bug in your own code.
+
+:::danger[Test this even if Fable 5.1 never errored for you]
+"It works today" is not evidence. If your code builds the `messages` array itself, the absence of this error on Fable 5.1 may only mean your account predates August 31, 2026. Run the test before you swap, not after.
+:::
+
+You are safe without changes if **all** of these hold: `system` and `tools` stay identical for the whole conversation; your code only ever *appends* to `messages`; and each assistant turn goes back exactly as the API returned it, every block in the original order. You are also safe if Claude Code, claude.ai, Claude Managed Agents or the Claude Agent SDK builds your requests — then the model ID is the entire migration.
+
+The stopgap, if you need to ship before you can fix the edit, is to send the `thinking-binding-controls-2026-08-01` beta header and set `thinking.block_binding.prefix_mismatch_behavior` to `"drop_block"`. The request then succeeds and lists each dropped block in a top-level `input_transformations` array. Treat it as a stopgap and not a setting: Anthropic's own testing found that when earlier thinking was dropped on every turn, the model **thought again from scratch and used more output tokens**. Measure that on your own tasks before you rely on it.
+
+The durable fixes are the append-only toolkit: [mid-conversation system messages](/docs/api/mid-conversation-system-messages) for instruction changes, turn-scoped system messages for per-turn reminders, and compaction or context editing — specifically a compaction that keeps **no** earlier turns after the summary — for shortening history.
+
+### 2. Fable 5.2's thinking blocks are a one-way door
+
+Fable 5.2 and Mythos 5.2 read each other's thinking blocks, and they read blocks from Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Mythos 5.1, Opus 5, Fable 5, Mythos 5, and earlier Opus/Sonnet/Haiku models. **No other model reads theirs.**
+
+So moving a conversation *onto* Fable 5.2 preserves its reasoning. Moving *off* it loses the reasoning for every turn that ran there — and that includes Opus 5.5, Fable 5.1, and both of Fable 5.2's own fallback targets, Opus 4.8 and Opus 5. If you run a router, a cost-saving downgrade, or server-side refusal fallback, this is a real behavior change rather than a theoretical one.
+
+The failure mode is quiet: the API drops the unreadable block before the model sees it, the request succeeds, and the dropped blocks are not billed. You only see it if you send the `thinking-binding-controls-2026-08-01` header and read `input_transformations`.
+
+There is a second binding on top of the model binding: **Fable 5.2 thinking blocks only work in the account that produced them**, or an account linked to it. Another account's request succeeds with the block silently dropped, reported as `reason: "organization_binding_mismatch"` with the beta header. This matters if you move transcripts between environments.
+
+### 3. `computer_20251124` is gone outside Bedrock
+
+Fable 5.1 accepted computer use two ways: the `computer_toolset_20260801` toolset, and the older `computer_20251124` tool behind the `computer-use-2025-11-24` beta header. Fable 5.2 and Mythos 5.2 support **only the toolset**. Declaring `computer_20251124` returns a 400 `invalid_request_error` on every platform **except Amazon Bedrock**, where the older tool still works as it did.
+
+That Bedrock carve-out is worth noting if you run multi-platform: the same request body can be valid on Bedrock and invalid on the Claude API.
+
+### 4. A Fable 5.2 executor needs a Fable 5.2 or Mythos 5.2 advisor
+
+With the beta [advisor tool](/docs/api/tool-use), the advisor must be at least as capable as the executor. A Fable 5.2 or Mythos 5.2 executor accepts **only** `claude-fable-5-2` or `claude-mythos-5-2` as its advisor — any other value, Fable 5.1 and Mythos 5.1 included, returns a 400.
+
+There is an ordering trap here that bites once and confuses for an hour. Changing the advisor's `model` **is an edit to `tools`**, which means it trips breaking change #1. So make the advisor change in **new conversations**, not partway through an existing one. And if you only want to upgrade the advisor while keeping your current executor, set it to `claude-fable-5-2`: every executor model accepts that one.
+
+One more detail if your code reads the advice text rather than just passing it along: a Fable 5.2 advisor returns its advice **encrypted**.
+
+<Callout type="info" items={[
+  "Two rules that are NOT new in 5.2, but are still the most common 400s: adaptive thinking is always on (both thinking.type 'enabled' with budget_tokens and 'disabled' return 400), and forced tool_choice ('any' or a named tool) returns 400. If you are coming from Fable 5.1, Mythos 5.1 or Opus 5.5 you already handle both. If you are coming from Opus 5 or earlier, both are breaking changes for you.",
+]} />
+
+## The migration, in order
+
+Anthropic publishes an explicit order for this. Follow it — several of these steps interact, and doing them out of order means re-testing.
+
+<Steps items={[
+  {title: "Swap the model ID", body: "Set model to claude-fable-5-2 (or claude-mythos-5-2). If Claude Code, claude.ai, Managed Agents or the Agent SDK builds your requests, you are done — stop here. Note that Claude Code offers an /claude-api migrate shortcut for codebases."},
+  {title: "Set effort explicitly to high, then sweep", body: "high is the API default. Set it explicitly anyway so a future default change cannot move it under you, then run your evals at medium and xhigh as well. Do NOT carry over a level you tuned on Fable 5.1 or Opus 5.5 — levels are recalibrated per model, so the same word means a different amount of thinking."},
+  {title: "Test whether your code edits history", body: "If your code builds the messages array itself, run the prefix-check test even if Fable 5.1 never returned the error for your account. This is the step people skip because production looks fine."},
+  {title: "Audit every model switch", body: "Find each place a router, fallback or cost-saving downgrade moves a conversation between models. Every model except Mythos 5.2 drops Fable 5.2's thinking blocks — Opus 5.5 and Fable 5.1 included."},
+  {title: "Move computer use to the toolset", body: "Replace computer_20251124 with computer_toolset_20260801 everywhere except Bedrock, where the old tool still works."},
+  {title: "Update the advisor, in a new conversation", body: "Set the advisor tool's model to claude-fable-5-2 or claude-mythos-5-2. Because this edits tools, start a new conversation rather than changing it mid-session."},
+  {title: "Read your prompts before you trust your evals", body: "Open your system prompts, skills, agent files, memory files and harness text, and delete or re-test the lines in the next section. Several of them now cost tokens for nothing, and one of them changes behavior in a direction you probably do not want."},
+  {title: "Run your longest agentic task and watch for five specific behaviors", body: "Where the model stops early, asks for approvals it does not need, goes quiet, delegates more than the task needs, or adds to existing code where you wanted it restructured. Apply one fix at a time and measure its token cost."},
+]} />
+
+## The prompt lines you should now delete
+
+This is the section that gets skipped and shouldn't. Anthropic documents several instructions written for earlier models that, on Fable 5.2, either stopped working or now cost you money.
+
+**"Answer directly without deliberating" no longer works.** Fable 5.1 usually honored a line like this. In Anthropic's testing, it **did not stop Fable 5.2 from thinking at `medium` effort and above** — and at `high` and above the model thinks before almost every reply, including a reply to a greeting. The fix is not a better sentence; it is a **lower effort level for those turns**. Delete the line and change the dial.
+
+**A token budget written into your prompt is costing you.** Some harnesses tell the model in the prompt how many tokens the task may use and how many remain. In Anthropic's testing on coding tasks at `high` and `xhigh`, **removing a large budget lowered cost with equivalent performance**. (This is about *text in your prompt*, not the API's beta task-budgets feature, which the testing did not cover.)
+
+**Standing instructions to delegate.** Lines that push work to subagents accumulate in system prompts, skills and agent files. Fable 5.2 delegates readily in a harness whose prompts invite it, and Anthropic notes subagents can account for a large share of what a session costs. Read those files before migrating, and check which model your harness runs subagents on by default.
+
+**Hard style limits make the prose choppy.** Fable 5.2 follows style rules closely, so a rule like "one instruction per sentence, in 20 words or fewer" is now followed literally enough to hurt.
+
+**The "treat that answer as done" lines from the Opus 5.5 guide.** Those two sentences do reduce Fable 5.2's thinking on follow-up questions at `high` effort — and in Anthropic's testing they also made the model **far less likely to point out mistakes in its earlier answers.** That is a bad trade in most applications. Leave them out where you want the model to keep re-examining its own work.
+
+**Accumulated cautions.** This one is subtle and specific to how closely 5.2 follows instructions. Cautious rules pile up wherever context carries over — memory files, notes, instruction files, messages between agents — and some were written by the model itself. Anthropic's numbers: with a dozen notes from earlier sessions, one of which said never to retry, the model retried after a busy tool in about **four tries in ten, down from nearly all** without those notes. A reviewer agent's "stop at the first error" in context was enough to stop Fable 5.2 retrying in about a third of tries, in a setup where **Fable 5.1 and Opus 5.5 both retried**.
+
+The fix that actually works is counterintuitive: **write the exception into the rule itself**, rather than adding a separate line granting the exception. Under a bare "never" rule where a person in charge had approved the step, the model took it in about **one try in ten**; a separate line saying an approved step has its go-ahead barely moved that; rewriting the rule itself to say to get a go-ahead first took it to about **nine tries in ten**.
+
+## Two prompt additions that earn their tokens
+
+### Finish the whole task
+
+Fable 5.2 sometimes ends a turn before the work is done — closing with a list of what remains, an offer to continue, or a stop at an ordinary obstacle like a timeout. It happens more at `low` and `medium` effort. Anthropic publishes system-prompt text for this, and its measured effect on replayed sessions from an agentic coding product at `medium` effort: **about half as many sessions ended with doable work left**, at the cost of roughly **30% more output tokens**.
+
+<PromptCard title="Finish the whole task — system prompt addition">
+{`# Finishing work
+Please avoid stopping while you still owe work the user asked for. Be persistent and do not stop unless needed.
+
+While status notes are welcome, as is clarifying with the user on open decisions, carry on with work that does not depend on the user's answer without unnecessary stops.
+
+If you notice yourself inviting the user to redirect you or offering to wait, instead proceed on the next part of the task. You may meet ordinary obstacles like errors, timeouts, locked files, empty results or failing tools. Diagnose them first, and when they are not real blockers, work through them with the access you have (wait and retry, fix the request, use another tool or source) rather than stopping unnecessarily.
+
+If someone clearly decided something is a hard blocker, such as a file marked not to be touched, access that was intentionally withheld, or a safety guardrail, leave it alone, say plainly what you found, and look for another safe way to finish the task. Stopping before the task is complete is very rarely merited, as in when the task can't move forward without user input, or where the blocker is deliberate and should not be worked past. This does not override the need for confirmation on risky or destructive actions.`}
+</PromptCard>
+
+The structural idea worth keeping when you adapt it: it **separates two kinds of obstacle**. Ordinary failures — errors, timeouts, busy tools — get diagnosed and worked through. Deliberate blockers — a file marked do-not-touch, access intentionally withheld, a safety guardrail — get left alone and reported. Anthropic also notes the text removed most endings that ask permission, but **not** endings that list what remains and then stop.
+
+One consequence to design around: because the model now asks less often, **keep your own confirmation step for risky or irreversible actions.** The prompt is not a substitute for a gate.
+
+### Say who owns the code
+
+This is the most striking measured effect in the whole release, and it is one sentence. Fable 5.2 responds closely to what the prompt says about who owns the code. When the prompt said nothing about ownership, or framed the codebase as someone else's, the model tended to **add to the existing structure even when that duplicated code**, and to **report nearby problems instead of fixing them**.
+
+<PromptCard title="Code ownership — one sentence, measured effect">
+{`This codebase is yours: what it's for and how it's built are your call, and you'll keep building on it.`}
+</PromptCard>
+
+Anthropic's numbers on small coding tasks: the model merged duplicated code in about **half** the tries with this sentence, and in **under a tenth** without it. The effect held even when the sentence sat inside a long system prompt.
+
+Now the bill, because this is a trade and not a free win. With the sentence, the model used about **1.5x the output tokens**, made several changes nobody asked for (many of them new tests and documentation), and — bug fixes aside — **changed how an existing feature behaves in one try in six to ten**, more often at higher effort. Its closing summary named the larger changes but often left out small ones.
+
+:::warning[Review the diff, not the summary]
+That last finding is the operational one: the model's own recap is not a complete changelog of what it did. And note that a scope limit elsewhere in the prompt does **not** cancel this sentence — with "No drive-by refactors, renames or cleanups" earlier in the same prompt, the model still merged duplicated code in about a third of tries. Leave the sentence out entirely where the user owns the code and wants minimal changes.
+:::
+
+## Effort: start at high, and know what each level is for
+
+Fable 5.2 supports all five effort levels and defaults to **`high`** on the Claude API. Anthropic's framing is that **most of the capability gain is already present at `high`**, and that above it the gains are uneven and task-dependent.
+
+| Level | What Anthropic recommends it for |
+|---|---|
+| `low` | Quick back-and-forth, well-specified tasks, high-volume work, fast subagents. Scores here sat **close to Fable 5.1's at higher effort levels**. |
+| `medium` | Interactive coding, chat, everyday knowledge work. |
+| `high` | Hard coding, research, agentic work, long unattended runs. The default. Turns take noticeably longer than `medium`. |
+| `xhigh` | Your hardest long-running coding and agentic work, *where you have measured a gain*. Raised internal coding scores slightly and used many more tokens. |
+| `max` | Measuring the ceiling, or open-ended problems like scientific discovery and mathematics, where time and tokens don't matter. |
+
+Three behaviors to hold in mind when you pick a level. The model is **more likely to stop early at lower effort**, so pair `low`/`medium` agentic work with the "finish the whole task" text above. At `high` and above it **thinks before almost every reply**, so route easy turns to a lower level rather than trying to prompt the thinking away. And **effort barely changes reply length** — that is a prompting job, not a dial.
+
+You can mix levels in one workflow: plan at `medium`, then raise effort for the long unattended stretch. To change level mid-conversation *without* resetting the prompt cache, use per-message effort (beta, `mid-conversation-output-config-2026-07-01`); setting a new top-level `effort` instead starts the cache over. Deeper treatment: [Effort Tuning](/docs/api/effort-tuning) and [Thinking & Effort](/docs/api/thinking-and-effort).
+
+## What the price cut actually buys
+
+| | Fable 5.1 | Fable 5.2 | Fable 5.2 fast mode |
+|---|---|---|---|
+| Base input | $10 / MTok | **$8 / MTok** | $16 / MTok |
+| Output | $50 / MTok | **$40 / MTok** | $80 / MTok |
+| Cache reads | $0.25 / MTok | **$0.20 / MTok** | — |
+| 5m cache writes | — | $10 / MTok | — |
+| 1h cache writes | — | $16 / MTok | — |
+| Batch | — | $4 in / $20 out | — |
+
+Three things to take from that table. **The cache-read multiplier did not change** — it is still 0.025x base input, the same ratio Fable 5.1 introduced, so the headline saving is a straight 20% across the board rather than a new caching story. **Batch is the usual 50% off**, which puts batched Fable 5.2 input at the price of unbatched Opus 5.5. And **fast mode is exactly 2x the standard rate** for "up to 2.5 times" the token generation speed, which makes it a latency purchase with a roughly break-even-to-slightly-favorable throughput story — worth it when a human is waiting, not as a default.
+
+Fast mode for Fable 5.2 is on the Claude API, both Google Cloud paths, and Microsoft Foundry (where it is a **separate model ID**, `claude-fable-5-2-fast`, for Anthropic-hosted deployments). Anthropic also lists it in Claude Code.
+
+:::tip[The cheaper flagship is still not the cheap option]
+Opus 5.5 is $4 / $20 — half of Fable 5.2 — and remains Anthropic's own recommended starting point. The price cut narrows the gap; it does not change the advice. Reach for Fable 5.2 when your evals on Opus at higher effort fall short, and see [Current Models & Pricing](/docs/whats-new/models-and-pricing) for live numbers.
+:::
+
+## Reading the launch benchmarks honestly
+
+Anthropic published a comparison table at launch. Here it is, as published — and then the three things worth noticing in it.
+
+| Benchmark | Fable 5.2 | Fable 5.1 | Opus 5.5 | GPT-6 Astra | Gemini 4 Carbon |
+|---|---|---|---|---|---|
+| FrontierCode 2.0 (agentic coding) | 49.1% *(xhigh)* | 41.1% *(medium)* | 45.5% | 42.8% | — |
+| FrontierSWE v2 (agentic coding) | 69.9% | 56.3% | 62.3% | 65.5% | 61.2% |
+| AutomationBench (business workflows) | 51.4% | 31.4% | 42.5% | 41.4% | **53.9%** |
+| Terminal-Bench-Science 0.1 | 74.6% | 52.6% | 58.7% | 68.1% | 64.8% |
+| WANDR (agentic search, relaxed) | 82.1% | 68.7% | 72.3% | — | — |
+| OSWorld 2.1 (computer use, partial) | 89.3% | 83.5% | 87.2% | 79.5% | 81.5% |
+| RoboDojo Sim (robotics) | 64.9% | 27.6% | 39.4% | 29.8% | — |
+| AA-Briefcase v1.1 (rubric) | 66.1% | 61.5% | 61.2% | 52.0% | 61.8% |
+| AA-Briefcase v1.1 (Elo) | 1785 | 1669 | **1800** | 1569 | 1611 |
+| Remote Labor Index | 41.3% *(high)* | 17.9% | 21.3% | 20.8% | — |
+| Humanity's Last Exam (with tools) | 74.2% | 65.6% | 67.7% | 57.2% | — |
+| Chartography (visual charts, no tools) | 73.4% | 44.8% | 64.4% | 71.0% | 72.5% |
+
+**First: the headline coding row compares different effort levels.** Fable 5.2's 49.1% on FrontierCode 2.0 is at `xhigh`; Fable 5.1's 41.1% is at `medium`. Anthropic labels this in its own footnotes, and most of the coverage dropped the labels. It is not a fabricated number — it is just not the 8-point same-settings jump it reads as. The FrontierSWE v2 row (69.9% vs 56.3%) carries no such caveat and is the cleaner coding comparison.
+
+**Second: Fable 5.2 does not sweep.** Gemini 4 Carbon beats it on AutomationBench (53.9% vs 51.4%), and — the row nobody quoted — **Opus 5.5 beats it on AA-Briefcase Elo, 1800 to 1785**, even while Fable 5.2 wins the same benchmark's rubric score 66.1% to 61.2%. A rubric score and a head-to-head Elo measure different things, and here they disagree. If your workload is knowledge work rather than long-horizon coding, that disagreement is the most decision-relevant line in the table, and it argues for running your own evals rather than upgrading on the strength of a launch post.
+
+**Third: the biggest jumps are in the narrowest domains.** RoboDojo Sim more than doubles (27.6% → 64.9%) and Remote Labor Index more than doubles (17.9% → 41.3%). Impressive, and also the rows least likely to predict anything about your application. The general lesson and the six-question checklist: [How to read an AI benchmark without getting fooled](/docs/models/reading-ai-benchmarks).
+
+On the Mythos side, Anthropic's table scores it slightly above Fable 5.2 exactly where the safeguards bind: **76.3%** on CyScenarioBench, **89.6%** on CVE Rediscovery, **85.1%** on 24-hour de novo binder design, **75.3%** on Terminal-Bench-Science 0.1.
+
+## Fable 5.2 vs Mythos 5.2
+
+Anthropic's own statement is the clearest framing available, and it is worth quoting rather than paraphrasing: "Claude Fable and Claude Mythos are the same underlying model. Fable has strong cybersecurity and biology safeguards to guard against misuse, which allows us to make it available to all users."
+
+So Mythos 5.2 is not a bigger model. It is the same weights without the cyber and biology safeguards, available only to organizations verified through programs such as the **Cyber Verification Program**. Anthropic also states Fable 5.2's safeguards are "as robust as those of Fable 5.1 but produce fewer unnecessary blocks" — so if benign security or life-sciences work was tripping the classifiers on 5.1, the false-positive rate should be lower before you consider applying for access.
+
+Practically: the two read each other's thinking blocks, so moving a conversation between them keeps its reasoning intact. If a refusal is blocking legitimate work, the path is a verification program, not a prompt workaround.
+
+## Refusals and fallback
+
+Fable 5.2 declines in-band: **HTTP 200** with `stop_reason: "refusal"` and a `stop_details` object naming the category. Five categories:
+
+- `cyber` — could enable malware or exploit development
+- `bio` — could enable biological harm, such as dangerous lab methods
+- `frontier_llm` — could help develop competing AI models
+- `reasoning_extraction` — asks the model to reproduce its internal reasoning in the response text
+- `general_harms` — another usage-policy area
+
+Two operational notes. The permitted server-side fallback targets for Fable 5.2 are **Opus 4.8 and Opus 5** — both of which, per breaking change #2, cannot read Fable 5.2's thinking blocks, so a fallback loses the conversation's reasoning. And **`reasoning_extraction` has no recommended fallback**, so that refusal stands; the fix is to stop asking for reasoning in the response text and read it from thinking blocks with `display: "summarized"` instead.
+
+## One source contradiction, reported rather than resolved
+
+As of November 10, 2026 two official Anthropic pages describe Fable 5.1's status differently. The [models overview](https://platform.claude.com/docs/en/models/overview) lists `claude-fable-5-1` under **"Legacy models (still available)"**. The [model deprecations](https://platform.claude.com/docs/en/about-claude/model-deprecations) status table lists it as **Active**, with no deprecation announced and a retirement floor no sooner than September 1, 2027.
+
+These are reconcilable rather than in conflict, and the distinction is useful: in Anthropic's own lifecycle vocabulary, **Legacy** means "will no longer receive updates and might be deprecated in the future" — one rung before **Deprecated**, which is when a retirement date gets assigned. The overview's grouping is the editorial signal; the status table is the contractual one. Anthropic commits to at least **60 days' notice** before retiring a publicly released model, and that clock starts when the notice goes out.
+
+Either way, there is no reason to linger: Fable 5.1 now costs **more** than its successor. Full lifecycle tracking: [Deprecation & Migration Watch](/docs/whats-new/deprecations).
+
+## Common mistakes
+
+- **Treating "it works on Fable 5.1" as proof your history handling is correct.** It may only prove your account predates August 31, 2026. This is the single most likely way this migration bites you.
+- **Reaching for `"drop_block"` as the fix rather than the stopgap.** It converts a 400 into a bill: dropped thinking means the model thinks again.
+- **Carrying over an effort level.** The same word means a different amount of thinking on a different model. Re-sweep.
+- **Leaving "answer directly" lines in the prompt.** They no longer work at `medium` and above, and they still cost tokens. Lower the effort instead.
+- **Adding the code-ownership sentence to a codebase the user owns.** It roughly quintuples duplicate-merging, raises output tokens ~1.5x, and changes existing feature behavior in one try in six to ten. That is right for some repos and wrong for most client work.
+- **Changing the advisor's `model` mid-conversation.** It edits `tools`, so it trips the prefix check. New conversations only.
+- **Reading the model's closing summary as a complete diff.** Anthropic's own testing says small changes get left out of it.
+- **Upgrading on the launch table.** Two rows go against Fable 5.2, one of them against Opus 5.5 at under half the price.
+
+## Check yourself
+
+<Quiz questions={[
+  {
+    q: "Your agent has run on Fable 5.1 for two months with no errors, and it injects a status reminder into the previous user turn on each request. You swap the ID to claude-fable-5-2 and start getting 400s. What happened?",
+    options: [
+      "Fable 5.2 removed support for user-turn edits entirely, with no workaround",
+      "The thinking-block prefix check, which on Fable 5.1 only errored on accounts created on or after August 31, 2026, applies to every account on Fable 5.2",
+      "The model ID is wrong — it needs a date suffix",
+      "Reminders must now be sent as tool results"
+    ],
+    answer: 1,
+    explain: "This is breaking change #1 and the most likely migration failure. Editing anything before a thinking block invalidates it; on Fable 5.1 the resulting 400 only fired on newer accounts, so older accounts ran a latent bug cleanly. The durable fix is append-only history (turn-scoped system messages for per-turn reminders); the stopgap is prefix_mismatch_behavior: \"drop_block\", which costs output tokens because the model re-thinks."
+  },
+  {
+    q: "You run a router that sends hard turns to Fable 5.2 and cheap turns to Opus 5.5 in the same conversation. What happens to the reasoning?",
+    options: [
+      "Nothing — Opus 5.5 is newer than Fable 5.1, so it reads Fable 5.2's blocks",
+      "The request fails with a 400 until you enable a beta header",
+      "Opus 5.5 drops Fable 5.2's thinking blocks before the model sees them; the request succeeds, the drop is unbilled, and it is silent unless you send thinking-binding-controls-2026-08-01 and read input_transformations",
+      "The blocks are converted into text blocks and billed as input"
+    ],
+    answer: 2,
+    explain: "Preservation is one-way. Fable 5.2 reads earlier models' blocks; only Fable 5.2 and Mythos 5.2 read Fable 5.2's. Opus 5.5 and Fable 5.1 both drop them — as do Opus 4.8 and Opus 5, which are Fable 5.2's own fallback targets, so a refusal fallback also loses the reasoning."
+  },
+  {
+    q: "On Anthropic's launch table, which row argues AGAINST moving knowledge work from Opus 5.5 to Fable 5.2?",
+    options: [
+      "FrontierSWE v2, where Opus 5.5 scores higher",
+      "AA-Briefcase v1.1 Elo, where Opus 5.5 scores 1800 against Fable 5.2's 1785 — even though Fable 5.2 wins the same benchmark's rubric score",
+      "Humanity's Last Exam, where Fable 5.2 loses to GPT-6 Astra",
+      "RoboDojo Sim, where the gain is smallest"
+    ],
+    answer: 1,
+    explain: "The rubric score and the head-to-head Elo on the same benchmark disagree, and the Elo favors Opus 5.5 at under half the price. Gemini 4 Carbon also beats Fable 5.2 on AutomationBench (53.9% vs 51.4%). Separately, the headline FrontierCode 2.0 row compares Fable 5.2 at xhigh with Fable 5.1 at medium — labeled by Anthropic, dropped by most coverage."
+  },
+  {
+    q: "Your system prompt for a client codebase says 'No drive-by refactors, renames or cleanups.' A teammate adds the code-ownership sentence to improve structure. What should you expect?",
+    options: [
+      "Nothing — the earlier scope limit cancels the ownership sentence",
+      "A 400, because the two instructions conflict",
+      "The model still merges duplicated code in about a third of tries, uses ~1.5x the output tokens, and may change existing feature behavior in one try in six to ten",
+      "The ownership sentence only applies when it is the first line of the prompt"
+    ],
+    answer: 2,
+    explain: "Anthropic tested exactly this combination: the scope limit does not cancel the ownership sentence. On client work where the user owns the code and wants minimal changes, leave the sentence out rather than trying to fence it in — and review the diff rather than the model's closing summary, which omits small changes."
+  }
+]} />
+
+## Terms worth remembering
+
+<Flashcards cards={[
+  {front: "Prefix check", back: "The API test for whether anything before a thinking block changed since the model produced it — system, tools, or an earlier message. On Fable 5.2 a violation returns 400 'The block is bound to a different conversation' on EVERY account; on Fable 5.1 only on accounts created on or after August 31, 2026."},
+  {front: "prefix_mismatch_behavior: \"drop_block\"", back: "Beta setting (thinking-binding-controls-2026-08-01) that drops invalid thinking blocks and succeeds instead of erroring, reporting each in a top-level input_transformations array. A stopgap: dropped thinking means the model re-thinks, raising output tokens."},
+  {front: "computer_toolset_20260801", back: "The computer-use toolset Fable 5.2 requires. The earlier computer_20251124 tool returns 400 on every platform except Amazon Bedrock, where it still works."},
+  {front: "Advisor pairing rule", back: "A Fable 5.2 or Mythos 5.2 executor accepts only claude-fable-5-2 or claude-mythos-5-2 as its advisor. Changing the advisor's model edits tools, so do it in new conversations. Every executor accepts a Fable 5.2 advisor."},
+  {front: "Fast mode", back: "Optional Fable 5.2 / Mythos 5.2 mode: up to 2.5x output tokens per second at exactly 2x the rate card ($16 in / $80 out). On Microsoft Foundry it is a separate model ID, claude-fable-5-2-fast."},
+  {front: "Fable vs Mythos", back: "Anthropic: 'the same underlying model.' Fable carries the cyber and biology safeguards that let it ship to everyone; Mythos is the build without them, for organizations verified through programs such as the Cyber Verification Program. They read each other's thinking blocks."},
+  {front: "reasoning_extraction", back: "The one Fable 5.2 refusal category with no recommended server-side fallback, so the refusal stands. Triggered by asking the model to reproduce its internal reasoning in the response text; read thinking blocks with display: \"summarized\" instead."},
+  {front: "Legacy vs Deprecated", back: "In Anthropic's lifecycle vocabulary: Legacy = no longer receiving updates, might be deprecated later. Deprecated = not recommended, has an assigned retirement date. Fable 5.1 is currently listed Legacy on the models overview but Active in the status table."},
+]} />
+
+## Takeaways
+
+<Callout type="takeaways" items={[
+  "The prefix check widening to every account is the headline risk, not a feature: code that edits conversation history ran clean on an older account under Fable 5.1 and returns a 400 after the swap. Test it even if you have never seen the error.",
+  "This is the first Claude flagship point release that is cheaper than its predecessor — $8/$40 against $10/$50, with the cache-read multiplier unchanged at 0.025x. There is no price argument for staying on Fable 5.1.",
+  "It is still not the cheap option: Opus 5.5 is half the price and remains Anthropic's own recommended starting point. Reach for Fable 5.2 when your evals on Opus at higher effort fall short.",
+  "Delete before you add: 'answer directly without deliberating' no longer works at medium effort and above, a prompt-written token budget raised cost for equivalent performance, and the Opus 5.5 'treat that answer as done' lines make the model far less likely to flag its own earlier mistakes.",
+  "The code-ownership sentence is the highest-leverage single line in the release and a genuine trade: duplicate-merging goes from under a tenth of tries to about half, at ~1.5x output tokens and unrequested behavior changes in one try in six to ten. Right for your own repo, wrong for most client work.",
+  "Read the launch table with its footnotes: the headline FrontierCode 2.0 row compares xhigh against medium, Gemini 4 Carbon wins AutomationBench, and Opus 5.5 wins AA-Briefcase Elo at under half the price.",
+]} />
+
+## Next
+
+- [Claude Fable 5.1: What Changed and How to Migrate](/docs/models/fable-5-1-field-guide) — the release this one supersedes, and where the always-on thinking and forced-`tool_choice` rules came from
+- [Claude Opus 5.5: The Field Guide](/docs/models/opus-5-5-field-guide) — the model Anthropic still tells you to start with, at half the price
+- [How to Read an AI Benchmark Without Getting Fooled](/docs/models/reading-ai-benchmarks) — the checklist behind this page's reading of the launch table

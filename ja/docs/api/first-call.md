@@ -1,0 +1,140 @@
+# 初めての API 呼び出し
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/api/first-call · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+SDK をインストールし、認証して、Python・TypeScript・cURL で Claude への実際の呼び出しを行う。
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/api/getting-started">
+以下の API の形は安定していますが、モデル ID と SDK のバージョンは動きます。[現在のモデル一覧表](/docs/whats-new/models-and-pricing) を参照してください。
+</VerifyNote>
+
+API を使うと、*あなたの*プログラムが Claude と通信できます。このレッスンを終える頃には、実際のリクエストを実行し、その各部分が何をしているのかを正確に理解しているはずです。
+
+<Callout type="objectives" items={["API キーを作成し、環境変数として安全に保管する", "Python または TypeScript の公式 SDK をインストールする（あるいは素の cURL を使う）", "初めての messages リクエストを送信し、Claude の返信を読む", "4つの中核フィールド——model、max_tokens、messages、system——を理解する"]} />
+
+## 全行程を3ステップで
+
+以下のすべては、1つのシンプルな流れに収まります。進めながらこの地図を念頭に置いてください。
+
+<Steps items={[{title: "API キーを取得する", body: "Anthropic Console でキーを作成し、環境変数としてエクスポートして、コード内に残らないようにします。"}, {title: "SDK をインストールする", body: "Python なら anthropic パッケージ、TypeScript なら @anthropic-ai/sdk を追加します。cURL ならインストールするものはありません。"}, {title: "呼び出す", body: "メッセージのリストをモデルに送り、返ってきた content を表示します。"}]} />
+
+## 1. API キーを取得する
+
+[Anthropic Console](https://console.anthropic.com) で作成します。次に環境変数として設定し、コード内に残らないようにします：
+
+<PromptCard title="API キーをエクスポートする">{`export ANTHROPIC_API_KEY="sk-ant-..."`}</PromptCard>
+
+<Callout type="warning" items={["キーは絶対にコミットしないこと。キーは環境変数かシークレットマネージャーに保管し、決してソース管理に入れないこと。セキュリティのページ（/docs/security）を参照。"]} />
+
+## 2. SDK をインストールする
+
+言語を選びます。SDK は、いま設定した環境変数からキーを自動的に読み取ります。
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+<PromptCard title="インストール（Python）">{`pip install anthropic`}</PromptCard>
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+<PromptCard title="インストール（TypeScript）">{`npm install @anthropic-ai/sdk`}</PromptCard>
+
+</TabItem>
+<TabItem value="curl" label="cURL">
+
+インストールするものはありません——必要なのは `curl` だけです。
+
+</TabItem>
+</Tabs>
+
+## 3. 呼び出す
+
+どのリクエストも `messages` のリストです。モデルは `content` で返信します。自分の言語のスニペットを実行すると、Claude が質問に答えるのが見えます。
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+
+message = client.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=1024,
+    messages=[
+        {"role": "user", "content": "In one sentence, what is an API?"}
+    ],
+)
+
+print(message.content[0].text)
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic(); // reads ANTHROPIC_API_KEY from the environment
+
+const message = await client.messages.create({
+  model: "claude-sonnet-5",
+  max_tokens: 1024,
+  messages: [
+    { role: "user", content: "In one sentence, what is an API?" },
+  ],
+});
+
+console.log(message.content[0].text);
+```
+
+</TabItem>
+<TabItem value="curl" label="cURL">
+
+```bash
+curl https://api.anthropic.com/v1/messages \
+  --header "x-api-key: $ANTHROPIC_API_KEY" \
+  --header "anthropic-version: 2023-06-01" \
+  --header "content-type: application/json" \
+  --data '{
+    "model": "claude-sonnet-5",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "In one sentence, what is an API?"}
+    ]
+  }'
+```
+
+</TabItem>
+</Tabs>
+
+## いま何が起きたのか
+
+あなたは4つの情報を送りました。それぞれが何を制御するかは次のとおりです：
+
+- **`model`** — どの Claude を使うか。やみくもにハードコードしないこと。[モデルの選び方](/docs/api/choosing-a-model)を参照。
+- **`max_tokens`** — 返信の長さの上限（[トークン](/docs/foundations)単位）。コンテキストウィンドウを設定するものでは*ありません*。
+- **`messages`** — これまでの会話。API は**ステートレス**です。チャットを続けるには、毎回履歴全体を送り返します。
+- **`system`**（任意）— 呼び出しに対する Claude の役割を設定するトップレベルの指示。
+
+<Flashcards title="4つの中核フィールド" cards={[{front: "model", back: "どの Claude を使うか。やみくもにハードコードせず、意図的に選ぶ。"}, {front: "max_tokens", back: "返信の長さの上限（トークン単位）。コンテキストウィンドウは設定しない。"}, {front: "messages", back: "これまでの会話。API はステートレスなので、毎ターン履歴全体を送り直す。"}, {front: "system", back: "呼び出しに対する Claude の役割を設定する、任意のトップレベル指示。"}]} />
+
+<Callout type="tip" items={["API はステートレスなので、マルチターンのチャットは増えていく messages 配列にすぎません。各返信を追加し、次の呼び出しでリスト全体を送り直します。"]} />
+
+<Quiz title="理解度チェック" questions={[{q: "max_tokens は何を制御しますか？", options: ["コンテキストウィンドウのサイズ", "Claude の返信の長さの上限", "送信できるメッセージの数"], answer: 1, explain: "max_tokens は返信の長さをトークン単位で制限します。コンテキストウィンドウは設定しません。"}, {q: "API でマルチターンの会話をどう続けますか？", options: ["サーバーが以前のメッセージを自動的に覚えている", "API はステートレスなので、毎回履歴全体を送り直す", "セッション ID ヘッダーを設定する"], answer: 1, explain: "Messages API はステートレスです。チャットを続けるには、毎回のリクエストで会話履歴全体を送り返します。"}, {q: "API キーはどこに置くべきですか？", options: ["環境変数かシークレットマネージャー", "ソースファイルにハードコード", "便利さのためリポジトリにコミット"], answer: 0, explain: "キーは環境変数かシークレットマネージャーに保管し、決してソース管理に入れないこと。"}]} />
+
+<Callout type="takeaways" items={["3ステップ：キーを取得し、SDK をインストールし、messages リクエストを送る。", "キーを ANTHROPIC_API_KEY に保管すれば、SDK が自動で読み取り、コードに入らない。", "リクエストは messages のリストで、返信は content で返ってくる。", "API はステートレス：チャットを続けるには会話履歴全体を送り直す。", "model、max_tokens、messages、system が、最初に手を伸ばすフィールド。"]} />
+
+## 次へ
+
+- 適切なモデルを選びコストを見積もる → [モデルの選び方](/docs/api/choosing-a-model) · [トークン & 料金](/docs/api)
+- レスポンスをストリーミングし会話を保つ → [ストリーミング & マルチターン](/docs/api)
+- Claude にあなたの関数を呼ばせる → [ツール利用](/docs/api)
+- 本番対応のスニペット → [API スニペット](/docs/templates)

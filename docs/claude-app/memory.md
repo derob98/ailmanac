@@ -1,0 +1,120 @@
+# Memory Across Chats
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-app/memory · AILmanac (CC BY 4.0) · last verified 2026-08-02
+
+How cross-chat memory works and its availability by plan.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={[
+  "Tell apart the four different things people call \"memory\" — only one of them is this page's topic",
+  "Know what cross-chat memory can do for you, and why availability depends on your plan",
+  "Stay in control: review, edit, clear or disable what Claude keeps",
+  "Know when to use an explicit mechanism instead, because a fact *must* be applied"
+]} />
+
+<VerifyNote lastVerified="2026-08-02" source="https://www.anthropic.com">
+Cross-chat memory behavior and availability vary by plan and change — confirm current details in the app/help center.
+</VerifyNote>
+
+By default each conversation is a [blank slate](/docs/foundations/tokens-and-context). **Memory** features let Claude carry useful facts about you across chats — so you don't re-introduce yourself every time.
+
+## What "memory" means here
+
+There are a few distinct things people call "memory" — don't confuse them:
+
+| Kind | What it is |
+|---|---|
+| **Context window** | Working memory *within* one chat (forgotten when it ends) — see [Tokens & Context](/docs/foundations/tokens-and-context) |
+| **Cross-chat memory** | Claude remembers facts about you *across* conversations (the topic of this page) |
+| **[Custom instructions](/docs/claude-app/custom-instructions)** | Standing facts *you* set explicitly |
+| **[Projects](/docs/claude-app/projects)** | Knowledge scoped to a workspace |
+
+## How cross-chat memory helps
+
+When enabled, Claude can recall things like your preferences, ongoing projects, or details you've shared — making it feel more like a continuous assistant than a stranger each session. Availability and controls depend on your plan.
+
+## Stay in control
+
+<Steps items={[
+  {
+    title: "Review and edit what's remembered",
+    body: "Where the app provides controls, open them and read what Claude has actually kept. People are routinely surprised — both by what was stored and by what wasn't."
+  },
+  {
+    title: "Clear or disable it when you want a clean slate",
+    body: "Turning memory off, or clearing it, is the right move when you want a fresh start or simply more privacy."
+  },
+  {
+    title: "Don't rely on it for accuracy of important facts",
+    body: "Confirm critical details rather than trusting recall. Memory makes Claude feel continuous; it does not make it authoritative about your life."
+  },
+  {
+    title: "Mind privacy",
+    body: "Memory persists information. Don't store sensitive data you wouldn't want kept. See [Privacy](/docs/foundations/privacy)."
+  }
+]} />
+
+:::tip[Explicit beats implicit]
+For facts that *must* be applied (your role, units, hard rules), set [custom instructions](/docs/claude-app/custom-instructions) or use a [Project](/docs/claude-app/projects) — that's more reliable than hoping memory recalls them.
+:::
+
+<Quiz questions={[
+  {
+    q: "You have a hard rule that every answer must use metric units. Where should it live?",
+    options: [
+      "Mention it once in a chat and let cross-chat memory pick it up",
+      "In custom instructions or a Project, because it must be applied every time",
+      "Nowhere — Claude infers units from context",
+      "In the context window of each new chat, retyped manually"
+    ],
+    answer: 1,
+    explain: "Cross-chat memory may recall it; custom instructions and Projects apply it. For anything that must be applied rather than merely remembered, use the explicit mechanism."
+  },
+  {
+    q: "Which kind of memory is forgotten when a single conversation ends?",
+    options: [
+      "Cross-chat memory",
+      "Custom instructions",
+      "The context window",
+      "Project knowledge"
+    ],
+    answer: 2,
+    explain: "The context window is working memory within one chat. Cross-chat memory, custom instructions and Projects all persist beyond a single conversation."
+  },
+  {
+    q: "What is the right posture toward a critical fact Claude recalls from a previous chat?",
+    options: [
+      "Trust it — recall is what memory is for",
+      "Confirm it, because memory is a convenience feature and not an accuracy guarantee",
+      "Delete the memory and re-enter the fact every session",
+      "Only trust it on paid plans"
+    ],
+    answer: 1,
+    explain: "Memory makes Claude feel continuous across sessions. It is not a system of record — confirm critical details rather than trusting recall."
+  }
+]} />
+
+<Flashcards cards={[
+  { front: "Context window", back: "Working memory within one chat. Forgotten when the conversation ends. See Tokens & Context." },
+  { front: "Cross-chat memory", back: "Claude carrying facts about you across separate conversations — preferences, ongoing projects, details you've shared. Availability and controls depend on your plan." },
+  { front: "Custom instructions", back: "Standing facts you set explicitly, applied every time. The reliable place for hard rules — role, units, constraints." },
+  { front: "Projects", back: "Knowledge scoped to a workspace, rather than to you personally or to a single chat." },
+  { front: "Explicit beats implicit", back: "If a fact MUST be applied, don't hope memory recalls it. Put it in custom instructions or a Project." },
+  { front: "The privacy rule for memory", back: "Memory persists information. Don't store sensitive data you wouldn't want kept — and review, clear or disable it where the app provides controls." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Four different things get called \"memory\" — context window, cross-chat memory, custom instructions, Projects. Only the second is this page's topic.",
+  "Cross-chat memory is a continuity convenience, not a system of record. Confirm anything critical.",
+  "Anything that must be applied every time belongs in custom instructions or a Project, not in memory.",
+  "Memory persists. Review what's stored, and keep sensitive data out of it."
+]} />
+
+## Next
+
+- [Memory 2026 — Categorized Entries, from App to API](/docs/power-user/memory-2026-categorized-entries) — the July 2026 overhaul in depth
+- [Reflect & Focus](/docs/claude-app/reflect-and-focus) — the monthly recap built on top of memory
+- [Tokens, Context & Memory](/docs/foundations/tokens-and-context)
+- [Custom Instructions & Styles](/docs/claude-app/custom-instructions)
+- [Privacy & Data Handling](/docs/foundations/privacy)

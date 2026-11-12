@@ -1,0 +1,70 @@
+# Grundlagen des Promptings
+
+> Source: https://derob98.github.io/ailmanac/de/docs/prompting/basics · AILmanac (CC BY 4.0)
+
+Das Framework für Klarheit und Direktheit, das dich auf jeder KI zu 80 % ans Ziel bringt.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={[
+  "Das Framework für Klarheit und Direktheit — Ziel, Zielgruppe, Kontext, Format, Tonfall",
+  "Warum die meisten schlechten Ergebnisse unzureichend spezifizierte Prompts sind, nicht ein schwaches Modell",
+  "Wie du eine vage Anfrage in eine präzise verwandelst, mit einem Vorher/Nachher",
+]} />
+
+Die meisten „schlechten KI-Ergebnisse“ sind in Wirklichkeit **unzureichend spezifizierte Prompts**. Verbessere den Prompt, und das Ergebnis verwandelt sich — ganz ohne Tricks. Das ist das Fundament; alles in [Prompting](/docs/prompting) baut darauf auf, und es lässt sich auf jede KI übertragen.
+
+## Die eine Gewohnheit: sei klar und direkt
+
+Behandle das Modell wie eine brillante, wörtlich denkende neue Kollegin, die deine Gedanken nicht lesen kann. Sag ihr fünf Dinge:
+
+| Element | Frag dich selbst | Beispiel |
+|---|---|---|
+| **Ziel** | Was will ich eigentlich? | „Schreibe eine Kaltakquise-E-Mail…“ |
+| **Zielgruppe** | Für wen ist sie gedacht? | „…an eine vielbeschäftigte Einkaufsleiterin im Krankenhaus“ |
+| **Kontext** | Was muss es wissen? | „Wir verkaufen Planungssoftware; wir sparen ihnen ca. 6 Std./Woche“ |
+| **Format** | Welche Form soll das Ergebnis haben? | „Unter 120 Wörter, 3 kurze Absätze, ein Call-to-Action“ |
+| **Tonfall** | Wie soll es klingen? | „Professionell, herzlich, nicht aufdringlich“ |
+
+Zusammengesetzt:
+
+> „Schreibe eine Kaltakquise-E-Mail an eine vielbeschäftigte Einkaufsleiterin im Krankenhaus. Wir verkaufen Planungssoftware, die ihnen etwa 6 Stunden pro Woche spart. Unter 120 Wörter, drei kurze Absätze, professionell und herzlich, aber nicht aufdringlich, mit einem einzigen klaren Call-to-Action am Ende.“
+
+<PromptCard title="Kaltakquise-E-Mail — klar & direkt">{`Write a cold email to a busy hospital procurement manager. We sell scheduling software that saves them about 6 hours a week. Under 120 words, three short paragraphs, professional and warm but not pushy, ending with a single clear call to action.`}</PromptCard>
+
+Dieser Prompt wird „schreibe eine Kaltakquise-E-Mail“ jedes Mal übertreffen.
+
+## Fünf Upgrades, die mehr leisten, als man erwartet
+
+1. **Zeige ein Beispiel.** Eine einzige Kostprobe des gewünschten Stils oder Formats („orientiere dich am Ton von diesem hier: …“) lehrt schneller, als es zu beschreiben. Das ist *Few-Shot*-Prompting — siehe [Few-Shot richtig gemacht](/docs/prompting).
+2. **Gib ihm eine Rolle.** „Du bist ein gewissenhafter Lektor“ stimmt das richtige Verhalten ein.
+3. **Bitte bei schwierigen Problemen um den Denkprozess.** „Arbeite es Schritt für Schritt durch, bevor du die endgültige Antwort gibst“ verbessert das Schlussfolgern (*Chain-of-Thought*).
+4. **Beschränke das Ergebnis.** „Antworte nur mit dem JSON, ohne Vorrede.“ „Genau 5 Stichpunkte.“ Konkrete Formen lassen sich leichter weiterverwenden.
+5. **Iteriere.** Dein erster Prompt ist ein Entwurf. Verfeinere ihn in einfacher Sprache: „kürzer“, „technischer“, „füge ein Gegenargument hinzu“.
+
+## Anti-Muster, die du loswerden solltest
+
+- ❌ **Stichwort-Sprache** („E-Mail Kunde Rabatt“) — du benutzt keine Suchmaschine. Schreibe vollständige Sätze.
+- ❌ **Die Aufgabe vergraben** in einer Wand aus Kontext. Stelle die Anweisung nach oben *und* wiederhole sie bei langen Eingaben am Ende.
+- ❌ **Vage Qualitätsworte** („mach es gut/professionell“), ohne zu sagen, was das für dich bedeutet.
+- ❌ **Annehmen, dass es sich erinnert** an frühere Chats. Standardmäßig tut es das nicht — siehe [Tokens, Kontext & Memory](/docs/foundations).
+
+## Probier es jetzt aus
+
+Baue unten einen strukturierten Prompt und kopiere ihn dann in Claude. Beachte, wie das Benennen von Rolle, Ziel, Format und Tonfall alles verändert:
+
+<PromptBuilder />
+
+Nimm dann einen Prompt, den du normalerweise eintippen würdest, baue ihn hier neu auf und vergleiche die beiden Ergebnisse nebeneinander. Dieser Kontrast ist die gesamte Lektion.
+
+<Quiz title="Überprüfe dich selbst" questions={[
+  {q: "Was verursacht normalerweise schlechte KI-Ergebnisse?", options: ["Das Modell ist zu klein", "Ein unzureichend spezifizierter Prompt", "Nicht genug Rechenleistung"], answer: 1, explain: "Die meisten schlechten Ergebnisse sind unzureichend spezifizierte Prompts — verbessere den Prompt, und das Ergebnis verwandelt sich."},
+  {q: "Was gehört NICHT zu den fünf zu spezifizierenden Dingen?", options: ["Ziel", "Zielgruppe", "Modell-Temperatur", "Format"], answer: 2, explain: "Ziel, Zielgruppe, Kontext, Format und Tonfall. Die Temperatur ist eine API-Einstellung, kein Teil des klaren und direkten Promptings."},
+  {q: "Wie solltest du das Modell beim Prompting behandeln?", options: ["Wie einen Gedankenleser", "Wie eine brillante, aber wörtlich denkende neue Kollegin", "Wie eine Suchmaschine"], answer: 1, explain: "Es kann deine Gedanken nicht lesen — buchstabiere aus, was eine wörtlich denkende neue Kollegin wissen müsste."},
+]} />
+
+## Weiter
+
+- Das wiederverwendbare Toolkit → [Bibliothek der Prompt-Patterns](/docs/prompting)
+- Was an Claude wirklich anders ist → [Prompting speziell für Claude](/docs/prompting)
+- Sofort einsatzbereit → [Wiederverwendbare Prompt-Vorlagen](/docs/templates)

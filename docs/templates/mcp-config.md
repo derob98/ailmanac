@@ -1,0 +1,106 @@
+# MCP Config & Server Scaffolds
+
+> Source: https://derob98.github.io/ailmanac/docs/templates/mcp-config · AILmanac (CC BY 4.0) · last verified 2026-11-10
+
+.mcp.json plus minimal stdio and remote server starters.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-11-10" source="https://modelcontextprotocol.io">
+MCP config keys and SDK APIs evolve — confirm against the official MCP docs and the [Claude Code MCP docs](https://code.claude.com/docs/en/mcp). Which reference servers are still maintained changes too; the archived set below was checked against the npm registry and [modelcontextprotocol/servers](https://github.com/modelcontextprotocol/servers).
+</VerifyNote>
+
+Copy-paste starters for connecting Claude to tools via [MCP](/docs/claude-code/mcp). Trim to what you need.
+
+## `.mcp.json` — declare servers (project-shared)
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/"
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    },
+    "private-api": {
+      "type": "http",
+      "url": "https://api.internal.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${INTERNAL_MCP_TOKEN}" }
+    }
+  }
+}
+```
+
+A remote entry needs an explicit `"type"`. Claude Code reads an entry with a `url` but no `type` as a stdio server, skips it, and tells you to add `"type": "http"` (or `"sse"` / `"ws"`).
+
+:::warning[Keep secrets out of the file]
+Reference env vars (`${INTERNAL_MCP_TOKEN}`) — don't hard-code tokens in a committed file.
+:::
+
+:::warning[Most of the old reference servers are archived]
+The `@modelcontextprotocol/server-*` packages that people still copy around for **GitHub, PostgreSQL, Slack and Puppeteer** now carry an npm deprecation notice reading *"Archived and unmaintained; no security guarantees"* and live in [modelcontextprotocol/servers-archived](https://github.com/modelcontextprotocol/servers-archived). Only a handful are still maintained reference servers — among the TypeScript ones, `server-filesystem`, `server-memory`, `server-everything` and `server-sequential-thinking`.
+
+Prefer the vendor's own server where one exists: GitHub ships [`api.githubcopilot.com/mcp/`](https://github.com/github/github-mcp-server), and browser control has moved to [`@playwright/mcp`](/docs/api/playwright-mcp-deep-guide). For PostgreSQL and Slack there is no official replacement — pick a maintained community server and [review it first](/docs/security/reviewing-third-party-code).
+:::
+
+## Minimal stdio server (TypeScript)
+
+A tiny server exposing one tool. Adapt the handler to your data.
+
+```ts
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { z } from "zod";
+
+const server = new McpServer({ name: "echo", version: "1.0.0" });
+
+server.registerTool(
+  "echo",
+  {
+    description: "Echo back the provided text",
+    inputSchema: z.object({ text: z.string().describe("Text to echo back") }),
+  },
+  async ({ text }) => ({ content: [{ type: "text", text: `You said: ${text}` }] }),
+);
+
+await server.connect(new StdioServerTransport());
+```
+
+:::note[SDK package rename (MCP TS SDK v2)]
+`@modelcontextprotocol/sdk` was split into `@modelcontextprotocol/server` and `@modelcontextprotocol/client` in v2. The v1 package still receives bug fixes; new projects should use v2.
+:::
+
+## Minimal stdio server (Python)
+
+```python
+from mcp.server import MCPServer
+
+mcp = MCPServer("echo")
+
+@mcp.tool()
+def echo(text: str) -> str:
+    """Echo the text back."""
+    return f"You said: {text}"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
+
+## Before you ship a server
+
+- **Least privilege** — only the data/actions it needs ([Securing Agents](/docs/security/securing-agents)).
+- **Validate inputs**; return errors as results, don't crash.
+- **Review third-party servers** before connecting ([Reviewing Third-Party Code](/docs/security/reviewing-third-party-code)).
+
+## Next
+
+- [MCP Servers in Claude Code](/docs/claude-code/mcp)
+- [Build & Wire Your First MCP Server](/docs/walkthroughs/first-mcp-server)
+- [Hooks & settings.json Recipes](/docs/templates/hooks-settings)

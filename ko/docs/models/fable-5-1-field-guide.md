@@ -1,0 +1,300 @@
+# Claude Fable 5.1: 무엇이 바뀌었고 어떻게 마이그레이션할까
+
+> Source: https://derob98.github.io/ailmanac/ko/docs/models/fable-5-1-field-guide · AILmanac (CC BY 4.0) · last verified 2026-10-21
+
+Anthropic이 2026년 9월 1일 Claude Fable 5.1과 Mythos 5.1을 출시했습니다. 가격은 동일한 $10/$50, 캐시 읽기는 $0.25로 인하, 호환성을 깨는 API 변경 세 가지(강제 tool_choice 오류, 단방향 thinking 블록, 추가 전용 히스토리)와 다섯 가지 추가 베타가 포함됩니다. claude-fable-5 또는 claude-opus-5를 고정해 쓰는 모든 분을 위한 마이그레이션 가이드입니다.
+
+<LevelBadge level="intermediate" />
+
+**2026년 9월 1일**, Anthropic은 **Claude Fable 5.1**(`claude-fable-5-1`)과 검증이 필요한 쌍둥이 모델 **Claude Mythos 5.1**(`claude-mythos-5-1`)을 출시했습니다. 출시 소식을 훑어보면 "더 좋아진 Fable" 정도로 분류하고 넘어가기 쉽습니다. 그러지 마세요. 이번은 모델 ID만 바꿔도 **프로덕션에서 400이 반환될 수 있는** 첫 번째 Claude 포인트 릴리스입니다. 강제 `tool_choice`가 사라졌고, thinking 블록은 이제 그것을 만든 모델과 대화에 묶이며, 대화 히스토리 편집은 신규 계정에서 오류로 강제됩니다. 또 가격표에서 *가장 싼* 항목이 가장 흥미로운 첫 릴리스이기도 합니다. 캐시 읽기가 $1에서 **MTok당 $0.25**로 내려갔고, 그래서 Anthropic은 정가 $10 / $50이 그대로인데도 일반적인 워크로드는 약 25%, 에이전트 비중이 큰 워크로드는 최대 45% 저렴하다고 말할 수 있습니다.
+
+이 페이지는 마이그레이션 가이드입니다. 무엇이 바뀌었는지, 무엇이 깨지는지, 무엇을 얻는지, 그리고 오후 한나절이면 돌려볼 수 있는 체크리스트를 다룹니다.
+
+<Callout type="objectives" items={[
+  "claude-fable-5 → claude-fable-5-1 교체를 400으로 바꾸는 세 가지 호환성 파괴 변경과 각각의 해결책을 안다",
+  "다섯 가지 추가 기능을 활용한다: 메시지별 effort, 턴 범위 시스템 메시지, 진행 상황 업데이트, 더 저렴한 캐시 읽기, 콘텐츠 출처 표시",
+  "코드 변경 없이 나타나는 일곱 가지 동작 변화(병렬 도구 호출 감소, 설명 감소, 더 조밀한 문장, 파일 전체 재작성)를 알아본다",
+  "Fable 5, Opus 5, GPT-5.6 Sol과 비교한 출시 벤치마크를 홍보 문구에 휘둘리지 않고 읽는다",
+  "워크로드에 맞게 Fable 5.1, Opus 5, Fable 5 중 하나를 고르고 마이그레이션 체크리스트를 실행한다",
+]} />
+
+<VerifyNote lastVerified="2026-09-14" source="https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1">
+모델 ID, 가격, 호환성 파괴 변경, 베타 헤더, 동작 관련 내용은 Anthropic 공식 "What's new in Claude Fable 5.1", [모델 개요](https://platform.claude.com/docs/en/models/fable-5-1/overview), [마이그레이션 가이드](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide), [가격 페이지](https://platform.claude.com/docs/en/about-claude/pricing)에서 가져왔으며, 모두 2026년 9월 14일에 확인했습니다. 벤치마크 수치는 [출시 발표](https://www.anthropic.com/claude-fable-and-mythos-5-1)에 실린 Anthropic 자체 수치입니다. 여기서 언급한 세 가지 베타는 형태가 바뀔 수 있으니 배포 전에 헤더를 다시 확인하세요. 아래의 출시 당시 비교는 Opus 5를 기준으로 합니다. 2026년 9월 1일에는 그 모델이 넘어서야 할 대상이었기 때문입니다. 2026년 10월 25일에 다시 확인한 [모델 개요](https://platform.claude.com/docs/en/models/overview)에 따르면 현재 "여기서 시작" 모델은 **Opus 5.5**입니다. 최신 모델 표는 [현재 모델과 가격](/docs/whats-new/models-and-pricing)을 참고하세요.
+</VerifyNote>
+
+## 한 문단 요약
+
+Fable 5.1은 [Fable 5](/docs/models/fable-5-mythos-5-flagship)의 후속 모델로, Opus보다 위에 있는 동일한 Mythos급 티어, 동일한 1M 토큰 컨텍스트, 동일한 128K 최대 출력, 동일한 입력 $10 / 출력 $50, 동일한 토크나이저, 동일한 상시 적응형 thinking, 동일한 인밴드 `stop_reason: "refusal"` 동작, 동일한 30일 보관 요건(ZDR 없음)을 갖습니다. Anthropic의 공식 지침은 취지상 그대로입니다. 대부분의 작업은 **현재의 Opus로 시작**하고, Fable 5.1은 "까다로운 추론과 장기 에이전트 작업이 필요하거나, 더 높은 effort의 Claude Opus 5.5 평가로도 여전히 부족할 때" 사용하세요. 출시 당시 이 문장은 Opus 5를 언급했지만, **2026년 9월 22일**부터 모델 개요는 **Opus 5.5**를 언급하며, 오늘 비교해야 할 모델은 이쪽입니다. Opus 5는 이제 레거시입니다. 새로운 점은 호환성 파괴 변경 3가지, 추가 기능 5가지, 75% 저렴해진 캐시 읽기, 그리고 평가 스위트가 알려주기 전에 알아 두어야 할 일련의 동작 변화입니다.
+
+## 호환성을 깨는 변경 세 가지
+
+ID만 바꿔서는 안 되는 이유입니다. 각각 조용한 성능 저하가 아니라 400입니다.
+
+### 1. 강제 도구 사용은 오류를 반환합니다
+
+`tool_choice: {"type": "any"}`와 `{"type": "tool", "name": "..."}`는 이제 400 `invalid_request_error`를 반환합니다.
+
+```text
+tool_choice: type "tool" and "any" are not supported for this model.
+```
+
+이유를 보면 이해가 됩니다. thinking은 항상 켜져 있는데 강제 도구 호출은 그 과정을 건너뛰게 되므로, 모델이 사고 과정을 도구 인자 안에서 처리하게 되어 인자의 품질이 떨어집니다. 이 검사는 Messages API, Message Batches API, 토큰 카운팅 엔드포인트에 모두 적용됩니다. `auto`(기본값)와 `none`은 그대로입니다.
+
+**해결책**은 두 줄 수정입니다. `tool_choice`는 `auto`로 두고, 도구에 `strict: true`를 설정하며 스키마에는 `additionalProperties: false`를 넣고, 도구를 언제 써야 하는지 프롬프트에 *명시*하세요. Anthropic의 설명으로는 Fable 5.1이 "명시적인 도구 지시를 안정적으로 따릅니다." 원하는 것이 도구 호출이 아니라 스키마에 맞는 JSON이었다면 [구조화된 출력](/docs/api/structured-output)으로 옮기세요.
+
+<PromptCard title="강제 도구 호출 → strict 도구 + 명시적 지시">
+{`# Before (Fable 5) — now a 400 on Fable 5.1
+"tool_choice": {"type": "tool", "name": "record_summary"}
+
+# After (Fable 5.1)
+"tools": [{
+  "name": "record_summary",
+  "description": "Record the structured summary of the document.",
+  "strict": true,
+  "input_schema": {
+    "type": "object",
+    "properties": {"summary": {"type": "string"}},
+    "required": ["summary"],
+    "additionalProperties": false
+  }
+}],
+"tool_choice": {"type": "auto"},
+"messages": [{"role": "user",
+  "content": "Summarize: The meeting moved to Thursday. Call the record_summary tool with your result."}]`}
+</PromptCard>
+
+### 2. thinking 블록은 단방향입니다
+
+이제 모든 thinking 블록에는 어느 모델이 만들었는지가 기록되며, 보존은 한 방향으로만 이루어집니다. **Fable 5.1은 Opus 5, Fable 5, Mythos 5, 그리고 이전의 모든 Claude가 만든 thinking 블록을 읽을 수 있지만, 그 모델들은 Fable 5.1의 블록을 읽을 수 없습니다.** Fable 5.1*으로* 넘어오는 대화는 추론을 유지합니다. Fable 5.1*에서* 나가는 대화(라우터, Opus 5로의 폴백, 세션 중 비용 절감용 다운그레이드)는 Fable 5.1이 진행한 턴의 추론을 잃습니다.
+
+API는 대상 모델이 읽을 수 없는 블록을 모델이 보기 전에 **제거**하는 방식으로 이를 처리합니다. 제거된 블록은 과금되지 않고 `input_tokens`에도 포함되지 않습니다. `thinking-binding-controls-2026-08-01` 베타 헤더가 없으면 제거는 **조용히** 이루어지고, 헤더가 있으면 최상위 `input_transformations` 배열에 보고됩니다. 모델 사이를 라우팅한다면 헤더를 보내고 그 배열을 로그에 남기세요. 추론이 조용히 사라지면 버그 리포트에 "12단계 이후 모델이 멍청해졌어요"라고 나타나기 마련입니다.
+
+### 3. 이전 턴을 편집하면 thinking 블록이 무효화됩니다
+
+두 번 읽어 볼 항목입니다. Fable 5.1 thinking 블록보다 앞에 있는 **어떤 것이든**, 즉 `system` 프롬프트, `tools` 배열, 이전 메시지를 수정하면 그 뒤의 모든 thinking 블록이 무효화됩니다. 검사가 적용되는 곳에서는 다음 요청이 `The block is bound to a different conversation`이라는 메시지의 400으로 거부됩니다.
+
+현재 적용 규칙은 다음과 같습니다.
+
+- **2026년 8월 31일 이후 생성된 계정:** 강제 적용됩니다.
+- **이전 계정:** API가 불일치를 기록하지만, `thinking.block_binding.prefix_mismatch_behavior`를 직접 설정한 경우에만 조치합니다.
+- **Mythos 5.1**은 이 검사를 전혀 수행하지 않습니다.
+- Claude Code, claude.ai, Managed Agents, Agent SDK는 prefix를 알아서 유지해 줍니다. **직접 만든 `messages` 배열만 위험합니다.**
+
+Anthropic이 제시한 무효화 요인 목록을 풀어 쓰면, 흔히 쓰는 에이전트 하네스 습관의 목록입니다.
+
+| 이후의 모든 thinking 블록을 무효화 | 유효하게 유지 |
+| --- | --- |
+| 이후 턴은 두고 이전 턴을 편집, 재정렬, 삭제 | 선두의 thinking 블록 묶음을 오래된 것부터 제거 |
+| 요청마다 리마인더나 상태 줄을 이전 턴에 주입했다가 다음 요청에서 제거 | 서버 측 컴팩션 또는 히스토리를 줄이는 [컨텍스트 편집](/docs/api/memory-and-context-editing) |
+| 한 대화 안에서 요청마다 최상위 `system`이나 `tools`를 다시 구성 | `cache_control` 마커 이동 |
+| 나중에 *다른 바이트*를 반환하는 이미지나 문서 URL(검사는 바이트 기준이므로 같은 파일에 대해 바뀌는 서명 URL은 괜찮음) | 요청 사이에 `effort` 변경 |
+
+해결책은 모두 한 가지 규칙으로 모입니다. **대화를 추가 전용(append-only)으로 다루세요.** 턴별 리마인더는 [턴 범위 시스템 메시지](#턴-범위-시스템-메시지-베타)(아래)로 바꿉니다. 도구와 지시의 변경은 [대화 중간 시스템 메시지와 도구 변경](/docs/api/mid-conversation-system-messages)으로 처리합니다. 히스토리 정리는 서버 측 컴팩션으로 합니다. 오류 대신 계속 진행하려면 `thinking-binding-controls-2026-08-01` 헤더와 `prefix_mismatch_behavior: "drop_block"`을 보내세요. 그러면 제거가 `input_transformations`에 `reason: "prefix_binding_mismatch"`로 보고됩니다.
+
+Anthropic은 이를 부분적으로 **증류 방지** 조치로 설명합니다. 출시 글에 따르면 새 API 계정은 더 이상 이전 컨텍스트를 수동으로 편집하면서 대화 기록을 유지할 수 없으며, 이는 공개적으로 알려진 증류 기법을 막습니다. 사용자 입장에서 실질적인 이점은 같은 규율이 [프롬프트 캐시](/docs/api/prompt-caching)도 따뜻하게 유지해 준다는 점입니다.
+
+## 추가 기능 다섯 가지
+
+### 메시지별 effort (베타)
+
+이제 **프롬프트 캐시를 무효화하지 않고** 대화 중간에 `effort`를 바꿀 수 있습니다. 어려운 단계에서는 올리고, 일상적인 단계에서는 낮추세요. `mid-conversation-output-config-2026-07-01` 베타 헤더를 보내고 effort만 담은 시스템 메시지를 삽입하면, 새 수준은 다음 사용자 턴부터 적용됩니다. Claude API와 Google Cloud의 Fable 5.1, Mythos 5.1, Opus 5에서 지원됩니다.
+
+<PromptCard title="캐시를 깨지 않고 요약 턴의 effort 낮추기">
+{`{
+  "model": "claude-fable-5-1",
+  "max_tokens": 4096,
+  "output_config": {"effort": "high"},
+  "messages": [
+    {"role": "user", "content": "Plan a migration from SQLite to PostgreSQL in three short steps."},
+    {"role": "assistant", "content": "1. Export the SQLite data. 2. Create the PostgreSQL schema. 3. Import the data and verify row counts."},
+    {"role": "system", "content": [], "output_config": {"effort": "low"}},
+    {"role": "user", "content": "Summarize the plan in one sentence."}
+  ]
+}
+# header: anthropic-beta: mid-conversation-output-config-2026-07-01`}
+</PromptCard>
+
+이는 [Thinking & Effort](/docs/api/thinking-and-effort)와 [Effort 튜닝](/docs/api/effort-tuning)의 effort 가이드와 맞물립니다. 기본값은 `high`이고, "세션 전체에 한 가지 수준"은 이제 유일한 방법이 아니라 게으른 방법입니다.
+
+### 턴 범위 시스템 메시지 (베타)
+
+`role: "system"` 메시지에 `clear_at: "next_user_message"`를 설정하면 그 메시지는 현재 턴에만 시스템 프롬프트 권한을 가지며, 이후 `user` 메시지가 생기면 더 이상 렌더링되지 않습니다. 메시지를 계속 그대로 다시 보내므로 이전 내용은 하나도 바뀌지 않고, 캐시는 계속 일치하며, 이후 thinking 블록도 유효하고, 지워진 메시지는 **입력 토큰이 들지 않습니다**. 헤더는 `mid-conversation-system-clear-at-2026-08-21`입니다.
+
+```json
+{
+  "role": "system",
+  "clear_at": "next_user_message",
+  "content": "Results have landed in your inbox. Check it before running more code."
+}
+```
+
+호환성 파괴 변경 3이 이제 처벌하는 "리마인더를 주입하고 다음 요청에서 삭제하는" 패턴의 공식 대체 수단입니다.
+
+### 도구 호출 사이의 진행 상황 업데이트 (베타)
+
+Fable 5에서처럼 Fable 5.1도 도구 호출 사이에 짧은 진행 메모를 쓰며, 각 메모는 호출 직전의 별도 `thinking` 블록으로 나옵니다. 기본값인 `thinking.display: "omitted"`에서는 이것들이 **빈 채로** 돌아오므로, 긴 에이전트 턴이 사용자에게는 조용해 보입니다. 새로 추가된 `display: "updates"`(헤더 `thinking-display-updates-2026-08-18`)는 추론은 숨긴 채 진행 메모를 텍스트로 반환합니다. 이때 텍스트가 비어 있지 않은 thinking 블록은 모두 렌더링할 수 있는 상태 줄입니다. `"summarized"`도 이를 반환하지만 요약된 추론과 섞여 나옵니다. 원본 사고 과정(chain of thought)은 여전히 반환되지 않습니다.
+
+### 캐시 읽기 MTok당 $0.25
+
+| | 기본 입력 | 5분 캐시 쓰기 | 1시간 캐시 쓰기 | **캐시 읽기** | 출력 |
+| --- | --- | --- | --- | --- | --- |
+| Fable 5 | $10 | $12.50 | $20 | $1.00 | $50 |
+| **Fable 5.1** | $10 | $12.50 | $20 | **$0.25** | $50 |
+
+캐시 읽기는 Fable 5.1과 Mythos 5.1에서 기본 입력의 0.025배이고, 다른 모든 Claude 모델에서는 0.1배입니다. 쓰기와 캐시 가능한 최소 프롬프트 512토큰은 그대로이며, 배치는 여전히 50% 할인($5 / $25)입니다. 큰 캐시 prefix를 매 턴 다시 읽는 긴 에이전트 루프에서는 바로 이 부분이 출시 글에서 말한 "최대 45% 저렴"의 출처입니다. 다른 모델과 비교하면, 사흘 뒤 같은 정가 $10 / $50으로 출시된 OpenAI의 GPT-6 Astra는 캐시 읽기에 **$1.00**을 받아 Fable 5.1의 네 배입니다. [Astra 가이드](/docs/models/openai-astra-preview)를 참고하세요.
+
+### 콘텐츠 출처 표시
+
+모든 Fable 5.1과 Mythos 5.1 텍스트에는 모든 플랫폼에서 Anthropic의 통계적 텍스트 워터마크가 들어갑니다. Claude가 만든 파일(예: 코드 실행을 통해)은 Files API로 가져올 때 서명된 [C2PA](https://c2pa.org/) Content Credentials를 갖습니다. Anthropic은 워터마크가 토큰이나 숨은 문자를 추가하지 않고, 사용자나 조직에 대한 정보를 담지 않으며, 요청을 바꿀 필요도 없다고 밝힙니다. 배경을 보면 Anthropic은 2026년 7월 AI 생성 콘텐츠 투명성에 관한 EU AI Act Code of Practice에 서명했고, 규제 당국, 팩트체커, 연구자, 검증이 필요한 기업을 위한 탐지 API가 비공개 프리뷰 중입니다.
+
+## 코드 변경 없이 나타나는 일곱 가지 동작 변화
+
+Anthropic이 공개적으로 문서화한 내용이며, 각각에 대해 공식 [Prompting Claude Fable 5.1](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-1) 가이드에 프롬프트 해결책이 있습니다. 사용자가 발견하기 전에 평가에서 먼저 확인하세요.
+
+<Flashcards cards={[
+  { front: "병렬 도구 호출이 더 들쭉날쭉함", back: "Fable 5가 여러 개를 묶어 호출하던 곳에서 Fable 5.1은 턴당 도구 호출을 하나만 내보낼 수 있습니다. 특히 다음 읽기가 암묵적으로만 정해지는 bash-에디터 하네스와 컴퓨터 사용에서 그렇습니다. 품질은 같지만 토큰, 왕복 횟수, 실제 소요 시간이 늘어납니다. 해결: 시스템 프롬프트에 '독립적인 도구 호출은 묶어서 실행' 한 줄을 추가합니다." },
+  { front: "긴 도구 실행 중 진행 상황 업데이트 감소", back: "도구 호출 사이에 사용자에게 보이는 텍스트가 줄어들며, effort가 높을수록 더 그렇습니다. 해결: thinking.display를 \"updates\"(베타)로 설정하고, '발견한 내용은 최종 답변까지 보류' 같은 프롬프트 줄을 삭제하고, 시작 문장, 주기적 업데이트, 마무리 요약을 명시적으로 요청합니다." },
+  { front: "낮은 effort에서 기억에 의존해 답하는 빈도 증가", back: "effort: low에서는 모델이 검색/조회 도구를 덜 호출합니다. 해결: 최신 데이터가 필요한 턴에서는 effort를 올리거나(메시지별 effort로 비용 부담이 적음) 검증 유도 문구를 추가합니다." },
+  { front: "더 조밀한 문장", back: "일부 출력에서 문장이 길어지고 문단 나눔이 줄어듭니다. 해결: 목표 밀도와 문단 길이를 명시합니다." },
+  { front: "채팅에서 서식 사용 감소", back: "이전 Claude보다 굵게, 제목, 목록을 덜 씁니다. Opus 4.x용으로 작성한 서식 금지 규칙이 이제 내용에 필요한 구조까지 억제할 수 있습니다. 점검해서 완화하세요." },
+  { front: "요약에서 표시 없는 인용", back: "원문 구절을 인용 표시 없이 그대로 옮길 가능성이 더 높습니다. 해결: 원문 그대로인 구간을 표시하도록 지시하거나, 게시할 내용은 겹침 여부를 사후 점검합니다." },
+  { front: "작은 수정에도 파일 전체 재작성", back: "필요한 부분만 고치기보다 텍스트 파일 전체를 다시 쓰는 경향이 더 큽니다. 결과는 같지만 출력 토큰과 시간이 더 듭니다. 해결: '부분 수정을 선호하고, 한 줄을 바꾸려고 파일 전체를 다시 쓰지 말 것'이라고 지시합니다." },
+]} />
+
+## Fable 5와 완전히 동일하게 유지되는 것
+
+Fable 5를 이미 제대로 연동했다면 아래는 모두 그대로 이어집니다.
+
+- 적응형 thinking은 항상 켜져 있습니다. `budget_tokens`가 있는 `thinking: {"type": "enabled"}`와 `{"type": "disabled"}`는 둘 다 400을 반환합니다. `thinking`을 생략하거나 `{"type": "adaptive"}`를 보내세요.
+- `thinking.display`의 기본값은 `"omitted"`이며, 원본 사고 과정은 반환되지 않습니다.
+- 인터리브드 thinking은 자동이며 베타 헤더가 필요 없습니다.
+- Prefill은 400을 반환합니다. 기본값이 아닌 `temperature`, `top_p`, `top_k`도 400을 반환합니다.
+- 거절은 HTTP 200과 `stop_reason: "refusal"`, `stop_details.category`로 도착하며, 출력이 나오기 전에 도착한 거절에는 과금되지 않습니다. 허용되는 폴백 대상은 **Opus 5와 Opus 4.8**이고, [폴백 크레딧](/docs/api/server-side-fallbacks)이 전환에 드는 프롬프트 캐시 비용을 환불해 줍니다. 전체 패턴은 [거절과 안전](/docs/api/refusals-and-safety)에 있습니다.
+- 30일 보관은 필수이며, 보관이 설정되지 않은 조직이나 워크스페이스의 요청은 400을 반환합니다. 두 모델 모두 Covered Models입니다.
+- 알아 둘 만한 차이 하나: **Fable 5.1과 Mythos 5.1은 모두 Priority Tier를 지원하지 않습니다.** Fable 5는 지원합니다. 우선 용량을 구매했다면 당분간 Fable 5에 머물 이유가 됩니다.
+
+## 출시 벤치마크, 솔직하게 읽기
+
+Anthropic의 수치이고, Anthropic의 하네스입니다. GPT-5.6 Sol과의 비교는 OpenAI가 가장 먼저 이의를 제기할 부분이며, OpenAI의 GPT-6 Astra는 사흘 뒤에 나왔으므로 이것은 9월 14일이 아니라 9월 1일 시점의 상황으로 보세요.
+
+| 벤치마크 | Fable 5.1 | Fable 5 | Opus 5 | GPT-5.6 Sol |
+| --- | --- | --- | --- | --- |
+| Terminal-Bench 4.0 | **55.8%** (Mythos 5.1: 60.9%) | 42.0% | 52.3% | 37.3% |
+| Terminal-Bench-Science 0.1 | **52.6%** | 24.7% | 29.0% | 22.4% |
+| GDPval-AA v2 (Elo) | **1853** | 1723 | 1824 | 1711 |
+| OSWorld 2.0, partial / strict | **77.9% / 41.7%** | 72.9% / 36.1% | 75.4% / 39.6% | — |
+| Humanity's Last Exam, no tools / with tools | **60.9% / 65.0%** | 57.8% / 63.8% | 56.6% / 63.6% | — |
+| AutomationBench | **31.4%** | 17.1% | 26.9% | 19.6% |
+| CursorBench 3.2.0 | **73.4%** | 70.5% | 70.0% | 67.2% |
+
+어느 한 행보다 중요한 해석 세 가지입니다.
+
+1. **Fable 5 → 5.1의 도약은 장기 에이전트 작업에서 가장 큽니다**(Terminal-Bench-Science는 두 배, AutomationBench는 거의 두 배). "더 높은 effort의 Opus 5로도 부족할 때 사용하라"는 Anthropic 자신의 포지셔닝과 맞아떨어집니다. 이득은 채팅이 아니라 몇 시간짜리 실행에서 나옵니다.
+2. **Opus 5는 헤드라인이 시사하는 것보다 가깝습니다.** 여러 행에서(Terminal-Bench 4.0: 52.3 대 55.8, GDPval: 1824 대 1853) 정가는 절반입니다. Anthropic이 계속 Opus 5로 시작하라고 말하는 데는 이유가 있습니다.
+3. **고객 인용문은 정확도만이 아니라 토큰에 관한 것입니다.** Cognition, Rogo, Browserbase, Block 모두 같거나 더 나은 결과를 더 적은 토큰으로 얻었다고 말합니다. $0.25 캐시 읽기와 합치면 "Fable 5.1이 더 똑똑하다"보다 "같은 작업에 Fable 5.1이 Fable 5보다 싸다"가 더 방어 가능한 주장입니다.
+
+출시 글의 과학 사례(12개 표적에서 적중률 약 50%인 단백질 결합체와 일반적인 10–15%, 30년 된 Magellan 레이더 데이터로 만든 해상도 2–3km의 금성 고도 지도, 오픈소스 유전체학 모델 7종에서 2.5배 속도 향상)는 벤치마크가 아니라 Anthropic이 보고한 연구 결과입니다. 연구 워크로드에는 흥미로운 신호이지만 구매 판단의 근거는 아닙니다.
+
+## Fable 5.1 vs Opus 5 vs Fable 5: 결정
+
+| 상황 | 선택 | 이유 |
+| --- | --- | --- |
+| 대부분의 프로덕션 작업, 비용에 민감 | **Opus 5.5** | Anthropic 자체의 기본 권장 모델(2026년 9월 22일부터 그 자리에서 Opus 5를 대체); 정가의 일부 수준; [현재 모델과 가격](/docs/whats-new/models-and-pricing) 참고 |
+| `high` effort의 Opus 5로도 부족한, 몇 시간짜리 자율 코딩, 연구, 문서/스프레드시트/슬라이드 제작 | **Fable 5.1** | 가장 큰 차이가 바로 여기서 나며, 캐시 읽기 덕분에 긴 루프가 Fable 5보다 저렴함 |
+| Priority Tier에 의존 | **Fable 5** (당분간) | Fable 5.1과 Mythos 5.1은 Priority Tier에서 지원되지 않음 |
+| `tool_choice`를 강제하고 이번 스프린트에 하네스를 바꿀 수 없음 | **Fable 5** | Fable 5.1은 400을 반환하므로 하네스를 먼저 마이그레이션하고 그다음 모델을 옮김 |
+| 대화 중간에 모델 사이를 라우팅하거나 폴백 | 아무거나, 단 **thinking-binding 헤더를 전송** | 그렇지 않으면 Fable 5.1에서 내려갈 때 추론이 조용히 사라짐 |
+| 계약상 데이터 무보관(ZDR)이 필요 | **Opus 5.5** 또는 아무 Opus | Fable 5.x와 Mythos 5.x는 30일 보관을 요구하며 ZDR 대상이 아님 |
+| 분류기 개입이 더 적어야 하는 방어적 사이버 또는 생명과학 연구 | 조직이 검증되었다면 **Mythos 5.1** | 같은 모델, 다른 안전장치 구성. 초대를 기다리지 말고 Cyber Verification Program(세 가지 티어)에 신청 |
+
+## 마이그레이션 체크리스트
+
+Anthropic은 Claude Code에서 이 대부분을 처리해 주는 번들 스킬을 제공합니다. 먼저 그것을 실행하고, 스킬이 볼 수 없는 항목을 확인하세요.
+
+<PromptCard title="ID 교체와 파라미터 수정을 자동화">
+{`/claude-api migrate this project to claude-fable-5-1`}
+</PromptCard>
+
+<Steps items={[
+  { title: "ID를 교체하고 강제 tool_choice를 grep", body: "claude-fable-5 → claude-fable-5-1 (Bedrock: anthropic.claude-fable-5-1). 그다음 type이 any 또는 tool인 tool_choice를 grep하세요. 검색된 항목은 각각 strict: true + additionalProperties: false + 명시적인 'X 도구를 호출하라' 지시로 바꾸거나 구조화된 출력으로 옮깁니다. 토큰 카운팅 호출도 잊지 마세요. 거기서도 검증합니다." },
+  { title: "히스토리 편집 점검 실행", body: "코드에서 messages 배열을 직접 만든다면 thinking-binding-controls-2026-08-01 헤더와 prefix_mismatch_behavior: \"drop_block\"으로 실제 세션을 한 번 돌리고 input_transformations를 로그에 남기세요. prefix_binding_mismatch 항목 하나하나가 히스토리를 편집하는 지점입니다. 원인을 고치세요. 턴별 리마인더 → 턴 범위 시스템 메시지, system/tools 변경 → 대화 중간 시스템 메시지, 히스토리 정리 → 서버 측 컴팩션. 그런 다음 프로덕션용 prefix_mismatch_behavior를 의도적으로 선택하세요." },
+  { title: "라우팅과 폴백 경로 점검", body: "대화가 Fable 5.1에서 Opus 5, Fable 5 또는 그 이전 모델로 넘어갈 수 있는 모든 곳에서 Fable 5.1 추론을 잃어도 괜찮은지 판단하세요. 제거가 최소한 보고되도록 binding 헤더를 보내세요. 폴백 대상이 Opus 5 또는 Opus 4.8(허용되는 유일한 대상)인지 확인하세요." },
+  { title: "effort를 재조정하고 메시지별 effort를 고려", body: "기본값은 high입니다. 긴 루프에서는 mid-conversation-output-config-2026-07-01 베타를 추가해 일상적인 턴에서 effort를 낮추고, 최신 조회가 필요한 턴에서는 올리세요. low effort는 기억에 의존해 답하는 경우가 더 많기 때문입니다." },
+  { title: "에이전트 루프용 프롬프트 줄 추가", body: "독립적인 도구 호출을 묶어 실행하라는 한 줄, 시작 문장과 주기적 업데이트와 마무리 요약을 요청하는 한 줄(UI에 진행 상황을 보여 준다면 thinking.display를 updates로 설정), 파일 전체 재작성보다 부분 수정을 선호하라는 한 줄을 넣으세요. Opus 4.x용으로 작성한 서식 금지 규칙은 완화하세요." },
+  { title: "평가를 다시 돌리고 비용을 재확인", body: "거절, 폴백, 폴백 크레딧, 토크나이저는 바뀌지 않았으므로 눈에 보이는 차이는 실제 동작 변화입니다. 전후의 캐시 읽기 지출을 비교하세요. 줄지 않았다면 prefix가 안정적이지 않다는 뜻이고 2단계가 끝나지 않은 것입니다." },
+]} />
+
+## Mythos 5.1: 같은 모델, 다른 안전장치
+
+Anthropic은 Fable 5.1과 Mythos 5.1이 **안전장치 구성만 다른 동일한 기반 모델**이며 사양과 가격이 같다고 밝힙니다. Mythos 5.1은 Anthropic의 검증 프로그램을 통과한 조직에만 제공됩니다. 방어적 보안 작업을 위한 **Cyber Verification Program**과 생명과학 작업을 위한 Life Sciences Verification Program이 있습니다. 안전장치 측면에서 *모든 사용자*에게 바뀐 것이 두 가지 있습니다. Fable 5.1은 이제 방어 목적으로 소프트웨어 취약점을 식별할 수 있고(Anthropic은 세션당 사이버 안전장치 개입이 약 60% 줄었다고 보고), 침투 테스트, 익스플로잇 생성, 바이너리 취약점 스캔 같은 이중 용도 작업은 여전히 Opus 모델로 리디렉션됩니다. 또한 생물학 안전장치는 무해한 기초 생물학 및 의료 질문에서 약 85% 덜 발동합니다. Mythos 5.1은 thinking 블록의 대화 binding 검사도 건너뜁니다. 검증을 받지 않았다면 Anthropic의 안내는 간단합니다. Fable 5.1을 쓰세요.
+
+<VerifyNote lastVerified="2026-10-21" source="https://support.claude.com/en/articles/14604842">
+검증은 **초대가 아니라 신청**입니다. 이는 2026년 10월 6일에 바뀌었고, 이날 Project Glasswing이 Cyber Verification Program의 세 가지 티어로 재편되었습니다. **Defense Access**(조직 및 유료 플랜의 개인), **Red Team Access**(조직 전용), **Specialized Access**(조직 전용, 미국 정부와 협력하여 심사하며 기존 Glasswing 멤버가 옮겨 간 곳)입니다. 모든 티어가 Opus 5.5, Sonnet 5.5, Mythos 5.1을 제공합니다. `portal.anthropic.com/programs`의 Verification Portal에서 신청하세요. 결정은 보통 영업일 기준 7일 이내에 나옵니다. 자격은 방어가 실제 본업인지에 달려 있습니다. "Organizations whose main business falls outside that scope may not be eligible."
+</VerifyNote>
+
+이름에 주의하세요. [Fable 5 가이드](/docs/models/fable-5-mythos-5-flagship)는 Mythos 5를 "안전 분류기가 없는 Fable 5"로 설명했습니다. 5.1에 대한 Anthropic의 표현은 "다른 안전장치 구성"이며, Mythos 5.1은 여전히 Anthropic 자체 Claude Security 제품을 구동합니다. 필터가 없는 모델이 아니라 구성이 다르게 배포된 모델로 보세요.
+
+## 빠른 확인
+
+<Quiz questions={[
+  {
+    q: "Fable 5 연동을 claude-fable-5-1로 마이그레이션했더니 tool_choice type이 \"tool\"인 모든 요청이 실패합니다. 공식 해결책은 무엇인가요?",
+    options: [
+      "thinking-binding-controls 베타 헤더를 추가한다",
+      "tool_choice는 auto로 두고, 도구에 strict: true를 설정하고 additionalProperties: false를 넣고, 프롬프트에서 언제 호출할지 모델에 알려 준다(또는 구조화된 출력으로 전환한다)",
+      "강제 호출이 진행되도록 thinking을 disabled로 설정한다",
+      "effort: low로 다운그레이드한다"
+    ],
+    answer: 1,
+    explain: "Fable 5.1은 tool_choice any와 tool에 400을 반환합니다. 강제 호출은 항상 켜진 thinking을 건너뛰어 사고 과정을 인자 안으로 밀어 넣기 때문입니다. Anthropic의 해결책은 auto와 명시적 지시를 함께 쓰는 strict 도구 사용, 또는 구조화된 출력입니다. thinking을 끄는 것은 이 모델에서 그 자체로 400입니다."
+  },
+  {
+    q: "라우터가 비용 절감을 위해 대화를 Fable 5.1에서 Opus 5로 내립니다. Fable 5.1 thinking 블록은 어떻게 되나요?",
+    options: [
+      "Opus 5가 정상적으로 읽는다",
+      "요청이 400으로 실패한다",
+      "API가 Opus 5가 보기 전에 제거한다. thinking-binding-controls-2026-08-01 헤더를 보내지 않으면 조용히 제거되고, 보내면 input_transformations에 보고된다",
+      "텍스트 블록으로 변환된다"
+    ],
+    answer: 2,
+    explain: "보존은 단방향입니다. Fable 5.1은 이전 모델의 thinking을 읽지만, 이전 모델은 Fable 5.1의 thinking을 읽지 못합니다. 읽을 수 없는 블록은 과금 없이 제거되며, 기본적으로 조용히 제거되고 베타 헤더가 있으면 input_transformations에 보고됩니다."
+  },
+  {
+    q: "에이전트 루프가 매 요청마다 이전 사용자 턴에 한 줄짜리 상태 리마인더를 주입하고 다음 요청에서 제거합니다. 신규 API 계정에서는 이제 오류가 납니다. 무엇으로 대체하나요?",
+    options: [
+      "clear_at: \"next_user_message\"가 있는 턴 범위 시스템 메시지(베타 헤더 mid-conversation-system-clear-at-2026-08-21)",
+      "요청마다 시스템 프롬프트를 다시 구성",
+      "리마인더를 tool_choice에 넣기",
+      "Mythos 5.1로 전환"
+    ],
+    answer: 0,
+    explain: "Fable 5.1 thinking 블록보다 앞의 내용을 편집하면 이후 블록이 무효화됩니다. 턴 범위 시스템 메시지는 한 턴 동안 시스템 권한을 가지고, 히스토리에 그대로 남으며, 지워지면 입력 토큰이 들지 않고, 캐시와 thinking 블록을 모두 유효하게 유지합니다."
+  },
+  {
+    q: "Fable 5.1은 Fable 5의 정가 $10 / $50을 유지합니다. Anthropic의 '에이전트 비중이 큰 작업에서 최대 45% 저렴'이라는 주장은 어디서 나오나요?",
+    options: [
+      "배치 할인을 75%로 확대",
+      "캐시 읽기가 MTok당 $1.00에서 $0.25로 하락(기본 입력의 0.1배가 아니라 0.025배), 그리고 작업당 토큰 감소",
+      "더 작은 토크나이저",
+      "무료 thinking 토큰"
+    ],
+    answer: 1,
+    explain: "바뀐 가격 행은 캐시 읽기뿐이며, Fable 5 요율의 4분의 1이 되었습니다. 캐시된 prefix를 매 턴 다시 읽는 긴 루프에서 이 효과가 누적됩니다. Anthropic의 고객들도 작업당 토큰이 줄었다고 보고합니다."
+  }
+]} />
+
+## 핵심 정리
+
+<Callout type="takeaways" items={[
+  "Fable 5.1은 tool_choice를 강제하지 않고, 대화 히스토리를 편집하지 않고, thinking 블록을 이전 모델로 라우팅하지 않는 경우에만 Fable 5의 드롭인 대체입니다. ID를 바꾸기 전에 세 가지를 모두 grep하세요.",
+  "대화를 추가 전용으로 다루세요. 턴별 리마인더는 턴 범위 시스템 메시지, 지시와 도구 변경은 대화 중간 메시지, 히스토리 정리는 서버 측 컴팩션입니다. thinking 블록도 유효하게 유지하고 캐시도 따뜻하게 유지합니다.",
+  "가격 이야기의 핵심은 정가가 아니라 저렴한 캐시 읽기입니다. 긴 에이전트 루프는 저렴해지지만 짧은 채팅은 그렇지 않습니다. 현재의 Opus(2026년 9월 22일부터 Opus 5.5)가 여전히 Anthropic 자체의 '여기서 시작'이며, Fable 5.1 요금의 일부 수준입니다. 현재 수치: /docs/whats-new/models-and-pricing.",
+  "병렬 도구 호출 감소, 설명 감소, 더 조밀한 문장, 파일 전체 재작성을 예상하세요. 각각 한 줄 프롬프트로 해결할 수 있고, thinking.display: \"updates\"가 눈에 보이는 진행 상황을 되살려 줍니다.",
+  "Priority Tier와 ZDR은 Fable 5에 머물거나 대신 Opus 모델을 쓰는 2가지 계약상의 이유입니다.",
+]} />
+
+## 다음
+
+- [Claude Fable 5 & Mythos 5: 플래그십 가이드](/docs/models/fable-5-mythos-5-flagship) — 그대로 이어지는 거절 / 폴백 연동
+- [대화 중간 시스템 메시지](/docs/api/mid-conversation-system-messages) — 이번 릴리스가 전제로 하는 추가 전용 도구 모음
+- [GPT-6 Astra: Claude 사용자를 위한 가이드](/docs/models/openai-astra-preview) — 사흘 뒤 같은 정가로 출시된 경쟁 모델

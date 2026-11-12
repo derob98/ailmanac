@@ -1,0 +1,56 @@
+# Vision, PDF & File Input
+
+> Source: https://derob98.github.io/ailmanac/docs/api/vision-pdf-files · AILmanac (CC BY 4.0) · last verified 2026-07-23
+
+Send images and documents, and reuse uploads by file_id.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-07-23" source="https://platform.claude.com/docs/en/build-with-claude/vision">
+Supported file types, size limits, and the Files API surface change — confirm in the official vision/PDF docs.
+</VerifyNote>
+
+<Callout type="objectives" items={["Why Claude is multimodal: images and documents in one message", "The three ways to send a file: Base64, URL, and the Files API", "When to reuse an upload by file_id to save cost and time", "What vision is great for — extraction, visual understanding, document Q&A", "How to use it safely: resolution limits and verifying critical numbers"]} />
+
+Claude is **multimodal**: you can include **images and documents** (like PDFs) in a message and ask questions about them — extract data, describe a chart, summarize a contract, read a screenshot.
+
+## Three ways to send a file
+
+<Steps items={[{title: "Base64", body: "Encode the bytes inline in the request. Simplest for one-offs."}, {title: "URL", body: "Point to a hosted file."}, {title: "Files API", body: "Upload once, then reference it by file_id across many requests (avoids re-uploading large files)."}]} />
+
+Here is what an image content block looks like alongside a text question:
+
+```python
+# Conceptual: an image content block alongside text (see docs for exact fields)
+messages=[{
+  "role": "user",
+  "content": [
+    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+    {"type": "text", "text": "What does this chart show? Give the top 3 takeaways."},
+  ],
+}]
+```
+
+PDFs work similarly (a document content block); Claude can read text and visual layout, and you can request **citations** back to where in the document an answer came from.
+
+## What it's great for
+
+<Callout type="tip" items={["Extraction — pull structured data from invoices, forms, tables (pair with Structured Output: /docs/api/structured-output).", "Understanding visuals — charts, diagrams, screenshots, UI.", "Document Q&A — ask questions across a long PDF with citations."]} />
+
+A quick copy-paste starter for document Q&A:
+
+<PromptCard title="Document Q&A prompt">{`What does this chart show? Give the top 3 takeaways.`}</PromptCard>
+
+## Tips
+
+<Callout type="takeaways" items={["Reuse with file_id when sending the same big document repeatedly — cheaper and faster.", "Resolution/size matter — very large images may be downscaled; check limits.", "Verify extracted numbers — vision is strong but not infallible; spot-check critical figures."]} />
+
+<Callout type="warning" items={["Vision is strong but not infallible — always spot-check critical figures. See Hallucinations: /docs/foundations/hallucinations."]} />
+
+<Quiz title="Check yourself" questions={[{q: "Which method lets you upload a file once and reference it across many requests by file_id?", options: ["Base64", "URL", "Files API"], answer: 2, explain: "The Files API uploads once and is referenced by file_id, avoiding re-uploading large files repeatedly."}, {q: "What can you request back from Claude when doing document Q&A on a PDF?", options: ["Citations to where in the document an answer came from", "A re-rendered copy of the PDF", "The raw base64 of the file"], answer: 0, explain: "Claude reads text and visual layout, and you can request citations pointing back to where an answer came from."}, {q: "Why should you spot-check critical extracted numbers?", options: ["Vision always fails on numbers", "Vision is strong but not infallible", "Numbers cost extra tokens"], answer: 1, explain: "Vision is strong but not infallible — verify critical figures rather than trusting them blindly."}]} />
+
+## Next
+
+- [Structured Output](/docs/api/structured-output)
+- [Generating Real Files (docx/pptx/xlsx/pdf)](/docs/claude-app/generating-files)
+- [Tokens & Pricing](/docs/api/tokens-and-pricing) — images cost tokens too

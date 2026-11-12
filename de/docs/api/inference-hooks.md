@@ -1,0 +1,454 @@
+# Inference Hooks: Inline-DLP für Claude Enterprise
+
+> Source: https://derob98.github.io/ailmanac/de/docs/api/inference-hooks · AILmanac (CC BY 4.0) · last verified 2026-11-09
+
+Der Betreiberleitfaden zu Claude Enterprise Inference Hooks, jetzt GA – der HTTPS-Webhook, mit dem Ihr DLP-Server jeden Prompt UND jeden Tool-Aufruf in Chat, Claude Code, Cowork, M365 und Chrome zulassen oder ablehnen kann, bevor das Modell handelt. Vollständige Spezifikation, Verdict-Schema, Signierung, Rollout-Playbook.
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={[
+  "Was Inference Hooks wirklich sind – ein HTTPS-POST von Anthropic an einen Server, den Sie selbst betreiben, kein WebSocket und kein On-Device-Agent",
+  "Die ZWEI Hook-Ereignisse, jetzt da Hooks GA sind: ein Prompt-Hook vor der Inferenz und ein Pre-Tool-Call-Hook, bevor ein Tool einer Antwort ausgeführt wird",
+  "Warum ein einziges tool_call-Verdict JEDEN Tool-Aufruf in dieser Antwort abdeckt – Sie können nicht einige zulassen und andere ablehnen",
+  "Das Schema des Prompt-Frames – genau das, was Ihr AI-Security-Server sieht (und was er nie sieht: System-Prompts, verborgene Reasoning-Ketten, Rohbytes)",
+  "Das Verdict-JSON: allow, deny mit deny_reason – und warum es heute bewusst keine redact-Aktion gibt",
+  "Das Signaturmodell – Standard Webhooks HMAC-SHA256, die zwei Verifikationsbugs, die bei jeder ersten Integration zuschlagen, und das whsec_-Secret-Format",
+  "Die drei operativen Stellschrauben, die darüber entscheiden, ob Nutzer blockiert werden oder das Modell ungeprüften Traffic bekommt: Verdict-Timeout, Fehlerbehandlung und Circuit Breaker",
+  "Ein Rollout-Playbook, das am ersten Tag nicht explodiert – Shadow Mode → Prozent-Rollout → Rollen-Ausschlüsse → Enforce, in dieser Reihenfolge",
+]} />
+
+<VerifyNote lastVerified="2026-11-09" source="https://platform.claude.com/docs/en/manage-claude/inference-hooks">
+**Inference Hooks sind jetzt allgemein verfügbar.** Anthropics Plattform-Release-Notes verzeichnen das Ende der Beta am **20. Oktober 2026**, und die Claude-Enterprise-Sicherheitsankündigung vom **5. November 2026** bestätigt *beide* Hook-Arten – Prompt-Hooks und Pre-Tool-Call-Hooks – als GA. Sie sind **nur für Claude-Enterprise-Organisationen** verfügbar; für die Konfiguration ist die Berechtigung `organization:manage` nötig, die nur Owner und Primary Owner haben. Weiterhin außerhalb des Umfangs: **Claude-Platform-(API-)Organisationen**, **Amazon Bedrock** und **Google Cloud**. Der Voice Mode wird jetzt *teilweise* abgedeckt – siehe Coverage-Matrix, und behandeln Sie Hooks nicht als Ihre einzige Kontrolle für Sprache. Kanonische Spezifikation: [Inference hooks](https://platform.claude.com/docs/en/manage-claude/inference-hooks) · [Configure](https://platform.claude.com/docs/en/manage-claude/inference-hooks-configuration) · [Endpoint reference](https://platform.claude.com/docs/en/manage-claude/inference-hooks-endpoint).
+</VerifyNote>
+
+Am 5. August 2026 als Beta angekündigt und **seit Oktober 2026 allgemein verfügbar**, sind **Inference Hooks** Anthropics erste Firstparty-Antwort auf die Frage, die sich jedes Security-Team nach dem Rollout eines Claude-Enterprise-Platzes stellt: *Wie verhindere ich, dass ein Prompt mit regulierten Daten jemals das Modell erreicht?* Die Antwort war bisher ein Unternehmens-Proxy, der den TLS-Verkehr zu `claude.ai` abfing – brüchig, unvollständig und blind für die Claude-Code-CLI. Inference Hooks verlegen den Durchsetzungspunkt in Anthropics Perimeter: Für jeden regulierten Prompt hält Anthropic die Inferenz an, sendet das Transkript per POST an einen Server, den Ihre Organisation betreibt, und wartet auf ein `allow` oder `deny`, bevor das Modell irgendetwas sieht.
+
+Mit GA kam die Änderung, die für agentische Arbeit am wichtigsten ist: ein **zweites Hook-Ereignis**, das bei Tool-Aufrufen auslöst – *nachdem* das Modell beschlossen hat zu handeln, aber *bevor* irgendetwas ausgeführt wird.
+
+## Die Ein-Absatz-Version
+
+Ihre Organisation stellt einen HTTPS-Endpunkt bereit. Anthropic sendet ihm jeden regulierten Prompt – und, wenn Sie **Validate tool calls** aktivieren, jeden Tool-Call-Batch – als signierten `POST` (Standard Webhooks HMAC-SHA256). Ihr Server gibt `{"action": "allow"}` zurück, und die Inferenz läuft weiter, oder `{"action": "deny", "deny_reason": "..."}`, und der Nutzer sieht den Grund und erreicht das Modell nie. Eine Konfiguration deckt jedes Claude-Produkt der Organisation ab: Chat, Claude Code, Cowork, Claude for Microsoft 365, Claude Tag, Claude in Chrome. Wenn Ihr Server in ein Timeout läuft oder 500 zurückgibt, entscheidet Ihre **Failure-Handling**-Einstellung, ob die Anfrage blockiert oder ungeprüft weiterläuft. Rollen Sie schrittweise aus – mit Shadow Mode + prozentualem Rollout + Rollenausschlüssen –, bevor Sie **Enforce verdicts** einschalten.
+
+## Die zwei Hook-Ereignisse
+
+<Steps items={[
+  {title: "Prompt-Hook – type: \"prompt\"", body: "Löst einmal pro regulierter Inferenzanfrage aus, bevor die Inferenz beginnt. Das Verdict deckt das gesamte Transkript ab. Dieses Ereignis gab es in der Beta, und mit ihm beginnen die meisten Integrationen."},
+  {title: "Pre-Tool-Call-Hook – type: \"tool_call\"", body: "Löst aus, wenn Claudes Antwort Tool-Aufrufe enthält, bevor IRGENDEINER davon ausgeführt wird. Löst nur in Organisationen aus, in denen die Einstellung Validate tool calls aktiv ist – sie ist nicht schon durch das Aktivieren von Hooks impliziert."},
+  {title: "Die Einschränkung, die Ihre Regeln formt", body: "Ein tool_call-Verdict gilt für JEDEN Tool-Aufruf in dieser Antwort. Anthropic ist da eindeutig: Sie können nicht einige Tool-Aufrufe zulassen und andere ablehnen. Ihre Regel muss ein Urteil über den Batch sein – ist irgendein Aufruf darin inakzeptabel, lehnen Sie die gesamte Antwort ab."},
+  {title: "Tool-Ergebnisse kommen über den PROMPT-Hook zurück", body: "Es gibt kein separates Tool-Ergebnis-Ereignis. Ergebnisse treffen als tool_result-Blöcke im nächsten Prompt-Frame ein, sodass exfiltrationsartige Inhalte, die aus einem Tool zurückkommen, im folgenden Zug erfasst werden, nicht beim Aufruf."}
+]} />
+
+Bei einem `tool_call`-Frame trägt jeder `tool_use`-Block außerdem ein `tool_info`-Objekt, dessen Kind verrät, woher das Tool stammt: `platform`, `application`, `third_party` oder `client`. Das ist das Feld, an dem Sie Ihre Richtlinie verzweigen sollten – ein `third_party`-MCP-Tool und ein Firstparty-Plattform-Tool verdienen sehr unterschiedliche Prüfung. Warum, lesen Sie unter [MCP-Tool-Poisoning und Rug Pulls](/docs/security/mcp-tool-poisoning-and-rug-pulls).
+
+Tool-Aufrufe über Skills, Plugins, verbundene Tools, lokale MCP-Server und Code, der im Code-Execution-Tool läuft, liegen alle im Umfang.
+
+<Callout type="warning" items={[
+  "Eine Handvoll interner claude.ai-Tool-Aufrufe kann in tool_call-Ereignissen fehlen – das Auflisten von Konnektoren oder Skills, ein Websuche-Vorschlag, ein Modellwechsel, das Lesen der lokalen Uhrzeit, das Lesen früherer Chats und des Gedächtnisses. Sie tauchen als tool_use-Blöcke im NÄCHSTEN Prompt-Frame wieder auf, Sie sehen sie also trotzdem; Sie können sie nur nicht zum Aufrufzeitpunkt blockieren.",
+  "Von Anthropic betriebene Funktionen, die eigene Modellaufrufe machen, werden gar nicht reguliert: Claude-Security-Scans (Beta), Code Review (Research Preview) und Smart Reports. Gehen Sie nicht davon aus, dass organisationsweite Prüfung buchstäblich jede Inferenz in Ihrem Tenant erfasst."
+]} />
+
+## Inference Hooks vs. die Compliance API
+
+Beide existieren für dasselbe Publikum – Security-, Legal- und Compliance-Teams von Claude Enterprise – arbeiten aber an entgegengesetzten Enden des Request-Lebenszyklus.
+
+|                | Inference Hooks                                             | [Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api) |
+| -------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **Wann**       | Inline, bevor die Inferenz läuft                            | Nach dem Ereignis                                                                  |
+| **Was sie tut** | Erlaubt oder verweigert jeden regulierten Request in Echtzeit | Ruft Aktivitäten, Chats, Dateien, Projekte, Nutzer für Audit und Export ab       |
+| **Richtung**   | Anthropic → Ihr Server                                      | Sie → Anthropic                                                                    |
+| **Wozu nutzen** | Ein Leck stoppen                                           | Beweisen, was passiert ist                                                         |
+
+Die meisten Unternehmen werden beides betreiben. Hooks sind der Drahtauslöser; die Compliance API ist das Audit-Log.
+
+## Wie der Verdict-Round-Trip funktioniert
+
+<Steps items={[
+  {title: "Nutzer sendet einen Prompt auf einer regulierten Oberfläche ab", body: "Ein Hook reguliert jedes Claude-Produkt der Organisation – claude.ai-Chat, Claude Code (Web, Desktop, CLI), Cowork, Claude for Microsoft 365, Claude Tag, Claude in Chrome – über Web, Desktop, Mobile, CLI und Slack hinweg. Nebenanfragen wie die Generierung von Konversationstiteln werden NICHT gesendet."},
+  {title: "Anthropic pausiert die Inferenz und POSTet das Transkript an Ihren Endpunkt", body: "Ein HTTPS-POST an die vom Admin konfigurierte URL. Header umfassen Content-Type: application/json, User-Agent: anthropic-dlp/1 und die drei Standard-Webhooks-Signatur-Header (webhook-id, webhook-timestamp, webhook-signature)."},
+  {title: "Ihr AI-Security-Server verifiziert die Signatur und bewertet das Transkript", body: "Berechnen Sie HMAC-SHA256 über `{webhook-id}.{webhook-timestamp}.{raw body bytes}` mit dem base64-dekodierten whsec_-Secret. Lehnen Sie alles ab, was mehr als 5 Minuten von Ihrer Uhr abweicht oder keine passende Signatur hat."},
+  {title: "Ihr Server antwortet mit einem JSON-Verdict und HTTP 200", body: "Entweder {\"action\": \"allow\"} oder {\"action\": \"deny\", \"deny_reason\": \"...\"}. Anthropic liest höchstens 64 KiB des Response-Bodys und folgt KEINEN Redirects."},
+  {title: "Anthropic setzt das Verdict durch", body: "Bei allow läuft die Inferenz normal weiter. Bei deny sieht der Nutzer Ihre deny_reason, gefolgt von der vom Admin konfigurierten Standardnachricht; das Modell sieht den Prompt nie. Jede Ablehnung wird im Activity Feed der Organisation protokolliert."},
+]} />
+
+Der ganze Sinn des Betriebs auf Anthropics Servern statt auf Nutzergeräten ist *Einheitlichkeit*: eine Konfiguration, ein Server, und jeder regulierte Request auf jeder Oberfläche wird gleich geprüft. Nichts wird auf Mitarbeiter-Laptops installiert, keine pro-App-Integration muss synchron gehalten werden.
+
+## Der Prompt-Frame
+
+Jeder Request ist ein JSON-Body mit diesen Top-Level-Feldern:
+
+| Feld         | Typ           | Beschreibung                                                                                                                                                                                                                             |
+| ------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`       | string        | `"prompt"` oder `"tool_call"` – siehe [die zwei Hook-Ereignisse](#die-zwei-hook-ereignisse). Weiterhin ein offenes Enum: Geben Sie bei unbekannten Werten `allow` zurück, damit Sie den Circuit Breaker nicht auslösen.                                                                                                      |
+| `request_id` | string        | Opaker Bezeichner pro Inferenzaufruf. Entspricht dem `webhook-id`-Header – als Idempotenzschlüssel verwenden.                                                                                                                             |
+| `tenant_id`  | string \| null | Opaker Bezeichner der Organisation.                                                                                                                                                                                                     |
+| `actor`      | object        | Diskriminiert über `type` (`"user"` ist heute der einzige Wert). Trägt eine getaggte `id`, die über die Requests eines Nutzers stabil ist, und `email_address` sofern verfügbar. Beide Felder können null sein.                          |
+| `source`     | object        | `{"application": "..."}`. Bekannte Werte: `claude-ai`, `claude-code`, `cowork`, `config-test` (vom Admin-Button „Test connection“ verwendet). Offenes Enum – neue Werte werden auftauchen.                                                                       |
+| `session_id` | string \| null | Opaker Konversations-Identifier. Nicht parsen. Best-Effort bei Claude Code.                                                                                                                                                             |
+| `model`      | string \| null | Öffentlicher Modellbezeichner für diesen Request, sofern verfügbar.                                                                                                                                                                     |
+| `messages`   | array         | Das Konversations-Transkript bis zum Zeitpunkt der Inferenz – siehe [Content-Blöcke](#content-blocks).                                                                                                                                    |
+| `metadata`   | object        | Reservierte Extension-Map. Heute leer. Unbekannte Keys tolerieren.                                                                                                                                                                        |
+
+Ein minimaler Live-Request sieht so aus:
+
+```json
+{
+  "type": "prompt",
+  "request_id": "req_abc123",
+  "tenant_id": "11111111-1111-1111-1111-111111111111",
+  "actor": {
+    "type": "user",
+    "id": "user_01AbCdEfGhIjKlMnOpQrStUv",
+    "email_address": "alice@example.com"
+  },
+  "source": { "application": "claude-ai" },
+  "session_id": "22222222-2222-2222-2222-222222222222",
+  "model": "claude-sonnet-5",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "Summarize the attached report." },
+        {
+          "type": "attachment",
+          "file_name": "q2-report.pdf",
+          "media_type": "application/pdf",
+          "size_bytes": 48213,
+          "text": "Q2 revenue grew 14% quarter over quarter..."
+        }
+      ]
+    }
+  ],
+  "metadata": {}
+}
+```
+
+### Content blocks
+
+Jeder `messages[].content[]`-Eintrag hat einen `type` und folgt dem öffentlichen Content-Modell der Messages API. Tool-Ergebnisse erscheinen unter der Rolle `user`.
+
+| Block-`type`  | Felder                                                                                                                                             |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `text`        | `text`                                                                                                                                             |
+| `tool_use`    | `id`, `tool_name`, `input`                                                                                                                         |
+| `tool_result` | `content` (Text, mit Zeilenumbrüchen zusammengefügt; Binärteile sind Platzhalter-Marker), `is_error`, `tool_name`, `tool_use_id`                   |
+| `attachment`  | `file_name`, `media_type`, `size_bytes`, `text` (extrahierter Text, Transkript oder Link-Metadaten)                                                |
+
+### Was das Transkript nie enthält
+
+Das ist der Teil, der Datenschutzprüfungen stolpern lässt.
+
+- **Keine System-Prompts.** Weder Anthropics, noch Ihre (via Projekte/Skills), noch die Konstitution des Modells – nichts davon wird gesendet.
+- **Kein verborgenes Reasoning.** Claudes Extended-Thinking-Kette gehört nicht zum Transkript, das Ihr Server sieht.
+- **Keine Tool-Definitionen.** Nur die Aufrufe und ihre Ergebnisse.
+- **Keine Rohbytes.** Dateien und Bilder werden durch Metadaten und extrahierten Text repräsentiert. Reiner Bildinhalt (ein Screenshot eines Dokuments) wird nicht geprüft.
+- **Kein Anthropic-interner Kontext** oder Vertrauensgrenzen.
+
+Das Transkript ist die Konversation *so, wie der Endnutzer sie sieht*, plus Tool-Spuren. Ein Block oder Turn, dessen Inhalte alle ausgeschlossen sind, wird komplett verworfen – **gehen Sie beim Parsen nicht von strikter User/Assistant-Abwechslung aus**.
+
+### Ein Größen-Gotcha
+
+Transkripte werden **ungekürzt** gesendet. Das Protokoll selbst erlaubt bis zu **64 MiB**; Anthropics Hinweis lautet, dass das Kontextfenster des Modells reale Bodys in der Praxis **unter etwa 10 MB** hält. Dimensionieren Sie Ihre Limits nach der praktischen Zahl und Ihre Fehlerbehandlung nach der des Protokolls.
+
+Übliche Defaults sind viel kleiner – nginx `client_max_body_size` liegt bei **1 MB**, Express `express.json()` bei **100 kB**, die meisten PaaS-Reverse-Proxys deckeln bei wenigen MB. Ein Body, den Ihr Server ablehnt, ist ein Webhook-Fehler, was unter der Failure-Handling-Einstellung **Allow the request** bedeutet, dass der übergroße Prompt das Modell **ungeprüft** erreicht. Erhöhen Sie Ihre Body-Limits, bevor Sie durchsetzen.
+
+## Das Verdict-Schema
+
+Antworten Sie mit HTTP 200 für beide Ausgänge. Das Feld `action` diskriminiert.
+
+Allow:
+
+```json
+{ "action": "allow" }
+```
+
+Deny:
+
+```json
+{
+  "action": "deny",
+  "deny_reason": "This prompt appears to contain customer payment card data, which your organization's policy does not allow.",
+  "reference_id": "scan_01HXPT4R9V"
+}
+```
+
+| Feld           | Typ & Limit                                                     | Semantik                                                                                                                                                                                                                                     |
+| -------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `action`       | `"allow"` oder `"deny"`; erforderlich                           | `allow` lässt die Inferenz weiterlaufen. `deny` weist den Request zurück.                                                                                                                                                                     |
+| `deny_reason`  | string oder null; **höchstens 500 Zeichen, längere gekürzt**    | Wird dem Endnutzer gezeigt, angehängt an die vom Admin konfigurierte Standardnachricht. Schreiben Sie für den Nutzer – sagen Sie ihm, was er ändern soll, nicht wie Ihre Scanner-Regel hieß.                                                  |
+| `reference_id` | string oder null; **höchstens 50 Zeichen aus `[A-Za-z0-9._:/-]`** | Ihr eigener Bezeichner für diese Auswertung. Wird am Activity-Feed-Eintrag `inference_hooks_request_denied` der Ablehnung protokolliert, dem Endnutzer nie gezeigt. Halten Sie ihn opak – kein Request-Inhalt, keine personenbezogenen Daten. |
+
+### Warum es keine redact-Aktion gibt
+
+Das Verdict ist bewusst binär. Anthropic hätte `{"action": "redact", "rewritten_prompt": "..."}` hinzufügen können und Ihren DLP-Server das Transkript im Flug bereinigen lassen – aber dann würde Anthropic auf Autorität Ihrer Organisation schicken, was auch immer Ihre Box zurückgibt. Das Design hält diese Vertrauensgrenze scharf: Ihr Server *bewertet* Inhalt, er *verfasst* ihn nicht. Wenn Sie Redaction brauchen, machen Sie sie im Client, bevor der Nutzer auf Senden drückt.
+
+### Ein deny wird nie wegen Formatierung verworfen
+
+Eine übergroße `deny_reason` wird gekürzt; eine fehlerhafte `reference_id` wird stillschweigend verworfen; die `action` wird trotzdem umgesetzt. Umgekehrt gilt das nicht: Alles außer HTTP 200 mit parsebarem Verdict ist ein **Webhook-Fehler**, kein Deny. Wenn Sie Blocks mit `HTTP 403` signalisieren, werden Ihre Denies stillschweigend zu Fail-Open-Allows (oder Blocks, je nach Fehlerbehandlung) und jeder einzelne zählt gegen den Circuit Breaker.
+
+## Der kleinste funktionierende Server
+
+<PromptCard title="Allow-all-AI-Security-Server in 12 Zeilen Python">
+{`# Run with: python server.py — expose on an https:// URL your admin configures.
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+class VerdictHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # keep the connection open between verdicts
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        verdict = b'{"action": "allow"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(verdict)))
+        self.end_headers()
+        self.wfile.write(verdict)
+
+ThreadingHTTPServer(("", 8000), VerdictHandler).serve_forever()`}
+</PromptCard>
+
+Stellen Sie das hinter einen TLS-terminierenden Reverse-Proxy auf Port 443, konfigurieren Sie es als Ihren Endpunkt und drücken Sie in der Admin-Konsole **Verbindung testen** – Sie sehen das Allow-Verdict. Das ist genau die Form einer archivierungs-only Integration: Bedingungslos `allow` zurückgeben und den Frame nach der Antwort persistieren, als Push-Alternative zum Polling der Compliance API. Es ist **keine** Form, mit der Sie erzwingen sollten – sie akzeptiert jeden Request, auch unsignierte. Fügen Sie Signaturverifikation hinzu, bevor Sie **Verdicts erzwingen** aktivieren.
+
+## Signaturverifikation
+
+Die Signierung folgt der [Standard-Webhooks](https://www.standardwebhooks.com/)-Spezifikation. Drei Header, kleingeschrieben wie Anthropic sie sendet, aber Case-insensitiv beim Lookup (Proxies ändern die Schreibweise).
+
+| Header              | Inhalt                                                                                                                                                                                                                         |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `webhook-id`        | Eindeutig pro Zustellung. Entspricht der `request_id` im Body. Als Idempotenzschlüssel verwenden.                                                                                                                              |
+| `webhook-timestamp` | Unix-Zeit in Sekunden als dezimaler String. Ablehnen, wenn mehr als **5 Minuten** in eine Richtung von Ihrer Uhr abweichend – das ist das Replay-Fenster.                                                                       |
+| `webhook-signature` | Leerzeichen-getrennte `v1,<base64>`-Werte. Jeder ist ein HMAC-SHA256 über den Byte-String `{webhook-id}.{webhook-timestamp}.{raw body bytes}`. Akzeptieren Sie den Request, wenn ein Wert passt – konstantzeitigen Vergleich nutzen. |
+
+### Die zwei Bugs, die bei jeder ersten Integration zuschlagen
+
+<Callout type="warning" items={[
+  "Verifizieren Sie die ROHEN Bytes, NICHT neu kodiertes JSON. Berechnen Sie den HMAC über den Body exakt wie empfangen, vor jedem Parsen oder Re-Serialisieren. Ein json.loads() → json.dumps()-Roundtrip verändert Whitespace und stirbt hier.",
+  "Dekodieren Sie das Secret mit einem STANDARD-base64-Decoder, nicht mit einem URL-safe. Das Signing-Secret ist der Wert nach dem Präfix whsec_, kodiert mit dem Standard-Alphabet (+ und /). Ein URL-safe-Decoder leitet die falschen Key-Bytes ab, sobald das Secret + oder / enthält, was meistens der Fall ist – und der Fehler ist ein stiller Konstantzeit-Mismatch."
+]} />
+
+Referenz-Python-Implementierung (aus Anthropics Docs komprimiert):
+
+```python
+import base64, hashlib, hmac, time
+
+TOLERANCE_SECONDS = 300
+
+def verify(secret: str, headers: dict[str, str], body: bytes) -> bool:
+    h = {k.lower(): v for k, v in headers.items()}
+    try:
+        msg_id, ts, sigs = h["webhook-id"], h["webhook-timestamp"], h["webhook-signature"]
+    except KeyError:
+        return False  # unsigned, not from Anthropic
+    try:
+        signed_at = int(ts)
+    except ValueError:
+        return False
+    if abs(time.time() - signed_at) > TOLERANCE_SECONDS:
+        return False  # replayed, or clocks disagree
+    try:
+        key = base64.b64decode(secret.removeprefix("whsec_"), validate=True)
+    except ValueError:
+        return False  # misconfigured secret
+    payload = f"{msg_id}.{ts}.".encode() + body
+    expected = b"v1," + base64.b64encode(hmac.new(key, payload, hashlib.sha256).digest())
+    return any(hmac.compare_digest(expected, s.encode()) for s in sigs.split())
+```
+
+### Secret-Rotation
+
+Rotation ist auf Admin-Seite ein sofortiger Cutover, **aber Requests, die mit dem vorherigen Secret signiert wurden, können noch ungefähr eine Minute danach eintreffen**, plus alles, was schon in Flight ist. Sorgen Sie dafür, dass Ihr Server während des Rotationsfensters Signaturen von altem und neuem Secret akzeptiert, damit diese Nachzügler nicht als unsigniert abgelehnt werden.
+
+### Einmalige Ausnahme
+
+Ein Verbindungstest, der **vor dem ersten Speichern Ihrer Organisation** gesendet wird, kommt unsigniert an, weil das Signing-Secret noch nicht existiert. Akzeptieren Sie unsignierte Requests, bis Ihr Admin bestätigt, dass das Secret existiert – danach ablehnen.
+
+## Operative Semantik
+
+### Timeout
+
+Ihr Admin setzt ein Verdict-Timeout zwischen **1 und 10.000 ms**, Default **5.000 ms**. Dieses Budget deckt den kompletten Round-Trip ab: Verbindung, TLS-Handshake, Upload des Request-Bodys, Download des Response-Bodys.
+
+### Retry
+
+Anthropic wiederholt **genau einmal, nach 100 ms Verzögerung, und nur wenn der Verbindungsversuch scheitert**. Nicht bei 500ern. Nicht bei Timeouts. Nicht bei Parse-Fehlern. Sobald Ihr Server geantwortet hat – mit irgendetwas – ist der Austausch beendet. Der Retry teilt sich dasselbe Timeout-Budget und trägt dieselbe `webhook-id` und Signatur, es ist also sicher, Deduplication per `webhook-id` zu keyen.
+
+### Fehlerbehandlung
+
+Alles andere, was keine saubere 200-mit-Verdict-Antwort ist, ist ein **Webhook-Fehler**: Timeouts, Non-200-Status (Redirects inklusive), nicht parsbare oder übergroße Response-Bodies, nicht erreichbare Endpunkte. Bei einem Fehler entscheidet die Einstellung Ihrer Organisation:
+
+- **Request blockieren.** Sicherer Default für hochregulierte Umgebungen. Wenn Ihr DLP-Server ausfällt, werden Nutzer blockiert. Verfügbarkeit von Claude wird zur Verfügbarkeit Ihres Scanners.
+- **Request erlauben.** Nutzer arbeiten weiter, während Ihr Server sich erholt. Prompts fließen während des Ausfalls ungeprüft – ein akzeptierter Tradeoff für viele Organisationen, aber planen Sie, wie Sie die Lücke in Ihrer Audit-Spur nachbereiten.
+
+### Circuit Breaker
+
+Anhaltende Webhook-Fehler, die Ihrem AI-Security-Server zurechenbar sind, **lösen einen Circuit Breaker aus**, der die Durchsetzung stoppt: Anthropic ruft Ihren Server nicht mehr auf, und die Failure-Handling-Einstellung gilt für jede Anfrage.
+
+**Die Wiederherstellung erfolgt automatisch.** Anthropics aktuelle Dokumentation besagt, dass der Breaker **zurückgesetzt wird, sobald wieder gültige Verdicts eintreffen** – Sie müssen **Enforce verdicts** nicht mehr von Hand umschalten, wie in der Beta. Das ist eine echte Verbesserung mit einer unangenehmen Folge: Ein *zeitweise* defekter Server kann in die Durchsetzung hinein- und wieder herausfallen, ohne dass jemand ein Ticket anlegt. Bauen Sie Ihr Alerting auf Breaker-Auslösungen auf, die im Activity Feed verzeichnet werden, nicht auf Nutzerbeschwerden – bis ein Nutzer es bemerkt, ist der Breaker womöglich schon zurückgesetzt und hat das Symptom gelöscht.
+
+In der Praxis bedeutet der Breaker auch: **Ein unbekannter Top-Level-`type` sollte `{"action": "allow"}` zurückgeben, nicht HTTP 500** – ein künftiger neuer Ereignistyp würde Sie sonst am Rollout-Tag in Circuit-Breaker-Gebiet bringen. Das mit GA eingetroffene `tool_call`-Ereignis ist genau das Szenario, für das diese Regel geschrieben wurde.
+
+### Latenz
+
+Jeder regulierte Request in Ihrer Organisation zahlt den Round-Trip Ihres AI-Security-Servers als zusätzliche Latenz. Load-testen Sie, bevor Sie an eine große Organisation ausrollen; ein 4-Sekunden-Scanner ist bei einem Chat-Prompt unsichtbar, aber ein Albtraum bei Claude-Code-Tool-Loops, die viele Requests hintereinander abfeuern.
+
+### Source-IP-Allowlisting
+
+Requests stammen aus `160.79.106.0/24`, Teil von Anthropics veröffentlichten [Outbound-IP-Ranges](https://platform.claude.com/docs/en/api/ip-addresses). Erlauben Sie diesen Block, **nicht** die Inbound-Ranges auf derselben Seite – unterschiedliche Listen. Und Allowlisting ist kein Ersatz für Signaturverifikation: Der Block trägt Anthropic-Egress über Inference Hooks hinaus.
+
+## Das Rollout-Playbook
+
+<Steps items={[
+  {title: "Shadow Mode – Verdicts beobachten, nichts blockieren", body: "Das Erste, was Sie einschalten. Ihr Server bewertet jeden Request, aber kein Deny wird durchgesetzt. Sie können Ihre Regeln eine Woche lang gegen echten Traffic feintunen, bevor ein einziger Nutzer blockiert wird."},
+  {title: "Prozent-Rollout – einen Bruchteil prüfen", body: "Wenn Sie die Durchsetzung aktivieren, starten Sie bei (sagen wir) 10% und steigern Sie sich. Reduziert den Blast Radius, falls Ihr Scanner eine False-Positive-Spitze hat."},
+  {title: "Rollen-basierte Ausschlüsse – ausnehmen, was nötig ist", body: "Rollen, von denen Sie wissen, dass sie Prompts schneller durchreichen, als Ihr Scanner mithält (Senior Engineering, On-Call SRE), können während der Feinabstimmung ausgenommen werden. Nicht für immer – aber während der Ramp-up-Phase nützlich."},
+  {title: "Verdicts erzwingen – wirklich ablehnen", body: "Erst nachdem die vorherigen drei sauber durch einen von Ihnen gesetzten Soak-Zeitraum gelaufen sind. Ab jetzt erreichen Ihre deny_reason-Strings tatsächlich die Nutzer, also prüfen Sie sie noch einmal, bevor Sie den Schalter umlegen."},
+]} />
+
+Anthropics Docs bringen es klar auf den Punkt: *Mitarbeiter am ersten Tag zu blockieren, ist wie DLP-Programme sterben.* Shadow Mode existiert aus einem Grund.
+
+## Gestalten Sie Ihre Integration
+
+<Callout type="tip" items={[
+  "Deduplizieren Sie auf webhook-id. Sie ist eindeutig pro Zustellung und entspricht der request_id im Body. Ein Verbindungsfehler-Retry verwendet sie erneut, es ist also ein sauberer Idempotenzschlüssel.",
+  "Speichern Sie jedes Verdict mit seiner reference_id. Anthropic protokolliert reference_id am Activity-Feed-Eintrag jeder Ablehnung, sodass Sie Denials wieder mit der exakten Scan-Entscheidung in Ihrem eigenen System verknüpfen können.",
+  "Für immer-erlaubende Archivierungsintegrationen: ANTWORTEN Sie zuerst, dann persistieren. Vor dem Schreiben zu antworten hält Ihren Round-Trip aus dem kritischen Pfad des Nutzers heraus – Ihr Speichersystem gehört nicht auf den Hot Path.",
+  "Schreiben Sie deny_reason für den Menschen, nicht das SIEM. 'Entfernen Sie die Kreditkartennummern aus Ihrem Prompt und senden Sie erneut' schlägt 'PCI_REGEX_2A ausgelöst, Referenz 4471'. Nutzer handeln beim Ersten."
+]} />
+
+## Coverage-Matrix
+
+Anthropics eigene Formulierung lautet „**including, but not limited to**“ – behandeln Sie die Ja-Liste als Untergrenze, nicht als feste Menge.
+
+| Oberfläche / Zugriff                          | Von Inference Hooks geprüft?                                     |
+| --------------------------------------------- | ---------------------------------------------------------------- |
+| claude.ai (Web, Desktop, Mobile)              | ✅ Ja                                                             |
+| Claude Code (Web, Desktop, CLI)               | ✅ Ja (`session_id` ist Best-Effort, Client-Zusicherung)          |
+| Claude Cowork                                 | ✅ Ja                                                             |
+| Claude for Microsoft 365                      | ✅ Ja                                                      |
+| Claude Tag                                    | ✅ Ja                                                      |
+| Claude in Chrome                              | ✅ Ja                                                      |
+| Slack                                         | ✅ Ja                                                      |
+| Tool-Aufrufe über Skills, Plugins, Konnektoren, lokales MCP, Code Execution | ✅ Ja, mit aktivem **Validate tool calls** |
+| Voice Mode                                    | ⚠️ **Teilweise** – Prompts und Tool-Aufrufe werden gesendet, aber Anthropic warnt, dass ein kleiner Teil der Tool-Aufrufe nicht gesendet wird. Als alleinige Kontrolle für Sprache nicht ausreichend. |
+| Einige interne claude.ai-Tool-Aufrufe         | ⚠️ In `tool_call`-Ereignissen ausgelassen; im nächsten Prompt-Frame sichtbar |
+| Claude-Security-Scans, Code Review, Smart Reports | ❌ Von Anthropic betriebene Funktionen mit eigenen Modellaufrufen – nicht reguliert |
+| Generierung von Konversationstiteln, andere Nebenläufigkeiten | ❌ Nicht gesendet                                     |
+| System-Prompts, Tool-Definitionen             | ❌ Nie gesendet                                                    |
+| Rohe Datei-/Bild-Bytes                        | ❌ Nie gesendet (extrahierter Text schon)                          |
+| Reiner Bildinhalt (z. B. Dokument-Screenshot) | ❌ Nicht geprüft                                                   |
+| Claude-Platform-API-Keys (Entwickler-Zugriff) | ❌ Außerhalb des Umfangs von Inference Hooks (Platform-Orgs, nicht Enterprise) |
+| Amazon Bedrock / Google Cloud Deployments     | ❌ Auf diesen Ebenen nicht verfügbar                               |
+
+## Die Begleitkontrolle: das Security Center
+
+Hooks setzen durch. Das **Security Center** – **in der Beta** zusammen mit der GA-Ankündigung am 5. November 2026 ausgeliefert – sagt Ihnen, ob der Rest Ihrer Konfiguration vernünftig ist. Es ist eine Seite in den Organisationseinstellungen, die Ihre tatsächlichen Einstellungen für Chat, Cowork und Claude Code mit Anthropics empfohlener Konfiguration vergleicht.
+
+<Steps items={[
+  {title: "Es prüft bei jedem Laden der Seite neu", body: "Kein nächtlicher Job. Jeder Besuch bewertet die aktuelle Konfiguration, sodass es sich als Vorher-/Nachher-Diff vor und nach einer Änderung nutzen lässt statt als Monatsbericht."},
+  {title: "Pro Kontrolle zeigt es drei Dinge", body: "Ihren aktuellen Wert, Anthropics empfohlenen Wert, wo es einen gibt, und einen direkten Link zur Einstellung. Es markiert auch Einstellungen, die neu sind oder sich kürzlich geändert haben – das ist der Teil, der Drift erfasst, den Sie nicht verursacht haben."},
+  {title: "Attestierungen geben dem Review einen Arbeitsbereich", body: "Eine gemeinsame Oberfläche, auf der Ihre Admins den Kontrollstatus festhalten, Risiken ausdrücklich akzeptieren und Probleme markieren. Das macht aus „wir haben es uns angesehen“ etwas Prüfbares."},
+  {title: "Der Bericht unterscheidet Geprüftes von Behauptetem", body: "Der herunterladbare Bericht markiert, welche Kontrollen automatisch verifiziert und welche ein Owner von Hand bestätigt hat. Behalten Sie diese Unterscheidung bei, wenn Sie ihn einem Prüfer übergeben."},
+  {title: "Lesen Sie es lieber über die Compliance API", body: "Organisationen mit Compliance-API-Zugriff können dieselben Ergebnisse programmatisch abrufen, statt die Seite zu laden."}
+]} />
+
+<Callout type="warning" items={[
+  "Anthropic erklärt, das Security Center sei eine Orientierungshilfe auf Basis eigener Empfehlungen, KEINE Zertifizierung. Es bescheinigt nicht die Einhaltung irgendeines Frameworks, und eine durchweg grüne Seite ist für sich genommen kein Nachweis für einen Prüfer – übergeben Sie die Attestierungen und den Bericht."
+]} />
+
+Alles andere in diesem Bündel vom 5. November ist weiterhin **Beta**: zentrale Verwaltung über eine übergeordnete Org-Konsole unter `admin.claude.com`, Admin-API-Abmeldung von Mitgliedern überall, selbstbediente IP-Allowlists, Verwaltung der Claude-Desktop-Einstellungen und EDR-Sensoren in Cowork auf macOS und Windows (per MDM verteilt, im Erkennungsmodus). Inference Hooks sind das einzige GA-Element in dem Set – planen Sie Ihre Kontrollen entsprechend.
+
+## Häufige Fehler
+
+<Callout type="warning" items={[
+  "Einen Block per HTTP 403 signalisieren. Das ist ein Webhook-Fehler, kein Deny – Ihr Policy-Verdict wird verworfen und die Fehlerbehandlung übernimmt.",
+  "Eine andere Action als 'allow' oder 'deny' zurückgeben. Gleiche Geschichte: Webhook-Fehler. Wenn Sie einen dritten Status haben wollen, machen Sie ihn in Ihrem eigenen Audit-Log, nicht im Verdict.",
+  "Kleine Default-Body-Limits (Express 100 kB, nginx 1 MB). Ein 3-MB-Transkript mit extrahiertem Text aus einer großen PDF wird an Ihrem Reverse-Proxy zu einem 413. Erhöhen Sie die Limits, um die 10-MB-Obergrenze abzudecken.",
+  "URL-safe-base64-Dekodierung des whsec_-Secrets. Stiller Konstantzeit-Mismatch bei jedem Request, bis Ihnen auffällt, dass alle Requests 'unsigniert' sind.",
+  "Den Body vor dem HMAC neu serialisieren. Verifizieren Sie die rohen Bytes exakt wie empfangen. json.loads + json.dumps verändert Whitespace und zerbricht die Signatur.",
+  "Unbekannte Top-Level-`type` mit 500 ablehnen. Löst den Circuit Breaker am Tag aus, an dem Anthropic einen neuen Event-Typ ausliefert. Geben Sie bei unbekannten Typen `allow` zurück.",
+  "`source.application`-Werte ablehnen, die Sie nicht kennen. Es ist ein offenes Enum. Neue Werte werden auftauchen und alte Integrationen dürfen daran nicht zerbrechen.",
+  "User/Assistant-Abwechslung annehmen. Turns, deren Blöcke alle ausgeschlossen sind, werden aus `messages` entfernt. Defensiv parsen."
+]} />
+
+## Wann Inference Hooks vs. ein clientseitiger Proxy
+
+Manche Organisationen betreiben noch TLS-abfangende Proxies für die Abdeckung *allem*, was ihre Mitarbeiter online tun. Inference Hooks sind kein Proxy-Ersatz – sie sind ein Claude-spezifischer Enforcement-Punkt, der *innerhalb* von Anthropics Perimeter sitzt und eine reichhaltigere, strukturierte Sicht auf die Konversation hat als ein Proxy, der nur verschlüsselte Bytes auf der Leitung sieht.
+
+- Verwenden Sie **Inference Hooks**, wenn Sie strukturierten Zugriff darauf wollen, was das Modell tatsächlich sehen wird (Tool-Aufrufe, Anhänge, Transkript), einheitliche Abdeckung über Chat + Code + Cowork und keine Per-Device-Installation.
+- Behalten Sie Ihre **Netzwerk-DLP** für alles andere auf der Box: Datei-Uploads zu Nicht-Claude-Diensten, Browser-Traffic außerhalb von claude.ai, E-Mail-Anhänge. Die beiden überlappen sich nicht.
+- Fügen Sie die **[Compliance API](https://platform.claude.com/docs/en/manage-claude/compliance-api)** für nachträgliches Audit und Export hinzu.
+
+## Quiz
+
+<Quiz questions={[
+  {
+    q: "Wie kontaktiert Anthropic Ihren AI-Security-Server?",
+    options: [
+      "Ein signierter WebSocket, eine dauerhafte Verbindung pro Organisation",
+      "Ein HTTPS-POST pro reguliertem Request, signiert nach Standard Webhooks",
+      "Ein gRPC-Stream mit mTLS",
+      "Eine Polling-Schleife – Ihr Server holt ausstehende Verdicts ab"
+    ],
+    answer: 1,
+    explain: "Ein HTTPS-POST pro reguliertem Request. Signiert mit den drei Standard-Webhooks-Headern (webhook-id, webhook-timestamp, webhook-signature) über HMAC-SHA256."
+  },
+  {
+    q: "Ihr DLP-Scanner erkennt einen Policy-Verstoß. Welche Antwort ist korrekt?",
+    options: [
+      "HTTP 403 mit { \"error\": \"blocked\" }",
+      "HTTP 200 mit { \"action\": \"deny\", \"deny_reason\": \"...\" }",
+      "HTTP 200 mit { \"action\": \"redact\", \"rewritten_prompt\": \"...\" }",
+      "HTTP 451 mit dem Grund im Header"
+    ],
+    answer: 1,
+    explain: "Deny ist immer HTTP 200 mit { \"action\": \"deny\", \"deny_reason\": \"...\" }. HTTP 403 ist ein Webhook-FEHLER – Ihr Verdict wird verworfen und die Fehlerbehandlung übernimmt. Es gibt heute keine redact-Aktion; das Verdict ist bewusst binär."
+  },
+  {
+    q: "Ihr AI-Security-Server ist für ein Rolling Deploy 90 Sekunden lang unten und liefert 500er. Was passiert in diesem Fenster mit Nutzer-Prompts?",
+    options: [
+      "Sie werden auf Anthropics Seite in die Warteschlange gestellt und verarbeitet, wenn Ihr Server sich erholt",
+      "Ihre Fehlerbehandlungs-Einstellung entscheidet – entweder werden sie blockiert oder sie laufen ungeprüft weiter",
+      "Sie werden immer blockiert; Fehler defaultet auf Fail-Closed",
+      "Sie laufen immer weiter; Fehler defaultet auf Fail-Open"
+    ],
+    answer: 1,
+    explain: "500er sind Webhook-Fehler. Die Fehlerbehandlungs-Einstellung Ihrer Organisation (Block the request vs. Allow the request) legt fest, auf welcher Seite des Zielkonflikts Sie stehen. Anhaltende Fehler lösen außerdem den Circuit Breaker aus, woraufhin die Fehlerbehandlung für jede Anfrage gilt – allerdings setzt sich der Breaker jetzt automatisch zurück, sobald wieder gültige Verdicts eintreffen, sodass ein zeitweise defekter Server unbemerkt in die Durchsetzung hinein- und wieder herausfallen kann."
+  },
+  {
+    q: "Es trifft ein tool_call-Frame mit drei Tool-Aufrufen ein: ein Lesezugriff auf ein internes Dokument, eine Third-Party-MCP-Suche und ein Schreibzugriff auf ein externes Ticketsystem. Ihre Richtlinie beanstandet nur den dritten. Was können Sie zurückgeben?",
+    options: [
+      "Ein Verdict-Array pro Aufruf, das die ersten beiden zulässt und den dritten ablehnt",
+      "{ \"action\": \"deny\" } – ein Verdict deckt alle drei ab, also wird die gesamte Antwort blockiert",
+      "{ \"action\": \"redact\" } mit entferntem dritten Aufruf",
+      "HTTP 207 Multi-Status mit einzelnen Ergebnissen"
+    ],
+    answer: 1,
+    explain: "Ein tool_call-Verdict gilt für jeden Tool-Aufruf in dieser Antwort – Anthropic sagt ausdrücklich, dass Sie nicht einige zulassen und andere ablehnen können. Ihre Regel muss ein Urteil über den Batch sein, daher lehnt ein einziger beanstandeter Aufruf die Antwort ab. Verzweigen Sie Ihre Richtlinie am tool_info-Kind jedes tool_use-Blocks (platform / application / third_party / client), um zu entscheiden, wie streng Sie sein wollen."
+  },
+  {
+    q: "Sie haben Inference Hooks organisationsweit aktiviert, und Ihr Prompt-Hook erhält Verkehr, aber Sie sehen kein einziges tool_call-Ereignis, obwohl Nutzer Claude Code mit MCP-Servern verwenden. Was ist die wahrscheinlichste Ursache?",
+    options: [
+      "Tool-Aufrufe lösen nur bei third_party-Tools aus",
+      "Die Organisationseinstellung Validate tool calls ist aus",
+      "tool_call-Ereignisse gibt es nur für Claude Platform",
+      "Ihr Verdict-Timeout ist zu niedrig, sodass Tool-Ereignisse verworfen werden"
+    ],
+    answer: 1,
+    explain: "Das tool_call-Ereignis löst nur in Organisationen aus, in denen Validate tool calls eingeschaltet ist. Das Aktivieren von Hooks impliziert es nicht. Beachten Sie auch, dass Tool-ERGEBNISSE nie als eigenes Ereignis eintreffen – sie kommen als tool_result-Blöcke im nächsten Prompt-Frame zurück."
+  }
+]} />
+
+## Quellen
+
+- Anthropic – [Inference hooks](https://platform.claude.com/docs/en/manage-claude/inference-hooks) (Überblick: die zwei Ereignisse, Oberflächen, Ausschlüsse, Failure Handling)
+- Anthropic – [Develop an Inference hooks integration](https://platform.claude.com/docs/en/manage-claude/inference-hooks-endpoint) (Frame- und Verdict-Schemata, Signierung)
+- Anthropic – [Configure Inference hooks](https://platform.claude.com/docs/en/manage-claude/inference-hooks-configuration)
+- Anthropic Help Center – [Inference hooks overview](https://support.claude.com/en/articles/16059458-inference-hooks-overview) (Plan-Gating, wer verwalten darf)
+- Anthropic – [More visibility and control over Claude Enterprise for security teams](https://claude.com/resources/articles/claude-enterprise-security-updates) (5. November 2026: GA-Bestätigung, Security Center, Attestierungen, das Beta-Bündel)
+- Anthropic Help Center – [Review your organization's security posture with the security center](https://support.claude.com/en/articles/18246629-review-your-organization-s-security-posture-with-the-security-center)
+- Anthropic – [Claude Platform release notes](https://platform.claude.com/docs/en/release-notes/overview) (20. Oktober 2026: Hooks verlassen die Beta)
+
+## Weiter
+
+- [Die Admin API: Automatisieren Sie Ihre Claude-Organisation](/docs/api/admin-api) – Enterprise-Nutzerverwaltung und RBAC-Endpunkte, die sich natürlich mit Hooks paaren.
+- [MCP-Tool-Poisoning und Rug Pulls](/docs/security/mcp-tool-poisoning-and-rug-pulls) – die Bedrohung, bei deren Triage das `tool_info`-Kind-Feld helfen soll.
+- [MCP 2026-07-28: Die stateless Spezifikation](/docs/api/mcp-2026-07-28-stateless) – die Tool-Call-Seite dessen, was Ihre Hooks in `tool_use`- und `tool_result`-Blöcken sehen werden.
+- [Refusals & Safety](/docs/api/refusals-and-safety) – Claudes eigene In-Model-Refusal-Signale, die *nachdem* Ihr Hook einen Prompt durchgelassen hat, feuern.

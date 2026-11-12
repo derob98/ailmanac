@@ -1,0 +1,134 @@
+# CLI per agenti di coding a confronto
+
+> Source: https://derob98.github.io/ailmanac/it/docs/models/coding-agent-clis-compared · AILmanac (CC BY 4.0) · last verified 2026-07-08
+
+Claude Code, Codex CLI, Gemini CLI e gli agenti terminale open-source — come l'harness (non solo il modello) decide i tuoi risultati, e come tenere la tua configurazione portabile con AGENTS.md.
+
+<LevelBadge level="intermediate" />
+
+Hai già scelto un modello. Ma il programma che *avvolge* il modello — il ciclo che legge i file, pianifica, esegue comandi, controlla il proprio lavoro e riprova — è una scelta separata, e conta almeno altrettanto. Il nome che la community usa per questo involucro è **harness** (o **agente**), e lo stesso modello può sembrare brillante in uno e mediocre in un altro. Questa pagina mappa gli agenti di coding da terminale del 2026, cosa li distingue davvero, e come tenere la tua configurazione portabile così che i costi di migrazione restino bassi.
+
+<Callout type="objectives" items={[
+  "Separare due scelte che si tende a confondere: il modello e l'harness che lo guida",
+  "Conoscere la forma duratura di ogni grande agente CLI — Claude Code, Codex CLI, Gemini CLI e il gruppo open-source",
+  "Scegliere sugli assi che decidono davvero: autonomia, apertura, indipendenza dal modello, sandboxing ed ecosistema",
+  "Rendere portabile la tua configurazione con AGENTS.md così da poter cambiare agente senza riscrivere il contesto del progetto",
+]} />
+
+<VerifyNote lastVerified="2026-07-08" source="https://agents.md">
+Numero di stelle, numeri di versione, punteggi di benchmark, prezzi e disponibilità di piani/tier in questa pagina cambiano **in fretta** — le classifiche degli agenti di coding si rimescolano quasi ogni mese e i vendor modificano i tier gratuiti con poco preavviso. Considera *gli archetipi e gli assi* qui sotto come duraturi; ricontrolla ogni numero specifico sul repo o sui doc del singolo progetto (linkati nelle Fonti) prima di decidere.
+</VerifyNote>
+
+## Il modello non è l'agente
+
+Un modello di frontiera è un predittore di testo. Un **agente di coding** è l'harness che lo circonda: il system prompt, il set di strumenti (leggere, modificare, eseguire shell, cercare), il ciclo di pianificazione, la strategia di gestione del contesto, il modello di permessi e sandbox, e la logica di retry. Cambia l'harness e cambi i risultati — le testimonianze dei professionisti nel corso del 2026 descrivono lo stesso modello oscillare di decine di punti su task reali di repository a seconda dell'agente che lo guida.
+
+Questo ha due conseguenze pratiche:
+
+- **Un numero di benchmark è un *abbinamento*, non un punteggio del modello.** «83% su Terminal-Bench» è un risultato *modello + harness + scaffold*. Cambia un pezzo qualsiasi e si muove.
+- **Il tuo ciclo è la vera unità di confronto.** Il miglior agente è quello che funziona meglio sul *tuo* stack, nel *tuo* terminale, a un prezzo che puoi sostenere — esattamente la stessa logica della scelta di un modello di coding. Vedi [Claude vs GPT vs Gemini per il coding](/docs/models/claude-gpt-gemini-for-coding) per la metà della decisione relativa al modello; questa pagina è la metà relativa all'harness.
+
+## Il panorama nel 2026
+
+Lo spazio degli agenti da terminale si è diviso in due campi: **agenti first-party** ottimizzati per i modelli di un singolo laboratorio, e agenti **indipendenti dal modello** che puoi puntare su qualunque modello (o pesi locali) preferisci.
+
+| Agente | Chi | Apertura | Modelli | Forma |
+|---|---|---|---|---|
+| **Claude Code** | Anthropic | Closed-source | Claude (first-party) | Lavoro multi-file autonomo e agentico; sandbox imposta dal sistema operativo; ecosistema profondo di skill/MCP/subagenti |
+| **Codex CLI** | OpenAI | Aperto (Apache-2.0, Rust) | GPT (first-party) | Agente terminale autonomo; sandbox nativa su Windows; ampia copertura di piattaforme |
+| **Gemini CLI** | Google | Open-source | Gemini (first-party) | Agente a grande contesto, integrazioni con l'ecosistema Google (vedi nota di aggiornamento sotto) |
+| **opencode** | Community (anomalyco) | Aperto (MIT, TypeScript) | Qualunque (indipendente dal modello) | L'agente aperto con più stelle; CLI + desktop; porta il tuo modello |
+| **Aider** | Community | Aperto (Apache-2.0) | Qualunque, inclusi locali | Pair-programmer git-nativo, non un orchestratore autonomo completo |
+| **Cline / Goose / altri** | Community | Aperto | Qualunque | Integrati nell'editor (Cline) o agenti aperti generici (Goose); indipendenti dal modello |
+
+<VerifyNote lastVerified="2026-07-08" source="https://github.com/google-gemini/gemini-cli">
+**Gemini CLI è in evoluzione.** A metà 2026 Google ha modificato l'accesso al tier gratuito e ha indirizzato alcuni utenti verso una CLI separata chiamata «Antigravity». Se il punto d'ingresso Google giusto sia Gemini CLI, Antigravity o qualcosa di più nuovo è esattamente il tipo di informazione che diventa obsoleta — conferma lo stato attuale sui doc ufficiali di Google prima di impegnarti.
+</VerifyNote>
+
+## Gli assi che decidono davvero
+
+Ignora la classifica per un attimo. Queste sono le domande durature:
+
+<Steps items={[
+  {title: "First-party o indipendente dal modello?", body: "Gli agenti first-party (Claude Code, Codex CLI, Gemini CLI) sono ottimizzati per il proprio modello e di solito offrono l'esperienza di picco più fluida. Gli agenti indipendenti dal modello (opencode, Aider, Cline) ti permettono di cambiare modello — di frontiera oggi, economico o locale domani — senza cambiare strumenti. Scegli l'indipendenza dal modello se ti importa evitare il lock-in o far girare pesi locali."},
+  {title: "Quanta autonomia vuoi?", body: "Aider è un pair-programmer: modifiche mirate, a livello di file, git-native, con te nel ciclo a ogni commit. Claude Code e Codex CLI sono orchestratori: dai un obiettivo, loro pianificano ed eseguono su molti file e comandi shell. Più autonomia significa più leva e più bisogno di guardrail."},
+  {title: "Qual è il raggio d'impatto?", body: "Un agente che esegue comandi shell può cancellare file, fare push di codice o spendere denaro. Preferisci una sandbox imposta dal sistema operativo e un modello di permessi esplicito rispetto a un «fidati di me». Claude Code e Codex CLI includono entrambi il sandboxing nel 2026; verifica cosa può toccare un agente prima di lasciarlo girare senza sorveglianza."},
+  {title: "L'ecosistema si adatta al tuo lavoro?", body: "Oltre al ciclo di base: server MCP per gli strumenti, skill riutilizzabili, subagenti, hook, integrazione con l'IDE, azioni CI. Un agente più leggero su un ottimo modello può perdere contro un agente più ricco su uno abbastanza buono, perché l'ecosistema fa più lavoro."},
+  {title: "Quanto costa nel TUO ciclo?", body: "Abbonamento vs consumo API, finestra di contesto, caching e quanto è verboso l'harness muovono tutti il conto reale. Un modello più economico in un harness affamato di token può costare più di un modello più caro in uno essenziale."},
+]} />
+
+<Callout type="tip" items={["Non comprare un harness sul benchmark da titolone. Compralo su una prova di 30 minuti contro un task reale nel tuo repo — la stessa mossa «valuta sul tuo codice» che batte ogni classifica di modelli.", "L'apertura è una copertura, non una funzione che userai ogni giorno. Il suo valore emerge il giorno in cui un prezzo cambia o un tier gratuito sparisce e vuoi spostarti."]} />
+
+## Portabilità: scrivi il tuo contesto una volta sola
+
+Il costo di migrazione nascosto più grande è il **contesto del tuo progetto** — comandi di build, convenzioni, regole di test, cose che l'agente non può dedurre. Nel 2026 questo ha uno standard di fatto: **`AGENTS.md`**, un file in Markdown puro alla radice del repo, gestito dalla Agentic AI Foundation sotto la Linux Foundation e letto in modo nativo da Codex, Gemini CLI, Cursor, Aider, il coding agent di Copilot, opencode, Goose e oltre 20 altri strumenti (oltre 60k repo lo hanno adottato).
+
+- **`AGENTS.md`** = contesto di progetto cross-tool. Scrivilo una volta; la maggior parte degli agenti lo legge.
+- **`CLAUDE.md`** = il file di memoria di progetto proprio di Claude Code (vedi [CLAUDE.md](/docs/claude-code/claude-md)). Puoi tenere un piccolo `CLAUDE.md` che punta ad `AGENTS.md`, oppure mantenerli entrambi.
+- **`SKILL.md`** = la specifica separata di Anthropic per impacchettare [skill](/docs/claude-code/skills) riutilizzabili con frontmatter e script inclusi. È *complementare* ad `AGENTS.md`, non un concorrente — uno descrive il progetto, l'altro impacchetta una procedura riutilizzabile.
+
+Tenere il contesto in `AGENTS.md` significa che il giorno in cui provi un agente diverso, le tue regole di progetto arrivano gratis.
+
+<PromptCard title="AGENTS.md minimale — scrivi solo ciò che un agente non può dedurre">{`# AGENTS.md
+
+## Setup
+- Install: \`pnpm install\`
+- Dev server: \`pnpm dev\` (port 3000)
+
+## Build & test (run before every commit)
+- Typecheck: \`pnpm typecheck\`
+- Lint: \`pnpm lint\`
+- Tests: \`pnpm test\` — all must pass
+
+## Conventions
+- TypeScript strict; no \`any\`.
+- Components in \`src/components\`, one per file.
+- Never edit files under \`generated/\` by hand.
+
+## Constraints
+- Do NOT run \`git push\` or open PRs without being asked.
+- Secrets live in \`.env.local\`; never commit them.
+`}</PromptCard>
+
+<Callout type="warning" items={["Metti in AGENTS.md solo ciò che l'agente non può scoprire da solo. Ribadire l'ovvio costa token a ogni esecuzione e seppellisce le regole che contano. Curalo a mano — i file di contesto generati automaticamente tendono a essere rumore."]} />
+
+## Una decisione, in un respiro
+
+- **Lavoro Claude profondo e autonomo con l'ecosistema di strumenti più ricco** → **Claude Code**.
+- **Agente first-party open-source legato a GPT, con forte copertura di piattaforme/Windows** → **Codex CLI**.
+- **Vuoi cambiare modello liberamente o far girare pesi locali** → **opencode** o **Cline**.
+- **Modifiche attente, git-native, con l'umano nel ciclo** → **Aider**.
+- **Grande scommessa sul contesto dell'ecosistema Google** → **Gemini CLI** (conferma prima l'accesso attuale).
+
+Qualunque cosa scelga, tieni il contesto del tuo progetto in `AGENTS.md` e dimostra la scelta con un task reale nel tuo repo prima di impegnarti.
+
+<Quiz questions={[{q: "Cosa si intende con l'harness di un agente di coding?", options: ["I dati di addestramento del modello", "Il programma che avvolge il modello — i suoi strumenti, il ciclo di pianificazione, la sandbox e la logica di retry", "Il tema dell'IDE", "La GPU su cui gira"], answer: 1, explain: "L'harness è l'agente attorno al modello: system prompt, strumenti, ciclo di pianificazione/retry, gestione del contesto e sandbox. Può muovere i risultati su task reali di decine di punti sullo stesso modello."}, {q: "Un blog riporta «83% su un benchmark di coding» per un agente. Cosa misura davvero quel numero?", options: ["Il modello da solo", "Uno specifico abbinamento modello + harness + scaffold", "Il linguaggio di programmazione", "L'abilità dell'utente"], answer: 1, explain: "Il punteggio di un agente di coding è un abbinamento. Cambia il modello, l'harness o lo scaffold e il numero si muove — ecco perché il tuo repo è l'unico test che conta."}, {q: "Perché scegliere un agente indipendente dal modello come opencode o Aider?", options: ["È sempre più accurato", "Per cambiare modello liberamente e far girare pesi locali, coprendoti da cambi di prezzo e di tier", "Non richiede configurazione", "Funziona solo con un modello"], answer: 1, explain: "Gli agenti indipendenti dal modello ti permettono di puntare su qualunque modello — di frontiera, economico o locale — così un cambio di prezzo o la rimozione di un tier gratuito non ti costringe a migrare strumento."}, {q: "A cosa serve AGENTS.md?", options: ["Un changelog", "Contesto di progetto cross-tool (comandi di build/test, convenzioni, vincoli) letto da oltre 20 agenti", "Un file di licenza", "Memoria solo per Claude"], answer: 1, explain: "AGENTS.md è un file di contesto di progetto in Markdown, standard di fatto, letto da Codex, Gemini CLI, Cursor, Aider, opencode e molti altri — scrivilo una volta e la maggior parte degli agenti lo usa. CLAUDE.md è l'equivalente proprio di Claude Code."}]} />
+
+## Flashcard
+
+<Flashcards title="Vocabolario delle CLI per agenti di coding" cards={[
+  {front: "Harness (agente)", back: "Il programma che avvolge un modello in un agente di coding: system prompt, strumenti (leggere/modificare/shell/cercare), ciclo di pianificazione + retry, gestione del contesto, permessi e sandbox. Conta quanto il modello."},
+  {front: "First-party vs indipendente dal modello", back: "Gli agenti first-party (Claude Code→Claude, Codex CLI→GPT, Gemini CLI→Gemini) sono ottimizzati per il modello di un singolo laboratorio. Gli agenti indipendenti dal modello (opencode, Aider, Cline) puntano su qualunque modello, inclusi pesi locali."},
+  {front: "Claude Code", back: "L'agente terminale closed-source di Anthropic per Claude. Lavoro multi-file autonomo, sandbox imposta dal sistema operativo e un ecosistema profondo: MCP, skill, subagenti, hook, azioni CI."},
+  {front: "Codex CLI", back: "L'agente terminale open-source (Apache-2.0, Rust) di OpenAI per GPT. Autonomo, sandbox nativa su Windows, ampia copertura di piattaforme. Circa 96k stelle su GitHub a metà 2026."},
+  {front: "opencode", back: "Agente community, open-source (MIT, TypeScript), indipendente dal modello — l'agente di coding aperto con più stelle nel 2026. CLI più app desktop; porta il tuo modello."},
+  {front: "Aider", back: "Pair-programmer git-nativo open-source (Apache-2.0). Modifiche mirate a livello di file con te nel ciclo, funziona con quasi ogni LLM inclusi i modelli locali. Non è un orchestratore autonomo completo."},
+  {front: "AGENTS.md", back: "File di contesto di progetto in Markdown, standard di fatto, alla radice del repo. Gestito dalla Agentic AI Foundation (Linux Foundation); letto da oltre 20 agenti in oltre 60k repo. Scrivi il contesto una volta, la maggior parte degli agenti lo legge."},
+  {front: "CLAUDE.md vs AGENTS.md vs SKILL.md", back: "CLAUDE.md = memoria di progetto di Claude Code. AGENTS.md = contesto di progetto cross-tool. SKILL.md = pacchetto di skill riutilizzabile di Anthropic. Complementari, non concorrenti."},
+]} />
+
+## Fonti e approfondimenti
+
+- [AGENTS.md — sito ufficiale e specifica](https://agents.md) (Agentic AI Foundation / Linux Foundation)
+- [openai/codex — repo di Codex CLI](https://github.com/openai/codex) (Apache-2.0, Rust)
+- [sst/opencode — repo di opencode](https://github.com/sst/opencode) (MIT, TypeScript)
+- [Aider-AI/aider — repo di Aider](https://github.com/Aider-AI/aider) (Apache-2.0)
+- [google-gemini/gemini-cli — repo di Gemini CLI](https://github.com/google-gemini/gemini-cli)
+- [Anthropic — documentazione di Claude Code](https://docs.claude.com/en/docs/claude-code/overview)
+- Correlati su questo sito: [Claude vs GPT vs Gemini per il coding](/docs/models/claude-gpt-gemini-for-coding) · [Codex Agent Plugins e cataloghi (v0.147.0)](/docs/models/codex-agent-plugins-catalogs) · [Agenti di coding locali](/docs/models/local-coding-agents) · [CLAUDE.md](/docs/claude-code/claude-md) · [Skill](/docs/claude-code/skills)
+
+
+## Prossimi passi
+
+- [Supabase Evals — benchmark di agenti su backend reale](/docs/models/supabase-evals-agent-benchmark)
+- [Open Code Review — rivedere ciò che questi agenti scrivono](/docs/models/open-code-review-hybrid-ai-reviewer)

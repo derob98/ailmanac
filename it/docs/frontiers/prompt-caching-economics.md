@@ -1,0 +1,138 @@
+# Economia del Prompt Caching
+
+> Source: https://derob98.github.io/ailmanac/it/docs/frontiers/prompt-caching-economics · AILmanac (CC BY 4.0) · last verified 2026-08-09
+
+Riutilizzare un prefisso stabile tra le chiamate API può ridurre in modo significativo sia il costo che la latenza. Ecco il modello mentale, quando aiuta davvero e quando no.
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-08-09" source="https://platform.claude.com/docs/en/build-with-claude/prompt-caching" />
+
+Le meccaniche della cache, le fasce di prezzo, le durate del TTL e le soglie minime di token cambiano man mano che Anthropic aggiorna la piattaforma. Non fare affidamento su numeri specifici di guide di terze parti. Controlla sempre la [documentazione ufficiale sul prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) e la pagina [Modelli e Prezzi](/docs/whats-new/models-and-pricing) per i valori attuali.
+
+# Economia del Prompt Caching
+
+<Callout type="objectives" items={["Perché la chiamata API ingenua paga in eccesso: lo stesso prefisso stabile elaborato da zero, ogni volta","Il modello mentale — prefisso stabile, suffisso volatile — e l'unica regola di ordinamento che rende possibile il caching","La suddivisione a tre vie del pricing di input (scrittura in cache, lettura dalla cache, input regolare) e quando il punto di pareggio ripaga","Quando il caching si guadagna il posto e i quattro scenari in cui silenziosamente non lo fa","Le cinque regole di invalidazione della cache che decidono se il tuo hit rate è del 90% o dello 0%","Come pre-riscaldare la cache e leggere i campi usage per dimostrare che i tuoi risparmi sono reali"]} />
+
+Ogni volta che chiami l'API di Claude, paghi per ogni token di input che invii — incluso il tuo system prompt, le tue definizioni di strumenti e qualsiasi contesto che inietti. Se stai facendo molte chiamate con lo stesso grande prefisso, stai pagando per elaborare quel prefisso da zero ogni singola volta.
+
+Il prompt caching cambia questo. Marchi una porzione stabile del tuo prompt come memorizzabile in cache. La prima chiamata la elabora e la archivia. Le chiamate successive che colpiscono la cache saltano quell'elaborazione — e pagano una frazione della tariffa normale per quei token.
+
+I risparmi non sono cosmetici. Per le applicazioni con system prompt grandi e stabili o con contesto pesante, il caching può cambiare l'economia di una funzionalità da "troppo costosa da mandare in produzione" a "praticamente gratis da far girare".
+
+## Il modello mentale: prefisso stabile, suffisso volatile
+
+Pensa a ogni chiamata API come a due parti:
+
+**Il prefisso stabile** — contenuto che non cambia tra le chiamate. È qui che si applica il caching. Esempi:
+- Il tuo system prompt
+- Le definizioni di strumenti
+- Un grande documento di riferimento o una codebase che inietti a ogni chiamata
+- Un lungo blocco di esempi few-shot
+
+**Il suffisso volatile** — contenuto che cambia a ogni chiamata. È qui che il caching non si applica. Esempi:
+- Il messaggio utente corrente
+- Dati in tempo reale che inietti per ogni richiesta
+- Cronologia della conversazione che cresce a ogni turno
+
+La regola è semplice: **struttura i tuoi prompt in modo che il contenuto stabile venga prima e il contenuto che cambia venga per ultimo.** I cache breakpoint sono posizionali — tutto ciò che precede il breakpoint marcato è idoneo al caching; tutto ciò che segue no.
+
+Se metti contenuto dinamico prima di contenuto statico, rompi la cache, perché il prefisso cambia a ogni richiesta.
+
+## Come funziona il modello di costo
+
+Il prompt caching introduce una suddivisione a tre vie nel modo in cui vengono tariffati i token di input:
+
+| Tipo di token | Quando si verifica | Costo rispetto all'input normale |
+|---|---|---|
+| Scrittura in cache | Prima chiamata, o dopo la scadenza della cache | Più alto dell'input normale |
+| Lettura dalla cache | Chiamate successive che colpiscono la cache | Molto più basso dell'input normale |
+| Input regolare | Token dopo l'ultimo cache breakpoint | Tariffa normale |
+
+I moltiplicatori esatti sono sulla [pagina ufficiale dei prezzi](https://platform.claude.com/docs/en/models/overview) e fluttuano — controllali direttamente. Ciò che non cambia è la struttura: le scritture costano più del normale, le letture costano molto meno. Il punto di pareggio — quando hai fatto abbastanza chiamate in cache da recuperare l'overhead di scrittura — arriva rapidamente su qualsiasi prompt con contenuto stabile sostanziale.
+
+La latenza segue lo stesso pattern. Le letture dalla cache saltano l'elaborazione completa della porzione in cache, il che riduce in modo significativo il time-to-first-token sulle chiamate con grandi prefissi.
+
+## Quando il prompt caching aiuta
+
+Il caching ripaga quando **sono vere entrambe le condizioni**:
+
+1. Hai un prefisso stabile sostanziale (esiste una soglia minima di token al di sotto della quale il caching non è disponibile — controlla la documentazione attuale per il numero esatto per modello).
+2. Quel prefisso viene riutilizzato abbastanza spesso da colpire la cache più che occasionalmente.
+
+Scenari in cui il caching è una scelta naturale:
+
+- **Q&A su documenti** — lo stesso grande documento viene iniettato per molte domande utente.
+- **Assistenti di codice** — una grande codebase o un albero di file è incluso in ogni richiesta.
+- **Cicli agentici** — lo stesso system prompt e le stesse definizioni di strumenti vengono inviati a ogni passo di un workflow multi-step.
+- **Agenti conversazionali con istruzioni lunghe** — una persona dettagliata, un set di regole o una base di conoscenza che non cambia mai da una chiamata all'altra.
+- **Elaborazione batch** — molti input vengono eseguiti rispetto allo stesso template.
+
+## Quando il prompt caching non aiuta
+
+Il caching non è utile quando:
+
+- I tuoi prompt sono brevi (sotto la soglia minima di token memorizzabili in cache).
+- Il tuo prefisso cambia a ogni chiamata — iniettare un timestamp, un contesto specifico per utente o qualsiasi personalizzazione nella parte "stabile" invalida la cache.
+- Fai chiamate poco frequenti con lunghi intervalli tra di esse. Il contenuto in cache scade dopo un TTL (una durata che puoi configurare, entro i limiti supportati dall'API). Se il tuo traffico è rado, pagherai per lo più costi di scrittura con poche letture.
+- Il tuo prefisso è piccolo rispetto al contenuto dinamico per chiamata. I risparmi scalano con la dimensione di ciò che è in cache.
+
+## Strutturare i prompt per essere cache-friendly
+
+L'unico requisito strutturale è l'ordine: **il contenuto stabile deve venire prima del contenuto volatile.**
+
+<Steps items={[{title: "Metti il system prompt per primo", body: "Istruzioni, persona, regole — le parti che non cambiano mai per richiesta utente."}, {title: "Poi le definizioni di strumenti (se statiche)", body: "Se il tuo set di strumenti è stabile tra le chiamate, tienilo prima del breakpoint così resta in cache."}, {title: "Poi il grande contesto iniettato", body: "Il documento di riferimento, l'albero dei file di codice o il lungo blocco few-shot che viene ripetuto a ogni chiamata."}, {title: "Marca il breakpoint", body: "Aggiungi cache_control sull'ULTIMO blocco che vuoi in cache. Tutto ciò che precede è idoneo; tutto ciò che segue no."}, {title: "Contenuto volatile per ultimo", body: "Messaggio utente, chunk recuperati specifici per questa chiamata, dati in tempo reale, cronologia della conversazione — tutto ciò che cambia per richiesta va DOPO il breakpoint."}]} />
+
+<PromptCard title="Forma di prompt cache-friendly">{`[System prompt — instructions, persona, rules]
+[Tool definitions — if static]
+[Large injected documents or context — same across calls]
+--------- cache breakpoint here ---------
+[Dynamic per-call content — user message, retrieved chunks]`}</PromptCard>
+
+Marchi il breakpoint con un campo `cache_control` sull'ultimo blocco che vuoi includere nella cache. Tutto ciò che precede quel marcatore è idoneo al caching; tutto ciò che segue è input regolare.
+
+Puoi collocare fino a quattro breakpoint espliciti in una singola richiesta. Questo è utile quando parti diverse del tuo prompt cambiano a frequenze diverse — ad esempio, le definizioni di strumenti cambiano raramente, la cronologia della conversazione cambia a ogni turno. Ogni sezione può avere il proprio breakpoint.
+
+## Regole di invalidazione della cache
+
+La cache è sensibile all'ordine. Qualsiasi modifica a un blocco in cache, o a qualsiasi blocco che lo precede nel prompt, invalida la cache a quel breakpoint e a tutti quelli successivi.
+
+<Callout type="warning" items={["Le modifiche alle definizioni di strumenti invalidano TUTTE le cache — tratta l'elenco degli strumenti come massimamente stabile.","Le modifiche al system prompt invalidano la cache del system e dei messaggi.","Le modifiche a metà conversazione interessano solo la cache dei messaggi.","Iniettare un timestamp, un ID utente o una personalizzazione per-richiesta in una sezione 'stabile' uccide silenziosamente il tuo hit rate — quel contenuto va DOPO l'ultimo breakpoint.","Spaziatura, punteggiatura e ordine contano al byte — modifiche 'piccole' invalidano comunque."]} />
+
+L'implicazione pratica: se stai iniettando qualcosa che cambia per ogni richiesta, assicurati in modo assoluto che viva *dopo* l'ultimo cache breakpoint, non prima o al suo interno.
+
+## Pre-warming e monitoraggio
+
+Puoi pre-riscaldare la cache prima che arrivi il traffico degli utenti inviando una richiesta con `max_tokens: 0` — questo scrive la cache senza generare output. Utile per i job batch o per anticipare il costo di scrittura durante le ore fuori picco.
+
+Il campo `usage` della risposta dell'API ti dice quanti token sono stati letti dalla cache (`cache_read_input_tokens`), scritti in cache (`cache_creation_input_tokens`) e fatturati come input regolare. Monitora questi valori per verificare che il tuo caching stia effettivamente colpendo e per misurare i risparmi che stai realizzando.
+
+<PromptCard title="Leggi il campo usage per dimostrare che il caching funziona">{`# From any Claude API response, inspect response.usage:
+{
+  "usage": {
+    "input_tokens": 42,                    # billed at normal rate
+    "cache_creation_input_tokens": 0,      # tokens written on this call
+    "cache_read_input_tokens": 8912,       # tokens served from cache (cheap)
+    "output_tokens": 384
+  }
+}
+# Healthy state after warm-up: cache_read >> cache_creation, run over run.
+# If cache_creation stays high, something upstream of your breakpoint is changing.`}</PromptCard>
+
+Usa il [Calcolatore di Costi](/docs/tools/cost-calculator) per modellare i risparmi attesi prima di impegnarti in un'architettura di caching.
+
+## In conclusione
+
+Il prompt caching non è una micro-ottimizzazione. Per qualsiasi applicazione che invia ripetutamente lo stesso grande prefisso, è una decisione economica strutturale. Il modello per ragionarci è semplice: il contenuto stabile va prima, il contenuto volatile va per ultimo, metti il breakpoint al confine.
+
+Se stai sviluppando sull'API e non hai ancora guardato al caching, controlla i tuoi prompt attuali per sezioni stabili grandi. Se esistono, abilitare il caching di solito richiede poco sforzo e i risparmi sono reali.
+
+<Quiz title="Verifica" questions={[{q: "Dove in una richiesta deve stare il cache breakpoint perché il caching funzioni?", options: ["Dopo il contenuto volatile per-richiesta, così solo la risposta è in cache", "Tra il prefisso stabile e il suffisso volatile — tutto ciò che PRECEDE è idoneo al caching", "Ovunque; l'ordine non influenza l'idoneità della cache"], answer: 1, explain: "I cache breakpoint sono posizionali. Tutto ciò che PRECEDE il breakpoint è idoneo al caching; tutto ciò che segue è input regolare. Se contenuto dinamico si infiltra davanti al breakpoint, la cache viene invalidata a ogni richiesta."}, {q: "Quale costo è PIÙ ALTO di un token di input normale?", options: ["Lettura dalla cache", "Scrittura in cache", "Entrambi costano meno dell'input normale"], answer: 1, explain: "Le scritture in cache costano PIÙ dell'input normale (stai pagando per elaborare + archiviare il prefisso). Le letture dalla cache costano molto MENO. Il punto di pareggio — dove i risparmi accumulati sulle letture ripagano il premio di scrittura — arriva rapidamente su qualsiasi prompt con contenuto stabile sostanziale."}, {q: "Inietti il timestamp corrente in cima a ogni richiesta 'così il modello conosce l'ora'. Cosa succede al caching?", options: ["Il caching funziona comunque — i timestamp sono ignorati ai fini della chiave di cache", "La cache viene invalidata a ogni chiamata — il prefisso 'stabile' ora cambia a ogni richiesta", "La cache va bene, ma solo se il timestamp cambia di meno di un secondo"], answer: 1, explain: "La cache è sensibile al byte. Qualsiasi contenuto che varia per chiamata — timestamp, ID utente, personalizzazione — deve vivere DOPO l'ultimo cache breakpoint. Altrimenti il prefisso muta e paghi costi di scrittura a ogni richiesta con zero beneficio di lettura."}, {q: "Come dimostri che il caching ti sta effettivamente facendo risparmiare in produzione?", options: ["Leggi cache_read_input_tokens vs cache_creation_input_tokens nel campo usage della risposta nel tempo — lo stato sano è letture che superano nettamente le scritture", "Confronta le bollette mensili prima e dopo aver abilitato cache_control — nessun segnale per-richiesta è disponibile", "Chiama un endpoint separato /cache/stats"], answer: 0, explain: "Il campo usage di ogni risposta riporta cache_read_input_tokens e cache_creation_input_tokens. Una volta riscaldata, le letture dovrebbero sovrastare le scritture. Conteggi di creation costantemente alti significano che qualcosa a monte del tuo breakpoint sta ancora cambiando."}, {q: "Cambi una singola parola nelle tue definizioni di strumenti. Cosa viene invalidato?", options: ["Solo la cache dei messaggi", "Tutte le cache a valle degli strumenti (le tool def stanno all'inizio del prompt, quindi tutti i breakpoint sotto vengono invalidati)", "Nulla — le definizioni di strumenti sono in cache separatamente"], answer: 1, explain: "Qualsiasi modifica a un blocco in cache, o a qualsiasi blocco che lo precede nel prompt, invalida la cache a quel breakpoint E a tutti quelli successivi. Poiché le definizioni di strumenti vivono in cima, modificarle è il modo più veloce di far saltare l'intera cache."}]} />
+
+<Callout type="takeaways" items={["Il caching suddivide il pricing di input in tre modi: scrittura in cache (premium), lettura dalla cache (economica), input regolare (normale) — il payoff scala con la dimensione del prefisso × frequenza di riuso.","Una regola modella i prompt cache-friendly: contenuto stabile PRIMA del breakpoint, contenuto volatile DOPO — invertisci questo e la cache muore a ogni richiesta.","Puoi collocare fino a quattro breakpoint così che tool, system prompt, documenti e cronologia vadano in cache ciascuno alla propria frequenza.","Qualsiasi modifica a un blocco in cache — o a qualsiasi blocco precedente nel prompt — invalida quel breakpoint e tutti quelli successivi.","Dimostra i risparmi con cache_read_input_tokens vs cache_creation_input_tokens nel campo usage, e pre-riscalda con max_tokens: 0 per i job batch.","Salta il caching quando i prefissi sono brevi, il traffico è rado (il contenuto in cache scade) o il prefisso è piccolo rispetto al contenuto dinamico per chiamata."]} />
+
+## Correlati
+
+- [Modelli e Prezzi](/docs/whats-new/models-and-pricing)
+- [Calcolatore di Costi](/docs/tools/cost-calculator)
+- [Context Engineering](/docs/frontiers/context-engineering)

@@ -1,0 +1,266 @@
+# Desktop-Agenten ohne Pixel
+
+> Source: https://derob98.github.io/ailmanac/de/docs/models/desktop-agents-accessibility-tree · AILmanac (CC BY 4.0) · last verified 2026-11-02
+
+Vercel Labs lieferte agent-desktop am 28. Oktober 2026 aus — Computer Use über den Accessibility-Baum in Rust, Apache-2.0, für macOS/Windows/Linux. Die Schlagzeile lautet „AX-Bäume statt Pixel“. Übernehmenswert ist sein Korrektheitsmodell: an einen Snapshot gebundene Refs, fail-closed-Auflösung, die sich weigert zu raten, Eigenschaften mit drei Zuständen und eine Wiederholungsregel, die auf ZUGESTELLT vs. NICHT ZUGESTELLT beruht statt auf Erfolg vs. Fehlschlag.
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-11-02" source="https://github.com/vercel-labs/agent-desktop">
+agent-desktop erreichte v1.0.0 am 28. Oktober 2026 und v1.0.2 zwei Tage später. Ein Projekt mit dieser Taktung wird Befehlsnamen, Flags und Fehlercodes ändern. Alles Folgende ist Anfang November 2026 aus der eigenen `README.md` und `CONCEPTS.md` des Repositories gelesen — prüfen Sie `agent-desktop --help` und das CHANGELOG, bevor Sie sich auf ein bestimmtes Flag verlassen. Das *Designmodell* in der zweiten Hälfte ist der dauerhafte Teil und lesenswert, selbst wenn Sie dieses Werkzeug nie installieren.
+</VerifyNote>
+
+<Callout type="objectives" items={[
+  "Verstehen, was ein Accessibility-Baum-Agent liest und wie er sich auf Protokollebene von einem Screenshot-Agenten unterscheidet",
+  "Die Wiederholungsregel lernen, die die meisten Computer-Use-Harnesses falsch machen — und warum „ist es fehlgeschlagen?“ die falsche Frage ist",
+  "Sehen, warum Refs an einen Snapshot gebunden sind und was ein Harness statt Raten tun sollte, wenn einer veraltet",
+  "Das Drei-Zustands-Eigenschaftsmodell kennen, das verhindert, dass ein Agent auf einem fehlgeschlagenen Lesevorgang handelt",
+  "Die zwei Fehlerbilder erkennen, die dieser Ansatz NICHT behebt: abgeschnittene Bäume und Apps ohne Accessibility-Oberfläche",
+  "Die Sicherheitsoberfläche verstehen: Alles auf dem Bildschirm wird zur Agenteneingabe",
+]} />
+
+Am 28. Oktober 2026 taggte Vercel Labs v1.0.0 von **agent-desktop**, und bis zum 31. Oktober stand es an der Spitze der GitHub-Trendliste. Es ist eine Rust-CLI und C-Bibliothek, Apache-2.0, die einem Agenten Computer Use auf macOS, Windows und Linux ermöglicht, indem sie den **Accessibility-Baum** des Betriebssystems liest — dieselbe Struktur, die ein Screenreader verarbeitet: AX API auf macOS, UI Automation auf Windows, AT-SPI auf Linux. Vercels eigene Formulierung: „agent-browser, für Ihren ganzen Computer.“
+
+Jeder bisherige Bericht hört bei der Schlagzeile auf: Bäume statt Pixel, also landen Klicks, wo sie sollen. Das stimmt und ist die uninteressanteste Hälfte.
+
+Die interessante Hälfte ist, dass das Repository eine `CONCEPTS.md` mitliefert, die faktisch **eine Spezifikation dafür ist, wie ein Computer-Use-Harness mit Unsicherheit umgehen sollte** — und Fragen beantwortet, die die gängigen Computer-Use-APIs vollständig Ihnen überlassen. Wenn Sie Agentenschleifen bauen, lesen Sie diese Seite wegen des Modells, auch wenn Sie das Werkzeug nie installieren. Unsere Seite [Computer-Use-Agenten im Vergleich](/docs/models/computer-use-agents) behandelt die Screenshot-basierten APIs von Anthropic, OpenAI und Google; dies ist die andere Architektur.
+
+## Was sich ändert, wenn man den Baum statt des Bildschirms liest
+
+Ein Screenshot-Agent bekommt ein Bild und liefert Koordinaten zurück. Der Vertrag lautet: *Hier sind ein paar Pixel, sag mir, wohin ich klicken soll.* Alles, was der Agent über die Oberfläche weiß, muss er visuell erschließen, und jede Aktion ist eine Wette auf eine Koordinate.
+
+Ein Baum-Agent bekommt Struktur. Ein Snapshot liefert JSON mit einem **Ref** für jedes Element, auf dem der Agent handeln kann, und Aktionen benennen einen Ref statt eines Punktes.
+
+<Steps items={[
+  {title: "Beobachten", body: "Snapshot des Accessibility-Baums eines Fensters, einer App oder einer Oberfläche. Sie erhalten JSON — Rollen, Namen, Zustände — mit einem Ref pro bedienbarem Knoten und einer Snapshot-ID, zu der die Refs gehören."},
+  {title: "Auflösen", body: "Bevor die Aktion ausgelöst wird, wird der Ref anhand von Identitätsbelegen, die zur Snapshot-Zeit gespeichert wurden, erneut mit dem AKTUELLEN Live-Baum abgeglichen. Dieser Schritt ist alles und wird unten behandelt."},
+  {title: "Handeln", body: "Dispatch unter einem Interaction Lease — maschinenweite Exklusivität über Desktop-Eingaben, jeweils von einem Prozess gehalten, damit zwei Aufrufer keine synthetischen Eingaben in die Aktionen des anderen mischen."},
+  {title: "Verifizieren", body: "Das Element erneut lesen, um zu bestätigen, dass die Änderung es tatsächlich erreicht hat. Eine Mutation gilt erst als „zugestellt“, wenn ein erneutes Lesen es sagt."},
+]} />
+
+Die praktischen Unterschiede, die daraus folgen, sind größer, als sie aussehen:
+
+- **Refs überstehen Layoutänderungen, die Koordinaten zerbrechen.** Ein Button, der 200 px im Fenster nach unten rutscht, ist im Baum derselbe Knoten. Für einen Screenshot-Agenten ist er eine neue Wette.
+- **Es ist standardmäßig headless.** Eingaben laufen über die Accessibility-API, ohne den Systemzeiger zu bewegen oder den Fokus zu stehlen, sodass der Agent Apps bedienen kann, während Sie den Rechner weiter nutzen. Ein Modus `--headed` existiert für physische Eingabesynthese, wenn eine App programmatische Eingaben ignoriert. Das ist ein wirklich anderes Betriebsmodell als bei Screenshot-Agenten, die mit Ihnen um den Cursor kämpfen.
+- **Snapshots sind Text, keine Bilder.** Das zählt für Ihre Rechnung und Ihr Kontextfenster — siehe [warum Agenten Tokens verbrennen](/docs/models/why-agents-burn-tokens). Es ist aber kein kostenloser Gewinn, denn dichte Bäume werden groß; die Antwort des Repos ist, zuerst grob zu kartieren (`--skeleton --compact`) und dann mit `--root` in eine Region hineinzugehen.
+- **Manchmal brauchen Sie trotzdem Screenshots.** Das Werkzeug liefert `screenshot` neben `snapshot`. Canvas-gerenderte Apps, selbst gezeichnete Oberflächen und Spiele haben wenig oder keine Accessibility-Oberfläche, und noch so viel Baumlesen erfindet keine.
+
+<PromptCard title="The minimal observe / act / verify loop">
+{`npm install -g agent-desktop
+agent-desktop version
+
+# macOS only: accessibility permission must be granted first
+agent-desktop permissions --guide
+
+# 1. observe — -i limits output to interactive elements
+agent-desktop snapshot --app Finder -i
+
+# 2. act — the ref MUST carry its snapshot ID; a bare @e8 is rejected
+agent-desktop click @s8f3k2p9:e8
+
+# 3. verify — re-snapshot and confirm the change landed
+agent-desktop snapshot --app Finder -i
+
+# dense UI? map coarsely, then drill into one region
+agent-desktop snapshot --app Slack --skeleton --compact
+agent-desktop snapshot --root @s8f3k2p9:e42`}
+</PromptCard>
+
+Die Ausgabe ist JSON mit einem booleschen `ok` und entweder `data` oder einem `error` mit Code, Disposition und Vorschlag. Die Befehle gruppieren sich in Beobachten (`snapshot`, `find`, `get`, `screenshot`, `list-surfaces`), Handeln auf Ref (`click`, `type`, `set-value`, `scroll`, `toggle`, `expand`), rohe Tastatur und Maus (`press`, `hover`, `drag`, `key-down`), Fenster- und App-Verwaltung (`launch`, `focus-window`, `resize-window`, `list-apps`) und System (`permissions`, `status`, `batch`, `skills`).
+
+## Die Idee zum Übernehmen: zugestellt, nicht erfolgreich
+
+Hier die Regel, und sie ist das Nützlichste im ganzen Repository:
+
+> Die entscheidende Unterscheidung ist nicht Erfolg versus Fehlschlag. Sie ist **zugestellt versus nicht zugestellt**.
+
+Überlegen Sie, was ein Agent tut, wenn ein `type`-Befehl einen Fehler zurückgibt. Das instinktive Harness-Verhalten — bei Fehler wiederholen — ist aktiv gefährlich, denn „Fehler“ vermengt zwei völlig verschiedene Situationen:
+
+- Die Tastenanschläge haben das Feld **nie erreicht**. Wiederholen ist kostenlos.
+- Die Tastenanschläge sind **möglicherweise angekommen** und das Bestätigungslesen schlug fehl. Wiederholen tippt alles doppelt.
+
+Ein Harness, das beides nicht unterscheiden kann, sendet Formulare still doppelt ab, klickt doppelt auf Senden und dupliziert Zeilen. agent-desktop klassifiziert daher jede Mutation in drei Zustellungszustände statt in einen Boolean:
+
+| Zustellungszustand | Bedeutung | Wiederholen? |
+|---|---|---|
+| **Nicht zugestellt** | Argumentfehler, Zugriffsverweigerung oder ein Nur-Lese-Befehl — die Aktion hat das Ziel nachweislich nie erreicht | **Sicher.** Frei wiederholen |
+| **Zugestellt, unverifiziert** | Die Eingabe wurde gesendet, aber die Wirkung ist unbestätigt — das typische Ergebnis physischer Eingabesynthese | **Unsicher.** Den Zustand erneut zu lesen ist der einzig richtige Zug |
+| **Zugestellt** | Wirkung durch erneutes Lesen des Elements bestätigt | Erledigt; nichts zu wiederholen |
+
+Lesevorgänge bekommen eine parallele Vierfach-Klassifikation, und die erste ist die subtile:
+
+- **Festgestellte Abwesenheit** — der Provider wurde gefragt und dem Ziel fehlt diese Eigenschaft oder dieses Muster tatsächlich. Eine *endgültige Antwort*, nie wiederholt.
+- **Wiederholbarer Fehler** — ein Transportfehler wie Timeout oder abgebrochene Verbindung. Innerhalb eines Budgets wiederholenswert.
+- **Nicht verfügbares Element** — es ist verschwunden. Gilt als veralteter Ref, wenn das Element bereits aufgelöst war; wiederholbar, wenn mitten im Durchlauf getroffen.
+- **Endgültiger Fehler** — eine Verweigerung oder ein nicht klassifizierter Code. Endgültig, unverändert ausgegeben.
+
+Das Werkzeug legt das direkt offen: Sie wiederholen nur, wenn `error.disposition.retry` den Wert `safe` hat.
+
+<Callout type="takeaways" items={[
+  "Wenn Sie heute Ihre eigene Computer-Use-Schleife schreiben, übernehmen Sie diese eine Idee, selbst wenn Sie sonst nichts übernehmen. Klassifizieren Sie jede Aktion danach, ob sie hätte ankommen können, und machen Sie „könnte angekommen sein“ zu einem eigenen Zweig, der den Zustand erneut liest, statt zu wiederholen. Idempotenz ist keine Eigenschaft Ihres Wiederholungscodes — sie ist eine Eigenschaft jeder einzelnen Aktion, und nur die Werkzeugschicht weiß, welche welche ist."
+]} />
+
+## Warum Refs an einen Snapshot gebunden sind
+
+In agent-desktop sieht ein Ref wie `@e8` aus, darf aber nie nackt verwendet werden — ein nackter Ref scheitert mit `INVALID_ARGS`. Er muss durch seine Snapshot-ID qualifiziert sein: `@s8f3k2p9:e8`.
+
+Das sieht nach Reibung aus. Es ist ein bewusstes Typsystem. Die genannte Begründung: **Refs sind innerhalb eines Snapshots deterministisch, aber über UI-Änderungen hinweg nicht stabil.** Die Snapshot-ID ist ein Namensraum, und jede Suche ist auf den Namensraum beschränkt, in dem sie erzeugt wurde — ein unter einer Sitzung aufgenommener Snapshot braucht später denselben Sitzungs-Scope.
+
+Die sperrige Syntax macht also einen echten Kategorienfehler undarstellbar. Sie können nicht versehentlich einen Bezeichner aus einer Beobachtung von vor drei Aktionen mitschleppen und ihn still gegen das auflösen lassen, was jetzt an dieser Stelle steht. Vergleichen Sie die Screenshot-Welt, in der eine Koordinate aus einem veralteten Screenshot syntaktisch nicht von einer frischen zu unterscheiden ist und jedes Mal zu *irgendetwas* aufgelöst wird.
+
+### Fail-closed-Auflösung: Weigerung zu raten
+
+Wenn die Aktion ausgelöst wird, wird der Ref über eine abgestufte Folge gegen den Live-Baum aufgelöst, und die Reihenfolge kodiert ein Urteil darüber, welche Belege vertrauenswürdig sind:
+
+<Steps items={[
+  {title: "Den gespeicherten Positionspfad ablaufen", body: "Dem zur Snapshot-Zeit aufgezeichneten Pfad durch den aktuellen Baum folgen."},
+  {title: "Gegen gespeicherte Identitätsbelege verifizieren", body: "Den Kandidaten gegen das Aufgezeichnete prüfen: zuerst die native ID, dann rollenabhängiger stabiler Text. Die Position führt zu einem Kandidaten; die Identität entscheidet, ob es der richtige ist."},
+  {title: "Auf eine begrenzte breite Suche zurückfallen", body: "Existiert der Pfad nicht mehr, weiter suchen — aber mit Grenze, nicht unbegrenzt."},
+  {title: "Erst dann Geometrie", body: "Als letztes Mittel über eindeutige Geometrie auflösen, und nur wenn der Ref KEINE aussagekräftige Identität zum Abgleichen hat. Unter Windows und Linux müssen die gespeicherten Grenzen ein Rechteck mit positiver Fläche sein — ein gespeicherter Hash ohne Ausdehnung wird nie zu einem geometrischen Treffer."}
+]} />
+
+Das Designversprechen liegt darin, was geschieht, wenn nichts davon einen sicheren Treffer liefert: Die Auflösung **schlägt geschlossen fehl (fail closed)**. Fehlende, veraltete und mehrdeutige Treffer werden abgelehnt — `STALE_REF`, `AMBIGUOUS_TARGET` — statt zu einem besten Tipp aufgelöst zu werden. Unter macOS behält die Implementierung die nativen Accessibility-Objekte gezielt bei, damit ein Element nicht still falsch identifiziert werden kann, wenn sich die Baumreihenfolge unter ihm verschiebt.
+
+Das ist das Gegenteil davon, wie ein Pixel-Agent degradiert. Eine veraltete Koordinate trifft immer *etwas*; ein veralteter Ref liefert einen Fehler. **Eine stille falsche Aktion gegen einen lauten Fehlschlag einzutauschen ist das gesamte Zuverlässigkeitsversprechen**, und es ist der richtige Tausch für alles, was ein Agent unbeaufsichtigt tut.
+
+<Callout type="note" items={["Dieselbe Überlegung zeigt sich in der zweiseitigen Behandlung von Teilergebnissen im Repo: Überschreitet ein Snapshot mitten im Durchlauf sein Zeitbudget, liefert er, was er beobachtet hat, statt den Durchlauf zu verwerfen — meldet aber die Vollständigkeit pro Knoten. Ein Harness, das dieses Feld ignoriert, wird selbstsicher über einem abgeschnittenen Baum schlussfolgern und folgern, ein Button existiere nicht. Prüfen Sie die Vollständigkeit, bevor Sie Abwesenheit schließen."]} />
+
+## Eigenschaften mit drei Zuständen: Absent, Unknown, Known
+
+Ein kleinerer Mechanismus mit überproportionalen Folgen. Eigenschaften werden nie zu einem Boolean zusammengeklappt. Drei Zustände bleiben getrennt:
+
+- **Known** — ein Wert wurde gelesen.
+- **Absent** — der Provider wurde gefragt und hat tatsächlich keinen Wert.
+- **Unknown** — das Lesen selbst schlug fehl.
+
+Die meisten Harnesses glätten `Unknown` zu `false` oder `null`, und ein Agent handelt dann auf einem *fehlgeschlagenen Lesevorgang*, als wäre er ein negatives Ergebnis: Die Checkbox „ist nicht angehakt“ (wir konnten sie nicht lesen), das Feld „ist leer“ (die Abfrage schlug fehl). Die Formulierung des Repos lautet, dass Unsicherheit mitreisen muss — fällt eine Beleg-Quelle höherer Priorität aus, wird dieser Ausfall weitergereicht statt wegverwischt. Zugängliche Namen werden im Kern aus geordneten Slots berechnet statt in jedem Plattformadapter, sodass gemeinsame Logik nie ein plattformspezifisches Token sieht und überall dieselben Unsicherheitsregeln gelten.
+
+Wenn Sie von dieser Seite zwei Dinge mitnehmen, nehmen Sie die Zustellungssemantik und diese. Beide sind Fälle derselben Disziplin: **Lassen Sie ein Nichtwissen nicht als Wissen auftreten.**
+
+## Zwei Grenzen, die man benennen sollte
+
+**Der Interaction Lease deckt nur den Dispatch ab.** Die Eingabe-Exklusivität ist maschinenweit und wird von jeweils einem Prozess gehalten, aber der Lease deckt bewusst *nicht* das Warten vor einer Aktion ab, weil das Warten darauf, dass ein Element bedienbar wird, lange dauern kann. Die praktische Folge: Ein Element kann bedienbar werden und sich zwischen Ihrem Warten und Ihrem Dispatch wieder ändern. Genau deshalb ist der Verifizierungsschritt nicht optional.
+
+**Die Plattformunterstützung ist nicht einheitlich, und Linux ist der ausgefranste Rand.** Accessibility-Baum, Klicken und Tippen funktionieren auf allen drei Betriebssystemen, aber unter Linux laufen Klicken und Tippen über AT-SPI mit X11/GNOME-Vorbehalten, Screenshots brauchen X11 oder ein Wayland-Portal, die Zwischenablage braucht unter Wayland `wl-clipboard`, die App-Verwaltung ist nur Starten-und-Auflisten, und Benachrichtigungen sind GNOME Shell. macOS braucht ausdrücklich erteilte Accessibility-Berechtigung sowie ein `TMPDIR`, das dem Nutzer gehört und Modus `0700` hat. Windows braucht bei passender Integritätsstufe des Terminals keine besondere Berechtigung. Von rund 60 Befehlen sind nicht alle auf jeder Plattform einsatzfähig — prüfen Sie `agent-desktop status` auf der Maschine, auf der Sie wirklich laufen wollen.
+
+## Die Sicherheitsoberfläche ist der ganze Bildschirm
+
+Das muss klar gesagt werden, weil die Bequemlichkeit verführerisch ist.
+
+Ein Accessibility-Baum-Agent liest den **Textinhalt von Anwendungen**, eine streng reichhaltigere Erfassung als ein Screenshot des fokussierten Fensters — einschließlich womöglich Inhalten, die auf dem Bildschirm sind, aber nicht das, worauf Sie gerade schauten. Das Repo ist ausdrücklich: Snapshots, Screenshots und Zwischenablageinhalte können sensible Daten enthalten und gehören nicht in öffentliche Logs. Es baut eine echte Gegenmaßnahme ein: **sichere Felder (secure fields)**. Sobald eine Plattform ein Element als geheim markiert, hält der Lesepfad sowohl seinen Wert als auch zugehörige Textbelege zurück, und der Aktionspfad darf hineinschreiben, gibt den versuchten oder beobachteten Wert aber nie zurück.
+
+Das schützt Passwörter. Es schützt nicht die offene E-Mail, die Slack-DM oder den Kundendatensatz im nächsten Fenster. Zwei Folgen:
+
+1. **Transkripte werden zu sensiblen Artefakten.** Agenten-Logs einer Desktop-Sitzung ähneln eher einer Bildschirmaufnahme als einem Terminalverlauf. Behandeln Sie sie entsprechend — siehe [was Ihr Agent hochlädt](/docs/security/what-your-agent-uploads).
+2. **Jede lesbare Oberfläche ist eine Injektionsoberfläche.** Jeder Text, den eine App anzeigt, wird zur Agenteneingabe, sodass eine präparierte Kalendereinladung, ein Dateiname oder eine Chatnachricht ein Prompt-Injection-Vektor ohne jede Netzwerkanfrage ist. Dieselbe Überlegung wie bei [dem Web, das Ihr Agent liest](/docs/security/the-web-your-agent-reads) gilt für den Desktop, und [Prompt Injection](/docs/security/prompt-injection) ist die Einführung. Ein Agent mit maschinenweiter Eingabe-Exklusivität und ohne Zeigerbewegung ist zudem konstruktionsbedingt einer, dessen Aktionen Sie nicht geschehen sehen.
+
+<Callout type="warning" items={["Headless-by-default ist zugleich ein Bedienkomfort und ein Aufsichtsrisiko. Weil der Agent Ihren Zeiger nicht bewegt und den Fokus nicht stiehlt, gibt es kein Umgebungssignal, dass er handelt. Betreiben Sie ihn unbeaufsichtigt, müssen Log und eine eingegrenzte Ziel-App die ausgleichende Kontrolle sein — nicht Ihre Aufmerksamkeit. Unsere Seite zum Härten autonomer Läufe behandelt das allgemeine Muster."]} />
+
+## Wann diese Architektur die richtige Wahl ist
+
+| Situation | Greifen Sie zu |
+|---|---|
+| Native Desktop-App mit echter Accessibility-Unterstützung (Finder, Office, die meisten Cocoa-/WinUI-Apps) | **Baum-Agent.** Stabile Refs, billige Text-Snapshots, keine Koordinatenrechnung |
+| Web-App im Browser | Zuerst ein browserspezifischer Harness — das DOM ist ein besserer Baum als die AX-Projektion des Browsers. Siehe [Computer-Use-Agenten im Vergleich](/docs/models/computer-use-agents) und [Browser mit geteiltem Login](/docs/models/browser-agents-shared-login) |
+| Canvas-/WebGL-App, Spiel, selbst gezeichnete Oberfläche, Remote-Desktop | **Screenshot-Agent.** Es gibt keine Accessibility-Oberfläche zum Lesen |
+| Der Agent muss laufen, während Sie weiterarbeiten | **Baum-Agent**, Headless-Modus — kein Fokusdiebstahl, kein Kampf um den Zeiger |
+| Unbeaufsichtigte, wiederholte, verändernde Aktionen | **Baum-Agent**, und die Zustellungssemantik beachten. Das ist der Fall, für den das ganze Design existiert |
+| Visuelle Prüfung („sieht das richtig aus?“) | Screenshot, unabhängig vom Harness. Ein Baum kann nicht sagen, ob das Layout kaputt ist |
+
+<Flashcards cards={[
+  { front: "agent-desktop in einem Satz", back: "Vercel Labs' Rust-CLI + C-Bibliothek (Apache-2.0, v1.0.0 am 28. Okt. 2026), die Agenten Computer Use über OS-Accessibility-Bäume ermöglicht — AX API auf macOS, UI Automation auf Windows, AT-SPI auf Linux." },
+  { front: "Die Wiederholungsregel", back: "Nicht 'Erfolg vs. Fehlschlag', sondern ZUGESTELLT vs. NICHT ZUGESTELLT. Nicht zugestellt = sicher zu wiederholen. Zugestellt, unverifiziert = Zustand erneut lesen, nie wiederholen. Zugestellt = erledigt. Nur wiederholen, wenn error.disposition.retry 'safe' ist." },
+  { front: "Warum @e8 allein abgelehnt wird", back: "Refs sind innerhalb eines Snapshots deterministisch, aber über UI-Änderungen hinweg nicht stabil. Die Snapshot-ID (@s8f3k2p9:e8) ist ein Namensraum, der das Mitschleppen eines veralteten Bezeichners undarstellbar statt still falsch macht. Ein nackter Ref scheitert mit INVALID_ARGS." },
+  { front: "Abgestufte Reihenfolge der Ref-Auflösung", back: "Gespeicherter Positionspfad → Identitätsbelege (native ID, dann rollenabhängiger stabiler Text) → begrenzte breite Suche → eindeutige Geometrie nur als letztes Mittel und nur, wenn der Ref keine aussagekräftige Identität hat. Fail closed bei fehlend/veraltet/mehrdeutig: STALE_REF, AMBIGUOUS_TARGET." },
+  { front: "Absent vs. Unknown vs. Known", back: "Known = ein Wert wurde gelesen. Absent = der Provider wurde gefragt und hat keinen. Unknown = das Lesen schlug fehl. Unknown zu false zusammenzuklappen lässt einen Agenten auf einem fehlgeschlagenen Lesevorgang handeln, als wäre er ein negatives Ergebnis." },
+  { front: "Vier Leseergebnisse", back: "Festgestellte Abwesenheit (endgültig, nie wiederholt), wiederholbarer Fehler (Transportfehler), nicht verfügbares Element (veraltet, wenn aufgelöst; wiederholbar mitten im Durchlauf), endgültiger Fehler (Verweigerung oder nicht klassifiziert — endgültig)." },
+  { front: "Interaction Lease — der Haken", back: "Maschinenweite Eingabe-Exklusivität, jeweils ein Prozess, aber sie deckt NUR DEN DISPATCH ab, nie das Warten davor (Warten kann lange dauern). Der Zustand kann sich also zwischen Warten und Dispatch noch ändern — deshalb ist der Verifizierungsschritt Pflicht." },
+  { front: "Secure Fields", back: "Sobald eine Plattform ein Element als geheim markiert, halten Lesevorgänge seinen Wert UND zugehörige Textbelege zurück; Aktionen dürfen hineinschreiben, geben den versuchten oder beobachteten Wert aber nie zurück. Schützt Passwörter — nicht die anderen Fenster auf dem Bildschirm." },
+  { front: "Teilbeobachtung", back: "Überschreitet ein Snapshot sein Zeitbudget, liefert er, was er abgelaufen hat, statt zu verwerfen, und meldet die Vollständigkeit pro Knoten. Ignoriert man dieses Feld, behandelt der Agent einen abgeschnittenen Baum als Beweis, dass ein Element nicht existiert." },
+  { front: "Wo Baum-Agenten scheitern", back: "Canvas-/WebGL-Apps, Spiele, selbst gezeichnete Oberflächen und Remote-Desktops bieten wenig oder keine Accessibility-Oberfläche. Auch jede visuelle Frage ('sieht das richtig aus?') — dort Screenshots verwenden." },
+]} />
+
+<Quiz questions={[
+  {
+    q: "Ihr Harness sendet einen `type`-Befehl in ein Formularfeld und erhält einen Fehler mit dem Zustellungszustand 'delivered unverified'. Was ist der richtige nächste Zug?",
+    options: [
+      "Den type-Befehl sofort wiederholen — unverifiziert heißt, er ist nicht angekommen",
+      "Den aktuellen Zustand des Feldes erneut lesen und von dort entscheiden",
+      "Die gesamte Aufgabe abbrechen, da der Zustand unerkennbar ist",
+      "Auf physische Eingabesynthese zurückfallen und erneut tippen"
+    ],
+    answer: 1,
+    explain: "'Delivered unverified' heißt, die Eingabe wurde gesendet, ihre Wirkung ist aber unbestätigt — das typische Ergebnis physischer Eingabesynthese. Wiederholen riskiert, alles doppelt zu tippen; Abbrechen verwirft eine wahrscheinlich erfolgreiche Aktion. Den aktuellen Zustand zu lesen ist der einzige Zug, der die Mehrdeutigkeit auflöst. Nur 'not delivered' (Argumentfehler, Zugriffsverweigerung, Nur-Lese-Befehl) darf frei wiederholt werden."
+  },
+  {
+    q: "Warum lehnt agent-desktop einen nackten Ref wie `@e8` ab und verlangt `@s8f3k2p9:e8`?",
+    options: [
+      "Damit mehrere Agenten einen Rechner teilen können, ohne zu kollidieren",
+      "Weil Refs innerhalb eines Snapshots deterministisch, über UI-Änderungen hinweg aber nicht stabil sind, begrenzt die Snapshot-ID die Suche",
+      "Um das Snapshot-JSON zu komprimieren und Tokens zu sparen",
+      "Weil die Accessibility-APIs bei jedem Aufruf ein Sitzungstoken verlangen"
+    ],
+    answer: 1,
+    explain: "Die Snapshot-ID ist eine Namensraumgrenze. Refs sind innerhalb eines Snapshots deterministisch, aber UI-Mutationen machen die Positionsidentität ungültig, sodass ein unqualifizierter Ref ein Kategorienfehler wäre — er ließe einen Bezeichner aus einer alten Beobachtung still gegen einen veränderten Baum auflösen. Die Pflicht zum Qualifizierer lässt diesen Fehler mit INVALID_ARGS scheitern, statt falsch zu gelingen. (Maschinenweite Kollisionen behandelt separat der Interaction Lease.)"
+  },
+  {
+    q: "Ein Snapshot kommt ohne den Button zurück, den Ihr Agent erwartete. Was müssen Sie prüfen, bevor Sie schließen, dass der Button nicht existiert?",
+    options: [
+      "Ob das Fenster zur Snapshot-Zeit fokussiert war",
+      "Ob der Snapshot vollständig war, denn ein abgelaufener Durchlauf liefert Teilergebnisse mit Vollständigkeit pro Knoten",
+      "Ob die App von agent-desktop gestartet wurde und nicht von Hand",
+      "Ob der Modus --headed aktiviert war"
+    ],
+    answer: 1,
+    explain: "Überschreitet ein Snapshot sein Zeitbudget, liefert er, was er beobachten konnte, statt den Durchlauf zu verwerfen, und meldet die Vollständigkeit an jedem Knoten. Ein Agent, der die Vollständigkeit ignoriert, behandelt einen abgeschnittenen Baum als Beleg für Abwesenheit. Es ist dieselbe Disziplin wie bei der Unterscheidung Absent/Unknown: Ein Misserfolg beim Beobachten ist keine negative Beobachtung."
+  },
+  {
+    q: "Welche Aufgabe passt am SCHLECHTESTEN zu einem Accessibility-Baum-Agenten?",
+    options: [
+      "Einen Stapel Dateien im Finder umbenennen",
+      "Ein mehrstufiges Formular in einer nativen Windows-Anwendung ausfüllen",
+      "Prüfen, ob eine WebGL-Datenvisualisierung korrekt gerendert wurde",
+      "Eine macOS-App bedienen, während der Nutzer in einem anderen Fenster weitertippt"
+    ],
+    answer: 2,
+    explain: "Ein WebGL-Canvas bietet im Wesentlichen keine Accessibility-Oberfläche, und 'korrekt gerendert' ist eine visuelle Frage, die ein Baum prinzipiell nicht beantworten kann — dafür braucht es einen Screenshot. Die anderen drei sind die Stärken der Architektur: stabile Refs bei nativen Apps und Headless-Betrieb, der weder den Zeiger bewegt noch den Fokus stiehlt."
+  },
+  {
+    q: "Was ist die wichtigste NEUE Sicherheitsexposition eines Desktop-Baum-Agenten gegenüber einem Screenshot-Agenten, der auf einen Browser-Tab beschränkt ist?",
+    options: [
+      "Accessibility-APIs lassen sich zur Eskalation von OS-Rechten missbrauchen",
+      "Er liest Textinhalte über Anwendungen hinweg, sodass alles auf dem Bildschirm zugleich sensible Erfassung und Injektionsvektor wird",
+      "Snapshots sind standardmäßig unverschlüsselt auf der Platte",
+      "Secure Fields werden unter Windows nicht unterstützt"
+    ],
+    answer: 1,
+    explain: "Die Erfassung ist reichhaltiger als ein Screenshot des fokussierten Fensters: Anwendungstext über Oberflächen hinweg landet im Transkript, Logs verhalten sich also eher wie eine Bildschirmaufnahme, und jeder angezeigte Text — eine Kalendereinladung, ein Dateiname, eine Chatnachricht — ist ein Prompt-Injection-Vektor, der keine Netzwerkanfrage braucht. Das Repo entschärft den engen Fall: Von der Plattform markierte Secure Fields halten beim Lesen Wert und zugehörige Textbelege zurück und geben beim Schreiben nichts zurück. Das deckt Passwörter, nicht die anderen Fenster."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Accessibility-Bäume ersetzen eine Koordinatenwette durch eine benannte Referenz, sodass Layoutänderungen, die einen Screenshot-Agenten zerbrechen, ein Nicht-Ereignis sind — aber Canvas, Spiele und selbst gezeichnete Oberflächen haben keinen Baum zum Lesen.",
+  "Übernehmen Sie das Zustellungsmodell: Klassifizieren Sie Aktionen danach, ob sie hätten ankommen KÖNNEN, nicht danach, ob sie einen Fehler lieferten. „Könnte angekommen sein“ verdient ein erneutes Lesen, nie eine Wiederholung.",
+  "Refs an einen Snapshot zu binden ist ein Typsystem, keine Reibung — es macht Fehler mit veralteten Bezeichnern unausdrückbar statt still falsch.",
+  "Fail-closed-Auflösung ist das Zuverlässigkeitsversprechen: Eine veraltete Koordinate trifft immer etwas, ein veralteter Ref liefert STALE_REF. Ziehen Sie bei allem Unbeaufsichtigten den lauten Fehlschlag vor.",
+  "Halten Sie Unknown getrennt von Absent. Ein Agent, der eine fehlgeschlagene Abfrage als negatives Ergebnis liest, handelt selbstsicher auf nichts.",
+  "Headless-Betrieb nimmt das Umgebungssignal, dass ein Agent arbeitet. Betreiben Sie ihn unbeaufsichtigt, sind Logs und eine eingegrenzte Ziel-App die Kontrolle — nicht Ihre Aufmerksamkeit.",
+]} />
+
+## Quellen & weiterführende Lektüre
+
+- [vercel-labs/agent-desktop](https://github.com/vercel-labs/agent-desktop) — das Projekt: README, Installations- und Plattformunterstützungs-Matrix, Befehlsgruppen, JSON-Ausgabeform, die Flags `--skeleton`/`--compact`/`--root`, Lizenz (Apache-2.0) und die Release-Historie v1.0.0–v1.0.2
+- [agent-desktop — CONCEPTS.md](https://github.com/vercel-labs/agent-desktop/blob/main/CONCEPTS.md) — die Quelle für alles in der zweiten Hälfte dieser Seite: Ref-Scoping, abgestufte fail-closed-Auflösung, die vier Leseergebnisse, Zustellungssemantik, Belege mit drei Zuständen, der Interaction Lease, Secure Fields und Teilbeobachtung
+- [agent-desktop — docs/faq.md](https://github.com/vercel-labs/agent-desktop/blob/main/docs/faq.md) und [docs/json-output.md](https://github.com/vercel-labs/agent-desktop/blob/main/docs/json-output.md) — Fehlercodes und der maschinenlesbare Ausgabevertrag
+- [Apple — Accessibility API (NSAccessibility)](https://developer.apple.com/documentation/appkit/nsaccessibility) · [Microsoft — UI Automation](https://learn.microsoft.com/en-us/windows/win32/winauto/entry-uiauto-win32) · [GNOME — AT-SPI2](https://gitlab.gnome.org/GNOME/at-spi2-core) — die drei Plattformbäume darunter
+- Verwandt auf AILmanac: [Computer-Use-Agenten im Vergleich](/docs/models/computer-use-agents) — die Screenshot-basierten APIs von Anthropic, OpenAI und Google und die Koordinatenfehler, die diese Architektur umgeht
+- Verwandt auf AILmanac: [Browser mit geteiltem Login für KI-Agenten](/docs/models/browser-agents-shared-login) — die Browser-Variante, in der der Agent Ihre Sitzung konstruktionsbedingt erbt
+- Verwandt auf AILmanac: [Prompt Injection](/docs/security/prompt-injection) — die Einführung, die nun für jedes Fenster auf Ihrem Desktop gilt
+- Verwandt auf AILmanac: [Was Ihr Agent hochlädt](/docs/security/what-your-agent-uploads) — warum Transkripte von Desktop-Agenten wie Bildschirmaufnahmen zu behandeln sind
+
+## Weiter
+
+- [Computer-Use-Agenten im Vergleich](/docs/models/computer-use-agents) — die andere Architektur und wie die Aktionsräume der drei großen Anbieter auseinanderlaufen
+- [Browser mit geteiltem Login für KI-Agenten](/docs/models/browser-agents-shared-login) — der Browser-Fall, in dem sich die Sicherheitshaltung umkehrt
+- [Autonome Läufe härten](/docs/security/hardening-autonomous-runs) — die Kontrollen für einen Agenten, der ohne Umgebungssignal handelt
+- [Agenten-Laufzeiten: Isolates vs. Container](/docs/frontiers/agent-runtimes-isolates-vs-containers) — wo diese Schleife tatsächlich laufen sollte

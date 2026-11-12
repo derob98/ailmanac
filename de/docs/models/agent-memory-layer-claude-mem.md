@@ -1,0 +1,289 @@
+# Die Memory-Schicht von Drittanbietern: Wie claude-mem wirklich funktioniert
+
+> Source: https://derob98.github.io/ailmanac/de/docs/models/agent-memory-layer-claude-mem · AILmanac (CC BY 4.0) · last verified 2026-10-26
+
+claude-mem hat 103.000 GitHub-Sterne und löst die Klage jedes Nutzers von Coding-Agenten: Der Agent vergisst alles, wenn die Sitzung endet. Darunter steckt ein zweites Modell in einem Hintergrund-Daemon, das jeden Ihrer Tool-Aufrufe liest — und auf dem gehosteten Pfad ordnet der eigene Kostendatensatz diesen Beobachter einem DeepSeek-Modell zu, nicht Claude. Die sechs Hooks, der Exit-Code-Vertrag, der Ihre Sitzung blockieren kann, der dreistufige Abruf, der die Token-Rechnung aufgehen lässt, wo die Daten landen, wer die Kompression bezahlt und eine Checkliste zur Bewertung jeder Memory-Schicht, bevor Sie sie installieren.
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Verstehen, was „Gedächtnis“ in dieser Werkzeugklasse bedeutet: kein gespeichertes Transkript, sondern Beobachtungen, die ein zweites Modell aus Ihren Tool-Aufrufen extrahiert", "Den Sechs-Hook-Lebenszyklus und den Exit-Code-Vertrag kennenlernen, der entscheidet, ob eine defekte Memory-Schicht leise degradiert oder Ihre Coding-Sitzung blockiert", "Das Detail sehen, das fast niemand prüft: Der Beobachter ist ein separates Modell bei einem Anbieter Ihrer Wahl, und der eigene Kostendatensatz von claude-mem ordnet seinen gehosteten Beobachter einem DeepSeek-Modell zu — Ihre Sitzungsinhalte gehen nicht zwingend an Claude", "Dem dreistufigen Abruf folgen, der die Token-Arithmetik aufgehen lässt — ein Index-Treffer von ~50–100 Tokens vor einem Detail-Abruf von ~500–1.000 Tokens — und warum genau diese Reihenfolge das ganze Design ist", "Wissen, wo die Daten landen: SQLite mit FTS5, ein Chroma-Vektorspeicher, der jeden extrahierten Fakt einzeln indiziert, und ein Worker auf Port 37700 + (uid % 100)", "Herausfinden, wer die Kompression bezahlt und warum es überhaupt einen gehosteten Tarif für 30 $/Monat gibt", "Fünf dokumentierte Fehlerbilder vermeiden, beginnend mit dem, bei dem die Reasoning-Tokens des Beobachters das Ausgabebudget der Sitzung auffraßen", "Eine Bewertungscheckliste mit acht Punkten auf jede Agenten-Memory-Schicht anwenden, bevor Sie sie jede Datei lesen lassen, die Ihr Agent berührt"]} />
+
+Jeder Nutzer eines Coding-Agenten stößt an dieselbe Wand. Sie verbringen eine Stunde damit, Kontext aufzubauen — welches Modul wofür zuständig ist, warum der frühere Ansatz scheiterte, die eine Falle im Build — und dann endet die Sitzung und alles ist weg. Morgen erklären Sie es erneut.
+
+**claude-mem** ist die mit großem Abstand beliebteste Antwort auf dieses Problem: **103.252 Sterne** auf GitHub (Stand 26. Oktober 2026), Apache-2.0, und so schnell in der Auslieferung, dass es in den zwölf Tagen vor Entstehen dieser Seite von v13.38 auf v15.2.1 sprang. Es funktioniert mit Claude Code, Cursor, Codex, OpenCode, Antigravity, Claude Desktop und einigen weiteren.
+
+Diese Seite ist keine Installationsanleitung — die README macht das gut. Sie leistet, was die README nicht tut: zu erklären, was das Werkzeug architektonisch *ist*, was es kostet, was Ihren Code liest und was kaputtgeht. Das meiste Folgende stammt aus dem `docs/`-Ordner des Repositories selbst, der detailliert und ehrlich ist und von der großen Mehrheit der 103.000 Sterne-Geber mit ziemlicher Sicherheit nie gelesen wurde.
+
+<VerifyNote lastVerified="2026-10-26" source="Primary: the thedotmack/claude-mem repository — README.md, docs/architecture-overview.md (hook table and timeouts, data flow, worker port formula, SQLite schema, Chroma document naming, dedup hash, generator restart backoff, the exit-0/exit-2 degradation contract, the two session-id types), docs/security.md (cmem_ key prefix, SHA-256 storage, the local-dev bypass requiring two env vars, BullMQ/Redis notes), docs/ip-boundary.md (the open-core split), docs/expense-pricing/README.md (the cmem-observer to deepseek/deepseek-v4-flash mapping on/after 2026-08-08, and the ~98%-input working shape), and the GitHub release notes for v15.0.0, v15.0.2, v15.1.0, v15.2.0 and v15.2.1. Star count (103,252), licence (Apache-2.0), creation date (2025-08-31) and last push (2026-10-26) verified via the GitHub API on 2026-10-26. Pricing ($30/month after a 30-day trial) and the 'moves memory generation off your primary agent's subscription' framing are from cmem.ai. This project ships multiple releases per week and renames features between majors — treat every specific port, flag, command, default and price here as a snapshot, and check the current release notes before relying on one. The architecture-overview hook table lists Setup plus five lifecycle events; the README describes six hooks including UserPromptSubmit and Stop separately. Where the two disagree, this page follows architecture-overview.md and says so." />
+
+## Was gespeichert wird, ist nicht Ihr Transkript
+
+Das erste Denkmodell, das Sie verwerfen sollten, ist „es speichert meine Chats“. Das tut es nicht. Die Speichereinheit ist eine **Beobachtung (Observation)**: eine strukturierte Notiz mit Typ, Titel und Erzähltext, die *von einem Modell* aus dem extrahiert wird, was Ihr Agent getan hat.
+
+Der Ablauf laut Datenfluss-Diagramm des Repos:
+
+1. Sie senden einen Prompt. Der Handler `session-init` registriert die Sitzung und fragt den Worker nach semantisch relevantem Kontext.
+2. Ihr Agent nutzt ein Tool. Der `PostToolUse`-Hook übergibt diese Tool-Nutzung an den Worker, der sie in die Warteschlange stellt.
+3. Der **SDKAgent** des Workers — eine Modellsitzung in einem Hintergrund-Daemon — liest die Warteschlange und erzeugt Beobachtungen und Zusammenfassungen.
+4. Diese landen in SQLite, werden in einen Chroma-Vektorspeicher synchronisiert und per Server-Sent Events an eine lokale Oberfläche gesendet.
+
+Das, was Ihre Arbeit beobachtet, ist also ein **zweites Modell**, und das, was es liest, ist **jeder Tool-Aufruf**: Dateilesungen, Dateischreibungen, Befehlsausgaben, Suchergebnisse. Das ist der Eintrittspreis für diese gesamte Werkzeugkategorie, und es verdient, vor allem anderen klar gesagt zu werden.
+
+<Callout type="key" items={["Eine Memory-Schicht ist kein Speicherfeature. Sie ist ein zweites Modell mit Dauerabo auf alles, was Ihr erstes Modell berührt. Bewerten Sie sie so, wie Sie jedes weitere Modell in Ihrer Pipeline bewerten würden — was es liest, wohin es das sendet, wer seine Tokens bezahlt und was passiert, wenn es ausfällt."]} />
+
+## Die sechs Hooks und der eine Vertrag, der im Betrieb zählt
+
+claude-mem wird als Satz von Lifecycle-Hooks installiert, jeweils als einzelner Befehl ohne Shell in der Form `claude-mem hook claude-code <event>` aufgerufen. Laut `docs/architecture-overview.md`:
+
+| Ereignis | Handler | Was er tut | Timeout |
+|---|---|---|---|
+| Setup | `version-check.js` | Versionsmarker-Prüfung unter 100 ms; gibt bei Abweichung den Hinweis aus, `npx claude-mem repair` auszuführen | 60s |
+| SessionStart | worker start + context | Startet den Worker-Dienst und injiziert früheren Kontext | 60s |
+| UserPromptSubmit | `session-init` | Registriert die Sitzung, startet den SDK-Agenten, semantische Injektion | 60s |
+| PostToolUse | `observation` | Erfasst die Tool-Nutzung und stellt sie im Worker in die Warteschlange | 120s |
+| Summary | `summarize` | Fordert vom SDK-Agenten eine Sitzungszusammenfassung an | 120s |
+| SessionEnd | `session-complete` | Beendet die Sitzung und leert ausstehende Nachrichten | 30s |
+
+Nun der Teil, der um 2 Uhr nachts für Sie zählt. Der Hook-Orchestrator implementiert einen ausdrücklichen **Degradationsvertrag**:
+
+- **Transportfehler** — `ECONNREFUSED`, Timeouts, 5xx vom Worker — **Exit 0**. Nicht blockierend. Ein ausgefallener Worker blockiert nie Ihre Coding-Sitzung.
+- **Client-Bugs** — 4xx, `TypeError`, `ReferenceError` — **Exit 2**. Blockierend, mit der Begründung, dass diese einen zu behebenden Bug anzeigen.
+
+Das ist ein vertretbares Design, und es hat eine Konsequenz, die man verinnerlichen sollte: **„Der Memory-Daemon ist tot“ ist harmlos, „der Memory-Daemon antwortet mit 400“ nicht.** Eine fehlerhafte Anfrage, ein Schema-Drift nach teilweisem Upgrade oder ein abgelaufener Schlüssel, der als 4xx erscheint, fällt in die Kategorie, die das Werkzeug bewusst laut gemacht hat. Deshalb mahnt der Setup-Hook nach einem externen Plugin-Upgrade `npx claude-mem repair` an — eine versionsverschobene Installation ist genau der Weg in den blockierenden Zweig.
+
+<Callout type="warning" items={["Wenn eine Coding-Sitzung unmittelbar nach einem Plugin-Update fehlschlägt, prüfen Sie Ihre Memory-Schicht, bevor Sie Ihren Agenten debuggen. Der veröffentlichte Vertrag lautet: Transportfehler degradieren leise, clientseitige Fehler blockieren — das Symptom einer halb aktualisierten Installation ist also eine Sitzung, die nicht startet, nicht eine Sitzung ohne Gedächtnis."]} />
+
+## Der dreistufige Abruf ist die eigentliche Idee
+
+Jedes Memory-System kann Dinge speichern. Schwierig ist ein Abruf, der nicht mehr Kontext kostet, als er spart — kippt man bei jedem Sitzungsstart zwanzig erinnerte Notizen hinein, hat man das Problem verschlimmert.
+
+Die Antwort von claude-mem, seit **v15.0.0** am 20. Oktober 2026 unter dem Namen *Smart memory search* als Standard ausgeliefert, ist eine dreistufige Suche, durch die der Agent hindurchdenkt, statt eines einzelnen Abrufs:
+
+<Steps items={[
+  {title: "Den kompakten Index durchsuchen", body: "Eine Volltextabfrage (SQLite FTS5, optional mit Chroma-Vektoren hybridisiert) liefert eine kompakte Trefferliste mit Observation-IDs. Die README beziffert das auf grob 50–100 Tokens pro Ergebnis — genug, um Relevanz zu beurteilen, zu wenig, um allein nützlich zu sein."},
+  {title: "Die Zeitleiste um das scheinbar Relevante prüfen", body: "Zu einer vielversprechenden Observation-ID holt man den chronologischen Kontext drumherum. Dieser Schritt unterscheidet „eine Notiz, die zu Ihren Stichwörtern passt“ von „die passende Notiz plus das, was unmittelbar davor und danach geschah“."},
+  {title: "Volle Details nur für die ausgewählten IDs holen", body: "Erst jetzt gelangt der volle Observation-Text in den Kontext, mit grob 500–1.000 Tokens je Stück. Die Aussage der README zu dieser Reihenfolge: etwa 10× weniger Tokens, verglichen mit dem Abruf der Details von Anfang an."}
+]} />
+
+Die drei Schritte werden dem Agenten als MCP-Tools bereitgestellt — `search(query, type, date, project, limit)`, `timeline(observation_id, query)` und `get_observations(ids[])` —, weshalb der Agent zwischen ihnen überlegen kann, statt dass der Abruf eine feste Pipeline wäre.
+
+Die übertragbare Lehre hat nichts mit claude-mem zu tun. **Auf billigen Repräsentationen filtern, dann für die Überlebenden das Detail bezahlen.** Es ist dasselbe Muster wie eine Trefferseite zu lesen, bevor man einen Tab öffnet, dasselbe wie ein Datenbankindex vor dem Zeilenabruf, und es ist die richtige Form für jeden Abruf, den Sie an einen Agenten hängen. Wenn Sie selbst entwerfen, siehe [Context Engineering](/docs/frontiers/context-engineering) für den allgemeinen Rahmen und [wie Agentengedächtnis wirklich funktioniert](/docs/frontiers/agent-memory-architectures) für die Taxonomie, in der dieses Werkzeug sitzt.
+
+## Wo Ihre Daten tatsächlich liegen
+
+Alles Lokale landet unter `~/.claude-mem/`. Zwei Speicher mit verschiedenen Aufgaben:
+
+**SQLite** (`claude-mem.db`), mit FTS5 für die Volltextsuche:
+
+| Tabelle | Zweck |
+|---|---|
+| `sdk_sessions` | Sitzungslebenszyklus und die Zuordnung zwischen den beiden Sitzungs-IDs |
+| `observations` | Die extrahierten Notizen: Typ, Titel, Erzähltext, Inhalts-Hash |
+| `session_summaries` | Pro Sitzung: Anfrage / Gelerntes / Erledigtes |
+| `user_prompts` | Ihr Prompt-Verlauf |
+| `pending_messages` | Die Arbeitswarteschlange pro Sitzung |
+| `observation_feedback` | Nutzungssignale pro Observation |
+
+**ChromaDB** (`chroma.sqlite3`) für Vektor-Embeddings, angesprochen über `chroma-mcp` per stdio. Das bemerkenswerte Detail: **Jede Observation erzeugt mehrere Dokumente, nicht eines** — `obs_{id}_narrative` für den Haupttext plus `obs_{id}_fact_0`, `obs_{id}_fact_1` usw. für jeden extrahierten Fakt. Fakten werden einzeln eingebettet, weshalb eine Anfrage zu einem bestimmten Detail eine Observation finden kann, deren Gesamtzusammenfassung von etwas anderem handelt.
+
+Der Worker ist ein Express-Daemon auf einem **Port pro Nutzer: `37700 + (uid % 100)`**. Wenn Sie `localhost:37777` in den Release Notes und Docs des Projekts gesehen haben, ist das der Port einer uid, keine Konstante — eine Kleinigkeit, die Sie genau einmal zehn Minuten kosten wird.
+
+<Callout type="note" items={["Der Worker bindet eine lokale HTTP-API und liefert darüber eine Oberfläche aus. docs/security.md ist eindeutig: Die Server-Beta verwendet standardmäßig API-Key-Authentifizierung, Schlüssel haben das Präfix cmem_ und werden einmal angezeigt, wobei nur ein SHA-256-Hash gespeichert wird, und der Loopback-Entwicklungs-Bypass erfordert zwei gemeinsam gesetzte Umgebungsvariablen (CLAUDE_MEM_AUTH_MODE=local-dev und CLAUDE_MEM_ALLOW_LOCAL_DEV_BYPASS=1) und darf nicht hinter einem Reverse-Proxy oder an einer öffentlich erreichbaren Bind-Adresse verwendet werden. Behandeln Sie das als harte Regel: Dieser Daemon hält einen durchsuchbaren Index von allem, was Ihre Agenten lesen."]} />
+
+## Wer die Kompression bezahlt — und welches Modell Ihren Code liest
+
+Hier ist die Tatsache, die mich am meisten überrascht hat, und der Grund, warum diese Seite existiert.
+
+Der Beobachter ist ein **separater Modellaufruf**, und seinen Anbieter wählen Sie bei der Installation: `npx claude-mem install --provider [host|openrouter|gemini|anthropic]`. Vier Optionen, vier verschiedene Antworten auf „wohin gehen meine Sitzungsinhalte“.
+
+Der eigene Kostenabrechnungs-Datensatz des Repositories in `docs/expense-pricing/README.md` dokumentiert, wie Beobachter-Traffic bepreist wird — und dokumentiert dabei, was der gehostete Beobachter ist. Sein Join-Rezept sagt, die Modell-ID `cmem-observer` sei ab dem 2026-08-08 zu **`deepseek/deepseek-v4-flash`** aufzulösen und davor zu `deepseek/deepseek-chat`.
+
+Hier gibt es einen scheinbaren Widerspruch, den es aufzulösen lohnt, denn Sie stoßen darauf, wenn Sie das Repo selbst lesen: `docs/architecture-overview.md` bezeichnet die Beobachter-Komponente als `SDKAgent (Claude Agent SDK)`, was klingt, als müsse es Claude sein. Beides stimmt zugleich. Das Agent SDK ist der *Harness* — die Schleife, die die Sitzung verwaltet und Antworten parst — und es lässt sich auf einen Nicht-Anthropic-Endpunkt richten, was genau die Release Notes von v15.0.2 andeuten, wenn sie Beobachter-Anfragen an „OpenRouter, das cmem.ai-Gateway und OpenAI-kompatible Endpunkte“ beschreiben. Das SDK ist der Client; das Provider-Flag entscheidet, wer antwortet.
+
+Lesen Sie auch die DeepSeek-Zuordnung sorgfältig, denn sie lässt sich leicht über- oder untertreiben. Sie bedeutet nicht, dass das Projekt etwas verbirgt — der Anbieter ist ein dokumentiertes Installations-Flag, und der Datensatz liegt offen im Repo. Sie bedeutet aber, dass **ein Werkzeug namens `claude-mem` auf seinem gehosteten Pfad seinen Beobachter als DeepSeek-Modell bepreist hat**, und wenn Ihre Annahme „das läuft wegen des Namens auf Claude“ war, war sie falsch. Darf Ihr Code nicht an einen Drittanbieter für Inferenz gehen, ist `--provider anthropic` oder ein selbst gehosteter OpenAI-kompatibler Endpunkt die Wahl, die Sie bewusst treffen müssen.
+
+Derselbe Datensatz verrät auch die *Form* dieses Traffics: Die eigenen Notizen des Projekts behandeln Beobachternutzung als grob **98 % Eingabe-Tokens**, genau das, was man von einem Prozess erwartet, dessen Aufgabe es ist, Tool-Ausgaben zu lesen und kurze Notizen auszugeben. Prompt-lastig, ausgabe-leicht.
+
+Und das ist die gesamte Ökonomie des gehosteten Tarifs. Das bezahlte Produkt **CMEM Pro** wird auf cmem.ai als gehostete Beobachtung und Cloud-Sync für **30 $/Monat nach 30 Tagen Testphase** beschrieben, mit dem Argument, die gehostete Beobachtung *verlagere die Memory-Erzeugung vom Abo Ihres primären Agenten weg*. Anders gesagt: Standardmäßig muss jemand dafür zahlen, dass ein zweites Modell alles liest, was Ihr erstes Modell tut. Entweder ist das Ihr eigenes Anbieterkonto samt Tariflimits, oder es sind 30 $/Monat an jemand anderen. Die Seite betont auch, dass der Effekt auf den Token-Verbrauch von Ihrer Arbeitslast und Ihrem Anbieter abhängt und dass Pro weder Preis noch Limits eines anderen Abos ändert.
+
+<Callout type="key" items={["Jede Memory-Schicht hat eine versteckte zweite Rechnung: die Kosten des Modells, das die Erinnerungen schreibt. Beantworten Sie vor der Installation drei Fragen. Welches Modell übernimmt die Extraktion? Wessen Konto bezahlt es? Und darf der Inhalt, den es liest, dorthin gehen? Bei claude-mem sind die Antworten konfigurierbar, dokumentiert und standardmäßig nicht das, was der Name nahelegt."]} />
+
+Die Lizenzaufteilung ist ebenfalls in `docs/ip-boundary.md` veröffentlicht und eine saubere Open-Core-Grenze, die man kennen sollte, wenn man darauf aufbauen will: Apache-2.0 deckt die Memory-Engine, den Server, die CLI, die SDKs, REST-Schemas, MCP-Tools, die Adapter für Claude Code und generische Agenten sowie die Speicher-Adapter ab. Reservierte kommerzielle Bereiche sind u. a. gehostetes Magic Recall, Team-/Organisations-Memory-Sync, das Admin-Dashboard, SSO/SAML/SCIM, Enterprise-RBAC und Audit-UI, die DLP-/Policy-Engine, Managed Evals und private Konnektoren. Die Engine gehört Ihnen also wirklich zum Einbetten; die Team- und Enterprise-Oberfläche nicht.
+
+## Fünf dokumentierte Fehlerbilder
+
+Alle stammen aus den eigenen Release Notes und Architektur-Docs des Projekts — die bestmögliche Quelle für eine Stolperfallen-Liste.
+
+**1. Die Reasoning-Tokens des Beobachters fraßen das Ausgabebudget der Sitzung auf.** Behoben in **v15.0.2** (23. Oktober 2026): Beobachter-Anfragen an OpenRouter, das cmem.ai-Gateway und OpenAI-kompatible Endpunkte deaktivieren Reasoning jetzt standardmäßig, weil Reasoning-Tokens das Ausgabebudget füllten und nichts mehr zum Ausgeben übrig ließen. Das ist der lehrreichste Bug der Liste — eine reine Folge davon, ein Reasoning-Modell in eine budgetbegrenzte Extraktionsrolle zu setzen, und er wird sich in allem wiederholen, was Sie genauso bauen.
+
+**2. Zwei Sitzungs-IDs, die nicht austauschbar sind.** `contentSessionId` kommt vom Host und ist für die Sitzung unveränderlich; `memorySessionId` kommt vom SDK-Agenten und **ändert sich bei jedem Worker-Neustart**. Das Architektur-Dokument nennt die Umwandlung zwischen beiden entscheidend für Fremdschlüssel-Constraints. Wenn Sie den SQLite-Speicher direkt abfragen, wird Sie das als Erstes verwirren.
+
+**3. Deduplizierung hat ein 30-Sekunden-Fenster.** Der Inhalts-Hash ist `SHA256(memory_session_id + title + narrative)`, auf 16 Hex-Zeichen gekürzt, und eine Wiederholung innerhalb von 30 Sekunden liefert die vorhandene ID, statt einzufügen. Nützlich, und auch ein Grund, warum gleich aussehende Observations legitim koexistieren können, wenn sie 31 Sekunden auseinander eintrafen.
+
+**4. Generator-Abstürze werden dreimal wiederholt, dann stoppt es.** Der Backoff beträgt 1 s, 2 s, 4 s; nach mehr als drei aufeinanderfolgenden Neustarts hört der Worker auf zu wiederholen und lässt den Iterator enden. Der Zähler wird zurückgesetzt, wenn der Generator die Arbeit natürlich abschließt. Ausstehende Nachrichten überleben Neustarts und werden bei der nächsten gültigen Antwort vom Parser-Pfad geleert — ein dauerhaft abstürzender Beobachter bedeutet also eine still wachsende Warteschlange, keine verlorene Eingabe.
+
+**5. Der Installations-Fußabdruck ist größer als `npm install`.** `npx claude-mem install` richtet **Bun und uv global** ein, führt `bun install` im Plugin-Cache aus und schreibt einen Versionsmarker. Die README ist eindeutig, dass `npm install -g` nur das SDK installiert und Sie `npx claude-mem install` verwenden müssen. Zwei global installierte Paketmanager-Runtimes durch ein Memory-Werkzeug sind eine vernünftige Ingenieurentscheidung und zugleich eine Lieferketten-Oberfläche, von der Sie wissen sollten, dass Sie sie akzeptiert haben — [Agenten-Skills prüfen](/docs/security/vetting-agent-skills) ist die allgemeine Disziplin.
+
+<Callout type="warning" items={["Release-Geschwindigkeit schneidet in beide Richtungen. Zwischen dem 13. und 25. Oktober 2026 lieferte dieses Projekt v13.38 bis v15.2.1 aus — zwei Major-Sprünge in zwölf Tagen, mit dabei umbenannten Funktionen (der Viewer, der Recall-Modus, die Work-Views). Ein so aktives Werkzeug behebt Bugs schnell und macht Ihre Notizen ebenso schnell kaputt. Pinnen Sie eine Version, wenn Sie es für ein Team dokumentieren, und lesen Sie die Release Notes vor dem Upgrade, nicht danach."]} />
+
+## Was Ihren Rechner verlässt, und die eine Kontrolle, die man kennen sollte
+
+`docs/security.md` und die README ergeben zusammen ein brauchbares Bild:
+
+- Die lokale Engine speichert das Gedächtnis auf Ihrem Rechner unter `~/.claude-mem/`.
+- Cloud-Sync ist Opt-in; wenn Sie ihn aktivieren, werden synchronisierte Daten auch von CMEM gespeichert. Der Rat der Seite selbst: die Datenschutzerklärung lesen, bevor man sich verbindet.
+- `CLAUDE_MEM_ONLINE_OPTIN=false` überspringt den Anmeldeablauf.
+- Inhalte, die in **`<private>`-Tags** stehen, werden **komplett von der Speicherung ausgeschlossen** — weder in den Observation-Speicher noch in Profil- oder Projektgedächtnis geschrieben.
+
+Das Letzte ist die Kontrolle, die man sich am ehesten merken sollte, weil sie die einzige In-Band-Kontrolle ist. Alles andere ist eine Konfigurationsentscheidung, die Sie einmal bei der Installation treffen; `<private>` ist das, wonach Sie mitten in der Sitzung greifen können, wenn gleich ein Geheimnis, ein Kundenname oder ein Produktions-Hostname durch einen Tool-Aufruf läuft.
+
+Es ist zugleich, konstruktionsbedingt, eine Kontrolle, an deren Nutzung Sie selbst denken müssen. Zur allgemeineren Frage, was ein Agent im normalen Verlauf seiner Arbeit von Ihrem Rechner schickt, siehe [was Ihr Agent hochlädt](/docs/security/what-your-agent-uploads).
+
+<PromptCard title="Inspect what a memory layer has actually recorded about you">
+{`# Where the local stores live, and how big they have got
+du -sh ~/.claude-mem/ 2>/dev/null
+ls -la ~/.claude-mem/
+
+# Which worker port is yours (the formula, not the number in the docs)
+python3 -c "import os; print(37700 + (os.getuid() % 100))"
+
+# Read the observation store directly — it is plain SQLite
+sqlite3 ~/.claude-mem/claude-mem.db ".tables"
+sqlite3 ~/.claude-mem/claude-mem.db \\
+  "SELECT type, title, substr(narrative,1,90) FROM observations
+   ORDER BY rowid DESC LIMIT 15;"
+
+# Which model actually wrote your memories (the field the cost docs join on)
+sqlite3 ~/.claude-mem/claude-mem.db \\
+  "SELECT generated_by_model, COUNT(*) FROM observations
+   GROUP BY 1 ORDER BY 2 DESC;"
+
+# And your own prompt history, which is stored separately
+sqlite3 ~/.claude-mem/claude-mem.db \\
+  "SELECT COUNT(*) FROM user_prompts;"`}
+</PromptCard>
+
+<Callout type="note" items={["Die Spaltennamen stammen aus der Schematabelle in docs/architecture-overview.md und dem Join-Rezept in docs/expense-pricing/README.md, das generated_by_model und created_at an Observation-Zeilen nennt. Ein Projekt, das zwei Majors in zwölf Tagen ausliefert, kann sie umbenennen — schlägt eine Abfrage fehl, führen Sie .schema observations aus und passen Sie an. Es geht nicht um das exakte SQL, sondern darum, dass Sie lesen können und sollten, was eine Memory-Schicht über Sie geschrieben hat, denn es ist eine lokale SQLite-Datei und nichts hindert Sie daran."]} />
+
+## Jede Memory-Schicht bewerten, nicht nur diese
+
+Diese Kategorie wird weiter wachsen, und die Fragen lassen sich verallgemeinern. Gehen Sie sie durch, bevor Sie die nächste installieren.
+
+<Steps items={[
+  {title: "Was ist die Speichereinheit?", body: "Ein rohes Transkript, eine vom Modell extrahierte Notiz oder ein kompiliertes Wissensartefakt? Extraktion heißt: Das Urteil eines zweiten Modells sitzt zwischen dem, was geschah, und dem, woran Sie sich erinnern — meist gewollt, aber auch ein Ort, an dem Fehler dauerhaft werden können."},
+  {title: "Welches Modell extrahiert, und wessen Rechnung ist es?", body: "Fragen Sie ausdrücklich. claude-mem macht es zu einem Flag mit vier Werten und dokumentiert seinen gehosteten Beobachter in seinem eigenen Kostendatensatz als DeepSeek-Modell. Wenn ein Werkzeug es Ihnen nicht sagt, ist das Ihre Antwort."},
+  {title: "Wird der Abruf gefiltert, bevor er geholt wird?", body: "Eine Memory-Schicht, die beim Sitzungsstart alles injiziert, was sie hat, ist eine Kontextsteuer, keine Kontexteinsparung. Suchen Sie einen billigen Indexschritt vor einem Detailschritt und prüfen Sie, was der Indexeintrag an Tokens kostet."},
+  {title: "Was passiert, wenn es ausfällt?", body: "Finden Sie den Degradationsvertrag. claude-mem veröffentlicht einen: Transportfehler enden mit Exit 0 und blockieren nie, Client-Fehler enden mit Exit 2 und blockieren. Ein Werkzeug ohne erklärten Vertrag wird Ihre Sitzung irgendwann aus einem Grund blockieren, den Sie nicht sehen können."},
+  {title: "Können Sie den Speicher selbst lesen und löschen?", body: "Eine lokale SQLite-Datei, die Sie abfragen und mit rm löschen können, ist eine ganz andere Datenschutz-Haltung als ein undurchsichtiger Cloud-Index. Prüfen Sie das lokale Format und ob der Sync Opt-in oder Opt-out ist."},
+  {title: "Gibt es eine In-Band-Ausschlusskontrolle?", body: "Sie werden eine bestimmte Sache mitten in der Sitzung von der Aufzeichnung ausnehmen müssen, ohne etwas umzukonfigurieren. <private>-Tags sind die Antwort von claude-mem; ein Werkzeug ohne Entsprechung heißt: Ihre einzige Kontrolle ist „nicht für diese Arbeit verwenden“."},
+  {title: "Was installiert die Installation tatsächlich?", body: "Globale Runtimes, ein Hintergrund-Daemon, ein MCP-Server, Hooks bei jedem Tool-Aufruf. Einzeln alles vernünftig; zählen Sie es, bevor Sie es akzeptieren."},
+  {title: "Wie schnell bewegt es sich, und brauchen Sie das?", body: "Schnelle Releases heißen schnelle Fixes und schnelle Brüche. Beim Rollout an ein Team pinnen Sie eine Version und übernehmen das Upgrade, statt jeden Entwickler auf einem anderen Major sitzen zu lassen."}
+]} />
+
+<Callout type="takeaways" items={["claude-mem ist kein Transkriptspeicher. Es ist ein zweites Modell in einem Hintergrund-Daemon, das jeden Tool-Aufruf liest und strukturierte Observations schreibt — die echten Kosten und die echte Fähigkeit dieser ganzen Werkzeugklasse.", "Der Beobachter ist ein separates Modell bei einem Anbieter, den Sie bei der Installation wählen (host, OpenRouter, Gemini oder Anthropic). Der eigene Kostendatensatz des Projekts ordnet seine gehostete cmem-observer-ID ab 2026-08-08 deepseek/deepseek-v4-flash zu, der Name sagt Ihnen also nicht, wohin Ihr Code geht.", "Jemand muss die Extraktion bezahlen. Standardmäßig ist das Ihr eigenes Anbieterkonto; das 30-$/Monat-Argument von CMEM Pro lautet ausdrücklich, dass gehostete Beobachtung die Memory-Erzeugung vom Abo Ihres primären Agenten wegverlagert.", "Der Abruf besteht aus drei Schritten, nicht einem: ein Index-Treffer von ~50–100 Tokens, dann Zeitleisten-Kontext, dann ein Detail-Abruf von ~500–1.000 Tokens nur für ausgewählte IDs. „Billig filtern, teuer holen“ ist das übertragbare Muster und der Grund, warum die Token-Rechnung überhaupt aufgeht.", "Der Degradationsvertrag ist veröffentlicht und asymmetrisch: Transportfehler enden mit Exit 0 und blockieren Ihre Sitzung nie, clientseitige Fehler enden mit Exit 2 und blockieren. Eine halb aktualisierte Installation ist daher eine Sitzung, die nicht startet.", "Beobachter-Traffic besteht nach der eigenen Buchhaltung des Projekts zu etwa 98 % aus Eingabe-Tokens — ein lesender, kein schreibender Prozess. Bepreisen Sie ihn entsprechend.", "Jede Observation wird zu mehreren Chroma-Dokumenten, eines pro extrahiertem Fakt plus der Erzähltext, weshalb eine Anfrage zu einem kleinen Detail eine Notiz zutage fördern kann, die nominell von etwas anderem handelt.", "Der Fix in v15.0.2 ist der lehrreichste Bug des Projekts: Ein Reasoning-Modell in einer Extraktionsrolle verbrauchte das Ausgabebudget für Reasoning und ließ Sitzungen ohne Ausgabe zurück. Deaktivieren Sie Reasoning bei jedem Modell, das Sie als Zusammenfasser einsetzen.", "Zwei Paketmanager-Runtimes (Bun und uv) werden global installiert, ein Daemon bindet 37700 + (uid % 100), und ein MCP-Server stößt zu Ihrem Agenten. Alles vertretbar, alles als Angriffsfläche zu zählen, bevor Sie es akzeptieren.", "Die einzige In-Band-Kontrolle ist das <private>-Tag, das Inhalte komplett von der Speicherung ausschließt. Alles andere wird bei der Installation entschieden."]} />
+
+<Flashcards title="Zwölf Begriffe aus dem Memory-Layer-Stack" cards={[
+  {front: "Observation", back: "Die Speichereinheit von claude-mem: eine strukturierte Notiz mit Typ, Titel und Erzähltext, vom Beobachter-Modell aus der Tool-Nutzung Ihres Agenten extrahiert. Kein Transkriptauszug."},
+  {front: "Beobachter / SDKAgent", back: "Die zweite Modellsitzung im Worker-Daemon, die die eingereihte Tool-Nutzung liest und Observations sowie Zusammenfassungen schreibt. Ihr Anbieter ist ein Flag bei der Installation."},
+  {front: "Worker-Daemon", back: "Ein lokaler Express-Dienst, von der Bun-Runtime verwaltet, auf dem Port pro Nutzer 37700 + (uid % 100). Enthält den Sitzungsmanager, die Suchorchestrierung, den Chroma-Sync und die Oberfläche."},
+  {front: "Progressive Disclosure / Smart Recall", back: "Dreistufiger Abruf — kompakter Index, dann Zeitleisten-Kontext, dann volle Details für ausgewählte IDs — mit Überlegungen des Agenten zwischen den Schritten. Standard seit v15.0.0."},
+  {front: "FTS5", back: "Die Volltextsuch-Erweiterung von SQLite, die Stichwort-Hälfte der Hybridsuche von claude-mem. Chroma-Embeddings liefern die semantische Hälfte."},
+  {front: "Embedding pro Fakt", back: "Chroma speichert ein Dokument für den Erzähltext einer Observation plus eines pro extrahiertem Fakt — obs_ID_narrative, obs_ID_fact_0, obs_ID_fact_1 usw. Aus einer Observation werden mehrere Vektoren, sodass eine enge Anfrage eine breit betitelte Notiz finden kann."},
+  {front: "Degradationsvertrag", back: "Die Regel, die Fehlerklasse auf Exit-Code abbildet: Transportfehler enden mit Exit 0 (blockieren nie die Host-Sitzung), Client-Fehler mit Exit 2 (blockieren, weil sie einen Bug anzeigen)."},
+  {front: "contentSessionId vs. memorySessionId", back: "Die Sitzungs-ID des Hosts, für die Sitzung unveränderlich, gegenüber der des SDK-Agenten, die sich bei jedem Worker-Neustart ändert. Die Umwandlung zwischen beiden ist für Fremdschlüssel tragend."},
+  {front: "Inhalts-Hash", back: "SHA256(memory_session_id + title + narrative), auf 16 Hex-Zeichen gekürzt, zum Deduplizieren von Wiederholungen innerhalb eines 30-Sekunden-Fensters."},
+  {front: "<private>-Tag", back: "Die eine In-Band-Ausschlusskontrolle: Inhalte darin werden komplett von der Speicherung ausgeschlossen und nie in Profil- oder Projektgedächtnis geschrieben."},
+  {front: "CMEM Pro", back: "Der bezahlte Tarif für gehostete Beobachtung und Cloud-Sync: 30 $/Monat nach 30 Tagen Testphase, beworben damit, die Memory-Erzeugung vom Abo Ihres primären Agenten wegzuverlagern."},
+  {front: "Open Core (ip-boundary)", back: "Engine, Server, CLI, SDKs, MCP-Tools und Adapter sind Apache-2.0; gehostetes Recall, Team-Sync, SSO, RBAC, Audit-UI, die DLP-Engine und Managed Evals sind reservierte kommerzielle Bereiche."},
+]} />
+
+<Quiz title="Prüfen Sie sich selbst" questions={[
+  {
+    q: "Ihre Coding-Sitzung lässt sich unmittelbar nach einem Plugin-Update nicht mehr starten. Welcher Zusammenhang ist nach dem veröffentlichten Degradationsvertrag von claude-mem am wahrscheinlichsten?",
+    options: [
+      "Kein Zusammenhang — die Memory-Schicht ist so entworfen, dass sie die Host-Sitzung nie blockiert",
+      "Der Memory-Worker ist wahrscheinlich ausgefallen, was den Sitzungsstart blockiert",
+      "Eine versionsverschobene Installation erzeugt Client-Fehler, die der Vertrag bewusst blockierend macht (Exit 2)",
+      "Der Chroma-Vektorspeicher ist beschädigt, was den SessionStart-Hook anhält"
+    ],
+    answer: 2,
+    explain: "Der Vertrag ist absichtlich asymmetrisch: Transportfehler (Verbindung verweigert, Timeouts, 5xx) enden mit Exit 0 und blockieren nie, 4xx und clientseitige Ausnahmen enden mit Exit 2 und blockieren. Eine halb aktualisierte Installation ist genau der Weg in den blockierenden Zweig — deshalb mahnt der Setup-Hook bei einer Versionsabweichung npx claude-mem repair an."
+  },
+  {
+    q: "Welche Aussage über das Modell, das die Observations von claude-mem schreibt, ist zutreffend?",
+    options: [
+      "Es ist immer Claude, da das Werkzeug in Claude Code läuft",
+      "Es ist ein separates Modell, dessen Anbieter ein Flag bei der Installation ist, und der eigene Kostendatensatz des Projekts ordnet seine gehostete Beobachter-ID einem DeepSeek-Modell zu",
+      "Es ist ein kleines lokales Modell, das dem Installer beiliegt, sodass nichts Ihren Rechner verlässt",
+      "Es gibt kein Modell — Observations entstehen durch deterministisches Parsen der Tool-Ausgabe"
+    ],
+    answer: 1,
+    explain: "Das Installations-Flag bietet host, OpenRouter, Gemini oder Anthropic. docs/expense-pricing/README.md löst die cmem-observer-ID ab dem 2026-08-08 zu deepseek/deepseek-v4-flash auf. Der Name bestimmt nicht, wohin Ihre Sitzungsinhalte gehen; das Flag tut es."
+  },
+  {
+    q: "Warum spart der dreistufige Abruf Tokens, statt welche auszugeben?",
+    options: [
+      "Weil die Embeddings quantisiert sind und jeder Abruf dadurch billiger ist",
+      "Weil abgerufene Observations sitzungsübergreifend gecacht werden",
+      "Weil der billige Schritt (ein Index-Treffer von ~50–100 Tokens) die Relevanz entscheidet, bevor der teure Schritt (ein Detail-Abruf von ~500–1.000 Tokens) nur für die Überlebenden läuft",
+      "Weil das Zusammenfassungsmodell die Details komprimiert, bevor sie den Agenten erreichen"
+    ],
+    answer: 2,
+    explain: "Auf billigen Repräsentationen filtern, dann für das Detail bezahlen, was übrig bleibt. Dieselbe Form wie eine Ergebnisseite lesen, bevor man Tabs öffnet, oder ein Index vor dem Zeilenabruf — und das richtige Muster für jeden Abruf, den Sie an einen Agenten hängen."
+  },
+  {
+    q: "Das Release v15.0.2 deaktivierte Reasoning standardmäßig für Beobachter-Anfragen. Welchen Fehler behob es, und was ist die allgemeine Lehre?",
+    options: [
+      "Reasoning-Tokens machten Observations ungenauer; für Extraktionsqualität Modelle ohne Reasoning bevorzugen",
+      "Reasoning-Tokens füllten das Ausgabebudget und ließen einer Sitzung nichts mehr zum Ausgeben — also Reasoning bei jedem Modell deaktivieren, das als budgetbegrenzter Zusammenfasser dient",
+      "Reasoning-Spuren wurden als Observations gespeichert, wodurch Chain-of-Thought in den Memory-Speicher gelangte",
+      "Reasoning-Anfragen wurden von OpenAI-kompatiblen Endpunkten abgelehnt, sodass der Worker in eine Absturzschleife geriet"
+    ],
+    answer: 1,
+    explain: "Die Release Notes sind eindeutig: Reasoning-Tokens füllten das Ausgabebudget und ließen Sitzungen ohne Ausgabe zurück. Es ist eine reine Folge davon, ein Reasoning-Modell in eine Extraktionsrolle mit begrenzter Ausgabe zu setzen, und es wird sich in allem wiederholen, was Sie genauso bauen."
+  },
+  {
+    q: "Sie müssen eine bestimmte Sache — einen Produktions-Hostnamen — mitten in der Sitzung von der Aufzeichnung ausnehmen, ohne etwas umzukonfigurieren. Was bietet claude-mem?",
+    options: [
+      "Einen /forget-Slash-Befehl, der passende Observations nachträglich löscht",
+      "Inhalte in <private>-Tags werden komplett von der Speicherung ausgeschlossen, einschließlich Profil- und Projektgedächtnis",
+      "Ein Ausschluss-Glob in ~/.claude-mem/settings.json, der ab der nächsten Sitzung gilt",
+      "Nichts — die einzige Kontrolle ist, das Plugin für diese Sitzung zu deaktivieren"
+    ],
+    answer: 1,
+    explain: "<private> ist die einzige In-Band-Kontrolle und die einzige, die mitten in der Sitzung funktioniert. Alles andere — Anbieterwahl, Cloud-Sync-Opt-in, Quellenbegrenzung — wird bei der Installation oder in den Einstellungen entschieden. Es ist zugleich, konstruktionsbedingt, etwas, an dessen Nutzung Sie selbst denken müssen."
+  },
+  {
+    q: "Die Docs sagen, der Worker lausche auf Port 37700 + (uid % 100), während Release Notes localhost:37777 erwähnen. Was sollten Sie schließen?",
+    options: [
+      "Der Port hat sich zwischen Versionen geändert und 37777 ist aktuell",
+      "37777 ist der berechnete Port eines Nutzers, keine Konstante — berechnen Sie Ihren aus Ihrer eigenen uid",
+      "37777 ist die Oberfläche und die API liegt auf einem anderen Port",
+      "Die Formel gilt nur für Mehrbenutzer-Server-Deployments"
+    ],
+    answer: 1,
+    explain: "37700 + (uid % 100) ist absichtlich pro Nutzer, damit zwei Konten auf einem Rechner nicht kollidieren. Eine konkrete Zahl in einem Changelog ist das, was die uid des Autors ergab. Berechnen Sie sie, statt sie zu kopieren."
+  }
+]} />
+
+## Quellen & weiterführende Lektüre
+
+- **thedotmack/claude-mem**: https://github.com/thedotmack/claude-mem — das Projekt. Apache-2.0, erstellt am 31. August 2025, 103.252 Sterne und letzter Push am 26. Oktober 2026 (an diesem Datum per GitHub-API geprüft).
+- **`docs/architecture-overview.md`**: https://github.com/thedotmack/claude-mem/blob/main/docs/architecture-overview.md — die beste einzelne Quelle dieser Seite. Schichtdiagramm, die Hook-Tabelle mit Timeouts, das Datenfluss-Diagramm, die Muster für Pending-Queue und Generator-Neustart, der Degradationsvertrag mit Exit 0/Exit 2, der Dedup-Hash, die zwei Sitzungs-ID-Typen, das SQLite-Schema und die Chroma-Dokumentbenennung.
+- **`docs/security.md`**: https://github.com/thedotmack/claude-mem/blob/main/docs/security.md — Standardwerte der API-Key-Authentifizierung, das Präfix `cmem_` und die reine SHA-256-Speicherung, die zwei gemeinsam erforderlichen Umgebungsvariablen für den Loopback-Bypass und die BullMQ/Redis-Hinweise.
+- **`docs/ip-boundary.md`**: https://github.com/thedotmack/claude-mem/blob/main/docs/ip-boundary.md — die Open-Core-Aufteilung zwischen Apache-2.0-Komponenten und reservierten kommerziellen Bereichen.
+- **`docs/expense-pricing/README.md`**: https://github.com/thedotmack/claude-mem/blob/main/docs/expense-pricing/README.md — der Kostenabrechnungs-Datensatz des Beobachters, die Zuordnung von `cmem-observer` zu `deepseek/deepseek-v4-flash` ab 2026-08-08 und die ~98-%-Eingabe-Arbeitsform. Die Datei, die „welches Modell liest meinen Code“ beantwortet.
+- **Release Notes v15.0.0** (Smart memory search als Standard): https://github.com/thedotmack/claude-mem/releases/tag/v15.0.0 — der dreistufige Abruf wird am 20. Oktober 2026 zum Standard.
+- **Release Notes v15.0.2** (Reasoning für Beobachter-Anfragen deaktiviert): https://github.com/thedotmack/claude-mem/releases/tag/v15.0.2 — der Ausgabebudget-Bug und der lehrreichste Punkt im Changelog.
+- **Release Notes v15.2.1**: https://github.com/thedotmack/claude-mem/releases/tag/v15.2.1 — npm-Veröffentlichung auf Trusted Publishing mit OIDC und Provenance-Attestierungen umgestellt, nachdem `NPM_TOKEN` seit v13.26.1 fehlgeschlagen war. Bemerkenswert für alle, die die Lieferkette des Pakets prüfen.
+- **cmem.ai**: https://cmem.ai/ — der gehostete Tarif: 30 $/Monat nach 30 Tagen Testphase, das Argument „verlagert die Memory-Erzeugung vom Abo Ihres primären Agenten weg“, die Aussagen zu lokalem Speicher und Cloud-Sync und der ehrliche Vorbehalt, dass Token-Effekte von Ihrer Arbeitslast und Ihrem Anbieter abhängen.
+- **Model Context Protocol** — Tools-Spezifikation: https://modelcontextprotocol.io/docs/concepts/tools — wie die Tools `search`, `timeline` und `get_observations` Ihren Agenten erreichen.
+- **SQLite FTS5**: https://www.sqlite.org/fts5.html — der Volltextindex hinter dem billigen ersten Schritt des Abrufs.
+- **Chroma**: https://docs.trychroma.com/ — der Vektorspeicher und das Dokumentmodell pro Fakt, durch das enge Anfragen breite Notizen treffen.
+
+## Weiter
+
+- [Wie Agentengedächtnis wirklich funktioniert](/docs/frontiers/agent-memory-architectures) — die Taxonomie, in der dieses Werkzeug sitzt: was als Gedächtnis zählt, auf welcher Schicht jeder Ansatz arbeitet und warum die meisten beim Abruf scheitern und nicht beim Speichern
+- [Hindsight: Agentengedächtnis, das lernt](/docs/models/hindsight-agent-memory-that-learns) — das andere Ende des Designraums, in dem das Gedächtnis nach Ergebnis aktualisiert statt aus Transkripten extrahiert wird
+- [CLAUDE.md & Memory-Dateien](/docs/claude-code/claude-md) — die erstanbieterseitige, handgeschriebene Baseline, mit der jedes dieser Werkzeuge implizit konkurriert und die Sie richtig hinbekommen sollten, bevor Sie einen Daemon hinzufügen
+- [Was Ihr Agent hochlädt](/docs/security/what-your-agent-uploads) — die breitere Version der Frage, die diese Seite zum Beobachter stellt: was Ihren Rechner verlässt, während ein Agent gewöhnliche Arbeit erledigt

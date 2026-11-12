@@ -1,0 +1,46 @@
+# IDE Integrations
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-code/ide-integrations · AILmanac (CC BY 4.0) · last verified 2026-07-16
+
+VS Code and JetBrains extensions, inline diffs, and shared settings.
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-07-16" source="https://code.claude.com/docs/en/vs-code">
+Supported IDEs and setup steps change — confirm in the official IDE integration docs.
+</VerifyNote>
+
+You don't have to live in the terminal. Claude Code integrates with your editor so you review changes **as diffs, right where you code**.
+
+## What you get
+
+- **Inline diffs.** Proposed edits appear as a reviewable diff in the editor, not just text in a terminal.
+- **Editor context.** Your open files, selection, and project are available to Claude.
+- **The same brain.** It's the same Claude Code — your [CLAUDE.md](/docs/claude-code/claude-md), [permissions](/docs/claude-code/permissions), [hooks](/docs/claude-code/hooks), and [settings](/docs/claude-code/settings) apply identically across the CLI and IDE. Configure once, use everywhere.
+
+## Supported editors
+
+- **VS Code** (and VS Code-based editors) via the extension.
+- **JetBrains IDEs** (IntelliJ IDEA, PyCharm, WebStorm, PhpStorm, GoLand, Android Studio) via the [plugin](https://code.claude.com/docs/en/jetbrains).
+
+Install from the editor's marketplace and authenticate; see the [official docs](https://code.claude.com/docs/en/vs-code) for current steps.
+
+## CLI or IDE — which?
+
+They're the same tool; pick by preference and task:
+
+| Prefer the IDE when… | Prefer the CLI when… |
+|---|---|
+| You want to review diffs visually | You're scripting or in [headless](/docs/claude-code/headless-and-agent-sdk) mode |
+| You're already coding in the editor | You're on a server / SSH |
+| You like editor context built in | You want maximum control and pipes |
+
+:::tip[Settings are shared]
+Because the CLI and IDE read the same config, set up your [CLAUDE.md](/docs/claude-code/claude-md) and [permissions](/docs/claude-code/permissions) once and they follow you between them.
+:::
+
+## Next
+
+- [CLAUDE.md & Memory Files](/docs/claude-code/claude-md)
+- [Plan Mode](/docs/claude-code/plan-mode)
+- [settings.json](/docs/claude-code/settings)

@@ -1,0 +1,266 @@
+# Desktop Agents Without Pixels
+
+> Source: https://derob98.github.io/ailmanac/docs/models/desktop-agents-accessibility-tree · AILmanac (CC BY 4.0) · last verified 2026-11-02
+
+Vercel Labs shipped agent-desktop on 28 October 2026 — accessibility-tree computer use in Rust, Apache-2.0, for macOS/Windows/Linux. The headline is 'AX trees instead of pixels'. The part worth stealing is its correctness model: refs scoped to a snapshot, fail-closed resolution that refuses to guess, tri-state properties, and a retry rule built on DELIVERED vs NOT DELIVERED rather than success vs failure.
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-11-02" source="https://github.com/vercel-labs/agent-desktop">
+agent-desktop reached v1.0.0 on 28 October 2026 and v1.0.2 two days later. A project moving at that cadence will change command names, flags and error codes. Everything below is read from the repository's own `README.md` and `CONCEPTS.md` at the start of November 2026 — check `agent-desktop --help` and the CHANGELOG before you depend on a specific flag. The *design model* in the second half is the durable part and is worth reading even if you never install this tool.
+</VerifyNote>
+
+<Callout type="objectives" items={[
+  "Understand what an accessibility-tree agent reads, and how it differs from a screenshot agent at the protocol level",
+  "Learn the retry rule that most computer-use harnesses get wrong — and why 'did it fail?' is the wrong question",
+  "See why refs are scoped to a snapshot, and what a harness should do instead of guessing when one goes stale",
+  "Know the three-state property model that stops an agent acting on a failed read",
+  "Spot the two failure modes this approach does NOT fix: truncated trees and apps with no accessibility surface",
+  "Understand the security surface: everything on screen becomes agent input",
+]} />
+
+On 28 October 2026 Vercel Labs tagged v1.0.0 of **agent-desktop**, and by 31 October it was at the top of GitHub's trending list. It is a Rust CLI and C library, Apache-2.0, that gives an agent computer use on macOS, Windows and Linux by reading the operating system's **accessibility tree** — the same structure a screen reader consumes: AX API on macOS, UI Automation on Windows, AT-SPI on Linux. Vercel's own framing is "agent-browser, for your whole computer."
+
+Every write-up so far stops at the headline: trees instead of pixels, so clicks land where they should. That is true and it is the least interesting half.
+
+The interesting half is that the repository ships a `CONCEPTS.md` which is, in effect, **a specification for how a computer-use harness should handle uncertainty** — and it answers questions that the mainstream computer-use APIs leave entirely to you. If you build agent loops, read this page for the model even if you never install the tool. Our [computer-use agents compared](/docs/models/computer-use-agents) page covers the screenshot-based APIs from Anthropic, OpenAI and Google; this is the other architecture.
+
+## What changes when you read the tree instead of the screen
+
+A screenshot agent gets an image and returns coordinates. The contract is: *here are some pixels, tell me where to click.* Everything the agent knows about the UI it has to infer visually, and every action is a bet on a coordinate.
+
+A tree agent gets structure. A snapshot returns JSON with a **ref** for every element the agent can act on, and actions name a ref rather than a point.
+
+<Steps items={[
+  {title: "Observe", body: "Snapshot the accessibility tree of a window, app or surface. You get back JSON — roles, names, states — with a ref per actionable node, and a snapshot ID that the refs belong to."},
+  {title: "Resolve", body: "Before the action fires, the ref is re-matched against the CURRENT live tree using identity evidence stored at snapshot time. This step is the whole ballgame and is covered below."},
+  {title: "Act", body: "Dispatch under an interaction lease — machine-wide exclusivity over desktop input, held by one process at a time, so two callers cannot interleave synthetic input into each other's actions."},
+  {title: "Verify", body: "Re-read the element to confirm the change actually reached it. A mutation is only 'delivered' once a re-read says so."},
+]} />
+
+The practical differences that follow from this are larger than they look:
+
+- **Refs survive layout changes that break coordinates.** A button that moves 200 px down the window is the same node in the tree. For a screenshot agent it is a new bet.
+- **It is headless by default.** Input goes through the accessibility API without moving the system pointer or stealing focus, so the agent can drive apps while you keep using the machine. A `--headed` mode exists for physical input synthesis when an app ignores programmatic input. This is a genuinely different operating model from screenshot agents, which fight you for the cursor.
+- **Snapshots are text, not images.** That matters for your bill and your context window — see [why agents burn tokens](/docs/models/why-agents-burn-tokens). But it is not a free win, because dense trees get large; the repo's own answer is to map coarsely first (`--skeleton --compact`) and then drill into a region with `--root`.
+- **You still need screenshots sometimes.** The tool ships `screenshot` alongside `snapshot`. Canvas-rendered apps, custom-drawn UIs and games have little or no accessibility surface, and no amount of tree-reading invents one.
+
+<PromptCard title="The minimal observe / act / verify loop">
+{`npm install -g agent-desktop
+agent-desktop version
+
+# macOS only: accessibility permission must be granted first
+agent-desktop permissions --guide
+
+# 1. observe — -i limits output to interactive elements
+agent-desktop snapshot --app Finder -i
+
+# 2. act — the ref MUST carry its snapshot ID; a bare @e8 is rejected
+agent-desktop click @s8f3k2p9:e8
+
+# 3. verify — re-snapshot and confirm the change landed
+agent-desktop snapshot --app Finder -i
+
+# dense UI? map coarsely, then drill into one region
+agent-desktop snapshot --app Slack --skeleton --compact
+agent-desktop snapshot --root @s8f3k2p9:e42`}
+</PromptCard>
+
+Output is JSON with an `ok` boolean and either `data` or an `error` carrying a code, a disposition and a suggestion. The commands group into observe (`snapshot`, `find`, `get`, `screenshot`, `list-surfaces`), act-on-ref (`click`, `type`, `set-value`, `scroll`, `toggle`, `expand`), raw keyboard and mouse (`press`, `hover`, `drag`, `key-down`), window and app management (`launch`, `focus-window`, `resize-window`, `list-apps`), and system (`permissions`, `status`, `batch`, `skills`).
+
+## The idea worth stealing: delivered, not successful
+
+Here is the rule, and it is the single most useful thing in the repository:
+
+> The distinction that matters is not success versus failure. It is **delivered versus not delivered**.
+
+Think about what an agent does when a `type` command returns an error. The instinctive harness behaviour — retry on error — is actively dangerous, because "error" conflates two completely different situations:
+
+- The keystrokes **never reached** the field. Retrying is free.
+- The keystrokes **may have landed** and the confirmation read failed. Retrying types everything twice.
+
+A harness that cannot tell these apart will silently double-submit forms, double-click Send, and duplicate rows. So agent-desktop classifies every mutation into three delivery states instead of a boolean:
+
+| Delivery state | Meaning | Retry? |
+|---|---|---|
+| **Not delivered** | Argument error, access denial, or a read-only command — the action demonstrably never reached the target | **Safe.** Retry freely |
+| **Delivered unverified** | Input was posted but the effect is unconfirmed — the typical outcome of physical input synthesis | **Unsafe.** Re-reading state is the only correct move |
+| **Delivered** | Effect confirmed by re-reading the element | Done; nothing to retry |
+
+Reads get a parallel four-way classification, and the first one is the subtle one:
+
+- **Settled absence** — the provider was asked and the target genuinely lacks that property or pattern. A *final answer*, never retried.
+- **Retryable failure** — a transport fault such as a timeout or dropped connection. Worth repeating within a budget.
+- **Unavailable element** — it disappeared. Settles as a stale ref if the element had been resolved; retryable if hit mid-walk.
+- **Terminal failure** — a denial or an unclassified code. Final, surfaced as-is.
+
+The tool exposes this directly: you retry only when `error.disposition.retry` says `safe`.
+
+<Callout type="takeaways" items={[
+  "If you are writing your own computer-use loop today, port this one idea even if you port nothing else. Classify every action by whether it could have landed, and make 'may have landed' a distinct branch that re-reads state instead of retrying. Idempotency is not a property of your retry code — it is a property of each individual action, and only the tool layer knows which is which."
+]} />
+
+## Why refs are scoped to a snapshot
+
+In agent-desktop a ref looks like `@e8`, but you may never use it bare — a bare ref fails with `INVALID_ARGS`. It must be qualified by its snapshot ID: `@s8f3k2p9:e8`.
+
+That looks like friction. It is a deliberate type system. The stated reason: **refs are deterministic inside one snapshot but are not stable across UI changes.** The snapshot ID is a namespace, and every lookup is confined to the namespace it was created in — a snapshot taken under a session needs that same session scope later.
+
+So the awkward syntax makes a real category error unrepresentable. You cannot accidentally carry an identifier from an observation three actions ago and have it silently resolve to whatever now occupies that slot. Compare the screenshot world, where a coordinate from a stale screenshot is syntactically indistinguishable from a fresh one and resolves to *something* every time.
+
+### Fail-closed resolution: refusing to guess
+
+When the action fires, the ref is resolved against the live tree through a graded sequence, and the ordering encodes a judgement about which evidence is trustworthy:
+
+<Steps items={[
+  {title: "Walk the stored positional path", body: "Follow the path recorded at snapshot time down the current tree."},
+  {title: "Verify against stored identity evidence", body: "Check the candidate against what was recorded: native ID first, then role-conditional stable text. Position gets you to a candidate; identity decides whether it is the right one."},
+  {title: "Fall back to a bounded broad search", body: "If the path no longer exists, search more widely — but with a bound, not indefinitely."},
+  {title: "Only then, geometry", body: "Resolve by unique geometry as a last resort, and only when the ref has NO meaningful identity to match on. On Windows and Linux the stored bounds must be a positive-area rectangle — a zero-extent stored hash never promotes to a geometric match."}
+]} />
+
+The design commitment is in what happens when none of that produces a confident match: the resolution **fails closed**. Missing, stale and ambiguous matches are rejected — `STALE_REF`, `AMBIGUOUS_TARGET` — rather than resolved to a best guess. On macOS the implementation retains the native accessibility objects specifically so an element cannot be silently misidentified when tree ordering shifts underneath it.
+
+This is the opposite of how a pixel agent degrades. A stale coordinate always hits *something*; a stale ref returns an error. **Trading a silent wrong action for a loud failure is the entire reliability claim**, and it is the right trade for anything an agent does unsupervised.
+
+<Callout type="note" items={["The same reasoning shows up in the repo's two-sided treatment of partial results: if a snapshot runs out of its time budget mid-walk, it returns what it observed rather than discarding the walk — but it reports completeness per node. A harness that ignores that field will confidently reason over a truncated tree and conclude a button does not exist. Check completeness before you conclude absence."]} />
+
+## Tri-state properties: Absent, Unknown, Known
+
+A smaller mechanism with outsized consequences. Properties are never collapsed to a boolean. Three states stay distinct:
+
+- **Known** — a value was read.
+- **Absent** — the provider was asked and genuinely has no value.
+- **Unknown** — the read itself failed.
+
+Most harnesses flatten `Unknown` into `false` or `null`, and an agent then acts on a *failed read* as if it were a negative result: the checkbox "isn't checked" (we could not read it), the field "is empty" (the query errored). The repo's phrasing is that uncertainty must travel — when a higher-priority evidence source fails, that failure is carried forward rather than smoothed away. Accessible names are computed in the core from ranked slots rather than in each platform adapter, so shared logic never sees a platform-specific token and the same uncertainty rules apply everywhere.
+
+If you take two things from this page, take delivery semantics and this. They are both cases of the same discipline: **do not let a failure to know masquerade as knowledge.**
+
+## Two limits worth naming
+
+**The interaction lease covers dispatch only.** Input exclusivity is machine-wide and held by one process at a time, but the lease deliberately does *not* cover the waiting that precedes an action, because waiting for an element to become actionable can run long. The practical consequence: an element can become actionable and then change again between your wait and your dispatch. That is exactly why the verify step is not optional.
+
+**Platform support is not uniform, and Linux is the ragged edge.** Accessibility tree, clicking and typing work across all three OSes, but on Linux clicking and typing run through AT-SPI with X11/GNOME caveats, screenshots need X11 or a Wayland portal, the clipboard needs `wl-clipboard` under Wayland, app management is launch-and-list only, and notifications are GNOME Shell. macOS needs accessibility permission granted explicitly, plus a `TMPDIR` that is user-owned with mode `0700`. Windows needs no special permission at matching terminal integrity level. Of roughly 60 commands, not all are operational on every platform — check `agent-desktop status` on the machine you actually plan to run on.
+
+## The security surface is the whole screen
+
+This needs stating plainly, because the convenience is seductive.
+
+An accessibility-tree agent reads the **text content of applications**, which is a strictly richer capture than a screenshot of the focused window — including, potentially, content that is on screen but not what you were looking at. The repo is explicit that snapshots, screenshots and clipboard contents can contain sensitive data and should be kept out of public logs. It does build in one real mitigation: **secure fields**. Once a platform marks an element secret, the read path withholds both its value and related text evidence, and the action path may write into it but never echoes the attempted or observed value.
+
+That protects passwords. It does not protect the open email, the Slack DM, or the customer record in the next window. Two consequences:
+
+1. **Transcripts become sensitive artifacts.** Agent logs from a desktop session are closer to a screen recording than to a terminal history. Treat them accordingly — see [what your agent uploads](/docs/security/what-your-agent-uploads).
+2. **Every readable surface is an injection surface.** Any text an app displays becomes agent input, so a crafted calendar invite, filename or chat message is a prompt-injection vector with no network request involved. The same reasoning as [the web your agent reads](/docs/security/the-web-your-agent-reads) applies to the desktop, and [prompt injection](/docs/security/prompt-injection) is the primer. An agent with machine-wide input exclusivity and no pointer movement is also, by construction, one whose actions you will not see happening.
+
+<Callout type="warning" items={["Headless-by-default is a usability feature and a supervision hazard at the same time. Because the agent does not move your pointer or steal focus, there is no ambient signal that it is acting. If you run this unattended, the compensating control has to be the log and a scoped-down target app — not your attention. Our hardening-autonomous-runs page covers the general pattern."]} />
+
+## When this architecture is the right choice
+
+| Situation | Reach for |
+|---|---|
+| Native desktop app with real accessibility support (Finder, Office, most Cocoa/WinUI apps) | **Tree agent.** Stable refs, cheap text snapshots, no coordinate math |
+| Web app in a browser | A browser-specific harness first — the DOM is a better tree than the browser's AX projection. See [computer-use agents compared](/docs/models/computer-use-agents) and [shared-login browsers](/docs/models/browser-agents-shared-login) |
+| Canvas/WebGL app, game, custom-drawn UI, remote desktop | **Screenshot agent.** There is no accessibility surface to read |
+| Agent must run while you keep working | **Tree agent**, headless mode — no focus stealing, no pointer fight |
+| Unsupervised, repeated, mutating actions | **Tree agent**, and honour the delivery semantics. This is the case the whole design exists for |
+| Visual verification ("does this look right?") | Screenshot, regardless of harness. A tree cannot tell you the layout is broken |
+
+<Flashcards cards={[
+  { front: "agent-desktop, in one line", back: "Vercel Labs' Rust CLI + C library (Apache-2.0, v1.0.0 on 28 Oct 2026) giving agents computer use via OS accessibility trees — AX API on macOS, UI Automation on Windows, AT-SPI on Linux." },
+  { front: "The retry rule", back: "Not 'success vs failure' but DELIVERED vs NOT DELIVERED. Not delivered = safe to retry. Delivered unverified = re-read state, never retry. Delivered = done. Retry only when error.disposition.retry is 'safe'." },
+  { front: "Why @e8 alone is rejected", back: "Refs are deterministic within one snapshot but not stable across UI changes. The snapshot ID (@s8f3k2p9:e8) is a namespace that makes carrying a stale identifier unrepresentable instead of silently wrong. A bare ref fails with INVALID_ARGS." },
+  { front: "Graded ref resolution order", back: "Stored positional path → identity evidence (native ID, then role-conditional stable text) → bounded broad search → unique geometry only as a last resort, and only when the ref has no meaningful identity. Fails closed on missing/stale/ambiguous: STALE_REF, AMBIGUOUS_TARGET." },
+  { front: "Absent vs Unknown vs Known", back: "Known = a value was read. Absent = the provider was asked and has none. Unknown = the read failed. Collapsing Unknown into false makes an agent act on a failed read as if it were a negative result." },
+  { front: "Four read outcomes", back: "Settled absence (final, never retried), retryable failure (transport fault), unavailable element (stale if resolved, retryable mid-walk), terminal failure (denial or unclassified — final)." },
+  { front: "Interaction lease — the catch", back: "Machine-wide input exclusivity, one process at a time, but it covers DISPATCH ONLY, never the waiting beforehand (waits can run long). So state can still change between wait and dispatch — which is why the verify step is mandatory." },
+  { front: "Secure fields", back: "Once a platform marks an element secret, reads withhold its value AND related text evidence; actions may write into it but never echo the attempted or observed value. Protects passwords — not the other windows on screen." },
+  { front: "Partial observation", back: "If a snapshot exceeds its time budget it returns what it walked rather than discarding, and reports completeness per node. Ignore that field and the agent will treat a truncated tree as proof an element does not exist." },
+  { front: "Where tree agents fail", back: "Canvas/WebGL apps, games, custom-drawn UIs and remote desktops expose little or no accessibility surface. Also any visual question ('does this look right?') — use screenshots there." },
+]} />
+
+<Quiz questions={[
+  {
+    q: "Your harness sends a `type` command into a form field and gets back an error with delivery state 'delivered unverified'. What is the correct next move?",
+    options: [
+      "Retry the type command immediately — unverified means it did not land",
+      "Re-read the field's current state and decide from there",
+      "Abort the whole task, since the state is unknowable",
+      "Fall back to physical input synthesis and type again"
+    ],
+    answer: 1,
+    explain: "'Delivered unverified' means the input was posted but its effect is unconfirmed — the typical result of physical input synthesis. Retrying risks typing everything twice; aborting throws away a probably-successful action. Reading current state is the only move that resolves the ambiguity. Only 'not delivered' (argument error, access denial, read-only command) is free to retry."
+  },
+  {
+    q: "Why does agent-desktop reject a bare ref like `@e8` and require `@s8f3k2p9:e8`?",
+    options: [
+      "To let multiple agents share one machine without colliding",
+      "Because refs are deterministic within a snapshot but not stable across UI changes, so the snapshot ID scopes the lookup",
+      "To compress the snapshot JSON and save tokens",
+      "Because the accessibility APIs require a session token on every call"
+    ],
+    answer: 1,
+    explain: "The snapshot ID is a namespace boundary. Refs are deterministic inside one snapshot but UI mutations invalidate positional identity, so an unqualified ref is a category error — it would let an identifier from an old observation silently resolve against a changed tree. Requiring the qualifier makes that mistake fail with INVALID_ARGS instead of succeeding wrongly. (Machine-wide collision is handled separately, by the interaction lease.)"
+  },
+  {
+    q: "A snapshot returns without the button your agent expected. What must you check before concluding the button does not exist?",
+    options: [
+      "Whether the window was focused at snapshot time",
+      "Whether the snapshot was complete, since a timed-out walk returns partial results with completeness reported per node",
+      "Whether the app was launched by agent-desktop rather than by hand",
+      "Whether --headed mode was enabled"
+    ],
+    answer: 1,
+    explain: "If a snapshot exceeds its time budget it returns what it managed to observe rather than discarding the walk, and reports completeness on each node. An agent that ignores completeness treats a truncated tree as evidence of absence. This is the same discipline as the Absent/Unknown distinction: a failure to observe is not a negative observation."
+  },
+  {
+    q: "Which task is the WORST fit for an accessibility-tree agent?",
+    options: [
+      "Renaming a batch of files in Finder",
+      "Filling a multi-step form in a native Windows application",
+      "Checking whether a WebGL data visualisation rendered correctly",
+      "Driving a macOS app while the user keeps typing in another window"
+    ],
+    answer: 2,
+    explain: "A WebGL canvas exposes essentially no accessibility surface, and 'rendered correctly' is a visual question a tree cannot answer even in principle — that needs a screenshot. The other three are the architecture's strengths: stable refs on native apps, and headless operation that neither moves the pointer nor steals focus."
+  },
+  {
+    q: "What is the main NEW security exposure of a desktop tree agent compared with a screenshot agent confined to one browser tab?",
+    options: [
+      "Accessibility APIs can be used to escalate OS privileges",
+      "It reads text content across applications, so anything on screen becomes both sensitive capture and an injection vector",
+      "Snapshots are unencrypted on disk by default",
+      "Secure fields are not supported on Windows"
+    ],
+    answer: 1,
+    explain: "The capture is richer than a focused-window screenshot: application text across surfaces lands in the transcript, so logs behave more like a screen recording, and any displayed text — a calendar invite, a filename, a chat message — is a prompt-injection vector needing no network request. The repo does mitigate the narrow case: platform-marked secure fields withhold value and related text evidence on read, and never echo on write. That covers passwords, not the other windows."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Accessibility trees replace a coordinate bet with a named reference, so layout changes that break a screenshot agent are a non-event — but canvas, games and custom-drawn UIs have no tree to read.",
+  "Steal the delivery model: classify actions by whether they COULD have landed, not by whether they returned an error. 'May have landed' deserves a re-read, never a retry.",
+  "Scoping refs to a snapshot is a type system, not friction — it makes stale-identifier bugs impossible to express rather than silently wrong.",
+  "Fail-closed resolution is the reliability claim: a stale coordinate always hits something, a stale ref returns STALE_REF. Prefer the loud failure for anything unsupervised.",
+  "Keep Unknown distinct from Absent. An agent that reads a failed query as a negative result will act confidently on nothing.",
+  "Headless operation removes the ambient signal that an agent is working. If you run it unattended, logs and a scoped target app are the control — not your attention.",
+]} />
+
+## Sources & further reading
+
+- [vercel-labs/agent-desktop](https://github.com/vercel-labs/agent-desktop) — the project: README, install and platform-support matrix, command groups, JSON output shape, the `--skeleton`/`--compact`/`--root` flags, licence (Apache-2.0) and the v1.0.0–v1.0.2 release history
+- [agent-desktop — CONCEPTS.md](https://github.com/vercel-labs/agent-desktop/blob/main/CONCEPTS.md) — the source for everything in the second half of this page: ref scoping, graded fail-closed resolution, the four read outcomes, delivery semantics, tri-state evidence, the interaction lease, secure fields and partial observation
+- [agent-desktop — docs/faq.md](https://github.com/vercel-labs/agent-desktop/blob/main/docs/faq.md) and [docs/json-output.md](https://github.com/vercel-labs/agent-desktop/blob/main/docs/json-output.md) — error codes and the machine-readable output contract
+- [Apple — Accessibility API (NSAccessibility)](https://developer.apple.com/documentation/appkit/nsaccessibility) · [Microsoft — UI Automation](https://learn.microsoft.com/en-us/windows/win32/winauto/entry-uiauto-win32) · [GNOME — AT-SPI2](https://gitlab.gnome.org/GNOME/at-spi2-core) — the three platform trees underneath
+- Related on AILmanac: [Computer-use agents compared](/docs/models/computer-use-agents) — the screenshot-based APIs from Anthropic, OpenAI and Google, and the coordinate bugs this architecture sidesteps
+- Related on AILmanac: [Shared-login browsers for AI agents](/docs/models/browser-agents-shared-login) — the browser variant, where the agent inherits your session by design
+- Related on AILmanac: [Prompt injection](/docs/security/prompt-injection) — the primer that now applies to every window on your desktop
+- Related on AILmanac: [What your agent uploads](/docs/security/what-your-agent-uploads) — why desktop agent transcripts should be treated like screen recordings
+
+## Next
+
+- [Computer-use agents compared](/docs/models/computer-use-agents) — the other architecture, and how the three big providers' action spaces diverge
+- [Shared-login browsers for AI agents](/docs/models/browser-agents-shared-login) — the browser case, where the security posture inverts
+- [Hardening autonomous runs](/docs/security/hardening-autonomous-runs) — the controls to put around an agent that acts without an ambient signal
+- [Agent runtimes: isolates vs containers](/docs/frontiers/agent-runtimes-isolates-vs-containers) — where this loop should actually execute

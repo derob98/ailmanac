@@ -1,0 +1,92 @@
+# Claude 从未见过 68% 的 Claude Code 文档
+
+> Source: https://derob98.github.io/ailmanac/zh-Hans/docs/whats-new/unread-manual · AILmanac (CC BY 4.0) · last verified 2026-10-15
+
+我们按周回放了官方 Claude Code 文档 15 个月的历史。如今文档中 68% 的内容写于 2026 年 6 月之后，而这正是当前所有 Claude 模型的训练截止日期。下面是每个模型错过了什么，以及一个把这些告诉它的插件。
+
+import {UnreadHeadline, ModelBars, LearnedSlider, CohortChart, SurvivalChart, NewIdentifiers} from '@site/src/components/DocsDecay';
+
+<VerifyNote lastVerified="2026-10-15" source="https://platform.claude.com/docs/en/about-claude/models/overview">
+训练截止日期取自 Claude Platform 文档中各模型的页面。Claude Code 文档的历史来自一个社区镜像，它每天多次复制官方页面。这些数字是 2026 年 10 月 15 日的快照；生成它们的脚本已在下方链接，任何人都可以重新运行。
+</VerifyNote>
+
+每个 Claude 模型都是从其训练截止日期时的文档中学会 Claude Code 的。此后文档仍在不断变化。我们按周回放了它的历史，以衡量两者已经相隔多远。
+
+<UnreadHeadline />
+
+最新的模型 Fable 5.1、Opus 5.5、Sonnet 5.5 和 Haiku 5.5 的可靠知识截止日期是 2026 年 6 月。从 6 月底到 10 月 15 日，文档从 107 页增长到 164 页，如今文档所说的大部分内容都写于这三个半月里。若按更严格的方式计算，即按确切措辞而非按事实，这一比例升至 72%。去掉代码示例则是 70%。无论怎么算，Claude 都从未见过自己手册的大部分内容。
+
+## 每个模型从未见过什么
+
+截止日期越早，模型能读到的今天的文档就越少。这些模型目前都仍可通过 Claude API 使用。
+
+<ModelBars />
+
+Claude Haiku 4.5 的截止日期是 2025 年 2 月，早于几乎所有内容：Claude Code 就在那个月以研究预览版发布，而今天文档的几乎全部内容都出现在之后。
+
+## 选择你学习 Claude Code 的那一周
+
+同样的算术也适用于人。把滑块移到你阅读文档的那一周，或你正在跟着学的教程的日期。
+
+<LearnedSlider />
+
+## 文档不只是扩充，还会被重写
+
+增长解释了差距的大部分，但不是全部。页面也会被重写。下面每一条色带是一个季度内写下的文本；随着其中的句子被删除或修改，色带会变细。
+
+<CohortChart />
+
+2025 年 7 月，文档有 29 页。如今有 164 页，句子和代码行数是当时的 21 倍。在 2025 年 7 月的文档中，仍然有效的只有 30.5%；其余部分要么被删除，要么被重写，数字、标志或名称都变了。就连最新模型看到的 2026 年 6 月文档，也在不到四个月里失去了 26.9% 的事实。
+
+## 一句话能维持多久
+
+追踪每一句话，从它出现的那一周到它消失的那一周，其中一半会在 196 天内消失或被改写。如果只有改动数字、标志、路径或名称的改写才算数，那么一半的事实会在 266 天内消失：约九个月。
+
+<SurvivalChart />
+
+## 你的模型从未听说过的东西
+
+这些是今天参考表中、但在某个模型的截止日期时尚不存在的标识符：CLI 标志、斜杠命令、hook 事件和环境变量。向 Claude 问起其中任何一个，它只能猜。
+
+<NewIdentifiers />
+
+"文档记录之始"不等于"发布之始"：其中少数早已存在，只是后来才进入文档。无论哪种情况，模型都没有可供学习的页面。
+
+## 把清单交给 Claude
+
+[since-cutoff 插件](https://github.com/derob98/ailmanac/tree/main/plugins/since-cutoff)会把这些清单放到 Claude 面前。会话启动时，一个 hook 读取正在运行的是哪个模型，并向其上下文添加一条简短的说明：在该模型截止日期之后才有文档记录的标志、命令和 hook 事件，以及一条指令——在依赖记忆或声称某功能不存在之前，先查阅文档。
+
+```bash
+claude plugin marketplace add derob98/ailmanac --sparse .claude-plugin plugins
+claude plugin install since-cutoff@ailmanac
+```
+
+这个 hook 只有几行 POSIX shell：不需要 Node，不联网，每个会话约 400 到 750 个 token。当 Claude Code 没有把模型传给 hook 时，例如在我们的无头 `-p` 测试中，说明会列出自 2026 年 6 月以来的变化，这对每个 Claude 模型都成立。在那次测试中，会话收到了说明，Claude 把它一字不差地复述了出来。
+
+## 该怎么做
+
+- **不要相信 Claude 对 Claude Code 的记忆。** 对于标志、设置、hook 和命令，让它去读页面。Claude Code 自带一个回答自身问题的向导代理，文档也在 [code.claude.com/docs/llms.txt](https://code.claude.com/docs/llms.txt) 发布了索引。
+- **给你的教程标注日期。** 六个月前的指南已经失去了三分之一以上的事实。复制其中的命令之前，请对照文档检查任何更早的内容。
+- **优先选择注明核实时间的页面。** 本站每个页面都带有最后一次核实的日期；[新鲜度仪表盘](/docs/whats-new/freshness)列出了所有页面，[Deprecation & Migration Watch](/docs/whats-new/deprecations) 则追踪被移除的内容。
+
+## 我们如何测量
+
+- **历史。** [web3dev1337/claude-code-docs](https://github.com/web3dev1337/claude-code-docs) 是一个知名文档镜像的分叉，保留了完整的同步历史：2025 年 7 月至 2026 年 10 月之间共 3,604 次同步。我们取每周的最后一次同步，共 67 份快照。
+- **范围。** 除变更日志和每周摘要（它们本来就是为记录历史而存在）以及 Agent SDK 页面（2026 年从另一个文档站点迁入，否则会被算作新增）之外的所有 Claude Code 页面。
+- **单位。** 每个页面被拆分为句子、表格行和代码行，去除链接和标记。同时出现在五个或更多页面上的行，例如横幅或通用代码行，会被丢弃。最终剩下 90,674 个不同的单位可供追踪。
+- **消失。** 一个单位在连续两份每周快照中缺失，或在最新一份快照中缺失，就算消失，因此某个页面在一次同步中失败不会被计入。
+- **事实。** 同一周内，替换了一句被删除句子的新句子，如果至少 60% 的词相同，且每个数字、标志、路径和标识符都完全一致，就被视为同一个事实。用这种方法关联了 7,965 处改写。
+- **截止日期。** 每个模型与其截止月份最后一天或之前的最后一份每周快照比较，这是最宽松的解读。早于 2025 年 7 月的截止日期使用第一份快照，而它包含的内容已经多于这些模型可能见过的内容：它们的占比是下限。
+- **存活。** 对第一份快照之后产生的所有单位做 Kaplan–Meier 估计，至今仍然存在的单位按删失处理。
+
+这个镜像并非官方：如果它漏掉或弄乱了某个页面，数字也会随之带有偏差。我们检查了截止日期所在的几周，看是否有页面在一次同步中消失，没有发现。这项分析比较的是文本，而不是产品行为。
+
+## 复现
+
+脚本及其输出都在本站的仓库中：[scripts/research/docs-decay.mjs](https://github.com/derob98/ailmanac/blob/main/scripts/research/docs-decay.mjs) 和 [data/research/claude-code-docs-decay.json](https://github.com/derob98/ailmanac/blob/main/data/research/claude-code-docs-decay.json)。需要 Node 和 git，运行约 15 秒：
+
+```bash
+git clone https://github.com/web3dev1337/claude-code-docs
+git clone https://github.com/derob98/ailmanac
+node ailmanac/scripts/research/docs-decay.mjs claude-code-docs
+```

@@ -1,0 +1,126 @@
+# Ein Modell & einen Anbieter auswählen
+
+> Source: https://derob98.github.io/ailmanac/de/docs/foundations/choosing-a-model-provider · AILmanac (CC BY 4.0)
+
+Eine anbieterneutrale Methode, ein Modell auszuwählen — und Benchmarks skeptisch zu lesen. Erstelle aus Ranglisten eine engere Auswahl, entscheide per Bake-off mit deinen eigenen Eingaben und wäge dann Kosten, Latenz, Fähigkeiten, Datenschutz und Lock-in auf einer Scorecard ab.
+
+<LevelBadge level="intermediate" />
+
+Wie wählst du zwischen Modellen und Anbietern aus, ohne dich im Hype zu verlieren? Mit einem einfachen, zeitlosen Vorgehen — denn die *konkrete* Rangliste ändert sich monatlich, die *Art und Weise zu wählen* hingegen nicht.
+
+<Callout type="objectives" items={[
+  "Einen öffentlichen Benchmark als Hinweis für die engere Auswahl lesen statt als Urteil, und die drei Gründe kennen, warum er deine Entscheidung nicht allein treffen kann",
+  "Einen Bake-off mit deinen eigenen echten Eingaben durchführen — die wertvollste Gewohnheit bei der Modellauswahl",
+  "Kandidaten nach den sieben Faktoren bewerten, die das Ergebnis wirklich bestimmen, nicht nur nach Qualität und Preis",
+  "Eine Standardhaltung einnehmen, die Wechsel günstig hält: zuerst Mittelklasse, Modell hinter einer Konfiguration, regelmäßig neu bewerten"
+]} />
+
+## Benchmarks skeptisch lesen
+
+Öffentliche Benchmark-Werte sind ein erster Hinweis, kein Urteil:
+
+- Sie können **manipuliert oder kontaminiert** sein (Testdaten gelangen ins Training).
+- Sie messen **generische** Aufgaben, nicht *deine* Aufgabe.
+- Kleine Punktunterschiede sind in der Praxis selten von Bedeutung.
+
+Nutze sie, um eine engere Auswahl zu treffen, nicht um die endgültige Entscheidung zu fällen.
+
+## Der einzige Benchmark, der zählt: deiner
+
+Führe einen kleinen **[Eval](/docs/foundations/evals)** mit einer Handvoll *deiner echten Eingaben* über 2–3 Kandidatenmodelle hinweg durch. Das dauert nur Minuten und sagt dir, was keine Rangliste kann. Dieser "Bake-off" ist die mit Abstand beste Gewohnheit bei der Modellauswahl.
+
+<Steps items={[
+  {title: "2–3 Kandidaten in die engere Auswahl nehmen", body: "Nutze öffentliche Ranglisten, Preislisten und Fähigkeitstabellen, um das Feld einzugrenzen — und hör dann auf. Mehr leistet ein Benchmark nicht."},
+  {title: "Eine Handvoll deiner echten Eingaben sammeln", body: "Keine synthetischen Beispiele. Nimm tatsächliche Prompts, Dokumente oder Nutzernachrichten aus der Workload, die du betreiben willst — auch die schwierigen, die aktuell scheitern."},
+  {title: "Festhalten, was 'gut' heißt, bevor du die Ausgabe ansiehst", body: "Lege die Bestehensbedingung vorab fest — korrekte Extraktion, keine Ablehnung, ein parsebares Format, unter einem Latenzbudget. Wer erst hinterher urteilt, macht aus einem Bake-off einen Bauchgefühl-Check."},
+  {title: "Dieselben Eingaben durch jeden Kandidaten schicken", body: "Derselbe Prompt, dieselben Eingaben, jeweils nur eine Variable. Bewahre die Rohausgaben auf, damit du sie erneut lesen kannst, wenn du deiner eigenen Bewertung widersprichst."},
+  {title: "Bewerten, dann anhand der Scorecard unten entscheiden", body: "Qualität ist eine von sieben Spalten. Ein Modell, das den Bake-off knapp gewinnt, bei Kosten oder Latenz aber deutlich verliert, ist nicht der Gewinner."},
+  {title: "Erneut ausführen, sobald sich etwas bewegt", body: "Ein neues Modell, eine Preisänderung oder eine Verschiebung deiner Eingaben macht das Ergebnis hinfällig. Halte den Eval als Datei bereit, die du in Minuten erneut ausführen kannst, nicht als einmaligen Nachmittag."}
+]} />
+
+<PromptCard title="Aus einer Handvoll echter Eingaben eine wiederverwendbare Bake-off-Spezifikation machen">
+{`I want to choose between these candidate models for one specific task: [list candidates].
+
+The task: [describe it in one or two sentences].
+Here are [N] real inputs from the workload, including [N] that currently fail: [paste inputs].
+
+Help me build a small eval I can re-run:
+1. Write the pass/fail condition for each input, in advance and in plain language.
+2. Flag any input where "good" is ambiguous, and ask me to decide before we score.
+3. Give me a single prompt to send to every candidate unchanged.
+4. Propose a scoring table with one row per input and one column per candidate.
+Do not rank the models yet — I will run them and bring the outputs back.`}
+</PromptCard>
+
+## Eine Entscheidungs-Scorecard
+
+Gewichte, was für deinen Anwendungsfall wirklich zählt:
+
+| Faktor | Frage |
+|---|---|
+| **Qualität bei deiner Aufgabe** | Zeigt der Bake-off, dass es gut genug ist? |
+| **Kosten** | Pro-Token-Preis bei deinem Volumen ([Kosten & Latenz](/docs/foundations/cost-and-latency)) |
+| **Latenz** | Schnell genug für das Erlebnis? |
+| **Fähigkeiten** | Vision? Langer Kontext? Tool-Nutzung? Strukturierte Ausgabe? |
+| **Datenschutz/Compliance** | Datenverarbeitung, Speicherort, Zertifizierungen ([Datenschutz](/docs/foundations/privacy)) |
+| **Zuverlässigkeit & Ökosystem** | Verfügbarkeit, SDKs, Doku, Support, Migrationspfad |
+| **Lock-in** | Wie schwer ist ein späterer Wechsel? |
+
+## Praktische Haltung
+
+- **Setze standardmäßig auf ein leistungsfähiges Mittelklasse-Modell** und gehe nur auf Basis von Belegen nach oben/unten.
+- **Abstrahiere das Modell über eine Konfiguration**, nicht über verstreute Literale, sodass ein Wechsel eine Änderung in einer Zeile ist ([Fehler & Migration](/docs/api/errors-and-rate-limits)).
+- **Bewerte regelmäßig neu** — die Speerspitze bewegt sich schnell; das heute beste Modell ist es im nächsten Quartal vielleicht nicht mehr.
+
+(Für die Claude-spezifischen Stufen siehe [Ein Claude-Modell auswählen](/docs/api/choosing-a-model).)
+
+<Quiz questions={[
+  {
+    q: "Ein neues Modell führt die Rangliste an, der du folgst, zwei Punkte vor dem, das du nutzt. Was empfiehlt diese Seite?",
+    options: [
+      "Wechseln — zwei Punkte sind ein echter Unterschied, und die Rangliste ist der beste verfügbare Beleg.",
+      "Es auf eine engere Auswahl setzen und dann per Bake-off mit deinen eigenen echten Eingaben entscheiden, denn kleine Punktunterschiede sind in der Praxis selten von Bedeutung.",
+      "Es komplett ignorieren, da öffentliche Benchmarks manipuliert und daher wertlos sind.",
+      "Ein Quartal abwarten, ob der Wert Bestand hat, bevor man etwas unternimmt."
+    ],
+    answer: 1,
+    explain: "Benchmarks sind ein Hinweis für die engere Auswahl, kein Urteil: Sie können kontaminiert sein, sie messen generische statt deiner Aufgaben, und kleine Unterschiede überstehen den Kontakt mit echten Eingaben selten. Die Antwort der Seite lautet weder 'wechseln' noch 'ignorieren' — die Rangliste soll das Feld eingrenzen und dein eigener Eval die Entscheidung treffen."
+  },
+  {
+    q: "Dein Bake-off zeigt Kandidat A bei der Qualität knapp vor Kandidat B. Was fehlt noch, bevor du dich für A entscheidest?",
+    options: [
+      "Nichts — die Qualität bei deiner Aufgabe ist der entscheidende Faktor.",
+      "Eine größere Stichprobe, denn eine Handvoll Eingaben kann nie eine Entscheidung tragen.",
+      "Die anderen sechs Scorecard-Faktoren: Kosten bei deinem Volumen, Latenz, Fähigkeiten, Datenschutz und Compliance, Zuverlässigkeit und Ökosystem sowie Lock-in.",
+      "Eine zweite Meinung aus einer öffentlichen Rangliste, um die Reihenfolge zu bestätigen."
+    ],
+    answer: 2,
+    explain: "Qualität ist eine von sieben Spalten. Ein knapper Qualitätsvorsprung kann leicht aufgewogen werden durch den Pro-Token-Preis bei deinem tatsächlichen Volumen, ein Latenzbudget, das das Erlebnis braucht, eine fehlende Fähigkeit wie Vision oder strukturierte Ausgabe, ein Compliance-Hindernis oder einen Migrationspfad, der die Entscheidung teuer rückgängig zu machen macht."
+  },
+  {
+    q: "Welche Praxis empfiehlt diese Seite speziell, um einen späteren Wechsel günstig zu halten?",
+    options: [
+      "An jeder Aufrufstelle die exakte Modell-ID festschreiben, damit das Verhalten reproduzierbar ist.",
+      "Das Modell hinter einer Konfiguration halten statt in verstreuten Literalen, sodass ein Wechsel eine Änderung in einer Zeile ist.",
+      "Den Anbieter mit dem größten Ökosystem wählen, da Lock-in unvermeidlich ist.",
+      "Immer das leistungsfähigste Spitzenmodell als Standard nehmen, damit man nie nach oben wechseln muss."
+    ],
+    answer: 1,
+    explain: "Die Haltung hat drei Teile: standardmäßig ein leistungsfähiges Mittelklasse-Modell nehmen und nur bei Belegen wechseln, das Modell hinter einer Konfiguration abstrahieren, damit ein Wechsel eine Änderung in einer Zeile ist, und regelmäßig neu bewerten, weil sich die Spitze schnell bewegt. Lock-in ist ausdrücklich ein Scorecard-Faktor, gerade weil es ein Kostenfaktor ist, den du selbst wählst."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Ranglisten erstellen eine engere Auswahl. Dein eigener Eval trifft die Entscheidung.",
+  "Ein Bake-off mit einer Handvoll echter Eingaben dauert Minuten und sagt dir, was kein öffentlicher Benchmark kann.",
+  "Lege fest, was 'gut' heißt, bevor du irgendeine Ausgabe liest, sonst wird der Bake-off zum Bauchgefühl-Check.",
+  "Qualität ist einer von sieben Faktoren — Kosten, Latenz, Fähigkeiten, Datenschutz, Zuverlässigkeit und Lock-in entscheiden ebenfalls über das Ergebnis.",
+  "Standardmäßig Mittelklasse, Modell hinter einer Konfiguration, regelmäßig neu bewerten: Diese Haltung hält jede spätere Entscheidung günstig."
+]} />
+
+## Weiter
+
+- [Claude vs. ChatGPT, Gemini & Copilot](/docs/foundations/claude-vs-others)
+- [KI-Qualität bewerten (Evals)](/docs/foundations/evals)
+- [Kosten- & Latenz-Abwägungen](/docs/foundations/cost-and-latency)
+- [Wie man einen KI-Benchmark liest, ohne sich täuschen zu lassen](/docs/models/reading-ai-benchmarks) — die lange Fassung der Skepsis, mit der diese Seite beginnt

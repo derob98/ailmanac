@@ -1,0 +1,82 @@
+# Gerenciamento de Contexto
+
+> Source: https://derob98.github.io/ailmanac/pt-BR/docs/claude-code/context-management · AILmanac (CC BY 4.0) · last verified 2026-11-08
+
+/compact vs /clear, compactação automática e como manter a eficácia conforme as sessões crescem.
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Distinguir /clear de /compact e escolher o certo na hora", "Conduzir uma compactação em vez de deixá-la adivinhar, e ajustar quando a automática dispara", "Saber exatamente o que sobrevive à compactação e o que é resumido e perdido", "Aplicar quatro técnicas para manter as sessões longas afiadas", "Reconhecer os sintomas de uma janela de contexto cheia e corrigi-los rápido"]} />
+
+<VerifyNote lastVerified="2026-11-08" source="https://code.claude.com/docs/en/context-window">
+Os nomes dos comandos, a janela de compactação automática e a tabela do que sobrevive à compactação mudam entre versões — confirme na documentação oficial.
+</VerifyNote>
+
+## A grande ideia
+
+Toda sessão tem uma [janela de contexto](/docs/foundations/tokens-and-context) finita. Conforme ela enche, o conteúdo mais antigo é comprimido e o Claude pode começar a "se perder". Gerenciar o contexto de forma deliberada é o que mantém as sessões longas afiadas.
+
+## Os dois comandos essenciais
+
+Dois comandos cobrem quase todas as situações. O segredo é combinar o comando com a sua intenção.
+
+<Flashcards cards={[{front: "/clear", back: "Apaga a conversa e começa do zero. Use ao mudar para uma tarefa SEM RELAÇÃO. A forma mais barata de recuperar um contexto limpo e focado. Aliases: /reset e /new."}, {front: "/compact", back: "Resume a conversa até agora em uma forma compacta — mantém o essencial e libera espaço. Use quando quiser CONTINUAR a mesma tarefa mas a janela está enchendo. Aceita instruções de foco opcionais."}]} />
+
+Decida com uma pergunta: é uma tarefa nova ou a mesma?
+
+```mermaid
+flowchart TD
+  A{New task or same task?} -->|New / unrelated| B[/clear]
+  A -->|Same task, context full| C[/compact]
+```
+
+Dois detalhes fáceis de passar batido:
+
+- **`/compact` aceita instruções.** `/compact focus on the auth bug fix` mantém o que *você* escolhe, em vez do que a passagem automática acha importante. Execute-o deliberadamente antes de começar uma tarefa nova e longa, em vez de esperar que a janela force isso.
+- **`/clear` não é um ponto sem volta.** Passe um nome (`/clear auth refactor`) para rotular a conversa que sai no seletor do `/resume`, e dentro do mesmo processo do Claude Code o menu de rewind ainda oferece uma entrada `/resume <session-id> (previous session)` — veja [Checkpoints e Rewind](/docs/claude-code/checkpoints-and-rewind).
+
+## Compactação automática — e como movê-la
+
+Quando o contexto se aproxima do limite, o Claude Code **compacta automaticamente** para que o trabalho continue sem uma parada brusca. Em modelos com janela de contexto de 1M, isso acontece por padrão em cerca de 967K tokens; modelos anteriores compactam no limite da sua janela de contexto. O Claude Code também pode compactar uma conversa que você deixe ociosa.
+
+O limiar é seu para mover. `/autocompact 500k` compacta mais cedo — útil quando você prefere resumir nos seus termos em vez de com 96% de ocupação — e `/autocompact auto` volta para a janela ajustada ao seu modelo.
+
+<PromptCard title="Compactar mais cedo que o padrão">{`/autocompact 500k`}</PromptCard>
+
+<Steps items={[{title: "Valores aceitos", body: "Uma contagem bruta de tokens (500000), uma com sufixo (500k, 1m), auto para voltar à janela ajustada do modelo, ou off para desativar a compactação automática na sessão. Execute /autocompact sem argumento para ver a janela atual."}, {title: "Onde pode ser definido", body: "O comando /autocompact salva nas suas configurações de usuário, sob o modelo atual em modelSettings. Você também pode definir autoCompactWindow no nível superior do JSON de configurações ou por modelo em modelSettings, ou usar a variável de ambiente CLAUDE_CODE_AUTO_COMPACT_WINDOW."}, {title: "Precedência, da mais alta", body: "CLAUDE_CODE_AUTO_COMPACT_WINDOW, depois autoCompactWindow por modelo em modelSettings, depois autoCompactWindow de nível superior, depois a janela padrão do modelo. Se um escopo de configurações de prioridade maior, como as configurações gerenciadas, definir a janela, /autocompact salva o seu valor, mas a sessão mantém o desse escopo — e avisa você."}]} />
+
+<Callout type="tip" items={["Trate a compactação automática como uma rede de segurança, não como estratégia. Limpar entre tarefas sem relação mantém o contexto mais limpo do que deixar a janela encher até a compactação automática disparar.", "Quando compactar, faça de propósito: /compact com instruções de foco vence uma passagem automática adivinhando o que importava."]} />
+
+## O que sobrevive à compactação
+
+A compactação resume a *conversa*. Tudo o que a sua configuração carrega do disco é tratado separadamente — por isso uma sessão compactada ainda conhece as convenções do seu projeto.
+
+<Steps items={[{title: "Reinjetado do disco", body: "O system prompt e o estilo de saída continuam valendo; o CLAUDE.md da raiz do projeto, as regras sem escopo, a memória automática e o plano que o Claude escreveu no plan mode voltam. As descrições das skills são reconstruídas a partir das suas skills atuais (Claude Code v2.1.304 ou posterior). Se a sessão começou com um snapshot do git status, o Claude Code lê um novo."}, {title: "Recarregado sob demanda", body: "Regras com frontmatter paths: e arquivos CLAUDE.md aninhados em subdiretórios são resumidos e perdidos, e só recarregam quando o Claude tocar de novo em um arquivo correspondente. Se uma regra precisa persistir após a compactação, remova o frontmatter paths: ou mova-a para o CLAUDE.md da raiz do projeto."}, {title: "Restaurado parcialmente", body: "O Claude Code relê até cinco dos arquivos que o Claude leu ou editou, os modificados mais recentemente primeiro — mas um arquivo acima de 5.000 tokens volta como referência de caminho ('Referenced file') sem o conteúdo. Os corpos das skills invocadas são reinjetados com teto de 5.000 tokens por skill e 25.000 no total, descartando as mais antigas primeiro e mantendo o início do arquivo: coloque o que importa no topo do SKILL.md."}, {title: "Resumido e perdido", body: "A própria conversa, incluindo o contexto que hooks adicionaram antes. Os hooks SessionStart que correspondem à fonte 'compact' rodam de novo e a saída deles entra no contexto compactado — é o hook a usar para tudo que precisa voltar."}, {title: "Intacto", body: "Comandos em segundo plano e subagentes em segundo plano continuam rodando, e o Claude Code lembra o Claude de quais ainda estão ativos para que ele não inicie um duplicado."}]} />
+
+## Técnicas para manter a eficácia
+
+Além dos dois comandos, quatro hábitos mantêm o seu contexto enxuto desde o início.
+
+<Steps items={[{title: "Uma tarefa por sessão", body: "Não deixe uma tarde de trabalho sem relação se acumular em um único contexto."}, {title: "Delegue leituras pesadas a subagentes", body: "Entregue leituras grandes a subagentes — eles gastam o contexto DELES e devolvem só a conclusão. Veja /docs/claude-code/subagents."}, {title: "Referencie, não cole", body: "Aponte o Claude para arquivos com @path em vez de colar blocos grandes, e mantenha o CLAUDE.md enxuto (veja /docs/claude-code/claude-md)."}, {title: "Acompanhe o orçamento", body: "Execute /context para um detalhamento ao vivo por categoria — uma grade colorida mais sugestões de otimização para ferramentas pesadas em contexto e memória inchada, incluindo quais arquivos CLAUDE.md e de memória automática foram carregados. Passe 'all' para expandir a lista por item no modo tela cheia. Uma statusline que mostra o uso de contexto dá o mesmo sinal de forma passiva. Veja /docs/claude-code/statusline."}]} />
+
+<PromptCard title="Veja para onde seu contexto realmente foi">{`/context`}</PromptCard>
+
+Estes levam à documentação atualizada: [subagentes](/docs/claude-code/subagents), [CLAUDE.md](/docs/claude-code/claude-md) e [statusline](/docs/claude-code/statusline).
+
+:::tip[Sintoma → solução]
+Se o Claude começa a esquecer uma instrução anterior ou a se repetir, a janela provavelmente está cheia. `/compact` (mesma tarefa) ou `/clear` (tarefa nova) costuma resolver na hora. Execute `/context` para confirmar — quando a conversa realmente excedeu a janela, a saída mostra o quanto você passou e qual comando libera espaço. Mais em [Por que o Claude fez isso?](/docs/contribute/troubleshooting).
+
+Se, em vez disso, você encontrar `Autocompact is thrashing`, a compactação está funcionando, mas algo superdimensionado continua reenchendo a janela — veja [Solução de problemas do Claude Code](/docs/claude-code/troubleshooting).
+:::
+
+<Callout type="takeaways" items={["/clear apaga a conversa para um recomeço — use para tarefas sem relação (aliases: /reset, /new)", "/compact resume a sessão para liberar espaço — use para continuar a mesma tarefa quando a janela enche, e passe instruções de foco para manter o que importa para você", "A compactação automática é uma rede de segurança, não uma estratégia: dispara por volta de 967K tokens em modelos de contexto 1M, e /autocompact 500k (ou auto, ou off) move essa linha", "A compactação resume a conversa mas reinjeta do disco o CLAUDE.md, as regras sem escopo, a memória automática e o plano; regras com escopo de caminho, arquivos CLAUDE.md aninhados e o conteúdo de arquivos grandes não voltam intactos", "Mantenha o contexto enxuto: uma tarefa por sessão, delegue leituras pesadas a subagentes, referencie arquivos em vez de colar e confira /context ou uma statusline", "Esquecimento ou repetição indica janela cheia — /compact (mesma tarefa) ou /clear (tarefa nova) resolve"]} />
+
+<Quiz title="Teste-se" questions={[{q: "Você termina uma tarefa e passa para algo completamente sem relação. Qual comando?", options: ["/compact — para resumir o trabalho anterior", "/clear — para apagar a conversa e começar do zero", "Nenhum — deixe a compactação automática cuidar disso"], answer: 1, explain: "/clear apaga a conversa e começa do zero. É a forma mais barata de recuperar um contexto limpo e focado ao mudar para uma tarefa sem relação."}, {q: "Você está no meio de uma tarefa e a janela de contexto está enchendo, mas quer continuar o mesmo trabalho. Qual comando?", options: ["/clear — para liberar o máximo de espaço", "/compact — para resumir a conversa mantendo o essencial", "Abrir um novo terminal"], answer: 1, explain: "/compact resume a conversa até agora em uma forma compacta, mantendo o essencial e liberando espaço — ideal para continuar a mesma tarefa."}, {q: "Qual é a forma certa de pensar na compactação automática?", options: ["A estratégia principal para gerenciar contexto", "Uma rede de segurança cujo limiar você pode mover — um /clear proativo e um /compact deliberado dão resultados melhores", "Um bug que você deveria desativar"], answer: 1, explain: "A compactação automática deixa o trabalho continuar sem uma parada brusca quando o contexto se aproxima do limite — cerca de 967K tokens por padrão em modelos de contexto 1M. É uma rede de segurança: limpar entre tarefas sem relação e compactar de propósito com instruções de foco são ambos melhores do que depender dela. Você também pode mover a linha com /autocompact 500k, ou desativá-la na sessão com /autocompact off."}, {q: "Você guarda uma regra em um arquivo com frontmatter `paths:`. A sessão é compactada. A regra ainda vale?", options: ["Sim — as regras são sempre reinjetadas do disco após a compactação", "Não imediatamente — ela só recarrega quando o Claude tocar de novo em um arquivo correspondente", "Não — ela some pelo resto da sessão"], answer: 1, explain: "Regras com escopo de caminho são carregadas no histórico de mensagens quando o Claude lê ou edita o arquivo que as aciona, então a compactação as resume e perde junto com a conversa. Elas recarregam sob demanda na próxima vez que um arquivo correspondente for tocado. Só o CLAUDE.md da raiz do projeto e as regras sem escopo são reinjetados incondicionalmente do disco — então, se uma regra precisa sobreviver a toda compactação, remova o frontmatter paths: ou mova-a para lá."}, {q: "O Claude começa a esquecer uma instrução anterior ou a se repetir. Qual a causa provável e a solução?", options: ["Um problema de rede — reinicie a máquina", "A janela provavelmente está cheia — /compact (mesma tarefa) ou /clear (tarefa nova)", "O modelo está quebrado — troque de modelo"], answer: 1, explain: "Esquecer ou se repetir geralmente significa que a janela está cheia. /compact (mesma tarefa) ou /clear (tarefa nova) costuma resolver na hora."}]} />
+
+## Próximos passos
+
+- [Auditoria do Orçamento de Contexto](/docs/claude-code/context-budget-audit) — o checklist de uma vez por projeto: `/skill-doctor`, limites de saída, `omitClaudeMd`, a janela de compactação automática
+- [Checkpoints e Rewind](/docs/claude-code/checkpoints-and-rewind) — `/rewind` para desfazer edições ou comprimir o contexto a partir de qualquer ponto
+- [Tokens, Contexto e Memória](/docs/foundations/tokens-and-context)
+- [Subagentes e Agentes Paralelos](/docs/claude-code/subagents)
+- [Personalização da Statusline](/docs/claude-code/statusline)

@@ -1,0 +1,186 @@
+# Ollama로 AI 모델 로컬에서 실행하기
+
+> Source: https://derob98.github.io/ailmanac/ko/docs/models/run-models-locally-ollama · AILmanac (CC BY 4.0) · last verified 2026-10-21
+
+오픈 웨이트 모델(Llama, Mistral, Qwen 등)을 내 컴퓨터에서 실행하세요 — 비공개, 오프라인, 실행 비용 무료 — Ollama로. 설치, CLI, 코드에서 호출하는 방법.
+
+<LevelBadge level="intermediate" />
+
+프런티어 모델은 클라우드에 있지만, **오픈 웨이트(open-weight)** 모델 계열 — Llama, Mistral, Qwen, DeepSeek, Gemma — 은 내 노트북이나 서버에 내려받아 실행할 수 있습니다. [Ollama](https://ollama.com/)는 이를 가장 쉽게 해 주는 도구입니다. 설치 한 번, 명령 하나면 모델이 로컬에서 돌아갑니다. 이 페이지는 처음부터 모델을 실행하고, 코드에서 호출하고, 트레이드오프를 이해하는 데까지 안내합니다. 7B 로컬 모델이 프런티어 모델처럼 동작하리라고 기대하지 않도록 하기 위해서입니다.
+
+<Callout type="objectives" items={[
+  "모델을 왜 로컬에서 실행하는지 — 그리고 클라우드 프런티어 모델과 비교한 솔직한 트레이드오프를 이해한다",
+  "Ollama를 설치하고 두 개의 명령으로 첫 모델을 실행한다",
+  "핵심 CLI를 사용한다: pull, run, list, ps, rm, stop",
+  "Ollama의 OpenAI 호환 API로 코드에서 로컬 모델을 호출한다",
+  "RAM 요구량, 모델 크기, 양자화를 이해해 내 기기에서 실제로 돌아가는 모델을 고른다",
+  "LM Studio(GUI)가 더 나은 출발점인 경우를 안다",
+]} />
+
+## 왜 모델을 로컬에서 실행하는가 (그리고 언제 하지 말아야 하는가)
+
+자신의 하드웨어에서 모델을 실행하면 네 가지를 얻습니다.
+
+- **프라이버시** — 프롬프트와 데이터가 내 기기를 벗어나지 않습니다. 규제가 있거나 민감한 분야의 팀이 로컬 모델을 찾는 이유입니다. ([모델 고르기](/docs/models/choosing-a-model)의 프라이버시/셀프 호스팅 분기를 참고하세요.)
+- **오프라인** — 인터넷도, API도, 장애 의존성도 없습니다. 모델은 디스크 위의 파일일 뿐입니다.
+- **비용** — 토큰당 청구가 없습니다. 일단 내려받으면 실행은 "무료"입니다(API 비용이 아니라 전기와 하드웨어로 지불합니다). 대규모에서 [토큰 지출](/docs/power-user/token-economy)이 제약이라면 로컬이 유리할 수 있습니다.
+- **제어** — 정확한 버전을 고정하고, 동작을 맞춤 설정하고, 속도 제한이나 이용 약관의 돌발 변경 없이 통합할 수 있습니다.
+
+솔직한 트레이드오프:
+
+- **성능 격차.** 노트북에서 실행할 수 있는 모델(파라미터 1B–14B)은 어려운 추론, 긴 컨텍스트, 에이전트형 작업에서 클라우드 프런티어 모델과 **같은 급이 아닙니다**. 일상적인 많은 작업에서는 격차가 작지만, 가장 어려운 작업에서는 큽니다.
+- **하드웨어.** 더 크고 성능이 좋은 모델은 일반적인 기기보다 더 많은 RAM/VRAM을 필요로 합니다. 흔히 존재하는 최고의 모델이 아니라 *내 하드웨어가 실행할 수 있는 가장 큰 모델*을 고르게 됩니다.
+- **직접 운영합니다.** 관리형 스케일링도, 자동 업그레이드도 없습니다. 그것이 제어의 대가입니다.
+
+흔하고 오래가는 패턴: 작은 평가로 **프로토타입을 만들고 고르며**(클라우드 모델과 같은 방법 — [모델 고르기](/docs/models/choosing-a-model) 참고), 비공개/오프라인/대규모에서도 저렴한 작업에는 로컬을 쓰고, 작업이 정말로 추가 성능을 필요로 할 때는 프런티어 API를 사용합니다.
+
+## Ollama를 설치하고 첫 모델 실행하기
+
+<Steps items={[
+  {title: "Ollama 설치", body: "macOS와 Windows: ollama.com/download에서 설치 프로그램을 내려받아 실행합니다. Linux: 공식 설치 스크립트를 사용합니다(아래). 그러면 ollama 명령과 로컬 백그라운드 서비스가 설치됩니다."},
+  {title: "모델 실행", body: "ollama run <model>은 처음 사용할 때 모델을 내려받고(수 GB일 수 있음) 대화형 채팅으로 들어갑니다. 첫 실행은 가중치를 받아 오느라 느리고, 이후 실행은 즉시 시작됩니다."},
+  {title: "채팅하고 종료하기", body: "프롬프트를 입력하고 Enter를 누릅니다. 대화형 세션을 나가려면 /bye를 입력하거나 Ctrl+D를 누릅니다. 모델은 다음에 쓸 수 있도록 디스크에 캐시된 채로 남습니다."},
+  {title: "내려받은 것 관리하기", body: "ollama list로 설치된 모델을 확인하고, ollama rm <model>로 하나를 삭제해 디스크 공간을 되찾습니다."},
+]} />
+
+Linux 설치(macOS/Windows는 대신 내려받은 설치 프로그램을 사용):
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+<PromptCard title="작은 모델 받아서 실행하기 (좋은 첫 선택)">{`ollama run gemma4:e2b`}</PromptCard>
+
+이 명령 하나가 `gemma4:e2b`를 내려받고 — Ollama 자체 퀵스타트가 가장 먼저 쓰는 모델로, *유효* 파라미터 약 2.3B에 디스크 용량 몇 GB인 엣지 크기의 Gemma 4 변형입니다 — 대화형 채팅을 시작합니다. 아직 채팅하지 않고 내려받기만 하려면 `ollama pull`을 대신 사용하세요.
+
+<VerifyNote lastVerified="2026-10-21" source="https://docs.ollama.com/quickstart">
+정확한 **모델 이름, 사용 가능한 파라미터 크기, 태그는 새 릴리스가 나올 때마다 자주 바뀝니다**. 이 페이지에서 쓰인 이름 — `gemma4:e2b`, `qwen3`, `deepseek-r1`, `gemma3`, `mistral`, `llama3.2` — 은 검증 시점에 Ollama 라이브러리에 있었으며, `qwen3.5` 같은 새 모델과 `gemma4`의 더 큰 `12b`/`26b`/`31b` 태그도 함께 있었습니다. 특정 이름/크기는 모두 변하기 쉬운 정보로 다루세요. 오늘 기준의 정확한 pull 이름과 크기는 <a href="https://ollama.com/library">ollama.com/library</a>에서 현재 라이브러리를 확인하세요.
+</VerifyNote>
+
+## 핵심 CLI
+
+몇 개의 명령으로 거의 모든 것을 처리할 수 있습니다. 전체 목록은 `ollama --help`로 확인하세요.
+
+```bash
+# Download a model without starting a chat
+ollama pull qwen3
+
+# Start an interactive chat (downloads first if needed)
+ollama run qwen3
+
+# One-shot: pass the prompt inline, get the answer, exit
+ollama run qwen3 "Summarize the CAP theorem in two sentences."
+
+# List models you've downloaded
+ollama list
+
+# Show models currently loaded in memory
+ollama ps
+
+# Stop a running/loaded model (frees memory)
+ollama stop qwen3
+
+# Delete a downloaded model to reclaim disk
+ollama rm qwen3
+```
+
+대화형 `ollama run` 세션 안에서 `/bye`로 종료하고 `/?`로 세션 내 명령을 확인할 수 있습니다. 실제로 모델을 서빙하는 백그라운드 서비스는 `ollama serve`로 시작됩니다(데스크톱 앱이 자동으로 시작해 줍니다).
+
+## 코드에서 호출하기 (OpenAI 호환 API)
+
+로컬 모델을 앱에서 정말 쓸모 있게 만드는 부분입니다. Ollama 백그라운드 서비스는 기본 포트 **11434**의 **`http://localhost:11434`**에서 로컬 HTTP API를 제공합니다. 자체 네이티브 엔드포인트(`/api/generate`, `/api/chat`) **그리고** `/v1`의 **OpenAI 호환** 계층이 있어서, OpenAI SDK용으로 작성된 대부분의 코드가 두 줄만 바꾸면 로컬 모델에서 동작합니다.
+
+`curl`을 사용한 원시 HTTP(네이티브 엔드포인트):
+
+```bash
+curl http://localhost:11434/api/chat -d '{
+  "model": "gemma4:e2b",
+  "messages": [
+    { "role": "user", "content": "Why is the sky blue?" }
+  ],
+  "stream": false
+}'
+```
+
+공식 OpenAI SDK를 사용하는 Python — `base_url`을 Ollama로 지정하고 비어 있지 않은 아무 `api_key`나 전달하면 됩니다(Ollama는 이 필드를 요구하지만 값은 무시합니다):
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:11434/v1",
+    api_key="ollama",  # required by the SDK, ignored by Ollama
+)
+
+response = client.chat.completions.create(
+    model="gemma4:e2b",
+    messages=[
+        {"role": "system", "content": "You are a concise assistant."},
+        {"role": "user", "content": "Explain gradient descent in two sentences."},
+    ],
+)
+
+print(response.choices[0].message.content)
+```
+
+OpenAI 호환이므로 호스팅된 API에서 쓰던 패턴이 그대로 이어집니다 — 스트리밍과 [도구 사용 / 함수 호출](/docs/api/tool-use)도 포함되며, 클라우드에서와 똑같이 로컬에서 동작합니다(모델이 실제로 그 작업을 잘한다는 전제하에). Ollama의 `/v1` 계층은 `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/models`(및 `/v1/models/{model}`), `/v1/embeddings`를 지원합니다.
+
+## 하드웨어, 모델 크기, 양자화
+
+모델에 붙는 숫자 — **1B, 7B, 8B, 70B** — 는 **파라미터 수**(십억 단위)입니다. 파라미터가 많을수록 일반적으로 성능이 좋고 *동시에* 메모리도 많이 필요합니다. 실행할 수 있는 범위의 실질적인 한계는 **RAM**(GPU라면 **VRAM**)입니다.
+
+**양자화(quantization)**는 이것을 평범한 기기에서 가능하게 만드는 핵심 기법입니다. 모델의 가중치는 원래 고정밀도(예: 16비트)로 저장되지만, 품질 손실이 작고 대개 거의 눈에 띄지 않는 수준으로 약 4비트까지 압축할 수 있습니다. Ollama는 대부분의 모델을 기본적으로 양자화해서 배포하며, 그래서 수십억 파라미터의 모델이 몇 GB에 들어갑니다. 대략적인 경험칙(해당 모델의 페이지에서 확인하세요):
+
+- **약 1B–3B** 모델: 대부분의 최신 노트북에서 무리 없이 실행됩니다(몇 GB의 RAM).
+- **약 7B–8B** 모델: 성능이 좋으면서도 실행 가능한 최적점입니다. 여유 RAM 수 GB를 잡으세요.
+- **약 13B–14B** 모델: 사양이 꽤 좋은 기기가 필요합니다.
+- **약 70B 이상** 모델: RAM이 많은 워크스테이션/서버나 강력한 GPU가 필요합니다. 일반적인 노트북의 영역이 아닙니다.
+
+실용적인 방법: 작은 모델(`gemma4:e2b`)로 시작해 워크플로를 처음부터 끝까지 확인한 다음, 내 하드웨어에서 여전히 부드럽게 돌아가는 가장 큰 모델까지 *올려* 가세요. 존재하는 가장 큰 모델이 아닙니다.
+
+<Flashcards title="로컬 모델 용어" cards={[
+  {front: "가중치 (Weights)", back: "모델 그 자체인, 학습된 숫자들(파라미터). 모델을 로컬에서 실행한다는 것은 가중치 파일을 메모리에 올리고 그것으로 계산한다는 뜻입니다."},
+  {front: "오픈 웨이트 모델", back: "가중치를 내려받아 직접 실행할 수 있는 모델(Llama, Mistral, Qwen, DeepSeek, Gemma) — 로컬 실행의 전제 조건입니다."},
+  {front: "파라미터 (예: 7B)", back: "가중치의 개수(십억 단위). 높을수록 일반적으로 성능이 좋고 메모리도 많이 필요합니다. 내 기기에서 실행할 수 있는지를 좌우하는 핵심 요소입니다."},
+  {front: "양자화", back: "가중치를 더 낮은 정밀도(예: 16비트 → 4비트)로 압축해 약간의 품질 손실로 모델이 훨씬 적은 RAM에 들어가게 하는 것. 수십억 파라미터 모델이 몇 GB에 들어가는 이유입니다."},
+  {front: "컨텍스트 윈도우", back: "모델이 한 번에 고려할 수 있는 토큰 수(프롬프트 + 출력). 로컬 모델은 사용 가능한 컨텍스트가 프런티어 모델보다 작은 경우가 많고, 컨텍스트가 클수록 메모리가 더 듭니다."},
+  {front: "양자화 태그 (예: q4)", back: "모델 변형의 정밀도/크기 트레이드오프를 나타내는 라벨 — 비트가 낮을수록 작고 빠르며, 높을수록 원래 품질에 가깝습니다."},
+]} />
+
+## LM Studio: GUI 대안
+
+명령줄이 맞지 않는다면 **[LM Studio](https://lmstudio.ai/)** 가 있습니다. macOS, Windows, Linux용 데스크톱 앱으로, 같은 일을 그래픽 인터페이스로 해 줍니다. 오픈 모델을 둘러보고 내려받고, 내장 UI에서 대화하고, Ollama처럼 **로컬 OpenAI 호환 서버**를 실행해 코드가 접속할 수 있게 합니다. 비개발자나 터미널보다 포인트 앤 클릭을 선호하는 사람에게 더 쉬운 입문 경로입니다. 스크립트로 다룰 수 있는 CLI와 가벼운 백그라운드 서비스를 원한다면 Ollama가 유리한 경향이 있습니다. 둘 다 같은 종류의 오픈 웨이트 모델을 실행하므로 이 페이지의 개념은 그대로 적용됩니다.
+
+<Quiz title="스스로 점검하기" questions={[
+  {q: "모델을 로컬에서 실행할 때, 클라우드 프런티어 모델과 비교한 가장 큰 솔직한 트레이드오프는 무엇인가요?", options: ["로컬 모델은 코드에서 호출할 수 없다", "노트북 크기의 로컬 모델은 어려운 작업에서 성능이 떨어진다", "로컬 모델은 토큰당 비용이 더 든다"], answer: 1, explain: "성능 격차가 진짜 트레이드오프입니다. 로컬에서 돌아갈 만큼 작은 모델은 가장 어려운 추론/에이전트형 작업에서 클라우드 프런티어 모델에 뒤처집니다. 코드 접근성과 토큰당 비용은 오히려 로컬의 장점입니다."},
+  {q: "모델을 (필요하면) 내려받고 동시에 대화를 시작하는 명령은 무엇인가요?", options: ["ollama pull gemma4:e2b", "ollama serve gemma4:e2b", "ollama run gemma4:e2b"], answer: 2, explain: "ollama run은 처음 사용할 때 내려받은 뒤 대화형 세션을 엽니다. ollama pull은 내려받기만 하고, ollama serve는 백그라운드 서비스를 시작합니다."},
+  {q: "OpenAI SDK 코드에서 로컬 모델을 호출하려면 무엇을 설정하나요?", options: ["유료 OpenAI API 키", "base_url을 http://localhost:11434/v1로, 그리고 비어 있지 않은 아무 api_key", "아무것도 필요 없다 — 자동으로 api.openai.com에 대해 동작한다"], answer: 1, explain: "base_url을 Ollama의 로컬 /v1 엔드포인트로 지정하고 비어 있지 않은 아무 api_key나 전달합니다(Ollama는 이 필드를 요구하지만 값은 무시합니다)."},
+  {q: "수십억 파라미터 모델이 몇 GB의 RAM에 들어갈 수 있는 이유는 무엇인가요?", options: ["파라미터가 클라우드에서 스트리밍되기 때문", "양자화가 가중치를 더 낮은 정밀도로 압축하기 때문", "Ollama가 모델의 일부만 불러오기 때문"], answer: 1, explain: "양자화는 가중치를 더 낮은 정밀도(예: 16비트 대신 4비트)로 저장해, 약간의 품질 손실로 메모리 사용량을 줄입니다."},
+]} />
+
+<Callout type="takeaways" items={[
+  "로컬 = 프라이버시 + 오프라인 + 토큰당 비용 없음 + 제어. 대가는 실제 성능 격차와 하드웨어 한계입니다.",
+  "두 개의 명령이면 실행됩니다: Ollama를 설치한 뒤 ollama run gemma4:e2b.",
+  "핵심 CLI: pull(내려받기), run(채팅), list, ps, stop, rm — 이것이 대부분입니다.",
+  "OpenAI 호환 엔드포인트로 코드에서 호출: base_url http://localhost:11434/v1, 비어 있지 않은 아무 api_key.",
+  "파라미터 수 + 양자화가 내 기기에서 모델을 실행할 수 있는지를 결정합니다. 작게 시작해서 부드럽게 돌아가는 수준까지 올리세요.",
+  "GUI가 좋다면? LM Studio가 포인트 앤 클릭으로 같은 일을 하며, 로컬 OpenAI 호환 서버도 제공합니다.",
+]} />
+
+## 출처 및 더 읽을거리
+
+- [Ollama](https://ollama.com/) — 공식 사이트 및 다운로드.
+- [Ollama 모델 라이브러리](https://ollama.com/library) — 현재 모델과 정확한 pull 이름/크기.
+- [Ollama CLI 레퍼런스](https://docs.ollama.com/cli) · [Ollama API 문서](https://docs.ollama.com/api) — 명령과 엔드포인트에 대한 공식 레퍼런스.
+- [Ollama의 OpenAI 호환성 블로그 글](https://ollama.com/blog/openai-compatibility) — `/v1` 엔드포인트와 SDK 사용법.
+- [GitHub의 Ollama](https://github.com/ollama/ollama) — 소스, 이슈, 상세 문서.
+- [LM Studio](https://lmstudio.ai/) — 로컬 모델 실행을 위한 GUI 대안.
+
+## 다음
+
+- 내려받은 모델에 도구 접근 권한을 주기 전에 → [백도어가 심긴 오픈 웨이트: abliterated 모델 공급망](/docs/security/backdoored-open-weights) — 내려받는 GGUF는 대개 3자 신뢰 사슬의 세 번째 고리입니다
+- 큰 Claude 시스템 프롬프트를 로컬 모델로 옮기나요? → [35 KB 시스템 프롬프트가 로컬 모델에서 깨지는 이유](/docs/models/large-system-prompts-on-local-models)
+- 양자화는 4비트 아래로 얼마나 내려갈 수 있을까? → [삼진 양자화 실전: Bonsai 2 27B를 5.95 GB로](/docs/models/ternary-quantization-bonsai-2-27b) — 가중치당 1.75비트, 그리고 Ollama가 이를 불러오지 못하는 이유
+- 작업별로 로컬과 클라우드 결정하기 → [모델 고르기](/docs/models/choosing-a-model)
+- 로컬에서도 도구가 동작하게 하기 → [도구 사용](/docs/api/tool-use)
+- 모델 실행에 실제로 드는 비용 살펴보기 → [토큰 이코노미](/docs/power-user/token-economy)

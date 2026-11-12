@@ -1,0 +1,340 @@
+# Harte Ausgabenlimits: Welche KI-Anbieter die Rechnung tatsächlich stoppen
+
+> Source: https://derob98.github.io/ailmanac/de/docs/models/hard-spend-caps · AILmanac (CC BY 4.0) · last verified 2026-10-05
+
+Ein weiches Limit schickt Ihnen eine E-Mail. Ein hartes Limit blockiert die Anfrage. Diese Seite zeigt, welche KI-Anbieter was tun — und die Falle, die niemand dokumentiert: Dasselbe Ereignis (Sie erreichen Ihr Limit) liefert HTTP 429 ohne retry-after beim Tier-Limit von Anthropic, HTTP 400 beim selbst gesetzten Limit, 429 bei OpenAI und 402 bei OpenRouter. Dazu: warum kein Limit exakt sein kann, wo der Custom-Tier sein Sicherheitsnetz verliert und wie man einen Pre-Flight-Notausschalter baut.
+
+<LevelBadge level="intermediate" />
+
+Am 3. Oktober 2026 veröffentlichte Simon Willison ein kurzes Plädoyer, das mit 615 Punkten auf der Hacker-News-Startseite landete: Nutzungsabgerechnete Dienste brauchen standardmäßig **harte** Budgetlimits, wobei unbegrenzte Abrechnung das ausdrückliche Opt-in sein sollte. Seine Formulierung ist die, auf die es ankommt — *„Nobody wants to wake up to an email sent at midnight warning about a budget limit and find that, while they slept, their rogue service had consumed several hundred (or several thousand) more dollars.“*
+
+Dass daraus ein Argument von 2026 wurde und keins von 2015, liegt daran, dass Agenten die Form des Risikos verändert haben. Ein Mensch, der einen Cronjob falsch konfiguriert, ist ein langsames Leck. Ein Agent, der einen fehlschlagenden Tool-Aufruf in einer Schleife wiederholt oder Subagenten startet, die Subagenten starten, ist ein Leck mit einem Modell dahinter — und es läuft in Maschinengeschwindigkeit, während Sie schlafen.
+
+Die gute Nachricht: In den letzten vier Monaten hat der größte Teil des Stacks still echte Limits bekommen. Die schlechte Nachricht ist, worum es auf dieser Seite eigentlich geht — **Die Limits gibt es, aber sie melden sich mit vier verschiedenen HTTP-Statuscodes, und mindestens zwei davon werden von der Retry-Logik verschluckt, die Sie bereits geschrieben haben.**
+
+<Callout type="objectives" items={[
+  "Ein weiches Limit (eine E-Mail) von einem harten Limit (einer blockierten Anfrage) unterscheiden — und wissen, welches Sie bei welchem Anbieter bekommen",
+  "Die vier verschiedenen Fehlerformen behandeln, die ein Ausgabenlimit zurückgeben kann, einschließlich der, die als 400 eintrifft und von Ihrer Retry-Logik als Bug behandelt wird",
+  "Verstehen, warum kein Limit auf dem Markt exakt sein kann und warum jeder Anbieter die Haftung für die Überschreitung ausschließt",
+  "Wissen, wo Anthropics Standard-Sicherheitsnetz verschwindet und wodurch die Enterprise-Spend-Limits-API es ersetzt",
+  "In etwa zwanzig Minuten eine echte Obergrenze unter ein neues Projekt legen, auf der Ebene, die tatsächlich blockiert"
+]} />
+
+## Weiches Limit vs. hartes Limit: die einzige Unterscheidung, die zählt
+
+Streicht man das Marketing weg, ist jede Ausgabenkontrolle eins von zwei Dingen.
+
+Ein **weiches Limit (soft cap)** beobachtet. Es überwacht ein Kostensignal, vergleicht es mit Ihrer Zahl und benachrichtigt — E-Mail, Webhook, Dashboard-Badge. Der Datenverkehr fließt weiter. AWS Budgets, Anthropics Nutzungs-Dashboard und jede „Billing-Alert“, die Sie je konfiguriert haben, sind weiche Limits. Sie sind wirklich nützlich, und sie sind kein Schutz: Die einzige Wirkung eines weichen Limits ist, einen Menschen zum Eingreifen aufzufordern, seine Latenz ist also *Ihre* Reaktionszeit, nicht die des Systems.
+
+Ein **hartes Limit (hard cap)** erzwingt. Es blockiert neue Anfragen am Limit. Ihr Code erfährt es durch einen Fehler, nicht durch einen Posteingang.
+
+Der praktische Test: *Wenn jeder Mensch im Team schläft, hört dann die Ausgabe auf?* Lautet die Antwort nein, ist es ein weiches Limit, egal wie die Oberfläche es nennt.
+
+Alles Folgende handelt von harten Limits. Behalten Sie auch Ihre weichen Limits — ein Limit, das auslöst, ist ein Vorfall, und Sie wollen die Warnung bei 60 % ebenso wie die Sperre bei 100 %.
+
+## Welche Anbieter tatsächlich blockieren
+
+| Anbieter / Ebene | Hartes Limit? | Geltungsbereich | Was Sie bei Auslösung bekommen |
+| --- | --- | --- | --- |
+| **Anthropic — Tier-Limit** | Ja, standardmäßig | Organisation, monatlich | HTTP 429, `rate_limit_error`, **kein `retry-after`**, `details.error_code: enforced_spend_limit_reached` |
+| **Anthropic — von Ihnen gesetztes Limit** | Ja, Opt-in | Organisation oder Workspace | HTTP **400**, `invalid_request_error`, Meldung beginnt mit „You have reached your specified API usage limits“ |
+| **Anthropic — Claude-Code-Workspace** | Ja | Dieser Workspace | Separat geprüft; kann ein 429 liefern, das **doch** ein `retry-after` trägt |
+| **OpenAI — hartes Ausgabenlimit** | Ja, Opt-in | Organisation und/oder Projekt | HTTP 429 |
+| **OpenRouter — Guthaben / Schlüssel-Limit** | Ja, strukturell | Kontoguthaben, pro Schlüssel | HTTP **402**, mit `error.metadata.limit_source` |
+| **Google Cloud — Spend-Cap-Budget** | Ja, Opt-in (Preview) | Ein Projekt × ein Dienst | Neue Nutzung dieses Dienstes blockiert, bis manuell aufgehoben |
+| **AWS — Projekt-Ausgabenlimit** | Ja, neue Konten | Pro Projekt | Projekt pausiert, statt weitere Kosten aufzubauen |
+| **LiteLLM / selbst gehostetes Gateway** | Ja, Pre-Flight | Schlüssel, Nutzer, Team, Modell | Auth-förmiger Fehler, ausgelöst *bevor* der Anbieter aufgerufen wird |
+| **Claude-Code-Telemetrie** | Nein | — | Nur Observability; exportiert Kosten, erzwingt nichts |
+
+<VerifyNote lastVerified="2026-10-05" source="Anthropic rate limits & Spend Limits API docs; OpenAI API rate-limits guide; OpenRouter limits reference; Google Cloud Billing spend-cap docs & July 27 2026 release note; LiteLLM proxy docs; Help Net Security on the AWS launch" />
+
+## Die Falle: vier Statuscodes, ein Ereignis
+
+Das ist der Teil, der an vier verschiedenen Stellen dokumentiert und nirgends zusammengefügt ist, und er ist das, was am ehesten zubeißt.
+
+Lesen Sie das Verhalten von Anthropic sorgfältig, denn es sind zwei verschiedene Verhaltensweisen.
+
+Überschreiten Sie das monatliche Limit Ihres **Tiers**, liefert die API HTTP 429 mit dem Fehlertyp `rate_limit_error` — demselben Typ wie bei einem gewöhnlichen Rate Limit —, aber **ohne `retry-after`-Header**. Anthropics eigene Dokumentation ist deutlich in der Folge: *„Retrying, including the SDK's automatic retries, fails until access resumes.“* Der Zugriff wird um 00:00 UTC am Ersten des Folgemonats wieder freigegeben, sofern Sie das Limit nicht erhöhen. Ein wohlerzogener Client mit exponentiellem Backoff sitzt also bis zu 31 Tage in einer Retry-Schleife und loggt vorübergehend wirkende Fehler. Das unterscheidende Feld ist `error.details.error_code`, das `enforced_spend_limit_reached` lautet.
+
+Überschreiten Sie ein Limit, das **Sie** konfiguriert haben — Organisation oder Workspace —, liefert die API HTTP **400** mit dem Typ `invalid_request_error`. Das kehrt die übliche Annahme um: Ein 400 heißt „Ihre Anfrage war fehlerhaft, nicht wiederholen“, sodass die meisten Clients es als Bug loggen und entweder abstürzen oder die Arbeit still fallen lassen. Es ist kein Bug; es ist Ihr eigenes Limit, das seine Arbeit tut.
+
+Und der Claude-Code-Workspace wird wiederum separat geprüft: Anfragen über dem Limit dieses Workspace können ein 429 erhalten, das *doch* ein `retry-after` trägt.
+
+OpenRouter wählt den dritten Weg. Weil das Modell vorausbezahltes Guthaben ist, ist Aufbrauchen ein Zahlungsproblem, und es liefert daher HTTP **402 Payment Required**, mit `error.metadata.limit_source`, das benennt, welches der drei Limits Sie getroffen haben — Kontoguthaben, Limit pro Schlüssel oder die Budget-Reservierung für laufende Anfragen. Ein wissenswertes Detail: Wird das Kontoguthaben negativ, schlagen Anfragen an **kostenlose** Modelle ebenfalls fehl.
+
+OpenAIs Dokumentation hält fest, dass von einem harten Ausgabenlimit betroffene Anfragen ein `429` zurückgeben. Sie nennt keine Durchsetzungslatenz und unterscheidet zwei leicht zu verwechselnde Dinge: das genehmigte monatliche Nutzungslimit, das OpenAI für Ihre Organisation setzt, und die Ausgabenlimits, die Sie selbst für eine Organisation oder ein Projekt konfigurieren. Beide können für eine Anfrage gelten, ein Projekt mit Spielraum kann also trotzdem von der Organisationsobergrenze darüber blockiert werden.
+
+Vier Formen für ein Ereignis. Der Handler, den Sie wollen, ist also nicht „bei 429 wiederholen“.
+
+<PromptCard title="Classify a cap error instead of retrying it">
+{`# The three signals that mean "stop, this is a budget wall" — not "wait and retry"
+#
+#   Anthropic tier cap   -> 429, type=rate_limit_error, NO retry-after,
+#                           error.details.error_code == "enforced_spend_limit_reached"
+#   Anthropic own limit  -> 400, type=invalid_request_error,
+#                           message startswith "You have reached your specified API usage limits"
+#   OpenRouter           -> 402, error.metadata.limit_source present
+#   OpenAI hard limit    -> 429  (no documented discriminator field)
+
+def is_budget_wall(status, body, headers):
+    err = (body or {}).get("error", {}) or {}
+    detail_code = (err.get("details") or {}).get("error_code")
+
+    if status == 429 and detail_code == "enforced_spend_limit_reached":
+        return True                      # month-long wall; do NOT back off
+    if status == 429 and "retry-after" not in {k.lower() for k in headers}:
+        return True                      # 429 with no retry-after is not a rate limit
+    if status == 400 and err.get("message", "").startswith(
+        "You have reached your specified API usage limits"
+    ):
+        return True                      # your own cap, wearing a 400
+    if status == 402 and (err.get("metadata") or {}).get("limit_source"):
+        return True                      # prepaid balance or key cap
+
+    return False
+
+# Page a human, mark the work as blocked, and stop the loop.
+# Retrying a budget wall just burns your own CPU until the first of the month.`}
+</PromptCard>
+
+Die allgemeine Regel, die jedes Refactoring eines Anbieters überlebt: **Ein 429 ohne `retry-after`-Header ist kein Rate Limit.** Rate Limits sind konstruktionsbedingt vorübergehend und sagen Ihnen, wie lange Sie warten sollen. Ein 429, das sich weigert zu sagen, wie lange, ist ein anderes Tier.
+
+## Warum kein Limit exakt sein kann — und warum das keine Faulheit ist
+
+Jedes harte Limit auf dem Markt löst bei *geschätzten* Kosten aus, nicht bei abgerechneten. Das sieht nach einer Abkürzung aus und ist in Wahrheit das einzig praktikable Design: Eine Abrechnungs-Pipeline, die Nutzung aggregiert, bewertet, Rabatte anwendet und abgleicht, braucht Minuten bis Stunden. Ein Limit, das darauf wartete, wäre gegen genau den Fehlermodus nutzlos, den es stoppen soll.
+
+Google Cloud sagt den Zielkonflikt klar: *„For faster enforcement, spend caps use gross, estimated costs to trigger alerts and enforce the spend cap“* — und dann, ehrlich, *„Due to latency in usage and cost reporting, spend cap enforcement isn't instantaneous. Consider setting your budget slightly below your absolute limit.“* Und die Haftung: *„any cost overages are billed as normal.“* Sie bleiben verantwortlich für das, was während der Meldeverzögerung durchsickert.
+
+Drei Konsequenzen, um die herum Sie entwerfen sollten:
+
+**Setzen Sie das Limit unter Ihre echte Obergrenze.** Wenn 500 $ die Zahl sind, die wirklich weh tut, begrenzen Sie bei 400 $. Die Lücke ist Ihr Überschreitungsbudget. Wie groß sie sein muss, hängt von Ihrer Spitzen-Verbrennungsrate ab, nicht vom Anbieter — eine Agentenflotte, die 50 $/Minute ausgeben kann, braucht eine größere Marge als eine Chat-App, die 50 $/Tag ausgibt.
+
+**Laufende Anfragen werden abgeschlossen.** Ein Limit blockiert *neue* Nutzung. Alles, was schon läuft, endet und wird abgerechnet. Bei lang laufenden Agenten-Zügen ist das kein Rundungsfehler.
+
+**Pre-Flight schlägt Post-hoc.** Der einzige Mechanismus, der Überschreitung strukturell vermeidet, ist, die geschätzten Kosten *vor* dem Aufruf zu reservieren. Der Proxy von LiteLLM tut das standardmäßig: Er schätzt die Maximalkosten aus dem Anfrage-Body und der Bepreisung des Modells, hält diesen Betrag gegen jedes zutreffende Budget, lehnt die Anfrage ab, wenn die Reservierung das Budget verletzen würde, und tauscht die Reservierung gegen die tatsächlichen Kosten aus, sobald die Antwort eintrifft. Die Reservierung für laufende Anfragen von OpenRouter ist dieselbe Idee, angewandt auf ein vorausbezahltes Guthaben. Beide sind strikt stärker als Messen im Nachhinein, und beide sind in der anderen Richtung nur näherungsweise — sie reservieren zu viel, können also eine Anfrage ablehnen, die Sie sich hätten leisten können.
+
+## Anthropics Tiers und wo das Netz verschwindet
+
+Anthropic gibt Ihnen ein hartes Limit, ob Sie danach fragen oder nicht. Die Tiers Start, Build und Scale tragen je ein monatliches Ausgabenlimit — das Maximum, das Ihre Organisation in einem Kalendermonat für die API ausgeben kann.
+
+| Nutzungs-Tier | Monatliches Ausgabenlimit |
+| --- | --- |
+| Start | 500 $ |
+| Build | 1.000 $ |
+| Scale | 200.000 $ |
+| Custom | **Keins** — mit Ihrem Account-Team vereinbart |
+
+<VerifyNote lastVerified="2026-10-05" source="platform.claude.com/docs/en/api/rate-limits — Spend limits" />
+
+Lesen Sie die letzte Zeile noch einmal. Das Standard-Sicherheitsnetz existiert in jedem Tier *außer* dem, das von den Organisationen mit den höchsten Ausgaben belegt wird. Der Aufstieg zu Custom entfernt die automatische Obergrenze, was ein ausdrücklich konfiguriertes Limit genau an dem Punkt verpflichtend statt optional macht, an dem man aufhört, darüber nachzudenken.
+
+Zwei weitere Dinge, die man bei der Gelegenheit setzen sollte:
+
+**Setzen Sie Ihr eigenes Limit unter das Tier-Limit.** Die Billing-Seite nimmt eine Zahl unterhalb des Limits Ihres Tiers. Das ist die Kontrolle, die Sie tatsächlich wollen, weil Sie sie wählen — und denken Sie daran, dass sie als 400 erscheint, nicht als 429.
+
+**Nutzen Sie Workspaces als Grenzen des Schadensradius.** Workspaces nehmen eigene Ausgaben- und Rate-Limits, sodass ein experimenteller Agent und Ihr Produktionsverkehr sich keinen Pool teilen. Organisationsweite Limits gelten stets zusätzlich, selbst wenn die Workspace-Limits in Summe mehr ergeben. Eine Einschränkung: Für den Standard-Workspace können Sie keine Limits setzen — legen Sie dort also nichts ab, woran Ihnen liegt.
+
+## Die Enterprise-Ebene: Limits pro Mitglied als API
+
+Claude-Enterprise-Organisationen bekommen etwas, das die Console nicht zeigt: eine **Spend-Limits-API**, die Budgets pro Person als Ressource behandelt, die Sie programmatisch lesen und schreiben können. Sie ist der Teil dieser Geschichte, über den kaum irgendwo geschrieben wird, daher lohnt es sich zu wissen, was sie tut.
+
+Acht Endpunkte über zwei Ressourcen. Der erste beantwortet „welches Limit gilt für jedes Mitglied, woher kam es und wie nah ist es dran“:
+
+<PromptCard title="Read every member's effective cap and month-to-date spend">
+{`curl "https://api.anthropic.com/v1/organizations/spend_limits/effective?limit=20" \\
+  --header "x-api-key: $ANTHROPIC_ADMIN_KEY" \\
+  --header "anthropic-version: 2023-06-01"
+
+# Each row carries:
+#   amount                -> the effective cap, in MINOR UNITS ("50000" = $500.00)
+#                            null = unlimited;  "0" = included plan usage only
+#   source.type           -> user | seat_tier | rbac_group | organization
+#   period_to_date_spend  -> spend since the period started, same minor-unit format
+#   spend_limit_id        -> the configured row this resolved from
+#
+# Requires an Admin API key with the read:spend_limits scope.`}
+</PromptCard>
+
+Vier Details, die Sie einen Nachmittag kosten, wenn Sie sie übersehen:
+
+- **Beträge sind Dezimalstrings in Nebeneinheiten (minor units)** der Abrechnungswährung. `"50000"` sind 500,00 $. Als Dezimalzahl parsen und durch 100 teilen — die Docs warnen ausdrücklich vor binärer Gleitkommazahl bei großen Werten.
+- **`null` und `"0"` sind nicht dasselbe.** In der effektiven Zeile eines Mitglieds heißt `null` *unbegrenzt*; `"0"` heißt, das Mitglied kann Claude nicht über die im Plan enthaltene Nutzung hinaus verwenden. Behandeln Sie `"0"` als bereits am Limit.
+- **`period_to_date_spend` kann `"0"` anzeigen, wenn der Wert schlicht nicht verfügbar ist.** Die Docs nennen es informativ, nicht transaktional — bauen Sie also kein Gate, das einen Nullwert als „keine Ausgaben“ behandelt.
+- **Ein Gruppenlimit ist ein Standardwert pro Mitglied, kein gepooltes Budget.** Jedes Mitglied, das es erbt, wird gegen seine eigene Ausgabe geprüft.
+
+Die zweite Ressource ist eine Review-Warteschlange. Klickt ein Mitglied in claude.ai auf „Request more usage“, erscheint eine Anfrage zur Erhöhung des Ausgabenlimits; Sie können ausstehende auflisten, und jede trägt eine aktuelle `spend_summary` mit dem aktuellen Limit und der Ausgabe bis zum Periodenstand dieses Mitglieds, sodass eine Policy-Engine ohne zweite Abfrage entscheiden kann. Das Genehmigen schreibt das neue Limit pro Nutzer im selben Aufruf. Zwei Asymmetrien: Ein Limit direkt mit `POST /spend_limits` zu setzen löst eine ausstehende Anfrage **nicht** auf (nutzen Sie den Genehmigungs-Endpunkt), und alle acht Endpunkte teilen sich ein Budget von 60 Anfragen pro Minute pro Organisation.
+
+Über diese API können Sie nur **Überschreibungen pro Nutzer** schreiben. Standardwerte für Seat-Tier, Gruppe und Organisation werden in den claude.ai-Einstellungen konfiguriert. Und die API gibt es nur für Enterprise — sie steht Claude-Platform-Organisationen (Console) nicht zur Verfügung.
+
+Für Reporting statt Durchsetzung ist die [Usage & Cost Analytics API](/docs/api/usage-cost-analytics) das Gegenstück — `GET /v1/organizations/analytics/cost`, das Ausgaben nach Modell, Workspace, API-Schlüssel, Akteur, `cost_type` und `token_type` gruppiert. Über die Aufteilung nach `cost_type` finden Sie heraus, dass Ihre Rechnung nicht überwiegend aus Inferenz besteht. Das ältere `GET /v1/organizations/cost_report` funktioniert noch, wurde von Anthropic aber **am 29. Oktober 2026 als Legacy markiert**; es liefert Tages-Buckets (Standard `1d`, höchstens 31 pro Seite) mit Beträgen in Nebeneinheiten, gruppierbar nach `description` oder `workspace_id`. Zwei Unterschiede zählen, bevor Sie das eine gegen das andere tauschen: Die neue API braucht den Header `anthropic-beta: analytics-usage-cost-2026-08-24`, und ihre Daten hinken 4–24 Stunden hinterher statt ~5 Minuten — sie berichtet also, während die Spend-Limit-Endpunkte oben erzwingen.
+
+## Eine Obergrenze unter ein Projekt legen
+
+<Steps items={[
+  {
+    "title": "Die Zahl bestimmen, die wirklich weh täte — und darunter begrenzen",
+    "body": "Wählen Sie den Betrag, bei dem Sie wollen, dass alles stoppt, und setzen Sie das Limit 20–25 % darunter. Dieser Puffer fängt Meldeverzögerung und laufende Anfragen ab. Schreiben Sie die Zahl irgendwo auf, wo ein künftiges Teammitglied sie findet, denn ein unerklärtes Limit wird beim ersten Vorfall angehoben."
+  },
+  {
+    "title": "Zuerst das Limit auf Anbieterebene setzen — es ist das einzige, das sich nicht umgehen lässt",
+    "body": "Bei Anthropic: Settings > Billing > Spend limits > Adjust limit, unter Ihrem Tier-Limit. Bei OpenAI: ein hartes Ausgabenlimit für die Organisation konfigurieren und ein engeres für das Projekt. Bei OpenRouter: Das vorausbezahlte Guthaben IST das Limit, laden Sie also klein auf und setzen Sie ein Guthabenlimit pro Schlüssel mit Rücksetzplan. Gateway- und Anwendungslimits sind Verteidigung in der Tiefe; diese Ebene ist die Mauer."
+  },
+  {
+    "title": "Jeder riskanten Arbeitslast einen eigenen Schlüssel und einen eigenen Workspace geben",
+    "body": "Ein Limit, das Sie mit der Produktion teilen, ist ein Limit, das Sie unter Druck anheben werden. Bei Anthropic legen Sie pro Arbeitslast einen Workspace mit eigenen Ausgaben- und Rate-Limits an (nicht den Standard-Workspace — er kann keine Limits aufnehmen). Anderswo ein API-Schlüssel pro Arbeitslast, jeder mit eigener Obergrenze."
+  },
+  {
+    "title": "Ihren Client beibringen, eine Budgetmauer zu erkennen",
+    "body": "Fügen Sie den Klassifikator von weiter oben auf dieser Seite hinzu. Konkret: Hören Sie auf, bei einem 429 ohne retry-after zu wiederholen, und hören Sie auf, einen 400 als Code-Bug zu behandeln, wenn seine Meldung mit 'You have reached your specified API usage limits' beginnt. Loggen Sie einen eigenen Ereignistyp für Budgetmauern, damit sie als Vorfälle erscheinen und nicht als Rauschen in Ihrer 4xx-Rate."
+  },
+  {
+    "title": "Ein Pre-Flight-Budget am Gateway ergänzen, wenn Agenten beteiligt sind",
+    "body": "Stellen Sie LiteLLM (oder ein Äquivalent) davor und setzen Sie max_budget mit einer budget_duration pro Schlüssel, Nutzer und Team. Die Budgetreservierung ist standardmäßig aktiv: Sie hält die geschätzten Maximalkosten, bevor der Anbieter aufgerufen wird, und gleicht danach auf die tatsächlichen ab — das verhindert, dass ein Schwall gleichzeitiger Agentenaufrufe gemeinsam ein Limit sprengt, das jeder einzelne respektierte."
+  },
+  {
+    "title": "Auch die Infrastruktur begrenzen, nicht nur das Modell",
+    "body": "Die Modell-API ist selten die ganze Rechnung. Bei Google Cloud legen Sie ein Spend-Cap-Budget für das konkrete Projekt und den Dienst an. Bei AWS setzen Sie das Projekt-Ausgabenlimit, falls Ihr Konto berechtigt ist. Prüfen Sie dann, was NICHT abgedeckt ist — bei GCP laufen persistente Compute- und Speicherkosten weiter auf, während ein Limit durchgesetzt wird."
+  },
+  {
+    "title": "Die weichen Limits behalten und das harte testen",
+    "body": "Setzen Sie auch Alarme bei 50/75/90 %. Prüfen Sie dann, dass die Mauer existiert: Setzen Sie das Limit eines Wegwerf-Schlüssels auf ein paar Cent, schicken Sie Verkehr hindurch und lesen Sie den tatsächlichen Statuscode, die Header und den Body, die Ihr Stack erhält. Ein Limit, das Sie nie auslösen sahen, ist ein Glaube, keine Kontrolle."
+  }
+]} />
+
+## Die Cloud-Ebene und was sie nicht abdeckt
+
+Google Cloud lieferte **Spend-Cap-Budgets** in seinen Billing-Release-Notes vom 27. Juli 2026 aus — als Preview, mit bemerkenswert wenig Aufhebens für ein Feature, das ein Jahrzehnt lang die Feature-Wünsche zur Abrechnung anführte. Die Mechanik lohnt genaues Lesen, denn der Geltungsbereich ist enger als „ein hartes Limit in Google Cloud“:
+
+- **Berechtigte Dienste sind eine kurze Liste** — wie dokumentiert: Gemini API, Gemini Enterprise Agent Platform, Cloud Run und Cloud Run functions. Prüfen Sie die aktuelle Liste, bevor Sie sich darauf verlassen; ein Limit auf einem nicht berechtigten Dienst existiert nicht.
+- **Ein Limit deckt ein Projekt × einen Dienst ab.** Kein kontoweiter Notausschalter.
+- **Nur Monatsperioden.**
+- **Es nimmt nicht automatisch wieder auf.** *„When a spend cap is enforced, the usage block is reversed only when you manually lift the spend cap“* — und Dienste können danach bis zu einer Stunde brauchen, bis sie vollständig wieder laufen. Für einen Produktionsdienst ist das ein bewusster Ausfall, den Sie einer bewussten Rechnung vorziehen. Entscheiden Sie, welches von beidem Sie wollen, *bevor* Sie das Limit setzen.
+- **Persistente Ressourcen kosten weiter.** Fixe Nutzung, die an Compute und Speicher gebunden ist, bleibt aktiv und läuft weiter auf. Das Limit stoppt neue Anfragen, nicht Ihre laufende Infrastruktur.
+- **Abonnementkosten sind ausgenommen** — z. B. Lizenzen für Gemini Enterprise.
+
+AWS ging den anderen Weg und packte das Problem bei der Anmeldung an. Berichtet am 17. September 2026: Neue AWS-Konten kommen als *Projekt* strukturiert, starten mit 100 $ Free-Tier-Guthaben und erhalten beim Wechsel auf Bezahlung ein monatliches Ausgabenlimit pro Projekt ab 20 $, wobei AWS eine Zahl aus der bisherigen Nutzung vorschlägt. Am Limit wird das Projekt pausiert, statt Kosten aufzubauen, und es läuft weiter, wenn der Eigentümer das Limit erhöht. Zwei Vorbehalte: Der Rollout erfolgt schrittweise und gilt **nur für Neukunden**, und was ein pausiertes Projekt mit einem laufenden öffentlichen Endpunkt macht, wird nicht ausgeführt — was bei allem Nutzerseitigen die Frage ist, die Sie zuerst beantwortet brauchen.
+
+<VerifyNote lastVerified="2026-10-05" source="docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps and Cloud Billing release notes (2026-07-27); helpnetsecurity.com/2026/09/17/aws-spend-limit-agent-set-permissions/" />
+
+## Wovor Limits Sie nicht retten
+
+Ein hartes Limit ist eine Obergrenze für *gemessene Nutzung* auf *einer Ebene*. Vier Dinge liegen regelmäßig außerhalb:
+
+**Seats und Abonnements.** Lizenzen pro Seat und Plangebühren sind keine gemessene Nutzung und werden von einem Nutzungslimit nicht begrenzt.
+
+**Persistente Infrastruktur.** Inaktive GPU-Instanzen, bereitgestellte Datenbanken und Speicher rechnen weiter ab, während Ihr API-Limit durchgesetzt wird. Der Agent hat gestoppt; die Maschine, auf der er lief, nicht.
+
+**Coding-Agenten auf ihrer eigenen Uhr.** Claude Code exportiert Kosten-Telemetrie — `claude_code.cost.usage` in USD und `claude_code.token.usage` in Tokens, beide nach jeder API-Anfrage erhöht, zugeordnet nach Modell, Abfragequelle (main / subagent / auxiliary), Geschwindigkeit und Effort. Das ist wirklich gute Observability, und sie erzwingt nichts: Die Metriken sind Nur-Lese-Exporte, die *nach* Abschluss jeder Anfrage ausgegeben werden. Die Durchsetzung muss auf der API- oder Gateway-Ebene darunter liegen. Setzen Sie ein Limit für den Claude-Code-Workspace und denken Sie daran, dass dieser Workspace getrennt vom Rest Ihrer Organisation geprüft wird.
+
+**Die Lücke zwischen den Ebenen.** Ein Gateway-Budget hilft nicht, wenn ein Dienst den Anbieter direkt erreichen kann. Das Limit auf Anbieterebene ist das einzige, das sich nicht umgehen lässt — weshalb es zuerst kommt.
+
+<Quiz questions={[
+  {
+    "q": "Ihr Anthropic-Client erhält plötzlich HTTP 429 mit Fehlertyp rate_limit_error, aber ohne retry-after-Header. Was ist die wahrscheinlichste Ursache, und was sollte der Client tun?",
+    "options": [
+      "Ein gewöhnliches Rate Limit — exponentiell zurückfahren und wiederholen",
+      "Die Organisation hat ihr monatliches Tier-Ausgabenlimit überschritten — nicht mehr wiederholen und einen Menschen alarmieren",
+      "Ein vorübergehendes Kapazitätsproblem — auf ein kleineres Modell wechseln und wiederholen",
+      "Eine fehlerhafte Anfrage — die Nutzlast korrigieren"
+    ],
+    "answer": 1,
+    "explain": "Ein 429 ohne retry-after ist Anthropics Tier-Ausgabenlimit. Die Docs halten fest, dass Wiederholungen, einschließlich der automatischen Retries des SDK, fehlschlagen, bis der Zugriff wieder freigegeben wird — das ist 00:00 UTC am Ersten des Folgemonats, sofern das Limit nicht erhöht wird. Bestätigen Sie mit error.details.error_code == enforced_spend_limit_reached."
+  },
+  {
+    "q": "Sie setzen in der Anthropic Console ein eigenes Ausgabenlimit unter Ihrem Tier-Limit. Was liefert die API, sobald Sie es überschreiten?",
+    "options": [
+      "HTTP 429 mit retry-after-Header",
+      "HTTP 402 Payment Required",
+      "HTTP 400 mit Typ invalid_request_error",
+      "HTTP 503 bis zur nächsten Abrechnungsperiode"
+    ],
+    "answer": 2,
+    "explain": "Ein selbst konfiguriertes Limit liefert HTTP 400 mit invalid_request_error und einer Meldung, die mit 'You have reached your specified API usage limits' beginnt. Das ist das Gegenteil der meisten Retry-Heuristiken, die 4xx außer 429 als dauerhaften Client-Bug behandeln — Ihr eigenes Limit kann also still verschluckt werden, wenn Sie die Meldung nicht gesondert behandeln."
+  },
+  {
+    "q": "Warum lösen alle harten Limits auf dem Markt bei geschätzten statt abgerechneten Kosten aus?",
+    "options": [
+      "Damit Anbieter zu ihren Gunsten runden können",
+      "Weil Abrechnungs-Pipelines Minuten bis Stunden hinterherhinken und ein Limit, das darauf wartete, einen schnellen Verbrauch nicht stoppen könnte",
+      "Weil Tokenzahlen erst bei Rechnungsstellung bekannt sind",
+      "Es ist eine Preview-Einschränkung, die bei GA entfällt"
+    ],
+    "answer": 1,
+    "explain": "Bewertung, Rabattierung und Abgleich brauchen Zeit. Google Cloud sagt, es verwende 'gross, estimated costs' gerade 'for faster enforcement', und warnt, dass die Durchsetzung nicht augenblicklich ist und Überschreitungen wie gewohnt abgerechnet werden. Die praktische Antwort ist, das Limit unter Ihre echte Obergrenze zu setzen."
+  },
+  {
+    "q": "Welcher Anthropic-Nutzungs-Tier hat kein monatliches Standard-Ausgabenlimit?",
+    "options": ["Start", "Build", "Scale", "Custom"],
+    "answer": 3,
+    "explain": "Start (500 $), Build (1.000 $) und Scale (200.000 $) tragen je ein monatliches Limit. Custom-Organisationen haben keins — Limits werden mit ihrem Account-Team vereinbart. Das Standardnetz verschwindet genau dort, wo die Ausgaben am größten sind, ein ausdrücklich konfiguriertes Limit ist also nicht mehr optional."
+  },
+  {
+    "q": "Was macht die Budgetreservierung von LiteLLM strukturell stärker als das Messen der Ausgaben nach jedem Aufruf?",
+    "options": [
+      "Sie fragt vor jeder Anfrage die Abrechnungs-API des Anbieters ab",
+      "Sie schätzt die Maximalkosten, hält sie gegen das Budget, bevor der Anbieter aufgerufen wird, und gleicht dann auf die tatsächlichen ab",
+      "Sie cacht Antworten, sodass wiederholte Aufrufe kostenlos sind",
+      "Sie blockiert jede Nebenläufigkeit, sodass immer nur eine Anfrage läuft"
+    ],
+    "answer": 1,
+    "explain": "Reservierung ist Pre-Flight: Das geschätzte Maximum wird gegen jedes zutreffende Budget gehalten, und die Anfrage wird abgelehnt, wenn die Reservierung es verletzen würde, wobei danach die tatsächlichen Kosten eingesetzt werden. Das verhindert, dass ein Schwall gleichzeitiger Aufrufe gemeinsam ein Limit überschreitet, das jeder einzelne respektierte. Es irrt in die andere Richtung — es kann eine Anfrage ablehnen, die Sie sich hätten leisten können."
+  },
+  {
+    "q": "Für Ihr Projekt wird ein Google-Cloud-Spend-Cap durchgesetzt. Was davon kostet weiterhin Geld?",
+    "options": [
+      "Neue Gemini-API-Anfragen an dieses Projekt",
+      "Bereits laufende bereitgestellte Compute- und Speicherressourcen",
+      "Nichts — das Limit stoppt alle Projektkosten",
+      "Nur Anfragen, die schon liefen"
+    ],
+    "answer": 1,
+    "explain": "Ein Spend-Cap blockiert neue Nutzung des berechtigten Dienstes. Googles Docs halten fest, dass fixe Nutzung im Zusammenhang mit persistenten Ressourcen wie Compute und Speicher aktiv bleibt und weiter Kosten aufbaut. Laufende Anfragen werden ebenfalls abgeschlossen. Die Modell-API zu begrenzen ist nicht dasselbe wie die Rechnung zu begrenzen."
+  }
+]} />
+
+<Flashcards cards={[
+  { "front": "Weiches vs. hartes Limit — der Test", "back": "Wenn jeder Mensch im Team schläft, hört die Ausgabe dann auf? Nein = weiches Limit (es benachrichtigt; seine Latenz ist Ihre Reaktionszeit). Ja = hartes Limit (es blockiert neue Anfragen; Ihr Code erfährt es über einen Fehler)." },
+  { "front": "Anthropic-Tier-Ausgabenlimit — die Fehlerform", "back": "HTTP 429, Typ rate_limit_error, KEIN retry-after-Header, error.details.error_code = enforced_spend_limit_reached. Der Zugriff wird um 00:00 UTC am 1. wieder freigegeben. Die Docs halten fest, dass Wiederholungen — einschließlich der automatischen des SDK — bis dahin fehlschlagen." },
+  { "front": "Selbst gesetztes Anthropic-Ausgabenlimit — die Fehlerform", "back": "HTTP 400, Typ invalid_request_error, Meldung beginnt mit 'You have reached your specified API usage limits' (oder '...specified workspace API usage limits'). Ein 400, kein 429 — Standard-Retry-Heuristiken behandeln Ihr eigenes Limit also als Code-Bug." },
+  { "front": "Die übertragbare Regel für 429er", "back": "Ein 429 ohne retry-after-Header ist kein Rate Limit. Rate Limits sind konstruktionsbedingt vorübergehend und sagen, wie lange man warten soll; ein 429, das sich weigert, es zu sagen, ist eine Budget- oder Kontingentmauer." },
+  { "front": "OpenRouter — drei Limits, ein Status", "back": "Kontoguthaben, Guthabenlimit pro Schlüssel und eine Ausgabenreservierung für laufende Anfragen. Jedes Überschreiten liefert HTTP 402 Payment Required mit error.metadata.limit_source, das benennt, welches. Ein negatives Guthaben blockiert auch kostenlose Modelle." },
+  { "front": "Anthropic-Tier-Limits", "back": "Start 500 $/Mo · Build 1.000 $/Mo · Scale 200.000 $/Mo · Custom = kein Limit (mit dem Account-Team vereinbart). Setzen Sie auf der Billing-Seite Ihr eigenes Limit unter das Tier-Limit." },
+  { "front": "Spend-Limits-API — Nebeneinheiten", "back": "Alle Beträge sind Dezimalstrings in Nebeneinheiten der Abrechnungswährung: \"50000\" = 500,00 $. Als Dezimalzahl parsen, durch 100 teilen; die Docs warnen vor binärer Gleitkommazahl bei großen Werten." },
+  { "front": "Spend-Limits-API — null vs. \"0\"", "back": "In der effektiven Zeile eines Mitglieds: amount null = unbegrenzt; \"0\" = kann Claude nicht über die im Plan enthaltene Nutzung hinaus verwenden (als bereits am Limit behandeln). In einer konfigurierten Zeile heißt null nur, dass kein numerisches Limit gesetzt ist — die effektive Zeile lesen, um sie zu unterscheiden." },
+  { "front": "Warum jedes Limit näherungsweise ist", "back": "Limits lösen bei geschätzten Bruttokosten aus, weil Abrechnungs-Pipelines Minuten bis Stunden hinterherhinken. Die Durchsetzung ist nicht augenblicklich, laufende Anfragen werden abgeschlossen, und Überschreitungen werden wie gewohnt abgerechnet. Setzen Sie das Limit 20–25 % unter die Zahl, die wirklich weh täte." },
+  { "front": "Budgetreservierung (Pre-Flight-Budgetierung)", "back": "Die Maximalkosten der Anfrage aus Body und Modellpreis schätzen, gegen jedes zutreffende Budget halten, bei Verletzung ablehnen, dann die tatsächlichen Kosten einsetzen. LiteLLM tut das standardmäßig; es ist der einzige Mechanismus, der unter Nebenläufigkeit hält." },
+  { "front": "Google-Cloud-Spend-Caps — die vier Grenzen", "back": "Kurze Liste berechtigter Dienste (wie dokumentiert: Gemini API, Gemini Enterprise Agent Platform, Cloud Run, Cloud Run functions) · ein Projekt x ein Dienst · nur monatlich · nur manuelles Aufheben, mit bis zu einer Stunde bis zur Wiederaufnahme. Persistente Compute- und Speicherressourcen kosten weiter." },
+  { "front": "Claude-Code-Kostentelemetrie", "back": "claude_code.cost.usage (USD) und claude_code.token.usage (Tokens), nach jeder API-Anfrage erhöht, zugeordnet nach Modell, Abfragequelle (main/subagent/auxiliary), Geschwindigkeit und Effort. Nur Observability — sie erzwingt nichts. Die Durchsetzung liegt auf der API- oder Gateway-Ebene." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Die Latenz eines weichen Limits ist Ihre Reaktionszeit. Wenn niemand wach ist, ist es keine Kontrolle.",
+  "Ein Ereignis, vier Statuscodes: 429-ohne-retry-after (Anthropic-Tier), 400 (Ihr eigenes Anthropic-Limit), 429 (OpenAI), 402 (OpenRouter). Generische Retry-Logik behandelt mindestens zwei falsch.",
+  "Ein 429 ohne retry-after-Header ist nie ein Rate Limit. Diese eine Heuristik fängt den schlimmsten Fehlermodus — einen Client, der eine monatelange Mauer wiederholt.",
+  "Jedes Limit löst bei geschätzten Kosten aus, und jeder Anbieter schließt die Überschreitung aus. Begrenzen Sie 20–25 % unter der Zahl, die wirklich weh täte.",
+  "Anthropics Custom-Tier hat kein monatliches Standardlimit — das Sicherheitsnetz verschwindet dort, wo die Ausgaben am größten sind.",
+  "Pre-Flight-Reservierung (LiteLLM, die Reservierung für laufende Anfragen bei OpenRouter) ist das einzige Design, das bei gleichzeitigen Agenten-Schüben hält. Messen im Nachhinein überschreitet stets.",
+  "Begrenzen Sie zuerst beim Anbieter — er ist die einzige Ebene, die sich nicht umgehen lässt. Gateway- und App-Limits sind Verteidigung in der Tiefe.",
+  "Ein Limit, das Sie nie auslösen sahen, ist ein Glaube. Setzen Sie einen Wegwerf-Schlüssel auf ein paar Cent und lesen Sie den echten Statuscode, den Ihr Stack erhält."
+]} />
+
+## Weiter
+
+- [Warum KI-Agenten Tokens verbrennen](/docs/models/why-agents-burn-tokens) — der Mechanismus hinter der Rechnung, die diese Limits abfangen: warum ein Agent das 50- bis 1000-Fache eines Chat-Zugs kostet
+- [Was KI bei verschiedenen Anbietern wirklich kostet](/docs/models/what-ai-costs-across-providers) — die Preis-Archetypen und wie man eine Arbeitslast vor dem Ausliefern abschätzt
+- [KI-Gateways: LiteLLM, OpenRouter, Portkey](/docs/models/ai-gateways-litellm-openrouter-portkey) — wohin das Pre-Flight-Budget gehört und was ein Gateway sonst noch bringt
+
+## Quellen & weiterführende Lektüre
+
+- [We're going to need default hard budget caps on pretty much everything — Simon Willison](https://simonwillison.net/2026/Oct/3/default-hard-budget-caps/) — das Argument vom 3. Oktober 2026, das dies prägte: harte Limits als Standard, unbegrenzte Abrechnung als Opt-in
+- [Rate limits — Anthropic](https://platform.claude.com/docs/en/api/rate-limits) — die Tier-Ausgabenlimits, die Form 429-ohne-retry-after und `enforced_spend_limit_reached`, der 400 eines selbst gesetzten Limits und Limits pro Workspace
+- [Spend Limits API — Anthropic](https://platform.claude.com/docs/en/manage-claude/spend-limits-api) — die acht Enterprise-Endpunkte, die Scope-Hierarchie und das Feld `source`, Beträge in Nebeneinheiten, `null` vs. `"0"` und der Lebenszyklus von Erhöhungsanfragen
+- [Get Cost Report — Anthropic Admin API](https://platform.claude.com/docs/en/api/beta/organization/cost_report/retrieve) — tägliche Kosten-Buckets, Aufteilung nach `cost_type` (tokens / web_search / code_execution / session_usage), Gruppierung nach Workspace
+- [Monitoring usage — Claude Code](https://code.claude.com/docs/en/monitoring-usage) — die OpenTelemetry-Metriken `claude_code.cost.usage` und `claude_code.token.usage` und ihre Attribute
+- [Rate limits — OpenAI](https://developers.openai.com/api/docs/guides/rate-limits) — harte Ausgabenlimits mit 429 und die Unterscheidung zwischen genehmigtem monatlichem Nutzungslimit und den von Ihnen konfigurierten Ausgabenlimits
+- [Limits — OpenRouter](https://openrouter.ai/docs/api-reference/limits) — Kontoguthaben, Limits pro Schlüssel, die Ausgabenreservierung für laufende Anfragen, die 402-Antwort und `limit_source`
+- [How spend cap budgets work — Google Cloud Billing](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps) — berechtigte Dienste, geschätzte Bruttokosten, manuelles Aufheben, Wiederaufnahmelatenz und was weiter aufläuft
+- [Cloud Billing release notes — Google Cloud](https://docs.cloud.google.com/billing/docs/release-notes) — der Eintrag zum Spend-Cap-Budget vom 27. Juli 2026
+- [Budgets and spend tracking — LiteLLM](https://docs.litellm.ai/docs/proxy/users) — `max_budget` und `budget_duration` über Schlüssel / Nutzer / Team / Modell, und Budgetreservierung als Pre-Flight-Durchsetzung
+- [AWS's new sign-up gives accounts spend caps — Help Net Security](https://www.helpnetsecurity.com/2026/09/17/aws-spend-limit-agent-set-permissions/) — das AWS-Projekt-Ausgabenlimit vom September 2026: nur Neukunden, ab 20 $/Monat, pausiert statt aufzulaufen
+- Verwandt: [Task-Budgets](/docs/api/task-budgets) · [Session-Budgets bei Managed Agents](/docs/api/managed-agents-session-budgets) · [Limits für Subagenten-Flotten](/docs/claude-code/subagent-fleet-limits) · [Ökonomie des Prompt Caching](/docs/frontiers/prompt-caching-economics) · [Agenten-Observability](/docs/api/agent-observability)

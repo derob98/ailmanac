@@ -1,0 +1,89 @@
+# Rutas de aprendizaje (elige tu itinerario)
+
+> Source: https://derob98.github.io/ailmanac/es/docs/start-here/learning-paths · AILmanac (CC BY 4.0)
+
+Órdenes de lectura secuenciados para cuatro tipos de lector, con estimaciones de tiempo.
+
+<LevelBadge level="all" />
+
+Elige el itinerario que más se parezca a ti. Cada uno es una ruta ordenada: haz los pasos en orden y salta lo que ya sepas. Los tiempos son aproximados.
+
+<Callout type="objectives" items={["Encuentra el único itinerario que coincide con tus objetivos: principiante, profesional del conocimiento, constructor o líder de equipo", "Sigue una ruta de lectura clara y ordenada en lugar de adivinar por dónde empezar", "Saber aproximadamente cuánto tiempo lleva cada itinerario (~45 min a ~½ día)", "Por dónde empezar si ninguno de los itinerarios te encaja de forma obvia"]} />
+
+:::tip[¿No estás seguro de cuál es el tuyo?]
+Guíate por tu **objetivo**, no por tu puesto de trabajo. ¿Quieres resultados sin programar? Principiante. ¿Trabajo real más rápido? Profesional del conocimiento. ¿Personalizar Claude Code o la API? Constructor. ¿Implementar la IA para otros? Líder de equipo.
+:::
+
+## 🌱 El principiante curioso · ~45 min
+
+Quieres usar bien la IA sin convertirte en programador.
+
+<Steps items={[
+  {title: "Tus primeros 5 minutos", body: "Principiante. Obtén un resultado real de Claude en cinco minutos. /docs/start-here/your-first-5-minutes"},
+  {title: "¿Qué Claude debería usar?", body: "Principiante. Elige el modelo adecuado para lo que estás haciendo. /docs/start-here/which-claude"},
+  {title: "Fundamentos del prompting", body: "Principiante. Los movimientos clave que mejoran las respuestas. /docs/prompting/basics"},
+  {title: "¿Qué es un LLM?", body: "Principiante. Un modelo mental en lenguaje sencillo de cómo funciona Claude. /docs/foundations"},
+  {title: "Productividad cotidiana", body: "Principiante. Aplícalo a tareas diarias y pequeñas victorias. /docs/playbooks/productivity"}
+]} />
+
+## 💼 El profesional del conocimiento · ~2 h
+
+Quieres que la IA haga tu trabajo real más rápido: escritura, investigación, análisis.
+
+<Steps items={[
+  {title: "Empieza con el itinerario del principiante curioso", body: "Haz primero el itinerario de ~45 min de arriba y luego continúa abajo."},
+  {title: "Biblioteca de patrones de prompts", body: "Todos los niveles. Patrones reutilizables que puedes llevar al trabajo real. /docs/prompting"},
+  {title: "Alucinaciones y cómo reducirlas", body: "Intermedio. Crea resultados en los que de verdad puedas confiar. /docs/foundations"},
+  {title: "Elige tu playbook", body: "Elige Escritura, Investigación o Análisis de datos. /docs/playbooks"},
+  {title: "Proyectos + plantillas de prompts reutilizables", body: "Espacios de trabajo persistentes (/docs/claude-app) y plantillas que reutilizas (/docs/templates)."}
+]} />
+
+## 🛠️ El constructor / desarrollador · ~½ día
+
+Escribes código y quieres personalizar Claude Code y construir sobre la API.
+
+<Steps items={[
+  {title: "Qué es Claude Code", body: "Principiante. Qué es la CLI y por qué importa. /docs/claude-code/what-is-claude-code"},
+  {title: "CLAUDE.md, archivos de memoria y modo de planificación", body: "Principiante. Enséñale a Claude tu proyecto y planifica antes de que actúe. /docs/claude-code"},
+  {title: "Permisos y settings.json", body: "Intermedio. Controla qué puede hacer Claude y cómo se comporta. /docs/claude-code"},
+  {title: "Tu primera llamada a la API → uso de herramientas → construir agentes", body: "Avanzado. Pasa de una sola llamada al uso de herramientas y a agentes completos. Empieza en /docs/api/first-call y luego /docs/api"},
+  {title: "Tutorial guiado: personaliza Claude Code para un repositorio real", body: "Intermedio. Júntalo todo en un proyecto real. /docs/walkthroughs"},
+  {title: "Seguridad y uso responsable", body: "Avanzado. Lanza con seguridad una vez que construyes de verdad. /docs/security"}
+]} />
+
+## 👥 El líder de equipo · ~3 h
+
+Estás implementando la IA en un equipo y te importan la consistencia, la seguridad y el coste.
+
+<Steps items={[
+  {title: "Lo esencial del itinerario del constructor (pasos 1–3)", body: "Cubre los fundamentos del constructor de arriba antes de continuar aquí."},
+  {title: "Plugins y marketplaces", body: "Avanzado. Distribuye un kit de herramientas compartido para que el equipo trabaje de la misma manera. /docs/claude-code"},
+  {title: "Compromisos de coste y latencia + elegir un modelo", body: "Intermedio. Equilibra velocidad, calidad y gasto. /docs/foundations y /docs/api/choosing-a-model"},
+  {title: "Asegurar agentes + reforzar ejecuciones autónomas", body: "Avanzado. Haz que las ejecuciones autónomas sean seguras a escala. /docs/security"},
+  {title: "Uso responsable y verificación", body: "Todos los niveles. Establece las normas que el equipo respeta. /docs/security"}
+]} />
+
+## Itinerarios de un vistazo
+
+| Itinerario | Eres… | Tiempo | Primer paso |
+| --- | --- | --- | --- |
+| 🌱 Principiante curioso | Usar bien la IA, sin programar | ~45 min | [Tus primeros 5 minutos](/docs/start-here/your-first-5-minutes) |
+| 💼 Profesional del conocimiento | Acelerar el trabajo real | ~2 h | [Biblioteca de patrones de prompts](/docs/prompting) |
+| 🛠️ Constructor / desarrollador | Personalizar Claude Code + API | ~½ día | [Qué es Claude Code](/docs/claude-code/what-is-claude-code) |
+| 👥 Líder de equipo | Implementar la IA en un equipo | ~3 h | [Plugins y marketplaces](/docs/claude-code) |
+
+:::note[Los itinerarios se construyen unos sobre otros]
+El itinerario del profesional del conocimiento empieza con todo el itinerario del principiante. El itinerario del líder de equipo empieza con lo esencial del constructor (pasos 1–3). Si terminas un itinerario, el siguiente ya está casi hecho.
+:::
+
+<Quiz title="Compruébate" questions={[
+  {q: "Quieres que la IA acelere tu escritura e investigación pero no programas. ¿Qué itinerario encaja?", options: ["El constructor / desarrollador", "El profesional del conocimiento", "El líder de equipo"], answer: 1, explain: "El itinerario del profesional del conocimiento (~2 h) sirve para hacer tu trabajo real más rápido, y empieza con el itinerario del principiante curioso."},
+  {q: "¿Aproximadamente cuánto dura el itinerario del principiante curioso?", options: ["~45 min", "~2 h", "~½ día"], answer: 0, explain: "El itinerario del principiante curioso dura unos 45 minutos: la ruta más corta de la página."},
+  {q: "¿Cuál es el primer paso del itinerario del constructor / desarrollador?", options: ["Tu primera llamada a la API", "Qué es Claude Code", "Permisos y settings.json"], answer: 1, explain: "El itinerario del constructor abre con Qué es Claude Code, luego pasa a CLAUDE.md y los archivos de memoria antes de la API."}
+]} />
+
+<Callout type="takeaways" items={["Cuatro itinerarios, una regla: elige por objetivo y luego sigue los pasos en orden.", "Los tiempos van de ~45 min (principiante) a ~½ día (constructor).", "Los itinerarios se anidan: el profesional del conocimiento se construye sobre el principiante; el líder de equipo se construye sobre el constructor.", "Ante la duda, empieza con Tus primeros 5 minutos: vale la pena en cualquier itinerario."]} />
+
+---
+
+¿No estás seguro de cuál encaja? Empieza con [Tus primeros 5 minutos](/docs/start-here/your-first-5-minutes): es útil sin importar dónde acabes. Y lee [Cómo funcionan los niveles y la actualidad](/docs/start-here/levels-and-freshness) para que las insignias y las fechas tengan sentido.

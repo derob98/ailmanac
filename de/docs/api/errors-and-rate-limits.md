@@ -1,0 +1,72 @@
+# Fehler, Rate Limits & Zuverlässigkeit
+
+> Source: https://derob98.github.io/ailmanac/de/docs/api/errors-and-rate-limits · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+Die Fehlerübersicht, Wiederholungen mit Backoff, Rate-Limit-Stufen und Modellmigration.
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Die HTTP-Fehlerübersicht lesen und wissen, welche Statuscodes wiederholt vs. behoben werden müssen", "Transiente Fehler mit exponentiellem Backoff und Jitter, gedeckelt, wiederholen", "Rate Limits mit retry-after, Glättung, Batching und günstigeren Modellen behandeln", "Den eigenen Code gegen Modell-Deprecations und Migrationen absichern"]} />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/api/errors">
+Exakte Statuscodes, Header und Rate-Limit-Stufen ändern sich — überprüfe dies in der offiziellen Dokumentation zu Fehlern/Rate Limits.
+</VerifyNote>
+
+Produktionscode spricht mit einem Netzwerkdienst und muss daher mit Fehlern rechnen. Ein wenig Struktur an dieser Stelle macht den Unterschied zwischen einer instabilen und einer verlässlichen Integration aus.
+
+## Die Fehlerübersicht
+
+Typische HTTP-Status, die du behandeln wirst:
+
+| Status | Bedeutung | Was zu tun ist |
+|---|---|---|
+| 400 | Ungültige Anfrage | Korrigiere den Payload; nicht unverändert wiederholen |
+| 401 | Falscher/fehlender API-Schlüssel | Anmeldedaten überprüfen |
+| 403 | Nicht erlaubt | Zugriff/Berechtigungen überprüfen |
+| 429 | Ratenbegrenzt | **Zurückfahren und wiederholen** (`retry-after` beachten) |
+| 500/529 | Serverfehler / überlastet | **Mit Backoff wiederholen** |
+
+<Callout type="tip" items={["Die SDKs stellen diese als typisierte Ausnahmen bereit, sodass du sauber verzweigen kannst, statt Strings zu parsen."]} />
+
+## Wiederholungen mit Backoff
+
+Bei transienten Fehlern (429, 5xx) wiederhole mit **exponentiellem Backoff + Jitter**, gedeckelt:
+
+```python
+import time, random
+for attempt in range(5):
+    try:
+        return client.messages.create(...)
+    except (RateLimitError, APIStatusError) as e:
+        if attempt == 4 or not should_retry(e):
+            raise
+        time.sleep(min(2 ** attempt + random.random(), 30))
+```
+
+<Callout type="warning" items={["Viele SDKs wiederholen transiente Fehler automatisch — kenne die Voreinstellung deines Clients, bevor du eigene hinzufügst, sonst verdoppelst du womöglich die Wiederholungen."]} />
+
+## Rate Limits
+
+Limits gelten pro Account/Stufe (Anfragen und Tokens pro Minute). Wenn du eines erreichst, erhältst du **429** mit Timing-Hinweisen. Strategien, um unter der Obergrenze zu bleiben:
+
+<Steps items={[{title: "retry-after beachten", body: "Wenn du ein 429 erhältst, lies den Timing-Hinweis in der Antwort und warte so lange, bevor du erneut versuchst."}, {title: "Spitzen glätten", body: "Verteile Anfragen über die Zeit, statt sie alle auf einmal abzufeuern."}, {title: "Offline-Arbeit batchen", body: "Verlagere umfangreiche, nicht-interaktive Jobs in die Stapelverarbeitung."}, {title: "Ein günstigeres Modell verwenden", body: "Leite umfangreiche Schritte an ein günstigeres Modell weiter — siehe Ein Modell auswählen."}]} />
+
+Siehe [Ein Modell auswählen](/docs/api/choosing-a-model) zur Wahl des richtigen Modells für umfangreiche Schritte.
+
+## Modellmigration
+
+Modell-IDs sind datiert/versioniert und werden eingestellt. Schütze dich davor:
+
+- **Lies die Modell-ID aus einer Konfiguration**, nicht aus verstreuten Literalen.
+- **Beobachte Einstellungen** — siehe [Beobachtung von Deprecations & Migration](/docs/whats-new/deprecations) und die [Modelltabelle](/docs/whats-new/models-and-pricing).
+- **Führe deine [Evals](/docs/foundations/evals) erneut aus**, wenn du Modelle wechselst.
+
+<Callout type="takeaways" items={["400/401/403 sind dein Fehler — korrigiere die Anfrage oder die Anmeldedaten, wiederhole nicht blind. 429 und 500/529 sind wiederholbar.", "Wiederhole transiente Fehler mit exponentiellem Backoff + Jitter, gedeckelt (z. B. min(2 ** attempt + random(), 30)).", "Bei 429: retry-after beachten, Spitzen glätten, Offline-Arbeit batchen und umfangreiche Schritte an ein günstigeres Modell weiterleiten.", "Lies Modell-IDs aus einer Konfiguration, beobachte Deprecations und führe Evals beim Modellwechsel erneut aus."]} />
+
+<Quiz title="Teste dich selbst" questions={[{q: "Du erhältst ein 400 Ungültige Anfrage. Was solltest du tun?", options: ["Zurückfahren und denselben Payload erneut senden", "Korrigiere den Payload; nicht unverändert wiederholen", "Deinen API-Schlüssel rotieren", "Auf retry-after warten"], answer: 1, explain: "400 bedeutet, dass die Anfrage selbst ungültig ist — korrigiere den Payload. Denselben Payload erneut zu senden, schlägt einfach wieder fehl."}, {q: "Welche Statuscodes sind diejenigen, die du mit Backoff wiederholen solltest?", options: ["400 und 401", "403 und 401", "429 und 500/529", "400 und 429"], answer: 2, explain: "429 (ratenbegrenzt) und 500/529 (Serverfehler / überlastet) sind transient — zurückfahren und wiederholen. 400/401/403 sind aufruferseitige Probleme, die stattdessen zu beheben sind."}, {q: "Warum Jitter zum exponentiellen Backoff hinzufügen?", options: ["Um Wiederholungen exakt und vorhersehbar zu machen", "Um Wartezeiten zu randomisieren, damit Wiederholungen nicht alle kollidieren", "Um den retry-after-Header zu überspringen", "Um den Token-Verbrauch zu senken"], answer: 1, explain: "Das Beispiel verwendet min(2 ** attempt + random.random(), 30) — die zufällige Komponente (Jitter) streut Wiederholungen, sodass nicht viele Clients im Gleichschritt wiederholen, und die Deckelung hält die Wartezeiten begrenzt."}, {q: "Was ist KEINE vorgeschlagene Rate-Limit-Strategie?", options: ["retry-after beachten", "Offline-Arbeit batchen", "Ein günstigeres Modell für umfangreiche Schritte verwenden", "Die Modell-ID an jeder Aufrufstelle hartkodieren"], answer: 3, explain: "Rate-Limit-Strategien sind: retry-after beachten, Spitzen glätten, Offline-Arbeit batchen und ein günstigeres Modell verwenden. Die Modell-ID aus einer Konfiguration zu lesen (statt sie hartzukodieren) ist eine Praxis der Modellmigration, keine Rate-Limit-Strategie."}]} />
+
+## Weiter
+
+- [Sicherheit, Verweigerungen & Fallbacks](/docs/api/refusals-and-safety)
+- [Tokens & Preise](/docs/api/tokens-and-pricing)
+- [Agenten auf der API bauen](/docs/api/building-agents)

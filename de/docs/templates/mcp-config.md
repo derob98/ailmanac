@@ -1,0 +1,106 @@
+# MCP-Konfiguration & Server-Gerüste
+
+> Source: https://derob98.github.io/ailmanac/de/docs/templates/mcp-config · AILmanac (CC BY 4.0) · last verified 2026-11-10
+
+.mcp.json plus minimale stdio- und Remote-Server-Startvorlagen.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-11-10" source="https://modelcontextprotocol.io">
+MCP-Konfigurationsschlüssel und SDK-APIs ändern sich — gleiche sie mit der offiziellen MCP-Dokumentation und der [Claude-Code-MCP-Dokumentation](https://code.claude.com/docs/en/mcp) ab. Auch welche Referenzserver noch gepflegt werden, ändert sich; die unten genannten archivierten Pakete wurden gegen die npm-Registry und [modelcontextprotocol/servers](https://github.com/modelcontextprotocol/servers) geprüft.
+</VerifyNote>
+
+Startvorlagen zum Kopieren, um Claude über [MCP](/docs/claude-code/mcp) mit Tools zu verbinden. Kürze sie auf das, was du brauchst.
+
+## `.mcp.json` — Server deklarieren (projektweit geteilt)
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/"
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    },
+    "private-api": {
+      "type": "http",
+      "url": "https://api.internal.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${INTERNAL_MCP_TOKEN}" }
+    }
+  }
+}
+```
+
+Ein Remote-Eintrag braucht ein explizites `"type"`. Claude Code liest einen Eintrag mit `url`, aber ohne `type`, als stdio-Server, überspringt ihn und weist dich darauf hin, `"type": "http"` (oder `"sse"` / `"ws"`) zu ergänzen.
+
+:::warning[Halte Secrets aus der Datei heraus]
+Referenziere Umgebungsvariablen (`${INTERNAL_MCP_TOKEN}`) — schreibe Tokens nicht fest in eine eingecheckte Datei.
+:::
+
+:::warning[Die meisten der alten Referenzserver sind archiviert]
+Die `@modelcontextprotocol/server-*`-Pakete, die viele noch für **GitHub, PostgreSQL, Slack und Puppeteer** herumkopieren, tragen inzwischen einen npm-Deprecation-Hinweis mit dem Wortlaut *„Archived and unmaintained; no security guarantees“* und liegen in [modelcontextprotocol/servers-archived](https://github.com/modelcontextprotocol/servers-archived). Nur eine Handvoll sind noch gepflegte Referenzserver — unter den TypeScript-Servern `server-filesystem`, `server-memory`, `server-everything` und `server-sequential-thinking`.
+
+Bevorzuge den Server des Anbieters, wo es einen gibt: GitHub liefert [`api.githubcopilot.com/mcp/`](https://github.com/github/github-mcp-server), und die Browsersteuerung ist zu [`@playwright/mcp`](/docs/api/playwright-mcp-deep-guide) gewandert. Für PostgreSQL und Slack gibt es keinen offiziellen Ersatz — wähle einen gepflegten Community-Server und [prüfe ihn zuerst](/docs/security/reviewing-third-party-code).
+:::
+
+## Minimaler stdio-Server (TypeScript)
+
+Ein winziger Server, der ein einziges Tool bereitstellt. Passe den Handler an deine Daten an.
+
+```ts
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { z } from "zod";
+
+const server = new McpServer({ name: "echo", version: "1.0.0" });
+
+server.registerTool(
+  "echo",
+  {
+    description: "Echo back the provided text",
+    inputSchema: z.object({ text: z.string().describe("Text to echo back") }),
+  },
+  async ({ text }) => ({ content: [{ type: "text", text: `You said: ${text}` }] }),
+);
+
+await server.connect(new StdioServerTransport());
+```
+
+:::note[SDK-Paket umbenannt (MCP TS SDK v2)]
+`@modelcontextprotocol/sdk` wurde in v2 in `@modelcontextprotocol/server` und `@modelcontextprotocol/client` aufgeteilt. Das v1-Paket erhält weiterhin Bugfixes; neue Projekte sollten v2 verwenden.
+:::
+
+## Minimaler stdio-Server (Python)
+
+```python
+from mcp.server import MCPServer
+
+mcp = MCPServer("echo")
+
+@mcp.tool()
+def echo(text: str) -> str:
+    """Echo the text back."""
+    return f"You said: {text}"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
+
+## Bevor du einen Server auslieferst
+
+- **Minimale Rechte** — nur die Daten und Aktionen, die er braucht ([Agenten absichern](/docs/security/securing-agents)).
+- **Eingaben validieren**; gib Fehler als Ergebnisse zurück, statt abzustürzen.
+- **Server von Drittanbietern prüfen**, bevor du sie verbindest ([Code von Drittanbietern prüfen](/docs/security/reviewing-third-party-code)).
+
+## Weiter
+
+- [MCP-Server in Claude Code](/docs/claude-code/mcp)
+- [Deinen ersten MCP-Server bauen und anbinden](/docs/walkthroughs/first-mcp-server)
+- [Hooks- & settings.json-Rezepte](/docs/templates/hooks-settings)

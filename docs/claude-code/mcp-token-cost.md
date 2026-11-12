@@ -1,0 +1,112 @@
+# The MCP Token Tax
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-code/mcp-token-cost · AILmanac (CC BY 4.0) · last verified 2026-11-10
+
+Why connecting MCP servers can burn 50k–150k tokens before your first request — and the three fixes: Tool Search, code execution, and knowing when a CLI call wins.
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-11-10" source="https://www.anthropic.com/engineering/advanced-tool-use">
+Token figures and feature names (`defer_loading`, Tool Search Tool, Programmatic Tool Calling) come from Anthropic's engineering posts. Claude Code's own tool-search behavior — that it is on by default, the `ENABLE_TOOL_SEARCH` values, the model floor and the description caps — is from the [Claude Code MCP docs](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search), which is where that part changes. Confirm both before quoting exact numbers.
+</VerifyNote>
+
+There's a recurring fight on Hacker News and X: *why burn tens of thousands of tokens on a single MCP operation when the same thing over a CLI costs a couple hundred?* It sounds like MCP-bashing. It isn't. The people arguing loudest are the ones who love agents — they've just met the bill. This page is the practical guide to that bill: where the tokens actually go, the two costs almost nobody separates, and the three fixes that turn a 150,000-token workflow into a 2,000-token one.
+
+<Callout type="objectives" items={["Separate the TWO distinct MCP token costs: tool-definition loading and intermediate results", "Understand why the schema cost is paid per-conversation, not once", "Use defer_loading and the Tool Search Tool to load tool schemas on demand", "Use code execution / Programmatic Tool Calling to keep large results out of context", "Decide, per task, when an MCP tool is worth it and when a plain CLI call wins"]} />
+
+## Two costs, not one
+
+When you connect an MCP server, the client asks it for `tools/list` and gets back **every tool with its full JSON schema**. That whole block is injected into the model's context. Most people stop their mental accounting there. But there are two separate taxes, and the second one is usually bigger.
+
+**Cost 1 — Tool definitions.** Every connected tool's name, description, and parameter schema sits in context. Anthropic's own framing: *"In cases where agents are connected to thousands of tools, they'll need to process hundreds of thousands of tokens before reading a request."* A single enterprise server can publish dozens to hundreds of tools; third-party analyses put a 400-tool server at roughly 400,000 tokens of schema alone — double a 200k window, and still 40% of a 1M one, spent before the first request. (Per-model window sizes: [Models and pricing](/docs/whats-new/models-and-pricing).)
+
+**Cost 2 — Intermediate results.** When the model calls a tool directly, **every result flows back through the model's context**, even the parts you never wanted it to read. Anthropic's example: pull a two-hour meeting transcript from one tool and pass it to another, and the full transcript passes through the model *twice* — potentially ~50,000 tokens — just to produce a one-line summary.
+
+<Callout type="warning" items={["Cost 1 is paid EVERY turn until prompt caching kicks in — the schemas are re-sent with each request in the conversation, not loaded once. A big tool catalog is a tax on the whole session, not a one-time fee. This is the cost of a tool whose definition is LOADED; deferring it (below) is what takes it off the per-turn bill.", "Cost 2 scales with your DATA, not your tool count. Ten tiny tools can be cheaper than one tool that returns a giant blob."]} />
+
+### The numbers, from the primary sources
+
+| Fix | Task | Before | After | Reduction |
+| --- | --- | --- | --- | --- |
+| Code execution with MCP | Google Drive → Salesforce workflow | 150,000 | 2,000 | **98.7%** |
+| Tool Search Tool | Load defs before work begins | ~77,000 | ~8,700 | **85%** |
+| Programmatic Tool Calling | Complex research task | 43,588 | 27,297 | **37%** |
+
+All three rows are Anthropic's published figures. The surprising part isn't the cost — it's the **accuracy**: with the Tool Search Tool, tool-selection accuracy *rose* (Opus 4.5 went 79.5% → 88.1%; Opus 4 went 49% → 74%). Fewer tools crowding the context means the model picks the right one more often. Cost and quality move the same direction here, which is rare.
+
+## Fix 1 — Load tool schemas on demand
+
+Instead of injecting all schemas upfront, mark them `defer_loading: true`. Claude then sees only a lightweight index; when it needs GitHub, it calls the **Tool Search Tool**, which returns *only* the matching GitHub schemas — not the 50+ tools from every other server. Anthropic reports this preserves ~191,300 tokens of context versus ~122,800 with everything preloaded.
+
+### In Claude Code it is already on
+
+You are watching this pattern right now if you use Claude Code with MCP servers. **Tool search is enabled by default**: only tool *names* and server instructions load at session start, and Claude fetches a full schema through a `ToolSearch` call when a task needs it. So adding another server costs you its tool names, not its schemas — Claude Code sets no per-server tool cap and says the practical limit is your context-window budget.
+
+One widely repeated claim is worth correcting, because it is half right. The "~10% of the context window" threshold is real, but it is **not** the default trigger — it is one opt-in mode of the `ENABLE_TOOL_SEARCH` environment variable:
+
+| `ENABLE_TOOL_SEARCH` | Behavior |
+| --- | --- |
+| *(unset)* — the default | Every MCP tool deferred, loaded on demand |
+| `true` | Same as unset |
+| `auto` | Threshold mode. Deferrable tools load **upfront** while their definitions total under 10% of the context window; at 10% or more, tool search turns on |
+| `auto:N` | Threshold mode with your own percentage (`N` is 0–100), e.g. `auto:5` |
+| `false` | Every MCP tool loaded upfront, no deferral |
+
+So if you were counting on tools loading upfront below 10%, you have the default backwards — nothing loads upfront unless you ask for `auto`. And `auto` is **sticky**: once the total crosses the threshold and tool search turns on, those tools can stay deferred even after the total falls back under it.
+
+<Callout type="warning" items={["Three things switch tool search off and ignore ENABLE_TOOL_SEARCH entirely: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS (from Claude Code v2.1.227 an organization can keep it on through managed settings), a session that gets the HIPAA configuration (no override at all), and Microsoft Foundry deployments hosted on Azure, which reject it server-side. Denying the ToolSearch tool in permissions also loads everything upfront.", "There is a model floor: Claude Code uses tool search on Claude Opus 4, Sonnet 4, Haiku 4.5 and later. On earlier models everything loads upfront and ENABLE_TOOL_SEARCH=true does NOT override that. On Google Cloud's Agent Platform the floor is higher — Opus 4.5, Sonnet 4.5, Haiku 4.5 and later."]} />
+
+If you write MCP servers, deferral also changes your description budget, and asymmetrically: a tool loaded **upfront** is cut at 4,096 characters (the same cap as server instructions), one loaded **through tool search** at 16,384. But the search itself only matches against the shorter limit, so the words Claude would search for have to be near the start either way.
+
+<Steps items={[{title: "Audit what you've connected", body: "List active servers and roughly how many tools each publishes. Run /context: it labels tools (deferred) or (loaded on-demand) when tool search has them, so you can see which servers are actually spending schema tokens and which are only spending names."}, {title: "Disconnect what this task doesn't need", body: "The cheapest fix is fewer servers. Connect the two or three a task actually uses, not your whole catalog — even deferred, every server still contributes tool names and server instructions to every turn."}, {title: "Defer the rest", body: "In Claude Code that is already the default. Elsewhere, prefer a client/config that supports defer_loading + Tool Search so schemas load only when searched."}]} />
+
+## Fix 2 — Keep results out of context with code execution
+
+The deeper fix targets Cost 2. Instead of the model calling tools one-by-one with every result passing through it, the model **writes code** that calls the tools, and the intermediate data stays in the execution environment. Anthropic exposes MCP servers as a **file tree of tools** the agent explores like a filesystem, loading only the definitions it needs — and *"intermediate results stay in the execution environment by default… the agent only sees what you explicitly log or return."*
+
+That single design change is what collapses the Drive→Salesforce workflow from 150,000 to 2,000 tokens: the records move through code, and only the final count comes back to the model. On the Developer Platform the same idea ships as **Programmatic Tool Calling** — Claude writes Python that orchestrates several tools and filters outputs before they ever hit its context.
+
+<Callout type="tip" items={["Rule of thumb: if a tool RETURNS something big (a transcript, a query dump, a file), you want code execution so the blob is processed out-of-context. If a tool just DOES something small (create an issue, send one row), a direct call is fine."]} />
+
+## Fix 3 — Know when a CLI call just wins
+
+Sometimes the right answer isn't a better MCP setup — it's no MCP at all. The HN/X argument has a real point: a shell command like `gh pr list` or `psql -c '…'` costs a couple hundred tokens round-trip, while the equivalent MCP path pays for schemas plus a structured result. If the agent already has a terminal and the CLI exists, that's often the leanest path.
+
+<PromptCard title="Prefer the CLI when the tool is already a CLI">
+{`# Instead of connecting a GitHub MCP server for read-only work,
+# let the agent use the gh CLI it already has:
+gh pr list --state open --json number,title,author
+
+# ~200 tokens of command + compact output, no schema tax,
+# no server to keep connected across the session.`}
+</PromptCard>
+
+MCP earns its overhead when you need **typed, permissioned, cross-surface** capability — a database with a read-only role, a browser it can drive, a SaaS API with OAuth — or when the same tools are reused across many turns so caching amortizes the schema cost. Reach for a CLI when the capability is a one-off, already scriptable, and returns something small. Neither is "better"; they're different points on a cost curve.
+
+<Callout type="takeaways" items={["MCP has two token costs: tool-definition schemas (paid ~every turn) and intermediate results (scales with your data).", "Tool Search + defer_loading cut the schema cost ~85% AND raise tool-selection accuracy — load schemas only when searched.", "In Claude Code tool search is ON by default: only tool names load at session start. The ~10% threshold people quote is the opt-in ENABLE_TOOL_SEARCH=auto mode, not the default.", "Code execution / Programmatic Tool Calling keep big results in the execution environment; only what you log or return reaches the model (150k → 2k in Anthropic's example).", "The cheapest optimization is connecting fewer servers per task.", "When the capability is a one-off that returns something small and already has a CLI, a shell call (~200 tokens) beats an MCP round-trip."]} />
+
+<Flashcards title="MCP economics terms" cards={[{front: "The MCP token tax", back: "Tokens spent on tool schemas + intermediate results, not on the actual work — the hidden cost of connecting servers."}, {front: "defer_loading", back: "A flag that keeps a tool's schema OUT of context until Claude searches for it via the Tool Search Tool."}, {front: "Tool Search Tool", back: "Lets Claude discover tools on demand; searching 'github' returns only GitHub schemas instead of every connected tool. ~85% schema-token cut in Anthropic's figures."}, {front: "Programmatic Tool Calling", back: "Claude writes code that orchestrates tools; intermediate results are filtered in the execution environment so only final output enters context."}, {front: "Progressive disclosure", back: "General pattern: expose a lightweight index of tools upfront, fetch full schemas only when needed."}, {front: "ENABLE_TOOL_SEARCH", back: "Claude Code's knob. Unset or true = everything deferred (the default). auto / auto:N = load upfront until definitions pass N% of the window (10% by default), then switch on and stay on. false = everything upfront."}]} />
+
+<Quiz title="Check yourself" questions={[{q: "Why is the tool-definition cost worse than a one-time fee?", options: ["Schemas are stored on disk and re-read slowly", "The schemas are re-sent with every request in the conversation until prompt caching applies", "Each tool call doubles the schema size"], answer: 1, explain: "Tool schemas live in the context that's sent each turn, so a big catalog taxes the whole session — not just the first message — until caching kicks in."}, {q: "A tool pulls a 2-hour transcript and hands it to a summarizer tool via direct calls. What's the hidden cost?", options: ["Nothing — only the summary uses tokens", "The full transcript passes through the model's context, potentially ~50k tokens, even though you only wanted a summary", "The transcript is billed once at the server, not the model"], answer: 1, explain: "With direct tool calls every intermediate result flows through the model. Code execution keeps the transcript in the execution environment so only the summary returns."}, {q: "You need a single read-only 'list open PRs' during a coding session and the agent has a terminal. Leanest option?", options: ["Connect a full GitHub MCP server", "Run the gh CLI directly — ~200 tokens, no schema tax, nothing to keep connected", "Load all GitHub tools with defer_loading off"], answer: 1, explain: "For a one-off that returns something small and already has a CLI, a shell call avoids the schema tax entirely. MCP earns its cost for reused, typed, permissioned capability."}, {q: "What surprising thing happens to tool-selection accuracy when you use the Tool Search Tool?", options: ["It drops, because Claude sees fewer tools", "It stays the same; only cost changes", "It rises — fewer tools crowding context means Claude picks the right one more often"], answer: 2, explain: "Anthropic reports accuracy went UP (Opus 4.5: 79.5% → 88.1%) with Tool Search. Cost and quality moved the same direction."}]} />
+
+## Related on AILmanac
+
+- [MCP Servers in Claude Code](/docs/claude-code/mcp) — how to add, scope, and secure servers.
+- [The Token Economy](/docs/power-user/token-economy) — compressing command output before it hits the model.
+- [Dynamic Workflows](/docs/claude-code/dynamic-workflows) — where orchestration cost shows up, and slicing to gauge spend.
+- [Tool Use on the API](/docs/api/tool-use) — the request/response shape behind all of this.
+- [Playwright MCP: The Deep Practical Guide](/docs/api/playwright-mcp-deep-guide) — worked example on the heaviest single server people connect (~3,500-token schema tax), when the Skill/CLI path wins instead.
+- [Tool Search & Deferred Loading](/docs/api/tool-search-and-deferred-loading) — the API-level deep dive: regex vs BM25, the five 400s, and why the request body doesn't get smaller.
+
+## Sources & further reading
+
+- [Code execution with MCP: building more efficient AI agents](https://www.anthropic.com/engineering/code-execution-with-mcp) — Anthropic Engineering. Source of the 150,000 → 2,000 token (98.7%) figure and the "intermediate results stay in the execution environment" pattern.
+- [Introducing advanced tool use on the Claude Developer Platform](https://www.anthropic.com/engineering/advanced-tool-use) — Anthropic Engineering. Tool Search Tool (`defer_loading`, ~85% reduction, accuracy gains) and Programmatic Tool Calling (43,588 → 27,297 tokens).
+- [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp) — official reference for connecting and scoping servers. Its [Scale with MCP tool search](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search) section is the source for tool search being the default, the `ENABLE_TOOL_SEARCH` table, the model floor and the 4,096 / 16,384-character description caps.
+- [modelcontextprotocol — Progressive Tool Discovery discussion](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/1923) — community design conversation on on-demand tool loading.
+- [MCP Progressive Disclosure](https://www.solo.io/blog/mcp-progressive-disclosure) (Solo.io) — third-party walkthrough of the lightweight-index / fetch-schema-on-demand pattern.
+
+
+## Next
+
+- [Accessibility](/docs/claude-code/accessibility)

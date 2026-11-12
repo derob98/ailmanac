@@ -1,0 +1,388 @@
+# Tracing OpenTelemetry natif : deux chemins, une seule trace
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/api/opentelemetry-tracing · AILmanac (CC BY 4.0) · last verified 2026-10-19
+
+Depuis octobre 2026, l'API Claude et le SDK Claude émettent eux-mêmes des spans OpenTelemetry, sans instrumentation artisanale. Mais les deux chemins se recouvrent, et additionner les deux doublera vos chiffres de tokens. Cette page couvre la configuration de chacun, la règle qui garde les comptes de tokens honnêtes, le flag traceparent qui supprime silencieusement vos traces et les règles de livraison qui désactivent une destination au bout de 24 heures.
+
+<LevelBadge level="advanced" />
+
+Durant la majeure partie de 2026, tracer un appel à l'API Claude voulait dire écrire le span soi-même : ouvrir un span, appeler `messages.create`, copier `usage` dans des attributs, fermer le span. [Observabilité des agents](/docs/api/agent-observability) est la page qui explique comment bien le faire, et c'est toujours la page sur ce que les noms *signifient*.
+
+Cette page porte sur ce qui a changé. L'API et le SDK émettent désormais ces spans eux-mêmes, en bêta, et ils en émettent nettement plus que ce que vous écriviez à la main : un span par requête de modèle *à l'intérieur* d'une requête API, un span par outil serveur que l'API a exécuté pour vous, un span par compaction, un span par tour Managed Agents. Des choses qui se passent du côté d'Anthropic, que l'instrumentation manuelle ne peut structurellement pas voir.
+
+Il existe deux chemins indépendants pour activer cela, et la chose la plus coûteuse à mal comprendre est qu'**ils se recouvrent**. Activez les deux sans lire un paragraphe de la documentation et chaque requête Messages apparaît deux fois, avec le même nom de span, et vos tableaux de bord de tokens doublent.
+
+<Callout type="objectives" items={[
+  "Choisir entre le tracing SDK, le tracing API, ou les deux, et savoir exactement ce que chacun peut et ne peut pas voir",
+  "Configurer chaque chemin : un tracer provider dans votre code, une destination dans la Console ou via l'Admin API",
+  "Additionner correctement les tokens sur des spans qui se recouvrent : la règle qui empêche le double comptage",
+  "Choisir un mode de contenu délibérément, et savoir ce qui l'emporte sur votre choix (HIPAA/FERPA/K-12, rétention de données nulle)",
+  "Rattacher les spans de l'API aux traces de votre application avec traceparent, en évitant le flag sampled qui les supprime",
+  "Survivre aux règles de livraison : at-least-once, best-effort et désactivation automatique après 24 heures d'échecs"
+]} />
+
+<VerifyNote lastVerified="2026-10-19" source="https://platform.claude.com/docs/en/manage-claude/opentelemetry">
+L'export OpenTelemetry pour l'API et le SDK Claude a été lancé en bêta le **14 octobre 2026**. Anthropic indique explicitement que les noms de spans, attributs, options du SDK et variables d'environnement peuvent changer pendant la bêta, et conseille d'épingler la version de votre SDK. Considérez chaque nom de cette page comme de la surface bêta et revérifiez-le avant une migration.
+</VerifyNote>
+
+## Les deux chemins
+
+Ce ne sont pas deux façons de faire la même chose. Ils voient des moitiés différentes de l'exécution.
+
+| Ce que vous obtenez | Tracing SDK | Tracing API |
+| --- | --- | --- |
+| Requêtes de l'API Messages et de l'API Sessions | oui | oui |
+| Consommation de tokens | oui | oui |
+| Chaque requête de modèle *à l'intérieur* d'une requête API | — | oui |
+| Tours Managed Agents | — | oui |
+| Outils serveur et outils du connecteur MCP, exécutés par l'API | — | oui |
+| Vos propres outils client, exécutés par le tool runner | oui | — |
+| Outils dans un sandbox auto-hébergé | oui | — |
+| Autres requêtes, comme les uploads de fichiers | oui | — |
+| Comment le configurer | code | Console ou Admin API |
+| Qui peut le configurer | tout développeur | un **admin** |
+| Quels clients il couvre | uniquement les clients utilisant le SDK | tout client, y compris curl |
+
+Le partage suit une seule ligne : **le SDK voit ce que fait votre processus, l'API voit ce que fait le côté d'Anthropic.** Un outil serveur comme la recherche web s'exécute à l'intérieur de la requête API : votre processus ne l'observe jamais, donc seul le tracing API produit ce span. Votre propre fonction `get_weather` s'exécute dans votre processus : seul le tracing SDK produit celui-là.
+
+C'est pourquoi « les deux » est la vraie réponse pour la plupart des déploiements en production, et pourquoi la règle de recouvrement ci-dessous n'est pas un cas limite.
+
+```mermaid
+flowchart TD
+  APP["your span: answer_question<br/>(your code)"] --> TR["anthropic.messages.tool_runner<br/>SDK · INTERNAL"]
+  TR --> C1["anthropic.messages.create<br/>SDK · CLIENT"]
+  C1 --> S1["anthropic.messages.create<br/>API · SERVER"]
+  S1 --> M1["anthropic.model_request<br/>API · INTERNAL"]
+  S1 --> W1["anthropic.tool_use web_search<br/>API · INTERNAL"]
+  S1 --> M2["anthropic.model_request<br/>API · INTERNAL"]
+  TR --> CT["anthropic.custom_tool_use get_weather<br/>SDK · INTERNAL"]
+  TR --> C2["anthropic.messages.create<br/>SDK · CLIENT"]
+  C2 --> S2["anthropic.messages.create<br/>API · SERVER"]
+```
+
+Lisez bien cette forme, car elle contient le piège. `anthropic.messages.create` apparaît **quatre fois** pour une conversation de deux requêtes : deux fois depuis le SDK (kind `CLIENT`) et deux fois depuis l'API (kind `SERVER`), chaque span API ayant pour parent son span SDK. Ce ne sont pas des doublons au sens d'une redélivrance : ce sont deux observations légitimes de la même requête, vues des deux extrémités.
+
+## Configurer le tracing SDK
+
+Les spans SDK ne demandent ni permissions ni accès à la Console. Le SDK utilise le tracer provider que votre application a déjà enregistré, il n'y a donc aucun exporter spécifique à Anthropic à brancher.
+
+<Steps items={[
+  {
+    "title": "Mettre à jour le SDK",
+    "body": "Les spans sont livrés dans les SDK actuels Python, TypeScript, C#, Go, Java, PHP et Ruby. Sur Java, le minimum est `anthropic-java` 2.73.0. Épinglez la version : la note bêta dit qu'une nouvelle version du SDK peut renommer un span, un attribut, une option ou une variable d'environnement."
+  },
+  {
+    "title": "Enregistrer un tracer provider avant le premier appel",
+    "body": "C'est de loin la raison la plus courante pour laquelle on ne voit aucun span. Le SDK lit le provider enregistré globalement au moment de l'appel ; enregistrez-le au démarrage du processus, pas paresseusement. Commencez avec un exporter console pour confirmer que des spans existent, puis passez à OTLP."
+  },
+  {
+    "title": "Appeler le SDK depuis l'un de vos propres spans",
+    "body": "Rien ne s'imbrique automatiquement. Si vous voulez que le span SDK (et le span API en dessous) apparaisse sous votre propre span `handle_request`, ouvrez votre span et appelez le SDK à l'intérieur. Sans cela, les spans SDK sont des spans racine et la trace ne dit rien sur la fonctionnalité ou l'utilisateur qui a déclenché l'appel."
+  },
+  {
+    "title": "Décider du mode de contenu et de l'ID de conversation",
+    "body": "Par défaut : métadonnées seulement. Réglez `traces.content_mode` sur `content` (ou `ANTHROPIC_OPEN_TELEMETRY_TRACES_CONTENT_MODE=content`) pour inclure prompts et réponses. Réglez `conversation_id` pour regrouper une conversation à plusieurs appels sous un même `gen_ai.conversation.id`."
+  }
+]} />
+
+<PromptCard title="Minimum viable SDK tracing — console exporter first (Python)">
+{`from anthropic import Anthropic
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+
+# Register BEFORE the first traced call. Swap ConsoleSpanExporter for an
+# OTLP exporter once you can see spans in the terminal.
+provider = TracerProvider()
+provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+trace.set_tracer_provider(provider)
+
+# Record prompts and responses, and label this conversation.
+client = Anthropic(open_telemetry={"traces": {"content_mode": "content"}})
+
+tracer = trace.get_tracer("my-service")
+with tracer.start_as_current_span("answer_question"):
+    message = client.with_options(
+        open_telemetry={**client.open_telemetry, "conversation_id": "conv_42"}
+    ).messages.create(
+        model="claude-opus-5-5",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": "Hello, Claude"}],
+    )`}
+</PromptCard>
+
+### Les options du SDK à connaître
+
+| Option (orthographe Python) | Variable d'environnement | Défaut |
+| --- | --- | --- |
+| `traces.content_mode` | `ANTHROPIC_OPEN_TELEMETRY_TRACES_CONTENT_MODE` | `metadata_only` |
+| `traces.max_content_bytes` | `ANTHROPIC_OPEN_TELEMETRY_TRACES_MAX_CONTENT_BYTES` | 0,75 Mo |
+| `conversation_id` | — | aucun |
+| `tracer_provider` | — | le provider global enregistré |
+| `propagation` | `ANTHROPIC_OPEN_TELEMETRY_PROPAGATION` | activé |
+| `open_telemetry` (interrupteur d'arrêt) | `ANTHROPIC_OPEN_TELEMETRY` | activé |
+
+Deux comportements vous coûteront chacun une heure si vous les découvrez à froid :
+
+- **Passer `open_telemetry` au client remplace en bloc les variables d'environnement**, clés imbriquées comprises. Toute clé que vous omettez de l'objet revient silencieusement à sa valeur par défaut du tableau, même si sa variable est définie. Construisez l'objet à partir de l'existant plutôt que de zéro.
+- **Sur TypeScript avec `@opentelemetry/instrumentation-undici`**, que `@opentelemetry/auto-instrumentations-node` tire avec lui, réglez `propagation: false`. Un bug de ce paquet ajoute un *second* en-tête `traceparent` à chaque requête, ce qui rend le contexte de trace invalide et casse silencieusement la jointure.
+
+<VerifyNote lastVerified="2026-10-19" source="https://platform.claude.com/docs/en/manage-claude/opentelemetry/sdk">
+Les noms d'options, noms de variables d'environnement, le plancher `opentelemetry-api` 1.57.0 pour Java et l'avertissement sur le double en-tête d'undici viennent de la page officielle de configuration du SDK. Les orthographes par langage diffèrent (TypeScript/Java/PHP utilisent le camelCase, C# le PascalCase, Go des fonctions `option.With…()`) ; consultez la page pour le vôtre.
+</VerifyNote>
+
+## Configurer le tracing API
+
+Le tracing API n'exige aucun changement de code. Vous enregistrez une *destination*, c'est-à-dire l'endpoint OTLP de votre plateforme d'observabilité plus des identifiants, et l'API y poste les spans.
+
+Ce qu'il vous faut avant de commencer :
+
+- **Le rôle admin** dans l'organisation de la Console. Le rôle développeur peut voir les destinations mais pas les créer ni les modifier.
+- **Un endpoint OTLP/HTTP acceptant du protobuf, en HTTPS, sur le port 443.** C'est l'exigence qui piège ceux qui s'auto-hébergent : un OpenTelemetry Collector standard écoute OTLP/HTTP sur le **port 4318**, il vous faut donc un load balancer, un reverse proxy ou un récepteur reconfiguré devant lui. Il n'y a pas d'option gRPC ni de port autre que 443.
+- **Des identifiants pour cet endpoint**, qui vont dans les en-têtes de requête. La Console n'affichera plus les valeurs après l'enregistrement.
+
+<PromptCard title="Create a telemetry destination with the Admin API (curl)">
+{`curl --fail-with-body -sS "https://api.anthropic.com/v1/organizations/telemetry_destinations" \\
+  -H "x-api-key: $ANTHROPIC_ADMIN_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: telemetry-destinations-2026-08-11" \\
+  -H "content-type: application/json" \\
+  -d '{
+    "endpoint_url": "https://gateway.example.com/otlp",
+    "headers": {"authorization": "Bearer YOUR_OBSERVABILITY_API_KEY"},
+    "traces": {"content_mode": "metadata_only"},
+    "workspaces": {"type": "all"}
+  }'`}
+</PromptCard>
+
+Notez la forme de l'URL de l'endpoint : donnez l'URL OTLP de **base** et laissez l'API ajouter `/v1/traces` elle-même. Un préfixe de chemin est autorisé. Si votre plateforme reçoit les traces ailleurs, renseignez l'URL d'endpoint de traces optionnelle, mais elle doit partager le même hôte.
+
+Trois réglages méritent une décision délibérée plutôt qu'un défaut :
+
+- **Workspaces** : `all`, `selected` ou `all except`. `all` inclut les workspaces créés plus tard, ce qui est généralement ce que l'on veut et parfois exactement ce que l'on ne veut pas. Une destination ne reçoit que les spans du workspace où la requête ou la session s'est réellement exécutée.
+- **Mode de contenu** : traité plus bas.
+- **Taille maximale de contenu** : ne s'applique qu'en mode contenu complet. Choisir un partenaire listé dans la Console préremplit une valeur que cette plateforme accepte ; avec **Custom**, vous êtes seul.
+
+Vérifiez ensuite, dans cet ordre : envoyez un span de test depuis le menu de la destination et confirmez qu'un span `anthropic.test` arrive ; envoyez une vraie requête dans le workspace choisi ; vérifiez que la colonne **Delivery** affiche **Healthy** ; filtrez votre plateforme sur `service.name` = `claude-platform`. Comptez environ une minute à chaque étape : les changements de destination comme la colonne de santé ont ce décalage.
+
+<VerifyNote lastVerified="2026-10-19" source="https://platform.claude.com/docs/en/manage-claude/opentelemetry/api">
+L'exigence du rôle admin, l'exigence d'un endpoint OTLP/HTTP-protobuf-HTTPS-443, l'en-tête bêta `telemetry-destinations-2026-08-11`, le span de vérification `anthropic.test` et la valeur `service.name` `claude-platform` viennent tous de la page officielle de configuration de l'API. Les destinations peuvent aussi être gérées avec le CLI `ant`.
+</VerifyNote>
+
+## Modes de contenu, et ce qui l'emporte sur votre choix
+
+Chaque destination et chaque client SDK a l'un des deux modes de contenu.
+
+- **Métadonnées seulement** (`metadata_only`) : le défaut. Identifiants, timing, statut, nombres de tokens, et le texte que vous avez choisi vous-même : noms d'agents, noms et descriptions d'outils, noms de serveurs MCP.
+- **Contenu complet** (`content`) : tout ce qui précède plus les prompts et réponses du modèle. Dans la référence des spans, ces attributs portent un badge `Content` : `gen_ai.system_instructions`, `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.tool.call.arguments`, `anthropic.tool_result.content`.
+
+Le contenu complet est ce qui rend les traces utilisables pour ce que les équipes veulent vraiment : lire une conversation en échec, ou [construire des évaluations](/docs/playbooks/evaluating-agents) à partir du trafic réel. C'est aussi ce qui déplace vos prompts et les saisies de vos utilisateurs vers un second système, sous la rétention et les contrôles d'accès de ce fournisseur plutôt que les vôtres. Même calcul que pour [ce que votre agent uploade](/docs/security/what-your-agent-uploads) : l'activer accorde à votre fournisseur d'observabilité à peu près l'habilitation qu'ont les données de votre application.
+
+Deux dérogations sont à retenir, car toutes deux produisent des tickets de support déroutants :
+
+- **Une restriction HIPAA, FERPA ou K-12 de traitement des données avec Anthropic force les destinations en métadonnées seulement**, quoi que dise la destination. Les spans SDK ne sont *pas* affectés : votre propre processus peut toujours émettre du contenu. Le symptôme est donc « le contenu complet est activé, la Console est d'accord, et les prompts n'apparaissent que sur les spans CLIENT ».
+- **La rétention de données nulle est compatible avec le contenu complet.** Pour les requêtes de l'API Messages, l'API ne garde le contenu exporté qu'en mémoire jusqu'à la livraison. Managed Agents n'est de toute façon pas éligible ZDR, et sa rétention n'est pas modifiée par l'usage d'OpenTelemetry.
+
+### Limites de contenu et troncature
+
+Chaque span contient jusqu'à **0,75 Mo** de contenu par défaut, valeur choisie pour tenir dans une fenêtre de contexte de 200k tokens de texte anglais tout en restant sous la limite de requête de 1 Mo courante sur les plateformes d'observabilité et les proxys. Une fenêtre complète de 1M tokens demande environ **4 Mo**.
+
+Quand le contenu dépasse la limite, le span est raccourci et `anthropic.content.truncated` passe à `true`. L'ordre de suppression est spécifié, et il compte pour qui construit des évaluations à partir des traces :
+
+- Les **spans de requête** suppriment d'abord le prompt système, puis les messages les plus anciens.
+- Les **spans d'outil** suppriment des blocs depuis la fin du résultat.
+- Les **images et documents** n'apparaissent que par leur type, jamais en octets.
+
+Un pipeline naïf « rejouer chaque trace comme cas d'évaluation » vous alimentera donc discrètement avec des conversations sans prompt système, sauf si vous filtrez sur `anthropic.content.truncated`. Faites de ce filtre la première ligne du pipeline, pas une découverte tardive.
+
+## La règle d'or : compter chaque token une fois
+
+C'est la section à lire deux fois. Les attributs de consommation de tokens apparaissent sur plusieurs spans par requête, par conception, car chaque span rapporte *sa propre étape*. Tout additionner de ce que vous recevez surcompte ; additionner le mauvais niveau sous-compte.
+
+<Steps items={[
+  {
+    "title": "Choisir exactement une source par requête",
+    "body": "Si une requête Messages a à la fois un span SDK et un span API, additionnez les spans API. Les deux s'appellent `anthropic.messages.create`, vous ne pouvez donc pas filtrer par nom : distinguez-les par le kind du span, le span SDK est CLIENT et son span API enfant est SERVER. Filtrer sur `service.name` = `claude-platform` fonctionne aussi."
+  },
+  {
+    "title": "Dans les spans API d'une requête Messages, additionner un niveau, pas deux",
+    "body": "Soit les spans `anthropic.messages.create`, soit leurs enfants `anthropic.model_request`, jamais les deux. Une requête avec trois requêtes de modèle rapporte son total sur le parent et ses parties sur les enfants."
+  },
+  {
+    "title": "Ajouter les tokens de compaction, depuis un seul endroit",
+    "body": "Les totaux `gen_ai.usage.*` excluent la compaction. Sur les spans SDK, ajoutez `anthropic.usage.compaction.input_tokens` et `anthropic.usage.compaction.output_tokens`. Sur les spans API, ajoutez à la place les spans enfants `anthropic.compaction`, puis N'ajoutez PAS aussi les attributs `anthropic.usage.compaction.*` du parent, car ils contiennent les mêmes tokens."
+  },
+  {
+    "title": "Pour Managed Agents, additionner les requêtes de modèle et les évaluations d'outcome",
+    "body": "Additionnez les spans `anthropic.model_request` plus les spans `anthropic.session.outcome_evaluation`. Les spans de tour sont des conteneurs ; les tokens vivent en dessous. Une évaluation d'outcome est une vraie dépense facile à oublier, car aucune requête de modèle de votre part ne l'a produite."
+  },
+  {
+    "title": "Dédupliquer par trace ID et span ID",
+    "body": "La livraison est at-least-once, donc le même span peut arriver deux fois. Si votre plateforme ne dédoublonne pas, vous devez le faire. C'est un problème différent du recouvrement CLIENT/SERVER et il demande sa propre correction."
+  }
+]} />
+
+Encore une chose qui n'est pas une règle de comptage mais vous évitera un mauvais chiffre : `gen_ai.usage.input_tokens` **inclut déjà** les lectures et écritures de cache. Y ajouter `gen_ai.usage.cache_read.input_tokens` double-compte les tokens les moins chers que vous ayez. Voir le [prompt caching](/docs/api/prompt-caching) pour ce que ces tokens coûtent les uns par rapport aux autres.
+
+:::warning[Les traces ne sont pas un registre de facturation]
+Anthropic indique clairement que les spans exportés ne sont pas garantis être un enregistrement complet de la consommation. La livraison est best effort, donc un span peut être perdu ; et un appelant peut supprimer entièrement les spans d'une requête en désactivant le flag sampled dans son `traceparent`. Pour la comptabilité par clé (repérer une clé qui a fuité, rapprocher une facture), utilisez l'Usage API, qui compte les requêtes n'ayant produit aucun span. Les traces servent au débogage et à l'*attribution* des coûts ; elles ne sont pas le grand livre.
+:::
+
+## Rattacher les spans de l'API à vos propres traces
+
+Par défaut, les spans de l'API vivent dans leurs propres traces : techniquement correct et presque inutile, car on ne peut pas savoir quelle fonctionnalité ou quel utilisateur a causé l'appel.
+
+L'API lit l'en-tête W3C `traceparent` de chaque requête. Avec le SDK, vous l'obtenez gratuitement tant que vous avez appelé le SDK dans votre propre span et enregistré le propagateur W3C trace context. (Si votre application a standardisé sur B3 ou un autre propagateur, ajoutez W3C à côté : le SDK écrit les en-têtes avec *votre* propagateur.) Avec tout autre client, injectez vous-même le contexte du span actif dans les en-têtes avant de poster.
+
+Puis il y a le flag qui surprend tout le monde :
+
+:::warning[Le flag sampled est un interrupteur pour les spans, pas une suggestion]
+Si le flag sampled du `traceparent` entrant est désactivé, l'API n'émet **aucun span pour cette requête, ni aucun des spans en dessous**. Le head sampling dans votre application décide donc si la télémétrie côté Anthropic existe tout court. Un service qui échantillonne à 1 % et active le tracing API obtient 1 % des spans de requête de modèle et d'outil serveur, et en conclura que la fonctionnalité est cassée. Échantillonnez en queue dans votre collector, ou forcez le flag sampled sur les chemins que vous voulez tracer.
+:::
+
+La propagation va un saut plus loin que ce que la plupart des gens attendent. Quand l'API Messages appelle votre serveur MCP via le [connecteur MCP](/docs/api/mcp), elle passe un `traceparent` W3C dans `params._meta`, de sorte qu'un serveur qui le lit peut rattacher ses propres spans sous ceux de l'API. Dans une requête `tools/call`, ce parent est le span `anthropic.mcp_tool_use` ; dans les autres messages, c'est `anthropic.messages.create`. Une requête non tracée n'envoie aucun `traceparent`. Côté client, le tableau est plus inégal : le paquet Python `mcp` à partir de la version 2.0 et le paquet C# `ModelContextProtocol` transmettent le contexte de trace dans `_meta` ; les SDK MCP TypeScript, Go, Java, Ruby et PHP ne le font pas d'eux-mêmes.
+
+## Règles de livraison, et comment une destination meurt
+
+L'export côté API est un push depuis l'infrastructure d'Anthropic vers votre endpoint, ce qui signifie qu'il a sa propre sémantique d'échec, plus proche d'un webhook que d'un exporter OTLP dans votre processus.
+
+| Propriété | Comportement |
+| --- | --- |
+| Duplication | At least once. Dédupliquez par trace ID + span ID. |
+| Perte | Best effort. Un span perdu n'est jamais renvoyé. |
+| Compression | La première requête de chaque livraison est compressée en gzip avec `Content-Encoding: gzip`. Sur un `400` ou `415`, les mêmes spans sont renvoyés immédiatement, non compressés. |
+| Retries | Retries limités après un timeout, un échec de connexion/TLS/DNS, ou un `408`, `429` ou `5xx`. Les autres échecs ne sont pas réessayés. |
+| Timeouts | Handshake TLS en 5 s, en-têtes de réponse en 5 s, 10 s au total par livraison, renvoi non compressé compris. |
+| User agent | `User-Agent: Claude-Platform`. Utile pour une règle d'allowlist. |
+
+Et trois façons dont l'API **désactive** une destination d'office, arrêtant l'export jusqu'à ce qu'un humain la réactive :
+
+1. L'endpoint renvoie une redirection `3xx`. Les redirections ne sont pas suivies : pointez la destination vers l'URL finale.
+2. Le nom d'hôte de l'endpoint se résout vers une adresse IP non publique. Il n'y a pas de tunnel vers votre VPC ; exposez un collector public ou utilisez une plateforme managée.
+3. Toutes les livraisons échouent pendant 24 heures.
+
+Cette troisième est le danger opérationnel. Une clé d'API d'observabilité renouvelée que personne ne remarque devient une destination **Failing** pendant un jour puis **Disabled**, et la réactivation est un clic manuel dans la Console (avec le filtre de workspace sur **All**), pas une récupération automatique. Si vous ne posez qu'une alerte à partir de cette page, posez-la sur l'état Delivery.
+
+### Limites par organisation
+
+| Limite | Valeur |
+| --- | --- |
+| Destinations, y compris désactivées | 10 |
+| Workspaces sélectionnés pour une destination | 1 000 |
+| En-têtes de requête par destination | 20 |
+| Longueur d'un nom d'en-tête | 128 octets |
+| Longueur d'une valeur d'en-tête | 4 096 octets |
+| Tous les noms et valeurs d'en-têtes ensemble | 16 384 octets |
+| Longueur de l'URL d'endpoint | 2 048 caractères |
+
+<VerifyNote lastVerified="2026-10-19" source="https://platform.claude.com/docs/en/manage-claude/opentelemetry/api">
+La sémantique de livraison, les valeurs de timeout, les trois conditions de désactivation automatique et le tableau des limites viennent des sections « Delivery and health » et « Limits » de la page officielle de configuration de l'API. Surface bêta : revérifiez avant de construire un SLO sur ces chiffres.
+</VerifyNote>
+
+## Lire une session Managed Agents
+
+Les sessions cassent l'hypothèse d'une seule trace, et la solution est une clé de regroupement plutôt qu'un trace ID.
+
+Les spans d'une session peuvent atterrir dans **plusieurs traces** (une requête ultérieure envoyée depuis une nouvelle trace racine en démarre une nouvelle), et avec l'orchestration multiagent une session a plusieurs threads. Donc :
+
+- **Un thread, comme transcription** : regroupez par `gen_ai.conversation.id` (l'ID du thread de session), triez par heure de début.
+- **Une session entière, tous threads confondus** : regroupez par `anthropic.session.id`, à travers les traces.
+
+Les formes de spans valent la peine d'être intégrées, car elles ne correspondent pas aux conventions GenAI génériques pour lesquelles vous avez peut-être déjà des tableaux de bord. `anthropic.session.turn` porte `gen_ai.operation.name` = `invoke_agent` et couvre l'état `running` d'un thread ; un tour démarré par une requête est enfant du span de cette requête, tandis qu'un tour qui démarre parce qu'un autre thread a répondu n'a aucun parent. En mode contenu complet, le span de tour contient le contenu du thread : `gen_ai.system_instructions` au premier tour d'un thread seulement, `gen_ai.input.messages`, `gen_ai.output.messages`. Les threads advisor sont volontairement plus minces : `gen_ai.agent.name` vaut `anthropic.advisor`, et les attributs d'instruction et d'entrée sont absents.
+
+Quatre cas ne produisent **aucun** span d'outil côté API, et chacun a fait croire à quelqu'un que son tracing était cassé : un outil que votre application exécute (le tool runner du SDK émet ce span) ; un outil dans un sandbox auto-hébergé (le worker d'environnement du SDK l'émet, groupé sous `anthropic.environment.work`) ; un outil multiagent ou advisor ; et un usage d'outil refusé sous la politique de permissions `auto` ou par un événement `user.tool_confirmation`. Les appels refusés ne laissent aucun span d'outil : si vous auditez ce qu'un agent a *tenté* de faire, lisez les événements de session, pas la trace.
+
+## Erreurs fréquentes
+
+- **Additionner chaque span `anthropic.messages.create` reçu.** Deux observations légitimes par requête, même nom. Filtrez d'abord par kind de span ou `service.name`. C'est l'erreur qui produit un coût plausible, faux, exactement doublé.
+- **Attendre des spans à votre taux d'échantillonnage habituel.** Un `traceparent` non échantillonné supprime entièrement les spans API. Le head sampling de votre service est le head sampling de la télémétrie d'Anthropic.
+- **Pointer une destination vers un Collector nu.** OTLP/HTTP sur 4318 n'est pas un endpoint HTTPS sur 443. Mettez un proxy devant, sinon la destination ne livre jamais.
+- **Traiter le contenu complet comme un flag de logging.** Il déplace prompts et saisies utilisateur chez votre fournisseur d'observabilité. Décidez-le avec la personne qui gère le traitement des données, et sachez qu'une restriction HIPAA/FERPA/K-12 l'emporte silencieusement, pour les spans API seulement.
+- **Construire des évaluations à partir des traces sans vérifier `anthropic.content.truncated`.** La troncature supprime d'abord le prompt système. Votre corpus d'évaluation manquera exactement de la partie qui déterminait le comportement.
+- **Laisser une destination `Failing` en l'état.** 24 heures d'échecs la désactivent, et la réactivation est manuelle. Alertez sur l'état Delivery, pas sur le volume de spans : le volume de spans a l'air bon jusqu'à ce qu'il tombe à zéro.
+- **Coder en dur ces noms d'attributs dans quarante panneaux.** Les spans suivent les conventions GenAI à un commit précis (`e57c543b`, 24 septembre 2026) d'un dépôt sans release taguée, et la note bêta se réserve le droit de renommer. L'habitude de la couche de mapping évoquée dans [l'observabilité des agents](/docs/api/agent-observability) s'applique ici avec plus de force.
+
+## Où vont les spans
+
+Toute plateforme qui accepte OTLP convient. Anthropic documente des guides d'intégration avec Arize AI, Braintrust, Databricks, Datadog, Grafana Cloud, Honeycomb, Langfuse, LangSmith, New Relic, PostHog, Sentry et Splunk ; choisir un fournisseur listé dans la Console demande les propres identifiants de cette plateforme et préremplit une taille de contenu qu'elle accepte, au lieu de demander un endpoint brut et des en-têtes.
+
+Pour Claude Code, l'Agent SDK et Cowork, c'est un système différent avec d'autres interrupteurs : `CLAUDE_CODE_ENABLE_TELEMETRY` et compagnie, traités dans [l'observabilité des agents](/docs/api/agent-observability). Activer des destinations ici ne fait rien pour eux, et inversement.
+
+<Quiz questions={[
+  {
+    "q": "Vous activez à la fois le tracing SDK et le tracing API, puis vous additionnez gen_ai.usage.input_tokens sur chaque span anthropic.messages.create. Que se passe-t-il ?",
+    "options": [
+      "Rien : le span API remplace le span SDK",
+      "Chaque requête est comptée deux fois, car le SDK (CLIENT) et l'API (SERVER) émettent tous deux un span portant ce nom",
+      "Seules les requêtes en streaming sont comptées en double",
+      "La somme est correcte mais omet les lectures de cache"
+    ],
+    "answer": 1,
+    "explain": "Une requête a un span CLIENT du SDK et un span SERVER de l'API, tous deux nommés anthropic.messages.create, le span API étant enfant du span SDK. Choisissez une source (la documentation recommande les spans API) et filtrez par kind de span ou par service.name = claude-platform."
+  },
+  {
+    "q": "Votre service échantillonne 1 % des traces en head sampling et vous venez d'ajouter une destination de télémétrie. Pourquoi presque aucun span de requête de modèle n'arrive-t-il ?",
+    "options": [
+      "Les destinations mettent 24 heures à monter en régime",
+      "Les spans de requête de modèle ne sont émis qu'en mode contenu complet",
+      "Un traceparent dont le flag sampled est désactivé supprime le span de la requête et tous ceux qui sont en dessous",
+      "Le SDK doit être mis à jour avant que les spans API apparaissent"
+    ],
+    "answer": 2,
+    "explain": "L'API respecte le flag sampled du traceparent entrant : s'il est désactivé, elle n'émet aucun span pour la requête ni pour ses enfants. Votre décision d'échantillonnage est aussi celle d'Anthropic. Échantillonnez en queue dans votre collector, ou forcez le flag sur les chemins que vous voulez tracer."
+  },
+  {
+    "q": "Une destination affiche Failing depuis un jour parce que la clé d'API d'observabilité a été renouvelée. Que se passe-t-il ensuite ?",
+    "options": [
+      "L'API réessaie indéfiniment et récupère quand la clé est corrigée",
+      "La destination est désactivée après 24 heures de livraisons échouées et doit être réactivée manuellement",
+      "Les spans sont mis en tampon et rejoués dès que la livraison réussit",
+      "L'API bascule automatiquement vers une seconde destination"
+    ],
+    "answer": 1,
+    "explain": "Toutes les livraisons en échec pendant 24 heures désactivent la destination, tout comme une redirection 3xx et un nom d'hôte résolu vers une IP non publique. Les spans perdus ne sont jamais renvoyés, et la réactivation est une action manuelle dans la Console avec le filtre de workspace sur All. Alertez sur l'état Delivery."
+  }
+]} />
+
+<Flashcards cards={[
+  { "front": "Tracing SDK vs tracing API : ce que chacun est seul à voir", "back": "SDK seulement : vos outils client via le tool runner, les outils de sandbox auto-hébergé, les requêtes hors Messages comme les uploads de fichiers. API seulement : chaque requête de modèle dans une requête API, les tours Managed Agents, les outils serveur et ceux du connecteur MCP, les compactions. Les deux : requêtes Messages et Sessions, consommation de tokens." },
+  { "front": "Distinguer les spans qui se recouvrent", "back": "Le span SDK et le span API d'une requête partagent le nom anthropic.messages.create. SDK = kind CLIENT, service.name est votre application. API = kind SERVER, service.name est claude-platform, et il est enfant du span SDK." },
+  { "front": "Règle de comptage des tokens", "back": "Une source par requête (préférez les spans API). Dans les spans API d'une requête Messages, additionnez soit anthropic.messages.create SOIT anthropic.model_request, jamais les deux. Ajoutez la compaction depuis un seul endroit. Pour Managed Agents, additionnez anthropic.model_request + anthropic.session.outcome_evaluation. Dédupliquez par trace ID + span ID." },
+  { "front": "gen_ai.usage.input_tokens inclut-il les tokens de cache ?", "back": "Oui : lectures et écritures de cache y sont déjà. Ajouter gen_ai.usage.cache_read.input_tokens par-dessus double-compte." },
+  { "front": "Modes de contenu", "back": "metadata_only (défaut) : identifiants, timing, statut, nombres de tokens, noms/descriptions que vous avez choisis. content : ajoute prompts et réponses : gen_ai.system_instructions, gen_ai.input.messages, gen_ai.output.messages, gen_ai.tool.call.arguments, anthropic.tool_result.content." },
+  { "front": "Ce qui l'emporte sur le contenu complet", "back": "Une restriction HIPAA, FERPA ou K-12 de traitement des données force les destinations en métadonnées seulement ; les spans SDK ne sont pas affectés. La rétention de données nulle est compatible avec le contenu complet : pour les requêtes Messages, l'API ne garde le contenu exporté qu'en mémoire jusqu'à la livraison." },
+  { "front": "Limite de contenu et ordre de troncature", "back": "0,75 Mo par span par défaut (~200k tokens d'anglais) ; une fenêtre de 1M tokens demande ~4 Mo. Au-delà, anthropic.content.truncated = true. Les spans de requête suppriment le prompt système puis les messages les plus anciens ; les spans d'outil suppriment des blocs depuis la fin ; images et documents n'apparaissent que par leur type." },
+  { "front": "Exigence d'endpoint pour une destination", "back": "OTLP/HTTP acceptant du protobuf, HTTPS, port 443, nom d'hôte et non IP. Un Collector par défaut écoute sur 4318 : mettez un proxy ou un load balancer devant. Donnez l'URL OTLP de base ; l'API ajoute /v1/traces." },
+  { "front": "Le flag sampled", "back": "Si le flag sampled du traceparent de la requête est désactivé, l'API n'émet aucun span pour la requête ni pour ses enfants. Le head sampling de votre application supprime silencieusement la télémétrie côté Anthropic." },
+  { "front": "Trois façons dont une destination est désactivée", "back": "Une redirection 3xx de l'endpoint ; un nom d'hôte résolu vers une IP non publique ; toutes les livraisons en échec pendant 24 heures. La réactivation est manuelle, dans la Console avec le filtre de workspace sur All." },
+  { "front": "Regrouper une session Managed Agents", "back": "Un thread comme transcription : regroupez par gen_ai.conversation.id (l'ID du thread), triez par heure de début. Une session entière à travers traces et threads : regroupez par anthropic.session.id." },
+  { "front": "Quand l'API n'émet aucun span d'outil", "back": "Un outil que votre application exécute (émis par le tool runner du SDK) ; un outil dans un sandbox auto-hébergé (worker d'environnement du SDK, sous anthropic.environment.work) ; les outils multiagent et advisor ; un usage d'outil refusé sous la politique de permissions auto ou par user.tool_confirmation. Les tentatives refusées sont dans les événements de session, pas dans les traces." },
+  { "front": "En-tête bêta de l'API des destinations de télémétrie", "back": "anthropic-beta: telemetry-destinations-2026-08-11, sur POST /v1/organizations/telemetry_destinations avec une clé admin. Aussi disponible via le CLI ant et la Console." },
+  { "front": "Quelle révision de semconv ces spans suivent", "back": "Les conventions GenAI d'OpenTelemetry au commit e57c543b, 24 septembre 2026, un dépôt sans release taguée. Plus des attributs propres à Anthropic sous le préfixe anthropic.*." }
+]} />
+
+<Callout type="takeaways" items={[
+  "Deux chemins, deux moitiés de l'exécution : le SDK voit votre processus, l'API voit le côté d'Anthropic. La plupart des déploiements en production veulent les deux.",
+  "Les deux chemins émettent anthropic.messages.create pour la même requête. Choisissez une source par kind de span avant d'additionner quoi que ce soit.",
+  "Dans les spans API, additionnez un niveau (messages.create ou model_request, jamais les deux) et ajoutez la compaction depuis exactement un endroit.",
+  "Les spans servent au débogage et à l'attribution, pas à la facturation : la livraison est best effort et un traceparent non échantillonné efface entièrement une requête. Utilisez l'Usage API pour le grand livre.",
+  "Le flag sampled est un interrupteur, pas une suggestion. Un service qui échantillonne à 1 % obtient 1 % des spans côté Anthropic.",
+  "Le contenu complet déplace vos prompts chez votre fournisseur d'observabilité. Une restriction HIPAA/FERPA/K-12 l'emporte pour les spans API seulement : un symptôme très déroutant si on ne le sait pas.",
+  "Vérifiez anthropic.content.truncated avant de construire des évaluations à partir des traces : la troncature supprime d'abord le prompt système.",
+  "Alertez sur l'état Delivery d'une destination. 24 heures d'échecs la désactivent, et la récupération est un clic manuel."
+]} />
+
+## Suite
+
+- [Observabilité des agents](/docs/api/agent-observability) — ce que signifient les noms `gen_ai.*`, pourquoi aucun n'est stable, et les interrupteurs de télémétrie de Claude Code que cette page ne couvre pas
+- [Diagnostics du cache](/docs/api/cache-diagnostics) — quand les spans montrent une lecture de cache inattendue, les champs par requête qui expliquent pourquoi
+- [Managed agents](/docs/api/managed-agents) — les sessions, tours et threads dont cette page vous apprend à regrouper les spans
+
+## Sources & pour aller plus loin
+
+- [OpenTelemetry for the Claude API](https://platform.claude.com/docs/en/manage-claude/opentelemetry) — la matrice de couverture, les modes de contenu, les limites de contenu et l'ordre de troncature, des exemples de traces, le regroupement de sessions et les règles de comptage de tokens
+- [Set up OpenTelemetry with the Claude API](https://platform.claude.com/docs/en/manage-claude/opentelemetry/api) — champs de destination, Admin API et CLI `ant`, périmètre par workspace, jointure `traceparent`, sémantique de livraison et de santé, limites et tableaux de dépannage
+- [Use OpenTelemetry with the Claude SDK](https://platform.claude.com/docs/en/manage-claude/opentelemetry/sdk) — installation par langage, enregistrement du tracer provider, tableau complet des options avec variables d'environnement, tracing de streams, sandboxes auto-hébergés et pièges de propagation
+- [OpenTelemetry span reference](https://platform.claude.com/docs/en/api/opentelemetry/spans) — chaque span, ses parents et enfants, et chaque attribut avec son badge `Content`
+- [Claude Platform release notes](https://platform.claude.com/docs/en/release-notes/overview) — l'entrée de lancement bêta du 14 octobre 2026
+- Voir aussi : [Prompt caching](/docs/api/prompt-caching) · [Compaction](/docs/api/compaction) · [Admin API](/docs/api/admin-api) · [Plafonds de dépenses stricts](/docs/models/hard-spend-caps) · [Ce que votre agent uploade](/docs/security/what-your-agent-uploads) · [Évaluer les agents](/docs/playbooks/evaluating-agents)

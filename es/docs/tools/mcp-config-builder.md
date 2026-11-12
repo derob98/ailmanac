@@ -1,0 +1,25 @@
+# Generador de configuración MCP
+
+> Source: https://derob98.github.io/ailmanac/es/docs/tools/mcp-config-builder · AILmanac (CC BY 4.0)
+
+Marca los servidores que quieras y obtén un .mcp.json listo para usar.
+
+<LevelBadge level="intermediate" />
+
+[MCP](/docs/claude-code/mcp) conecta a Claude con herramientas y datos externos. Elige los servidores que quieras y copia (o descarga) un `.mcp.json` de partida. Sustituye los marcadores `${...}` por variables de entorno: nunca escribas secretos directamente en el archivo.
+
+<McpConfigBuilder />
+
+:::warning[Dos filas necesitan que pongas tú el nombre del paquete]
+PostgreSQL y Slack generan a propósito un marcador `REPLACE-WITH-A-MAINTAINED-…` en lugar de un paquete. Los paquetes `@modelcontextprotocol/server-*` que todo el mundo usaba para esos dos están [archivados y sin mantenimiento](/docs/templates/mcp-config), sin garantías de seguridad, y ninguno tiene un sustituto oficial; por eso debes elegir un servidor de la comunidad que sí se mantenga, revisarlo y pegar el nombre de su paquete. Todas las demás filas son un servidor de referencia mantenido o el endpoint del propio proveedor.
+:::
+
+:::warning[Confía, pero verifica]
+Un servidor MCP ejecuta código y puede acceder a datos. Conecta solo servidores en los que confíes, dales el mínimo privilegio y confirma cada paquete en [modelcontextprotocol.io](https://modelcontextprotocol.io). Consulta [Revisar código de terceros](/docs/security/reviewing-third-party-code).
+:::
+
+## Siguiente
+
+- [Servidores MCP en Claude Code](/docs/claude-code/mcp) — la guía completa
+- [Configuración MCP y plantillas de servidor](/docs/templates/mcp-config) — código inicial de servidores
+- [Construye y conecta tu primer servidor MCP](/docs/walkthroughs/first-mcp-server)

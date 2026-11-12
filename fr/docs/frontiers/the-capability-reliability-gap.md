@@ -1,0 +1,110 @@
+# L'écart entre capacité et fiabilité
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/frontiers/the-capability-reliability-gap · AILmanac (CC BY 4.0)
+
+Qu'un modèle fasse quelque chose une fois dans une démo n'est pas la même chose que le faire correctement à chaque fois en production. Comprendre cet écart est le fondement de la construction de systèmes d'IA dignes de confiance.
+
+<LevelBadge level="intermediate" />
+
+# L'écart entre capacité et fiabilité
+
+<Callout type="objectives" items={["Pourquoi « ça a marché dans ma démo » n'est pas une preuve que ça marchera en production","Capacité contre fiabilité — ce sont des propriétés différentes, et la plupart des guides les confondent","Comment la variance transforme discrètement une tâche à 95 % en produit cassé","Une boucle d'évaluation en quatre étapes, avec un jeu de référence, que vous pouvez lancer aujourd'hui avec un tableur","Pourquoi les évaluations sont le vrai fossé défensif — pas les prompts"]} />
+
+Voici un schéma qui brûle presque tous ceux qui livrent de l'IA à de vrais utilisateurs pour la première fois :
+
+> Le modèle fait la chose parfaitement dans votre test. Il échoue en production. Vous êtes perplexe, parce que vous l'avez *vu* fonctionner.
+
+Ce que vous avez rencontré, c'est l'écart entre capacité et fiabilité.
+
+La **capacité** signifie que le modèle *peut* faire une tâche — il produit une sortie correcte au moins une fois, dans certaines conditions.
+
+La **fiabilité** signifie que le modèle fait la tâche correctement *de façon constante* — sur des entrées variées, sur des exécutions répétées, malgré de légers changements de formulation ou de contexte.
+
+Les démos prouvent la capacité. La production exige la fiabilité. Ce sont des propriétés différentes, et la plupart des guides les confondent.
+
+## Pourquoi les démos mentent
+
+Quand vous testez un prompt, vous avez typiquement tendance à :
+
+- L'exécuter sur des entrées que vous avez conçues vous-même
+- L'exécuter une poignée de fois
+- Trier sur le volet la sortie qui a l'air bonne
+- Ajuster le prompt jusqu'à ce que le résultat semble correct
+
+Ce processus optimise la capacité. Le prompt fonctionne maintenant sur *vos* exemples. Vous avez vu une sortie correcte. Vous livrez.
+
+Le problème, c'est que les entrées des utilisateurs en production ne sont pas vos exemples. Elles sont plus désordonnées, plus variées, formulées d'une manière que vous n'aviez pas anticipée. Le modèle n'a jamais été testé dessus. Vous n'avez aucune idée de ses performances dans ces cas.
+
+Une seule bonne sortie n'est pas une estimation de performance. C'est une anecdote.
+
+## La variance est la variable cachée
+
+Les LLM sont stochastiques. Exécutez deux fois le même prompt et vous obtenez souvent des sorties différentes. Cette variance est normale et généralement sans conséquence. Mais cela signifie que la question pertinente n'est pas « est-ce que ça a marché ? » — c'est « dans quelle proportion du temps est-ce que ça marche ? »
+
+Une tâche où le modèle réussit 95 % du temps a fière allure en démo et casse pour environ un utilisateur sur vingt. Une tâche où il réussit 60 % du temps semble correcte quand c'est vous qui l'exécutez. Ce sont des situations très différentes, et vous ne pouvez pas les distinguer sans mesurer.
+
+## Le spectre capacité-fiabilité en pratique
+
+| Dimension | Capable mais peu fiable | Fiable |
+|---|---|---|
+| Entrées testées | Exemples conçus par l'auteur | Entrées variées, issues de vrais utilisateurs |
+| Taille d'échantillon | Quelques exécutions | Exécutions répétées sur de nombreux exemples |
+| Visibilité des modes de défaillance | Les échecs sont rares en test, fréquents en production | Les échecs sont mesurés et compris |
+| Comment vous apprenez que c'est cassé | Plaintes des utilisateurs | Votre suite d'évaluations |
+| Comment vous l'améliorez | Essais et erreurs sur les prompts | Suivi du taux de réussite, débogage systématique des échecs |
+| Confiance au déploiement | Basée sur le feeling | Basée sur des preuves |
+
+## Les évaluations sont le vrai fossé défensif
+
+De meilleurs prompts peuvent augmenter la capacité. Seules les évaluations peuvent vous dire si vous avez augmenté la fiabilité.
+
+Une *évaluation* est un test structuré : un ensemble d'entrées, des sorties attendues ou des critères d'évaluation, et un moyen de mesurer le taux de réussite. Vous exécutez le modèle sur les entrées, vous notez les sorties, et vous obtenez un chiffre. Puis vous changez quelque chose — le prompt, le modèle, la température — et vous relancez. Maintenant vous avez un signal.
+
+Ce n'est pas glamour. C'est la partie du travail produit en IA que la plupart des tutoriels sautent complètement. Mais c'est la seule façon de répondre à la question qui compte vraiment quand vous livrez : « À quelle fréquence est-ce que ça marche sur des entrées que je n'ai pas vues ? »
+
+### Une façon simple de commencer
+
+Vous n'avez pas besoin d'infrastructure pour démarrer. Voici une boucle d'évaluation minimale viable :
+
+<Steps items={[{title: "Construisez un jeu de référence", body: "Rassemblez 20 à 50 entrées réelles ou réalistes. Pour chacune, écrivez à quoi ressemble une sortie correcte (ou les critères pour la juger). Ce sont vos exemples de référence. Préférez de vraies entrées d'utilisateurs à celles que vous avez inventées — vous cherchez la distribution contre laquelle vous n'avez pas testé."}, {title: "Exécutez N fois", body: "Exécutez votre prompt sur chaque exemple plusieurs fois (3 à 5 est un plancher raisonnable). La variance entre exécutions vous renseigne sur la stabilité du prompt ; la variance entre exemples vous renseigne sur la couverture. Les deux comptent."}, {title: "Suivez le taux de réussite", body: "Pour chaque paire (entrée, exécution), notez réussite ou échec. Calculez le taux global. Ce chiffre unique est le début de votre image de fiabilité — tout le reste est du bruit tant que vous ne l'avez pas."}, {title: "Faites-en un test de non-régression", body: "Chaque fois que vous changez le prompt, le modèle ou la température, relancez l'évaluation. Si le taux de réussite baisse, vous avez cassé quelque chose. S'il monte, vous avez fait une vraie amélioration — par opposition à un changement qui paraissait meilleur sur le seul exemple que vous avez regardé."}]} />
+
+C'est tout. Un tableur suffit. La discipline compte plus que l'outillage.
+
+## Pourquoi c'est un problème d'ingénierie, pas un problème de prompting
+
+L'instinct, quand un modèle échoue, est de réécrire le prompt. Parfois c'est juste. Mais souvent c'est une façon d'optimiser pour le cas d'échec que vous avez vu, au prix d'une régression sur des cas que vous n'avez pas vérifiés.
+
+L'ingénierie de la fiabilité pour l'IA ressemble à ceci :
+
+- Définir ce que « correct » signifie avant d'exécuter quoi que ce soit
+- Mesurer contre une distribution d'entrées représentative
+- Suivre les changements dans le temps avec une méthodologie constante
+- Distinguer « ce modèle ne sait pas faire cette tâche » de « cette tâche est sous-spécifiée »
+
+L'ingénierie de prompt est un outil au sein de ce processus. Ce n'en est pas un substitut.
+
+## Le cadrage honnête
+
+La plupart des capacités de l'IA sont réelles. Les modèles peuvent authentiquement faire des choses remarquables. L'écart entre capacité et fiabilité n'est pas un argument selon lequel les capacités seraient factices — c'est un argument selon lequel savoir qu'elles existent ne suffit pas.
+
+Si vous avez besoin qu'une tâche fonctionne 95 % du temps, vous avez besoin d'une *preuve* qu'elle fonctionne 95 % du temps. Cette preuve vient de l'exécution de tests structurés, pas de la confiance dans la démo.
+
+Les ingénieurs qui construisent des produits d'IA durables ne sont pas nécessairement ceux qui écrivent les meilleurs prompts. Ce sont ceux qui savent ce que « fonctionner » veut dire avant de livrer, et qui disposent d'une mesure qui leur dit si c'est vrai.
+
+<Quiz title="Vérifiez vos acquis" questions={[{q: "Vous faites la démo d'un nouveau prompt à votre équipe. Il réussit parfaitement votre exemple favori trois fois d'affilée. Qu'avez-vous prouvé ?", options: ["La fiabilité — trois exécutions suffisent à établir un taux de réussite","La capacité — vous avez montré que le modèle PEUT le faire dans certaines conditions, sur des entrées que vous avez choisies","Rien, parce que la température était probablement supérieure à zéro"], answer: 1, explain: "Trois exécutions sur des entrées que vous avez conçues prouvent la capacité, pas la fiabilité. Pour formuler une affirmation de fiabilité, il vous faut une distribution d'entrées représentative et assez d'exécutions pour estimer la variance. Une seule bonne sortie est une anecdote, pas une estimation de performance."}, {q: "Votre prompt réussit 95 % du temps sur le jeu de référence. Est-il prêt pour la production ?", options: ["Oui — 95 % est bien au-dessus de la barre du secteur","Cela dépend du rayon d'impact du mode de défaillance des 5 % et de votre capacité à le détecter","Non — la production exige un taux de réussite de 99,9 %"], answer: 1, explain: "95 % signifie qu'une interaction utilisateur sur vingt échoue. Que cela puisse être livré dépend : de ce qui se passe en cas d'échec (sortie erronée silencieuse contre erreur que vous pouvez réessayer), du fait que l'utilisateur le remarque ou non, et du caractère borné de l'échec. Il n'y a pas de chiffre universel — le taux d'échec tolérable est fixé par la tâche, pas par le modèle."}, {q: "Vous modifiez le prompt pour corriger un cas d'échec que vous avez observé. Quelle est la meilleure étape suivante ?", options: ["Livrer — vous avez corrigé le bug","Relancer toute l'évaluation — vous avez peut-être régressé sur des cas que vous n'avez pas vérifiés","Ajouter ce cas comme exemple few-shot"], answer: 1, explain: "Optimiser pour un unique échec observé fait souvent régresser silencieusement des cas que vous n'avez pas revérifiés. C'est pourquoi la boucle d'évaluation traite chaque changement de prompt comme un test de non-régression : même jeu de référence, même nombre d'exécutions par entrée, comparaison du nouveau taux de réussite à l'ancien. S'il a baissé quelque part, vous avez échangé un bug contre un autre."}]} />
+
+<Callout type="takeaways" items={["La capacité, c'est « est-ce qu'il peut ? ». La fiabilité, c'est « à quelle fréquence le fait-il ? » — les démos prouvent la première, la production exige la seconde.","Une seule bonne sortie est une anecdote, pas une estimation de performance. Une vraie preuve exige des entrées variées exécutées plusieurs fois.","La variance est la variable cachée : 95 % de réussite a fière allure en démo et casse pour un utilisateur sur vingt.","Commencez avec un jeu de référence de 20 à 50 entrées réelles, exécutez chacune N fois, suivez le taux de réussite, et relancez à chaque changement.","De meilleurs prompts augmentent la capacité. Seules les évaluations augmentent (et prouvent) la fiabilité — les évaluations sont le vrai fossé défensif."]} />
+
+## Ressources liées
+
+- [Votre premier appel d'API](/docs/api/first-call)
+- [Les bases du prompting](/docs/prompting/basics)
+- [La demi-vie de la fraîcheur](/docs/frontiers/freshness-half-life)
+- [Quand les agents gèrent une entreprise](/docs/frontiers/when-agents-run-a-business) — l'écart rendu concret : deux expériences réelles où des modèles de pointe ont reçu un budget réel.
+- [Des agents sous pression de KPI](/docs/frontiers/agents-under-kpi-pressure) — un benchmark montrant comment le même écart se transforme en violations de contraintes dès qu'un KPI entre dans le prompt.
+- [Le goulot d'étranglement de la vérification](/docs/frontiers/the-verification-bottleneck) — la version à l'échelle industrielle de l'écart : quand l'IA peut écrire du code plus vite que les équipes ne peuvent lui faire confiance.
+
+
+## Suite
+
+- [Le goulot d'étranglement de la vérification](/docs/frontiers/the-verification-bottleneck)

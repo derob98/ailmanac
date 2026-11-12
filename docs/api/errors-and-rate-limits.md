@@ -1,0 +1,72 @@
+# Errors, Rate Limits & Reliability
+
+> Source: https://derob98.github.io/ailmanac/docs/api/errors-and-rate-limits · AILmanac (CC BY 4.0) · last verified 2026-08-08
+
+The error map, retries with backoff, rate-limit tiers, and model migration.
+
+<LevelBadge level="intermediate" />
+
+<Callout type="objectives" items={["Read the HTTP error map and know which statuses to retry vs. fix", "Retry transient errors with exponential backoff and jitter, capped", "Handle rate limits with retry-after, smoothing, batching, and cheaper models", "Insulate your code from model deprecations and migrations"]} />
+
+<VerifyNote lastVerified="2026-08-08" source="https://platform.claude.com/docs/en/api/errors">
+Exact status codes, headers, and rate-limit tiers change — confirm in the official errors/rate-limit docs.
+</VerifyNote>
+
+Production code talks to a network service, so it must expect failure. A little structure here is the difference between a flaky integration and a dependable one.
+
+## The error map
+
+Typical HTTP statuses you'll handle:
+
+| Status | Meaning | What to do |
+|---|---|---|
+| 400 | Invalid request | Fix the payload; don't retry as-is |
+| 401 | Bad/missing API key | Check credentials |
+| 403 | Not permitted | Check access/permissions |
+| 429 | Rate limited | **Back off and retry** (respect `retry-after`) |
+| 500/529 | Server error / overloaded | **Retry with backoff** |
+
+<Callout type="tip" items={["The SDKs surface these as typed exceptions, so you can branch cleanly instead of parsing strings."]} />
+
+## Retries with backoff
+
+For transient errors (429, 5xx), retry with **exponential backoff + jitter**, capped:
+
+```python
+import time, random
+for attempt in range(5):
+    try:
+        return client.messages.create(...)
+    except (RateLimitError, APIStatusError) as e:
+        if attempt == 4 or not should_retry(e):
+            raise
+        time.sleep(min(2 ** attempt + random.random(), 30))
+```
+
+<Callout type="warning" items={["Many SDKs retry transient errors automatically — know your client's default before adding your own, or you may double up on retries."]} />
+
+## Rate limits
+
+Limits apply per-account/tier (requests and tokens per minute). When you hit one you get **429** with timing hints. Strategies to stay under the ceiling:
+
+<Steps items={[{title: "Respect retry-after", body: "When you get a 429, read the timing hint in the response and wait that long before retrying."}, {title: "Smooth bursts", body: "Spread requests over time instead of firing them all at once."}, {title: "Batch offline work", body: "Move high-volume, non-interactive jobs into batch processing."}, {title: "Use a cheaper model", body: "Route high-volume steps to a cheaper model — see Choosing a Model."}]} />
+
+See [Choosing a Model](/docs/api/choosing-a-model) for picking the right model for high-volume steps.
+
+## Model migration
+
+Model IDs are dated/versioned and get deprecated. Insulate yourself:
+
+- **Read the model ID from config**, not scattered literals.
+- **Watch deprecations** — see [Deprecation & Migration Watch](/docs/whats-new/deprecations) and the [models table](/docs/whats-new/models-and-pricing).
+- **Re-run your [evals](/docs/foundations/evals)** when you switch models.
+
+<Callout type="takeaways" items={["400/401/403 are your fault — fix the request or credentials, don't blind-retry. 429 and 500/529 are retryable.", "Retry transient errors with exponential backoff + jitter, capped (e.g. min(2 ** attempt + random(), 30)).", "On 429: respect retry-after, smooth bursts, batch offline work, and route high-volume steps to a cheaper model.", "Read model IDs from config, watch deprecations, and re-run evals when migrating models."]} />
+
+<Quiz title="Check yourself" questions={[{q: "You get a 400 Invalid request. What should you do?", options: ["Back off and retry the same payload", "Fix the payload; don't retry as-is", "Rotate your API key", "Wait for retry-after"], answer: 1, explain: "400 means the request itself is invalid — fix the payload. Retrying the same payload will just fail again."}, {q: "Which statuses are the ones you should retry with backoff?", options: ["400 and 401", "403 and 401", "429 and 500/529", "400 and 429"], answer: 2, explain: "429 (rate limited) and 500/529 (server error / overloaded) are transient — back off and retry. 400/401/403 are caller-side problems to fix instead."}, {q: "Why add jitter to exponential backoff?", options: ["To make retries exact and predictable", "To randomize wait times so retries don't all collide", "To skip the retry-after header", "To reduce token usage"], answer: 1, explain: "The example uses min(2 ** attempt + random.random(), 30) — the random component (jitter) spreads retries out so many clients don't retry in lockstep, and the cap keeps waits bounded."}, {q: "Which is NOT a suggested rate-limit strategy?", options: ["Respect retry-after", "Batch offline work", "Use a cheaper model for high-volume steps", "Hardcode the model ID in every call site"], answer: 3, explain: "Rate-limit strategies are: respect retry-after, smooth bursts, batch offline work, and use a cheaper model. Reading the model ID from config (not hardcoding) is a model-migration practice, not a rate-limit one."}]} />
+
+## Next
+
+- [Safety, Refusals & Fallbacks](/docs/api/refusals-and-safety)
+- [Tokens & Pricing](/docs/api/tokens-and-pricing)
+- [Building Agents on the API](/docs/api/building-agents)

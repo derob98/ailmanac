@@ -1,0 +1,106 @@
+# Конфигурация MCP и каркасы серверов
+
+> Source: https://derob98.github.io/ailmanac/ru/docs/templates/mcp-config · AILmanac (CC BY 4.0) · last verified 2026-11-10
+
+.mcp.json плюс минимальные стартеры stdio- и удалённого сервера.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-11-10" source="https://modelcontextprotocol.io">
+Ключи конфигурации MCP и API SDK меняются — сверяйтесь с официальной документацией MCP и [документацией MCP для Claude Code](https://code.claude.com/docs/en/mcp). Меняется и то, какие эталонные серверы ещё поддерживаются; приведённый ниже архивный набор проверен по реестру npm и репозиторию [modelcontextprotocol/servers](https://github.com/modelcontextprotocol/servers).
+</VerifyNote>
+
+Готовые к копированию стартеры для подключения Claude к инструментам через [MCP](/docs/claude-code/mcp). Оставьте только то, что вам нужно.
+
+## `.mcp.json` — объявление серверов (общее для проекта)
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/"
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    },
+    "private-api": {
+      "type": "http",
+      "url": "https://api.internal.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${INTERNAL_MCP_TOKEN}" }
+    }
+  }
+}
+```
+
+Для удалённой записи нужен явный `"type"`. Claude Code читает запись с `url`, но без `type`, как stdio-сервер, пропускает её и просит добавить `"type": "http"` (или `"sse"` / `"ws"`).
+
+:::warning[Не храните секреты в файле]
+Ссылайтесь на переменные окружения (`${INTERNAL_MCP_TOKEN}`) — не прописывайте токены прямо в файле, который попадает в коммит.
+:::
+
+:::warning[Большинство старых эталонных серверов заархивировано]
+Пакеты `@modelcontextprotocol/server-*`, которые до сих пор копируют для **GitHub, PostgreSQL, Slack и Puppeteer**, теперь помечены в npm как устаревшие с сообщением *«Archived and unmaintained; no security guarantees»* и перенесены в [modelcontextprotocol/servers-archived](https://github.com/modelcontextprotocol/servers-archived). Поддерживаемыми эталонными серверами остаются лишь немногие — среди TypeScript-серверов это `server-filesystem`, `server-memory`, `server-everything` и `server-sequential-thinking`.
+
+Там, где есть сервер от самого вендора, выбирайте его: GitHub предоставляет [`api.githubcopilot.com/mcp/`](https://github.com/github/github-mcp-server), а управление браузером перешло к [`@playwright/mcp`](/docs/api/playwright-mcp-deep-guide). Для PostgreSQL и Slack официальной замены нет — выберите поддерживаемый серверный проект сообщества и [сначала проверьте его](/docs/security/reviewing-third-party-code).
+:::
+
+## Минимальный stdio-сервер (TypeScript)
+
+Крошечный сервер с одним инструментом. Адаптируйте обработчик под свои данные.
+
+```ts
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { z } from "zod";
+
+const server = new McpServer({ name: "echo", version: "1.0.0" });
+
+server.registerTool(
+  "echo",
+  {
+    description: "Echo back the provided text",
+    inputSchema: z.object({ text: z.string().describe("Text to echo back") }),
+  },
+  async ({ text }) => ({ content: [{ type: "text", text: `You said: ${text}` }] }),
+);
+
+await server.connect(new StdioServerTransport());
+```
+
+:::note[Переименование пакета SDK (MCP TS SDK v2)]
+В v2 пакет `@modelcontextprotocol/sdk` разделён на `@modelcontextprotocol/server` и `@modelcontextprotocol/client`. Пакет v1 по-прежнему получает исправления ошибок; новым проектам следует использовать v2.
+:::
+
+## Минимальный stdio-сервер (Python)
+
+```python
+from mcp.server import MCPServer
+
+mcp = MCPServer("echo")
+
+@mcp.tool()
+def echo(text: str) -> str:
+    """Echo the text back."""
+    return f"You said: {text}"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
+
+## Прежде чем выпускать сервер
+
+- **Минимум привилегий** — только те данные/действия, которые ему нужны ([Защита агентов](/docs/security/securing-agents)).
+- **Валидируйте входные данные**; возвращайте ошибки как результаты, не аварийно завершайтесь.
+- **Проверяйте сторонние серверы** перед подключением ([Проверка стороннего кода](/docs/security/reviewing-third-party-code)).
+
+## Дальше
+
+- [MCP-серверы в Claude Code](/docs/claude-code/mcp)
+- [Создание и подключение вашего первого MCP-сервера](/docs/walkthroughs/first-mcp-server)
+- [Рецепты хуков и settings.json](/docs/templates/hooks-settings)

@@ -1,0 +1,96 @@
+# 権限とパーミッションモード
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/claude-code/permissions · AILmanac (CC BY 4.0) · last verified 2026-08-18
+
+allow/ask/deny ルールとモード — 安全性を損なわずに確認プロンプトを減らす。
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-18" source="https://code.claude.com/docs/en/whats-new/2026-w32">
+ルールの正確な構文やモード名は変化します — Claude Code 公式の permissions と permission-modes のドキュメントで確認してください。**v2.1.283 以降:** `auto` は、すべてのプランとプロバイダーで、対話型ターミナルおよび VS Code セッションの組み込みの開始モードです（下記参照）。
+</VerifyNote>
+
+<Callout type="objectives" items={["3 つの権限判定（allow / ask / deny）の意味", "権限ルールがツールとパターンをどう照合するか", "6 つのパーミッションモードと、それぞれを使う場面", "auto モードが対話型セッションの開始モードになった理由と、オプトアウトの方法", "auto モードが確認プロンプトを安全性分類器に置き換える仕組み", "安全性を損なわずにプロンプトを減らす、妥当な初期 allowlist の作り方", "プロジェクト用と個人用の権限ルールの保存場所"]} />
+
+権限は、**Claude Code が確認のために止まらずに何をしてよいか**を決めます。うまく調整すればコントロールを失わずに流れるように作業でき、下手に調整すればすべてを無条件に承認するか、プロンプトに埋もれることになります。
+
+## 3 つの判定
+
+すべての操作は、次のいずれかに決まります。
+
+<Flashcards cards={[{front: "allow", back: "プロンプトなしで実行する。"}, {front: "ask", back: "一時停止してあなたに確認する — 明示的に許可も拒否もされていないものすべての既定。"}, {front: "deny", back: "決して実行しない。頼まれても実行しない。"}]} />
+
+ルールは通常、ツールとパターンを組み合わせて照合します。例: `Bash(npm run test:*)` を allow、`Read(./.env)` を deny。
+
+<PromptCard title="ツール + パターンを許可する">{`Bash(npm run test:*)`}</PromptCard>
+
+<PromptCard title="ツール + パターンを拒否する">{`Read(./.env)`}</PromptCard>
+
+## パーミッションモード
+
+モードはセッション全体の姿勢を決めます。モードは 6 つあります。よく使うものは `Shift+Tab` で切り替えるか、設定で `permissions.defaultMode` を指定します。
+
+| モード | 確認なしで実行できること | 使う場面 |
+|---|---|---|
+| **`default`**（**Manual** と表示） | 読み取りのみ | 日常の作業、慎重を要する変更 |
+| **`acceptEdits`** | 読み取り、ファイル編集、一般的なファイルシステムコマンド | 信頼できて範囲の明確な編集セッション |
+| **`plan`** | 読み取りと、auto モードが利用可能な場合は分類器が承認したコマンド。ソースを編集することはない | 大きい／リスクのあるタスク — [Plan Mode](/docs/claude-code/plan-mode) を参照 |
+| **`auto`** *（v2.1.283 以降、対話型セッションの開始モード）* | すべて。安全性分類器が審査 | プロンプト疲れが本当のリスクになる長いタスク |
+| **`dontAsk`** | 作業ディレクトリ内のファイル読み取りと事前承認済みツール。プロンプトが必要になる操作はすべて拒否 | ロックダウンされた CI やスクリプト |
+| **`bypassPermissions`** | すべて、チェックなし | サンドボックス／コンテナ専用 — シークレットのあるマシンでは**絶対に**使わない |
+
+### auto モードが Claude Code の既定に
+
+Claude Code **v2.1.283** 以降、`auto` は**すべてのプランとプロバイダー**で、対話型ターミナルおよび VS Code セッションの組み込みの開始モードです。それ以前のバージョンでは、2026 年 8 月 14 日から、Pro・Max・Team プランの新規セッションでのみ既定でした。Anthropic の根拠（1,000 人超の有料ユーザーによる自社テスト）: 分類器は有害な操作の **89%** を捕捉したのに対し、手動レビューは **13.6%** でした — 慣れたユーザーは手動プロンプトの約 97% を読まずに承認していたためです。
+
+2 つの例外で意図が守られます。
+
+- **あなた**がユーザー設定で `permissions.defaultMode` を指定している場合、アプリ内の 1 回限りの切り替えプロンプトを承認しない限り、そのまま維持されます。
+- **あなたの組織**が既定を管理している場合（Team/Enterprise の管理設定）、自動的には何も変わりません。
+
+セッションの途中でも `Shift+Tab` でいつでもモードを切り替えられます。これらのプランですでに有効な関連変更として、auto モードが行う分類器の呼び出しは**利用上限にカウントされなくなりました**。
+
+<PromptCard title="早めにオプトイン（8 月 14 日より前）— auto を既定にする">{`~/.claude/settings.json
+{
+  "permissions": {
+    "defaultMode": "auto"
+  }
+}`}</PromptCard>
+
+<PromptCard title="8 月 14 日以降も従来のプロンプト動作を維持する">{`~/.claude/settings.json
+{
+  "permissions": {
+    "defaultMode": "default"
+  }
+}`}</PromptCard>
+
+### auto モードの実際の仕組み
+
+`auto` は、すべてについてプロンプトを出す方式と、安全性を切る方式の中間です。あなたに尋ねる代わりに、別の**分類器モデル**が実行前に各操作を審査し、依頼の範囲を超えて拡大するもの、認識できないインフラに触れるもの、Claude が読んだばかりの悪意あるコンテンツに誘導されたように見えるものをブロックします。明示的な `ask` ルールは、従来どおり停止してあなたに確認します。
+
+ブロックされるのは、`curl | bash`、force push、本番へのデプロイとマイグレーション、未解決の変数に対する `rm -rf`、トランスクリプトの改ざん、未コミットの作業を破棄する破壊的な git コマンド、シークレットの外部エンドポイントへの送信などです。一方で、日常的な作業（ローカルでの編集、宣言済みの依存関係のインストール、読み取り専用の HTTP、自分のブランチへの push）はそのまま通します。同じ操作が繰り返しブロックされると、auto モードは一時停止し、プロンプトの判断をあなたに戻します。
+
+auto モードは安全性の保証ではありません — プロンプトを減らすものであって、慎重を要する操作をレビューする必要がなくなるわけではありません。利用可否はプラン、モデル、そして（Team/Enterprise では）管理者のトグルに依存します。cron、クラウドセッション、CI など本当に無人で動かす場合は、[Hardening Autonomous Runs](/docs/security/hardening-autonomous-runs) と組み合わせてください — auto は `bypassPermissions` ではありません。
+
+<Callout type="warning" items={["bypassPermissions はサンドボックスの中で使うものです。実機ですべてのプロンプトを切って動かすと、エージェントが触ってはいけないものに触れてしまいかねません。使い捨ての環境に限ってください — 本当に欲しいのがプロンプトの削減なら、代わりに auto モードを使います。/docs/security/hardening-autonomous-runs の Hardening Autonomous Runs を参照してください。"]} />
+
+## 妥当な初期 allowlist
+
+目標: 安全で繰り返しの多い操作はあらかじめ許可し、破壊的な操作は **ask** か **deny** のままにします。
+
+<Steps items={[{title: "安全で繰り返しの多いものを許可する", body: "ファイルの読み取り、テスト／lint／ビルドコマンドの実行、git status/diff。"}, {title: "中程度のリスクは先に確認する", body: "依存関係のインストール、プロジェクト外へのファイル書き込み、ネットワーク呼び出し。"}, {title: "破壊的なものは拒否する", body: "シークレットファイル（.env、鍵ファイル）の読み取り、force-push、rm -rf。"}]} />
+
+プロジェクトのルールは [`settings.json`](/docs/claude-code/settings)（共有）に、個人用の上書きは `settings.local.json` に保存します。
+
+<Callout type="tip" items={["プロンプトから学びましょう。同じ安全なコマンドを数回承認すれば、allowlist に何を追加すべきかがはっきり分かります — 繰り返されるプロンプトを 1 回限りのルールに変えられます。"]} />
+
+<Callout type="takeaways" items={["3 つの判定: allow（プロンプトなし）、ask（既定 — 一時停止して確認）、deny（決して実行しない）。", "ルールはツールとパターンを組み合わせて照合する。例: Bash(npm run test:*) や Read(./.env)。", "6 つのモードがセッションの姿勢を決める: default（Manual）、acceptEdits、plan、auto、dontAsk、bypassPermissions。", "v2.1.283 以降、auto はすべてのプランで対話型ターミナルおよび VS Code セッションの開始モード。自分で設定した defaultMode はそのまま維持され、組織が管理する既定には影響しない。", "auto モードは、プロンプトの代わりにすべての操作を安全性分類器で審査する — プロンプト疲れに使うのはこちらで、bypassPermissions ではない。", "allowlist を作る: 安全で繰り返しの多いものは allow、中程度のリスクは ask、破壊的なものは deny。", "共有ルールは settings.json、個人用の上書きは settings.local.json に置く。"]} />
+
+<Quiz title="理解度チェック" questions={[{q: "明示的に許可も拒否もされていない操作に対して、既定の 'ask' 判定は何をしますか？", options: ["黙って実行する", "一時停止して確認を求める", "恒久的にブロックする"], answer: 1, explain: "ask は、明示的に許可も拒否もされていないものすべての既定です — 一時停止してあなたに確認します。"}, {q: "サンドボックスやコンテナの中でのみ安全で、シークレットのあるマシンでは決して使ってはいけないパーミッションモードはどれですか？", options: ["plan", "acceptEdits", "bypassPermissions"], answer: 2, explain: "bypassPermissions はプロンプトと安全チェックを完全にスキップします。使い捨ての環境に限り、シークレットのあるマシンでは絶対に使わないでください。"}, {q: "長いタスクで権限プロンプトを大幅に減らしたいが、安全網は残したい場合、どのモードを使いますか？", options: ["bypassPermissions — すべてのプロンプトをスキップする", "auto — 分類器が各操作を審査し、危険なものをブロックする", "dontAsk — 決して中断しない"], answer: 1, explain: "auto モードは、プロンプトの代わりに、curl | bash、force push、本番デプロイのような権限拡大をブロックする分類器を使います。bypassPermissions は安全網を取り除き、dontAsk は事前承認されていないものをすべて拒否するだけです。"}, {q: "共有のプロジェクト権限ルールと個人用の上書きは、それぞれどこに保存すべきですか？", options: ["どちらも settings.local.json", "プロジェクトのルールは settings.json、個人用の上書きは settings.local.json", "プロジェクトのルールは settings.local.json、個人用の上書きは settings.json"], answer: 1, explain: "プロジェクトのルールは settings.json（共有）に、個人用の上書きは settings.local.json に置きます。"}, {q: "妥当な初期 allowlist で 'deny' リストに入れるべきものはどれですか？", options: ["git status / diff", "rm -rf と .env の読み取り", "テスト／lint／ビルドコマンドの実行"], answer: 1, explain: "破壊的なものは拒否します。シークレットファイル（.env、鍵ファイル）の読み取り、force-push、rm -rf などです。"}, {q: "2026 年 8 月 14 日、ユーザー設定ですでに permissions.defaultMode を 'default' にしていた場合、Pro プランでは何が起きますか？", options: ["自動的に 'auto' に上書きされる", "アプリ内の 1 回限りの切り替えプロンプトを承認しない限り 'default' のまま", "それでも新しいセッションごとに auto モードが黙って適用される"], answer: 1, explain: "ユーザー設定で自分で指定した defaultMode は保持されます。Claude Code は 1 回限りの切り替えプロンプトを出しますが、あなたの選択を上書きはしません。組織が管理する既定も影響を受けません。"}]} />
+
+## 次へ
+
+- [settings.json: 設定システム](/docs/claude-code/settings)
+- [Hooks](/docs/claude-code/hooks) — allow/deny を超えて、ルールを決定論的に強制する
+- [Sandbox Credential Masking](/docs/claude-code/sandbox-credential-masking) — サンドボックス内のコマンドが本物のシークレットを保持することなく、`gh`、`npm`、`aws` に認証させる
+- [セキュリティと責任ある利用](/docs/security/responsible-use)

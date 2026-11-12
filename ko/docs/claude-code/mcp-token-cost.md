@@ -1,0 +1,112 @@
+# MCP 토큰 세금
+
+> Source: https://derob98.github.io/ailmanac/ko/docs/claude-code/mcp-token-cost · AILmanac (CC BY 4.0) · last verified 2026-11-10
+
+MCP 서버를 연결하면 첫 요청 전에 5만~15만 토큰이 타 버리는 이유 — 그리고 세 가지 해법: Tool Search, 코드 실행, 그리고 CLI 호출이 이기는 순간을 아는 것.
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-11-10" source="https://www.anthropic.com/engineering/advanced-tool-use">
+토큰 수치와 기능 이름(`defer_loading`, Tool Search Tool, Programmatic Tool Calling)은 Anthropic의 엔지니어링 글에서 가져왔습니다. Claude Code 자체의 도구 검색 동작 — 기본으로 켜져 있다는 점, `ENABLE_TOOL_SEARCH` 값, 모델 하한선, 설명 글자 수 상한 — 은 [Claude Code MCP 문서](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search)에서 가져왔으며, 이 부분은 그곳에서 바뀝니다. 정확한 수치를 인용하기 전에 둘 다 확인하세요.
+</VerifyNote>
+
+Hacker News와 X에서는 같은 싸움이 되풀이됩니다. *같은 일을 CLI로 하면 수백 토큰인데, 왜 MCP 오퍼레이션 하나에 수만 토큰을 태우는가?* MCP 때리기처럼 들립니다. 아닙니다. 가장 크게 목소리를 내는 사람들은 에이전트를 사랑하는 사람들입니다 — 그저 청구서를 만났을 뿐입니다. 이 페이지는 그 청구서에 대한 실전 가이드입니다. 토큰이 실제로 어디로 가는지, 거의 아무도 구분하지 않는 두 가지 비용, 그리고 15만 토큰짜리 워크플로를 2천 토큰으로 바꾸는 세 가지 해법.
+
+<Callout type="objectives" items={["서로 다른 두 가지 MCP 토큰 비용을 구분하기: 도구 정의 로딩과 중간 결과", "스키마 비용이 왜 한 번이 아니라 대화마다 지불되는지 이해하기", "defer_loading과 Tool Search Tool로 도구 스키마를 필요할 때만 로드하기", "코드 실행 / Programmatic Tool Calling으로 큰 결과를 컨텍스트 밖에 두기", "작업마다 MCP 도구가 값어치를 하는지, 아니면 평범한 CLI 호출이 이기는지 판단하기"]} />
+
+## 비용은 하나가 아니라 둘
+
+MCP 서버를 연결하면 클라이언트가 `tools/list`를 요청하고 **모든 도구를 전체 JSON 스키마와 함께** 돌려받습니다. 그 블록 전체가 모델의 컨텍스트에 주입됩니다. 대부분의 사람은 여기서 계산을 멈춥니다. 하지만 세금은 둘이고, 두 번째가 대개 더 큽니다.
+
+**비용 1 — 도구 정의.** 연결된 모든 도구의 이름, 설명, 파라미터 스키마가 컨텍스트에 앉아 있습니다. Anthropic 자신의 표현: *"에이전트가 수천 개의 도구에 연결된 경우, 요청을 읽기도 전에 수십만 개의 토큰을 처리해야 합니다."* 엔터프라이즈 서버 하나가 수십에서 수백 개의 도구를 게시할 수 있고, 서드파티 분석은 400개 도구 서버를 스키마만 약 40만 토큰으로 추산합니다 — 200k 윈도우의 두 배이고, 1M 윈도우에서도 여전히 40%이며, 첫 요청 전에 소모됩니다. (모델별 윈도우 크기: [모델과 가격](/docs/whats-new/models-and-pricing).)
+
+**비용 2 — 중간 결과.** 모델이 도구를 직접 호출하면 **모든 결과가 모델의 컨텍스트를 통과합니다** — 읽히길 원하지 않았던 부분까지요. Anthropic의 예: 한 도구에서 두 시간짜리 회의록을 끌어와 다른 도구에 넘기면, 한 줄 요약을 만들려고 전체 회의록이 모델을 *두 번* 통과합니다 — 잠재적으로 약 5만 토큰.
+
+<Callout type="warning" items={["비용 1은 프롬프트 캐싱이 걸리기 전까지 매 턴 지불됩니다 — 스키마는 한 번 로드되는 게 아니라 대화의 매 요청마다 다시 전송됩니다. 큰 도구 카탈로그는 일회성 수수료가 아니라 세션 전체에 붙는 세금입니다. 이는 정의가 **로드된** 도구의 비용이며, 도구를 지연(아래)시키면 매 턴 청구에서 빠집니다.", "비용 2는 도구 개수가 아니라 데이터에 비례합니다. 작은 도구 열 개가 거대한 블롭을 반환하는 도구 하나보다 쌀 수 있습니다."]} />
+
+### 1차 출처에서 나온 숫자들
+
+| 해법 | 작업 | 이전 | 이후 | 감소 |
+| --- | --- | --- | --- | --- |
+| MCP와 코드 실행 | Google Drive → Salesforce 워크플로 | 150,000 | 2,000 | **98.7%** |
+| Tool Search Tool | 작업 시작 전 정의 로딩 | ~77,000 | ~8,700 | **85%** |
+| Programmatic Tool Calling | 복잡한 리서치 작업 | 43,588 | 27,297 | **37%** |
+
+세 행 모두 Anthropic이 공개한 수치입니다. 놀라운 부분은 비용이 아니라 **정확도**입니다. Tool Search Tool을 쓰면 도구 선택 정확도가 *올라갔습니다*(Opus 4.5는 79.5% → 88.1%, Opus 4는 49% → 74%). 컨텍스트를 붐비게 하는 도구가 줄면 모델이 올바른 것을 더 자주 고릅니다. 여기서는 비용과 품질이 같은 방향으로 움직이는데, 이는 드문 일입니다.
+
+## 해법 1 — 도구 스키마를 필요할 때 로드하기
+
+모든 스키마를 미리 주입하는 대신 `defer_loading: true`로 표시하세요. 그러면 Claude는 가벼운 인덱스만 봅니다. GitHub이 필요해지면 **Tool Search Tool**을 호출하고, 그것이 매칭되는 GitHub 스키마*만* 돌려줍니다 — 다른 모든 서버의 50여 개 도구는 오지 않습니다. Anthropic은 이 방식이 전부 미리 로드했을 때의 약 122,800 토큰 대비 약 191,300 토큰의 컨텍스트를 보존한다고 보고합니다.
+
+### Claude Code에서는 이미 켜져 있습니다
+
+MCP 서버와 함께 Claude Code를 쓰고 있다면 지금 이 패턴을 보고 있는 셈입니다. **도구 검색은 기본으로 켜져 있습니다.** 세션 시작 때는 도구 *이름*과 서버 지침만 로드되고, 작업이 필요로 할 때 Claude가 `ToolSearch` 호출로 전체 스키마를 가져옵니다. 그래서 서버를 하나 더 추가해도 드는 것은 도구 이름이지 스키마가 아닙니다. Claude Code는 서버별 도구 상한을 두지 않으며, 현실적인 한계는 컨텍스트 윈도우 예산이라고 설명합니다.
+
+널리 반복되는 주장 하나는 반쯤만 맞기 때문에 바로잡을 가치가 있습니다. “컨텍스트 윈도우의 ~10%”라는 임계값은 실재하지만, 기본 트리거는 **아닙니다**. 환경 변수 `ENABLE_TOOL_SEARCH`의 선택형 모드 중 하나입니다.
+
+| `ENABLE_TOOL_SEARCH` | 동작 |
+| --- | --- |
+| *(미설정)* — 기본값 | 모든 MCP 도구를 지연하고 필요할 때 로드 |
+| `true` | 미설정과 동일 |
+| `auto` | 임계값 모드. 지연 가능한 도구는 정의 합계가 컨텍스트 윈도우의 10% 미만인 동안 **미리** 로드되고, 10% 이상이 되면 도구 검색이 켜짐 |
+| `auto:N` | 직접 정한 비율을 쓰는 임계값 모드(`N`은 0–100). 예: `auto:5` |
+| `false` | 모든 MCP 도구를 미리 로드, 지연 없음 |
+
+따라서 10% 미만에서는 도구가 미리 로드될 것이라고 기대했다면 기본값을 거꾸로 알고 있는 것입니다. `auto`를 요청하지 않는 한 미리 로드되는 것은 없습니다. 그리고 `auto`는 **끈적합니다**. 합계가 임계값을 넘어 도구 검색이 켜지면, 합계가 다시 임계값 아래로 내려가도 그 도구들은 지연된 채로 남을 수 있습니다.
+
+<Callout type="warning" items={["도구 검색을 끄고 ENABLE_TOOL_SEARCH를 완전히 무시하는 것이 세 가지 있다. CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS(Claude Code v2.1.227부터 조직은 관리형 설정으로 켜진 상태를 유지할 수 있음), HIPAA 구성이 적용된 세션(재정의 불가), 그리고 서버 측에서 이를 거부하는 Azure 호스팅 Microsoft Foundry 배포다. 권한에서 ToolSearch 도구를 거부해도 모든 것이 미리 로드된다.", "모델 하한선이 있다. Claude Code는 Claude Opus 4, Sonnet 4, Haiku 4.5 및 이후 모델에서 도구 검색을 사용한다. 그보다 이전 모델에서는 모든 것이 미리 로드되며 ENABLE_TOOL_SEARCH=true로도 이를 재정의할 수 없다. Google Cloud의 Agent Platform에서는 하한선이 더 높아 Opus 4.5, Sonnet 4.5, Haiku 4.5 및 이후 모델이다."]} />
+
+MCP 서버를 직접 작성한다면, 지연은 설명 예산도 바꾸며 그 방식은 비대칭입니다. **미리** 로드되는 도구는 4,096자에서 잘리고(서버 지침과 같은 상한), **도구 검색을 통해** 로드되는 도구는 16,384자에서 잘립니다. 하지만 검색 자체는 더 짧은 한도에 대해서만 매칭하므로, Claude가 검색할 법한 단어는 어느 쪽이든 앞부분에 있어야 합니다.
+
+<Steps items={[{title: "무엇을 연결했는지 점검하기", body: "활성 서버와 각각이 게시하는 도구 개수를 대략 파악하세요. /context를 실행하면 도구 검색이 적용된 도구에 (deferred) 또는 (loaded on-demand) 표시가 붙어서, 어떤 서버가 실제로 스키마 토큰을 쓰고 어떤 서버는 이름만 쓰는지 볼 수 있습니다."}, {title: "이번 작업에 필요 없는 것 끊기", body: "가장 싼 해결책은 서버를 줄이는 것입니다. 카탈로그 전체가 아니라 작업이 실제로 쓰는 두세 개만 연결하세요. 지연되더라도 모든 서버는 매 턴 도구 이름과 서버 지침을 계속 더합니다."}, {title: "나머지는 지연하기", body: "Claude Code에서는 이미 기본값입니다. 다른 곳에서는 defer_loading + Tool Search를 지원하는 클라이언트/설정을 택해 스키마가 검색될 때만 로드되게 하세요."}]} />
+
+## 해법 2 — 코드 실행으로 결과를 컨텍스트 밖에 두기
+
+더 깊은 해법은 비용 2를 겨냥합니다. 모델이 도구를 하나씩 호출하며 모든 결과가 모델을 통과하는 대신, 모델이 도구를 호출하는 **코드를 작성**하고 중간 데이터는 실행 환경에 머뭅니다. Anthropic은 MCP 서버를 에이전트가 파일시스템처럼 탐색하는 **도구의 파일 트리**로 노출해 필요한 정의만 로드하게 합니다 — 그리고 *"중간 결과는 기본적으로 실행 환경에 머뭅니다… 에이전트는 여러분이 명시적으로 로그하거나 반환한 것만 봅니다."*
+
+바로 그 하나의 설계 변경이 Drive→Salesforce 워크플로를 150,000에서 2,000 토큰으로 무너뜨립니다. 레코드는 코드를 통해 움직이고, 최종 개수만 모델로 돌아옵니다. 개발자 플랫폼에서는 같은 아이디어가 **Programmatic Tool Calling**으로 제공됩니다 — Claude가 여러 도구를 오케스트레이션하고 출력이 컨텍스트에 닿기 전에 필터링하는 Python을 작성합니다.
+
+<Callout type="tip" items={["경험칙: 도구가 큰 것을 반환한다면(회의록, 쿼리 덤프, 파일) 블롭이 컨텍스트 밖에서 처리되도록 코드 실행을 원하게 됩니다. 도구가 작은 일을 그저 수행하기만 한다면(이슈 생성, 한 행 전송) 직접 호출로 충분합니다."]} />
+
+## 해법 3 — CLI 호출이 그냥 이기는 때를 알기
+
+때로는 정답이 더 나은 MCP 설정이 아니라 MCP를 아예 안 쓰는 것입니다. HN/X 논쟁에는 진짜 논점이 있습니다. `gh pr list`나 `psql -c '…'` 같은 셸 명령은 왕복 수백 토큰인 반면, 동등한 MCP 경로는 스키마에 구조화된 결과까지 지불합니다. 에이전트가 이미 터미널을 가지고 있고 CLI가 존재한다면, 그것이 대개 가장 날렵한 경로입니다.
+
+<PromptCard title="도구가 이미 CLI라면 CLI를 선호하세요">
+{`# Instead of connecting a GitHub MCP server for read-only work,
+# let the agent use the gh CLI it already has:
+gh pr list --state open --json number,title,author
+
+# ~200 tokens of command + compact output, no schema tax,
+# no server to keep connected across the session.`}
+</PromptCard>
+
+MCP가 오버헤드 값을 하는 때는 **타입이 있고, 권한이 통제되고, 여러 표면에 걸친** 능력이 필요할 때입니다 — 읽기 전용 롤이 있는 데이터베이스, 조종할 수 있는 브라우저, OAuth가 걸린 SaaS API — 또는 같은 도구를 여러 턴에 걸쳐 재사용해 캐싱이 스키마 비용을 분산시킬 때입니다. 능력이 일회성이고, 이미 스크립트로 가능하고, 작은 것을 반환한다면 CLI를 집으세요. 어느 쪽도 "더 낫지" 않습니다. 비용 곡선 위의 다른 지점일 뿐입니다.
+
+<Callout type="takeaways" items={["MCP에는 두 가지 토큰 비용이 있습니다: 도구 정의 스키마(거의 매 턴 지불)와 중간 결과(데이터에 비례).", "Tool Search + defer_loading은 스키마 비용을 약 85% 줄이면서 도구 선택 정확도도 올립니다 — 스키마는 검색될 때만 로드하세요.", "Claude Code에서는 도구 검색이 기본으로 켜져 있다. 세션 시작 때는 도구 이름만 로드된다. 흔히 인용되는 ~10% 임계값은 기본값이 아니라 선택형 ENABLE_TOOL_SEARCH=auto 모드다.", "코드 실행 / Programmatic Tool Calling은 큰 결과를 실행 환경에 붙잡아 둡니다. 로그하거나 반환한 것만 모델에 도달합니다(Anthropic 예시에서 150k → 2k).", "가장 싼 최적화는 작업당 더 적은 서버를 연결하는 것입니다.", "능력이 작은 것을 반환하는 일회성이고 이미 CLI가 있다면, 셸 호출(약 200 토큰)이 MCP 왕복을 이깁니다."]} />
+
+<Flashcards title="MCP 경제학 용어" cards={[{front: "MCP 토큰 세금", back: "실제 작업이 아니라 도구 스키마 + 중간 결과에 쓰이는 토큰 — 서버 연결의 숨은 비용."}, {front: "defer_loading", back: "Claude가 Tool Search Tool로 검색하기 전까지 도구의 스키마를 컨텍스트 밖에 두는 플래그."}, {front: "Tool Search Tool", back: "Claude가 도구를 필요할 때 발견하게 합니다. 'github'를 검색하면 연결된 모든 도구가 아니라 GitHub 스키마만 반환됩니다. Anthropic 수치로 스키마 토큰 약 85% 절감."}, {front: "Programmatic Tool Calling", back: "Claude가 도구를 오케스트레이션하는 코드를 작성합니다. 중간 결과는 실행 환경에서 필터링되어 최종 출력만 컨텍스트에 들어옵니다."}, {front: "점진적 공개 (Progressive disclosure)", back: "일반 패턴: 가벼운 도구 인덱스를 먼저 노출하고, 전체 스키마는 필요할 때만 가져온다."}, {front: "ENABLE_TOOL_SEARCH", back: "Claude Code의 조절 장치. 미설정 또는 true = 전부 지연(기본값). auto / auto:N = 정의가 윈도우의 N%(기본 10%)를 넘을 때까지 미리 로드한 뒤 켜지고 계속 켜진 상태 유지. false = 전부 미리 로드."}]} />
+
+<Quiz title="확인해 보세요" questions={[{q: "도구 정의 비용이 일회성 수수료보다 나쁜 이유는?", options: ["스키마가 디스크에 저장되어 다시 읽는 게 느리기 때문", "프롬프트 캐싱이 적용되기 전까지 스키마가 대화의 매 요청마다 다시 전송되기 때문", "도구 호출마다 스키마 크기가 두 배가 되기 때문"], answer: 1, explain: "도구 스키마는 매 턴 전송되는 컨텍스트 안에 있으므로, 큰 카탈로그는 첫 메시지만이 아니라 캐싱이 걸릴 때까지 세션 전체에 세금을 물립니다."}, {q: "한 도구가 2시간짜리 회의록을 끌어와 직접 호출로 요약 도구에 넘깁니다. 숨은 비용은?", options: ["없음 — 요약만 토큰을 씁니다", "요약만 원했는데도 전체 회의록이 모델의 컨텍스트를 통과하며, 잠재적으로 약 5만 토큰", "회의록은 모델이 아니라 서버에서 한 번 과금됩니다"], answer: 1, explain: "직접 도구 호출에서는 모든 중간 결과가 모델을 통과합니다. 코드 실행은 회의록을 실행 환경에 붙잡아 두어 요약만 돌아오게 합니다."}, {q: "코딩 세션 중에 '열린 PR 목록'을 한 번만 읽기 전용으로 봐야 하고 에이전트에 터미널이 있습니다. 가장 날렵한 선택은?", options: ["전체 GitHub MCP 서버 연결", "gh CLI 직접 실행 — 약 200 토큰, 스키마 세금 없음, 연결 유지할 것도 없음", "defer_loading을 끈 채로 모든 GitHub 도구 로드"], answer: 1, explain: "작은 것을 반환하고 이미 CLI가 있는 일회성이라면 셸 호출이 스키마 세금을 완전히 피합니다. MCP는 재사용되고, 타입이 있고, 권한이 통제되는 능력에서 값을 합니다."}, {q: "Tool Search Tool을 쓰면 도구 선택 정확도에 어떤 놀라운 일이 벌어지나요?", options: ["Claude가 더 적은 도구를 보므로 떨어진다", "그대로다. 비용만 바뀐다", "올라간다 — 컨텍스트를 붐비게 하는 도구가 줄어 Claude가 올바른 것을 더 자주 고른다"], answer: 2, explain: "Anthropic은 Tool Search로 정확도가 올라갔다고 보고합니다(Opus 4.5: 79.5% → 88.1%). 비용과 품질이 같은 방향으로 움직였습니다."}]} />
+
+## AILmanac 관련 문서
+
+- [Claude Code의 MCP 서버](/docs/claude-code/mcp) — 서버를 추가하고, 범위를 정하고, 보안을 잡는 법.
+- [토큰 경제](/docs/power-user/token-economy) — 명령 출력이 모델에 닿기 전에 압축하기.
+- [동적 워크플로](/docs/claude-code/dynamic-workflows) — 오케스트레이션 비용이 드러나는 지점과, 지출을 가늠하기 위한 슬라이싱.
+- [API의 도구 사용](/docs/api/tool-use) — 이 모든 것 뒤에 있는 요청/응답 형태.
+- [Playwright MCP: 실전 심층 가이드](/docs/api/playwright-mcp-deep-guide) — 사람들이 연결하는 가장 무거운 단일 서버(약 3,500토큰의 스키마 세금)에 대한 실제 사례와, 대신 Skill/CLI 경로가 이기는 경우.
+- [Tool Search와 지연 로딩](/docs/api/tool-search-and-deferred-loading) — API 수준의 심층 해설: regex 대 BM25, 다섯 가지 400 오류, 그리고 요청 본문이 작아지지 않는 이유.
+
+## 출처 및 더 읽을거리
+
+- [MCP와 코드 실행: 더 효율적인 AI 에이전트 만들기](https://www.anthropic.com/engineering/code-execution-with-mcp) — Anthropic Engineering. 150,000 → 2,000 토큰(98.7%) 수치와 "중간 결과는 실행 환경에 머문다" 패턴의 출처.
+- [Claude 개발자 플랫폼의 고급 도구 사용 소개](https://www.anthropic.com/engineering/advanced-tool-use) — Anthropic Engineering. Tool Search Tool(`defer_loading`, 약 85% 감소, 정확도 향상)과 Programmatic Tool Calling(43,588 → 27,297 토큰).
+- [Claude Code MCP 문서](https://code.claude.com/docs/en/mcp) — 서버 연결과 범위 지정에 대한 공식 레퍼런스. 이 문서의 [Scale with MCP tool search](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search) 절은 도구 검색이 기본값이라는 점, `ENABLE_TOOL_SEARCH` 표, 모델 하한선, 4,096 / 16,384자 설명 상한의 출처입니다.
+- [modelcontextprotocol — Progressive Tool Discovery 논의](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/1923) — 필요 시 도구 로딩에 대한 커뮤니티 설계 논의.
+- [MCP Progressive Disclosure](https://www.solo.io/blog/mcp-progressive-disclosure) (Solo.io) — 가벼운 인덱스 / 필요 시 스키마 가져오기 패턴에 대한 서드파티 설명.
+
+
+## 다음
+
+- [접근성](/docs/claude-code/accessibility)

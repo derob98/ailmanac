@@ -1,0 +1,94 @@
+# Learning Paths (Choose Your Track)
+
+> Source: https://derob98.github.io/ailmanac/docs/start-here/learning-paths · AILmanac (CC BY 4.0)
+
+Sequenced reading orders for four kinds of reader, with time estimates.
+
+<LevelBadge level="all" />
+
+Pick the track that sounds most like you. Each one is an ordered path — do the steps in order, skip what you already know. Times are rough.
+
+<Callout type="objectives" items={["Find the single track that matches your goals — newcomer, knowledge worker, builder, or team lead", "Follow a clear, ordered reading path instead of guessing where to start", "Know roughly how much time each track takes (~45 min to ~½ day)", "Where to begin if none of the tracks feels like an obvious fit"]} />
+
+:::tip[Not sure which track is yours?]
+Match on your **goal**, not your job title. Want results without coding? Newcomer. Faster real work? Knowledge Worker. Customizing Claude Code or the API? Builder. Rolling AI out to others? Team Lead.
+:::
+
+## 🌱 The Curious Newcomer · ~45 min
+
+You want to use AI well without becoming a programmer.
+
+<Steps items={[
+  {title: "Your First 5 Minutes", body: "Beginner. Get a real result from Claude in five minutes. /docs/start-here/your-first-5-minutes"},
+  {title: "Which Claude Should I Use?", body: "Beginner. Pick the right model for what you're doing. /docs/start-here/which-claude"},
+  {title: "Prompting Basics", body: "Beginner. The core moves that make answers better. /docs/prompting/basics"},
+  {title: "What Is an LLM?", body: "Beginner. A plain-language mental model of how Claude works. /docs/foundations"},
+  {title: "Everyday Productivity", body: "Beginner. Apply it to daily tasks and small wins. /docs/playbooks/productivity"}
+]} />
+
+## 💼 The Knowledge Worker · ~2 hrs
+
+You want AI to make your real job faster — writing, research, analysis.
+
+<Steps items={[
+  {title: "Start with the Curious Newcomer track", body: "Do the ~45 min track above first, then continue below."},
+  {title: "Prompt Patterns Library", body: "All levels. Reusable patterns you can lift into real work. /docs/prompting"},
+  {title: "Hallucinations & How to Reduce Them", body: "Intermediate. Make outputs you can actually trust. /docs/foundations"},
+  {title: "Pick your playbook", body: "Choose Writing, Research, or Data Analysis. /docs/playbooks"},
+  {title: "Projects + Reusable Prompt Templates", body: "Persistent workspaces (/docs/claude-app) and templates you reuse (/docs/templates)."}
+]} />
+
+## 🛠️ The Builder / Developer · ~½ day
+
+You write code and want to customize Claude Code and build on the API.
+
+<Steps items={[
+  {title: "What Claude Code Is", body: "Beginner. What the CLI is and why it matters. /docs/claude-code/what-is-claude-code"},
+  {title: "CLAUDE.md, Memory Files & Plan Mode", body: "Beginner. Teach Claude your project and plan before it acts. /docs/claude-code"},
+  {title: "Permissions & settings.json", body: "Intermediate. Control what Claude can do and how it behaves. /docs/claude-code"},
+  {title: "Your First API Call → Tool Use → Building Agents", body: "Advanced. Go from one call to tool use to full agents. Start at /docs/api/first-call then /docs/api"},
+  {title: "Walkthrough: Customize Claude Code for a real repo", body: "Intermediate. Put it all together on an actual project. /docs/walkthroughs"},
+  {title: "Security & Responsible Use", body: "Advanced. Ship safely once you're building for real. /docs/security"}
+]} />
+
+## 👥 The Team Lead · ~3 hrs
+
+You're rolling AI out to a team and care about consistency, safety, and cost.
+
+<Steps items={[
+  {title: "Builder track essentials (steps 1–3)", body: "Cover the Builder basics above before continuing here."},
+  {title: "Plugins & Marketplaces", body: "Advanced. Ship a shared toolkit so the team works the same way. /docs/claude-code"},
+  {title: "Cost & Latency Tradeoffs + Choosing a Model", body: "Intermediate. Balance speed, quality, and spend. /docs/foundations and /docs/api/choosing-a-model"},
+  {title: "Securing Agents + Hardening Autonomous Runs", body: "Advanced. Make autonomous runs safe at scale. /docs/security"},
+  {title: "Responsible Use & Verification", body: "All levels. Set the norms the team holds to. /docs/security"}
+]} />
+
+## Tracks at a glance
+
+| Track | You are… | Time | First step |
+| --- | --- | --- | --- |
+| 🌱 Curious Newcomer | Using AI well, no coding | ~45 min | [Your First 5 Minutes](/docs/start-here/your-first-5-minutes) |
+| 💼 Knowledge Worker | Speeding up real work | ~2 hrs | [Prompt Patterns Library](/docs/prompting) |
+| 🛠️ Builder / Developer | Customizing Claude Code + API | ~½ day | [What Claude Code Is](/docs/claude-code/what-is-claude-code) |
+| 👥 Team Lead | Rolling AI out to a team | ~3 hrs | [Plugins & Marketplaces](/docs/claude-code) |
+
+:::note[Tracks build on each other]
+The Knowledge Worker track starts with the whole Newcomer track. The Team Lead track starts with the Builder essentials (steps 1–3). If you finish one track, the next one up is mostly already done.
+:::
+
+<Quiz title="Check yourself" questions={[
+  {q: "You want AI to speed up your writing and research but you don't code. Which track fits?", options: ["The Builder / Developer", "The Knowledge Worker", "The Team Lead"], answer: 1, explain: "The Knowledge Worker track (~2 hrs) is for making your real job faster, and it starts with the Curious Newcomer track."},
+  {q: "Roughly how long is the Curious Newcomer track?", options: ["~45 min", "~2 hrs", "~½ day"], answer: 0, explain: "The Curious Newcomer track is about 45 minutes — the shortest path on the page."},
+  {q: "What is the first step of the Builder / Developer track?", options: ["Your First API Call", "What Claude Code Is", "Permissions & settings.json"], answer: 1, explain: "The Builder track opens with What Claude Code Is, then moves to CLAUDE.md and memory files before the API."}
+]} />
+
+<Callout type="takeaways" items={["Four tracks, one rule: pick by goal, then follow the steps in order.", "Times range from ~45 min (Newcomer) to ~½ day (Builder).", "The tracks nest — Knowledge Worker builds on Newcomer; Team Lead builds on Builder.", "When in doubt, start with Your First 5 Minutes — it pays off on any track."]} />
+
+---
+
+Not sure which fits? Start with [Your First 5 Minutes](/docs/start-here/your-first-5-minutes) — it's useful no matter where you end up. And read [How Levels & Freshness Work](/docs/start-here/levels-and-freshness) so the badges and dates make sense.
+
+
+## Next
+
+- [How Levels & Freshness Work](/docs/start-here/levels-and-freshness)

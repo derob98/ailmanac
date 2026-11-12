@@ -1,0 +1,128 @@
+# Apprendimento e studio
+
+> Source: https://derob98.github.io/ailmanac/it/docs/playbooks/learning · AILmanac (CC BY 4.0)
+
+Tutoraggio socratico e teach-back — imparare con l'AI, non barare con essa.
+
+<LevelBadge level="all" />
+
+<Callout type="objectives" items={[
+  "Condurre una sessione di studio in cinque passi che si chiude con te in grado di spiegare l'argomento senza aiuti",
+  "Distinguere le cinque modalità di insegnamento e sapere quale usare in ogni momento",
+  "Usare il teach-back — il passo che quasi tutti saltano, e l'unico che rivela ciò che non sai",
+  "Riconoscere il confine tra ricevere una guida e ricevere la soluzione già pronta, e restare dal lato giusto",
+  "Inserire la pratica distribuita nel tempo nel flusso di lavoro, così la comprensione sopravvive alla settimana",
+]} />
+
+L'AI può essere il tutor paziente e sempre disponibile che la maggior parte di noi non ha mai avuto — *se* la usi per **capire**, non per delegare il pensiero. La differenza tra imparare e barare sta nel flusso di lavoro.
+
+Ecco la trappola, ed è comoda. Una spiegazione che leggi dà la stessa sensazione di una spiegazione che hai capito. La sensazione arriva per prima e la lacuna emerge dopo, in sala d'esame o durante la code review. Ognuna delle modalità qui sotto serve a far venire a galla quella lacuna **finché puoi ancora farci qualcosa**.
+
+## Modalità che insegnano davvero
+
+- **Spiegamelo come se fossi alle prime armi.** "Spiega [concetto] in modo semplice, con un'analogia e un esempio." Poi approfondisci a strati.
+- **Tutoraggio socratico.** "Non darmi la risposta — fammi domande che mi guidino a trovarla."
+- **Teach-back.** Spiegalo, poi *tu* lo riformuli; l'AI corregge le tue lacune. È qui che l'apprendimento si fissa davvero.
+- **Interrogami.** "Genera 5 domande su [argomento], poi valuta le mie risposte e spiega gli errori."
+- **Piano di studio.** "Ho 2 settimane per [esame]. Costruisci un piano e fammi esercitare sui miei punti deboli."
+
+Le modalità non sono alternative: sono una sequenza. La spiegazione porta la forma dell'idea nella tua testa; teach-back e quiz verificano se è arrivata davvero.
+
+## Una sessione che insegna, passo dopo passo
+
+<Steps items={[
+  {title: "Di' cosa sai già — prima di chiedere qualsiasi cosa", body: "Parti dalla tua comprensione attuale, anche se è sbagliata: «Credo che un indice di database sia una copia ordinata di una colonna, ma non so perché questo renda le ricerche più veloci.» Un tutor che conosce il tuo punto di partenza insegna da lì. Uno che non lo conosce ti ripeterà il manuale, e il manuale è proprio ciò che ha già fallito."},
+  {title: "Chiedi uno strato, non l'intero argomento", body: "Chiedi la versione semplice con un'analogia e un esempio, poi fermati. La profondità batte l'ampiezza, e una risposta di 2.000 parole è un documento che scorrerai, non una lezione che assimilerai. Approfondisci solo quando lo strato attuale regge."},
+  {title: "Passa il tutor in modalità socratica per la parte difficile", body: "Dove senti la nebbia, chiedigli di smettere di spiegare e cominciare a domandare: «Non darmi la risposta — fammi domande che mi guidino a trovarla.» Essere interrogati ed essere informati producono le stesse parole e ricordi completamente diversi."},
+  {title: "Riformulalo con parole tue, a memoria, senza guardare", body: "Chiudi la spiegazione e scrivi la tua versione a memoria. Poi consegnala per farla correggere, con gentilezza e in modo specifico. I punti in cui diventi vago non sono problemi di scrittura: sono esattamente i punti che non hai ancora capito, e restano invisibili finché non provi a dirli ad alta voce."},
+  {title: "Fatti interrogare, poi programma il ritorno", body: "Chiedi cinque domande, rispondi e fatti spiegare gli errori. Poi metti un promemoria in calendario tra due o tre giorni per rifare il quiz a freddo sullo stesso materiale. È nel secondo passaggio che la comprensione smette di essere una sensazione e diventa qualcosa che possiedi."}
+]} />
+
+## Prompt di partenza
+
+<PromptCard title="Apri una sessione di tutoraggio (modalità socratica)">{`Tutor me on {topic}. Start by asking what I already know, then teach one step at
+a time and check my understanding before moving on. Don't just give answers.`}</PromptCard>
+
+<PromptCard title="Teach-back — il passo che trova le lacune">{`I'll explain {concept} back to you. Point out anything wrong or missing, kindly
+and specifically. Here's my explanation: {your attempt}`}</PromptCard>
+
+<PromptCard title="Interrogami, poi spiega solo gli errori">{`Generate 5 questions on {topic}, ranging from recall to application. Ask them one
+at a time, wait for my answer, and don't reveal the answer before I reply. At the
+end, explain only the ones I got wrong and tell me what to review.`}</PromptCard>
+
+<PromptCard title="Piano di studio di due settimane con ripasso dei punti deboli">{`I have 2 weeks before an exam on {topic}. I'm currently weak on {weak areas}.
+Build a day-by-day plan that spends most of the time on my weak spots, includes
+spaced review of anything I've already covered, and ends with a mock test.`}</PromptCard>
+
+## Usala per imparare, non per barare
+
+:::warning[Per i lavori valutati, chiedi una guida — non le soluzioni]
+Se incolli i compiti e copi l'output, non hai imparato (e potresti violare il regolamento della tua scuola). Chiedi suggerimenti, verifiche e spiegazioni che portino *te* alla risposta. Il risultato deve essere tuo.
+:::
+
+- **Verifica i fatti** — i tutor possono sbagliare con sicurezza; ricontrolla le affermazioni chiave ([Allucinazioni](/docs/foundations/hallucinations)).
+- **Un concetto alla volta** — la profondità batte l'ampiezza.
+- **Pratica distribuita** — torna sul materiale e rifai il quiz: è questo che lo fa restare.
+
+## Bonus: apprendimento accessibile
+
+Per la dislessia, l'apprendimento delle lingue o le differenze di concentrazione, l'AI può riformulare, semplificare, tradurre e procedere con pazienza al tuo ritmo — vedi [Accessibilità](/docs/playbooks/accessibility).
+
+<Flashcards cards={[
+  {front: "Spiegamelo come se fossi alle prime armi", back: "Chiedi la versione semplice con un'analogia e un esempio, poi approfondisci a strati. Porta la forma di un'idea nella tua testa — ma da solo non dimostra nulla sul fatto che tu l'abbia capita."},
+  {front: "Tutoraggio socratico", back: "«Non darmi la risposta — fammi domande che mi guidino a trovarla.» Ideale per la parte di un argomento in cui senti nebbia più che confusione, perché essere interrogati ed essere informati producono ricordi molto diversi."},
+  {front: "Teach-back", back: "Riformuli il concetto a memoria e l'AI corregge le tue lacune. È il passo che quasi tutti saltano e l'unico che rivela in modo affidabile ciò che non sai, perché la vaghezza nella tua spiegazione corrisponde direttamente ai buchi nella tua comprensione."},
+  {front: "Interrogami", back: "«Genera 5 domande sull'argomento, poi valuta le mie risposte e spiega gli errori.» Trasforma il riconoscimento passivo in richiamo attivo — e gli errori sono la lista di studio che non avresti mai scritto da solo."},
+  {front: "Pratica distribuita", back: "Tornare sullo stesso materiale dopo giorni e rifare il quiz a freddo. È il secondo passaggio che trasforma la sensazione di capire in qualcosa di duraturo."},
+  {front: "La trappola della fluidità", back: "Una spiegazione chiara che leggi dà la stessa sensazione di una che hai capito. La lacuna emerge solo quando ti viene chiesto di produrre tu l'idea — ed è per questo che il flusso di lavoro finisce in teach-back e quiz, non nella lettura."}
+]} />
+
+<Quiz questions={[
+  {
+    q: "Hai appena letto una spiegazione AI nitida di un concetto e ti è sembrata perfettamente chiara. Cosa ti dice sul fatto di averlo imparato?",
+    options: [
+      "Lo hai imparato — la chiarezza è lo scopo di tutto",
+      "Molto poco; una spiegazione chiara che leggi dà la stessa sensazione di una che hai capito",
+      "Niente, finché non hai letto almeno due spiegazioni diverse",
+      "Lo hai imparato finché sai ripetere l'analogia"
+    ],
+    answer: 1,
+    explain: "Questa è la trappola della fluidità. La sensazione di capire arriva quando la spiegazione è chiara, non quando la conoscenza è tua — e la lacuna resta nascosta finché qualcosa non ti costringe a produrre l'idea senza aiuti. Per questo la sessione finisce in teach-back e quiz anziché nella lettura."
+  },
+  {
+    q: "Sei bloccato nel mezzo nebbioso di un argomento: segui ogni frase ma non riesci a metterle insieme. Quale modalità è la più adatta?",
+    options: [
+      "Spiegamelo come se fossi alle prime armi, ancora una volta",
+      "Tutoraggio socratico — fatti porre domande invece di ricevere spiegazioni",
+      "Piano di studio, per tornarci più tardi",
+      "Interrogami, per vedere quanto va male"
+    ],
+    answer: 1,
+    explain: "Rileggere una spiegazione che già riesci a seguire non aggiunge nulla; le frasi non erano mai il problema. Chiedere al tutor di smettere di spiegare e cominciare a fare domande ti costringe a fare l'assemblaggio, che è la parte che non stava avvenendo."
+  },
+  {
+    q: "Un compito valutato scade stasera e hai poco tempo. Quale richiesta resta dal lato giusto del confine?",
+    options: [
+      "«Scrivi la risposta così studio la struttura, poi la riformulo»",
+      "«Fammi domande sulla mia bozza e indica dove il mio ragionamento si rompe»",
+      "«Dammi la soluzione e controllo il mio lavoro confrontandolo»",
+      "«Fai tu la domanda 3 e il resto lo faccio io»"
+    ],
+    answer: 1,
+    explain: "Suggerimenti, verifiche e spiegazioni che ti portano alla risposta sono una guida. Una risposta finita che riformuli è la soluzione già pronta con qualche passaggio in più — non l'hai imparata e potrebbe violare il regolamento della tua scuola. Il risultato deve essere tuo."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Il flusso di lavoro è la differenza tra imparare e barare — non l'argomento, e non lo strumento",
+  "Inizia dichiarando cosa sai già; un tutor senza il tuo punto di partenza ti ripete il manuale che ti ha già deluso",
+  "Uno strato alla volta, poi riformula a memoria — i punti in cui diventi vago sono i punti che non hai capito",
+  "Chiudi ogni sessione programmando il quiz a freddo tra due o tre giorni",
+  "Per i lavori valutati chiedi suggerimenti e verifiche, mai la risposta finita — e controlla i fatti, perché un tutor sicuro di sé può comunque sbagliare",
+]} />
+
+## Prossimi passi
+
+- [Pacchetto di skill per studenti e apprendimento](/docs/templates/skills)
+- [Che cos'è un LLM?](/docs/foundations/what-is-an-llm)
+- [Accessibilità: Claude come strumento assistivo](/docs/playbooks/accessibility)

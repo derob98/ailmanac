@@ -1,0 +1,96 @@
+# Skill पैक और SKILL.md टेम्पलेट
+
+> Source: https://derob98.github.io/ailmanac/hi/docs/templates/skills · AILmanac (CC BY 4.0) · last verified 2026-07-20
+
+उपयोगकर्ता के प्रकार के अनुसार तैयार Agent Skills, और अपनी खुद की skill लिखने का तरीका।
+
+<LevelBadge level="all" />
+
+<VerifyNote lastVerified="2026-07-20" source="https://code.claude.com/docs/en/skills">
+Skill फ़ाइल का ढाँचा और skills कहाँ इस्तेमाल हो सकती हैं (Claude Code, Claude.ai, Cowork, cloud sessions) बदलता रहता है — ब्योरे के लिए आधिकारिक Skills docs देखें। Custom commands अब skills में मिला दी गई हैं: `.claude/commands/` के अंतर्गत फ़ाइलें अब भी काम करती हैं, पर skills ही सुझाया गया रूप हैं।
+</VerifyNote>
+
+एक **Skill** Claude को केंद्रित विशेषज्ञता देती है, जिसे वह आपके अनुरोध से मेल खाने पर *ज़रूरत के समय* लोड करता है — इसलिए आपको हर बार अपनी ज़रूरतें दोबारा समझानी नहीं पड़तीं। AILmanac हर तरह के उपयोगकर्ता के लिए **तैयार skill पैक** का एक सेट देता है। इस अवधारणा को विस्तार से [Skills](/docs/claude-code/skills) पेज पर सीखें।
+
+## तैयार पैक
+
+ये रिपॉज़िटरी के
+[`plugins/ailmanac/skills`](https://github.com/derob98/ailmanac/tree/main/plugins/ailmanac/skills) फ़ोल्डर में हैं:
+
+| पैक | किसके लिए | क्या करता है |
+|---|---|---|
+| `ailmanac` | Claude या अन्य AI टूल्स के बारे में पूछने वाला कोई भी | जवाब इसी गाइड में खोजता है और पेज को उसकी सत्यापित तारीख के साथ उद्धृत करता है |
+| `claude-md-check` | Claude Code उपयोगकर्ता | आपकी `CLAUDE.md` को आपकी रिपॉज़िटरी से और memory फ़ाइलों के लोड होने के तरीके से मिलाकर जाँचता है |
+| `writing-content-pro` | लेखक, मार्केटर, क्रिएटर | ब्रीफ़ → कई चरणों में ड्राफ़्ट → आपकी आवाज़ से मिलान → दोबारा उपयोग |
+| `developer-workflow` | डेवलपर | पहले संदर्भ, फिर कोडिंग, रिव्यू, टेस्ट, स्पष्ट commits |
+| `research-analyst` | शोधकर्ता, विश्लेषक | स्रोतों पर आधारित संश्लेषण, उद्धरण के अनुशासन के साथ |
+| `data-analyst` | डेटा और स्प्रेडशीट उपयोगकर्ता | SQL/फ़ॉर्मूले + सरल भाषा में व्याख्या + सांख्यिकीय जाँच |
+| `business-marketing` | संस्थापक, छोटे व्यवसायों के मालिक | पोज़िशनिंग, कॉपी, ग्राहक संचार, हल्की योजना |
+| `student-learning` | विद्यार्थी और सीखने वाले | सुकराती ट्यूटरिंग + teach-back (सीखें, सिर्फ़ नकल न करें) |
+| `everyday-productivity` | सभी के लिए | ईमेल, सारांश, योजना, निर्णय |
+
+हर पैक में घर के नियम शामिल हैं: **संदर्भ दें, दोहराएँ, और जो मायने रखता है उसे सत्यापित करें।**
+
+## इन्हें इंस्टॉल करें (Claude Code)
+
+सब एक साथ, plugin के रूप में:
+
+```bash
+claude plugin marketplace add derob98/ailmanac --sparse .claude-plugin plugins
+claude plugin install ailmanac@ailmanac
+```
+
+या रिपॉज़िटरी की क्लोन से कोई एक पैक कॉपी करें:
+
+```bash
+# personal — available in all your projects
+mkdir -p ~/.claude/skills && cp -r plugins/ailmanac/skills/writing-content-pro ~/.claude/skills/
+
+# or per-project — shareable with your team via the repo
+mkdir -p .claude/skills && cp -r plugins/ailmanac/skills/writing-content-pro .claude/skills/
+```
+
+जब आपका अनुरोध skill के `description` से मेल खाता है, तो Claude उसे अपने आप सक्रिय कर देता है। Claude.ai / Cowork पर एक skill बनाएँ और पैक की `SKILL.md` पेस्ट करें (उपलब्धता प्लान के अनुसार बदलती है)।
+
+## अपनी खुद की लिखें — न्यूनतम टेम्पलेट
+
+Skill एक फ़ोल्डर है जिसमें `SKILL.md` होती है: YAML frontmatter + निर्देश। `description` ही **ट्रिगर** है — इसे "Use when…" के रूप में लिखें। केवल `description` अनिवार्य है; कमांड का नाम फ़ोल्डर के नाम से आता है।
+
+```markdown
+---
+description: Use when the user is doing X — be specific about the trigger so Claude knows when to load this and when not to.
+---
+
+# My Skill
+
+Short statement of the role/goal.
+
+## Workflow
+1. Step one…
+2. Step two…
+
+## Rules
+- The non-negotiables (accuracy, privacy, output format).
+
+## Default output
+What a good response looks like.
+```
+
+### वैधता चेकलिस्ट
+
+- [ ] फ़ोल्डर का नाम kebab-case में है — वही `/command-name` बनता है।
+- [ ] `description` बताता है कि **इसे कब इस्तेमाल करना है** (ट्रिगर), सिर्फ़ यह नहीं कि यह क्या है। मुख्य उपयोग-मामला सबसे पहले रखें (skill सूची में `description` + `when_to_use` को मिलाकर 1,536 अक्षरों पर काट दिया जाता है)।
+- [ ] निर्देश विशिष्ट और सीमित हैं — एक स्पष्ट काम।
+- [ ] कोई secrets, credentials, या निजी/क्लाइंट डेटा नहीं।
+- [ ] अनिश्चितता को संभालने का तरीका बताया गया है (मनगढ़ंत जानकारी न दें; सत्यापित करें)।
+
+## संबंधित
+
+- [Skills: ज़रूरत पर मिलने वाली विशेषज्ञता](/docs/claude-code/skills) — पूरी अवधारणा
+- [Custom Slash Commands](/docs/claude-code/slash-commands) — इन्हें आप ज़रूरत पड़ने पर खुद चलाते हैं
+- [Subagents](/docs/claude-code/subagents) — काम के पूरे हिस्से सौंप दें
+
+
+## आगे
+
+- [MCP Config और सर्वर स्कैफ़ोल्ड](/docs/templates/mcp-config)

@@ -1,0 +1,88 @@
+# Token, contesto e prezzi
+
+> Source: https://derob98.github.io/ailmanac/it/docs/api/tokens-and-pricing · AILmanac (CC BY 4.0) · last verified 2026-06-20
+
+Conta correttamente i token, max_tokens contro finestra di contesto e come stimare il costo.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={["Contare correttamente i token con gli strumenti di Anthropic (non con il tokenizer di un altro modello)", "Distinguere max_tokens dalla finestra di contesto — e perché la differenza conta", "Stimare il costo dell'API a partire dai token di input + output alle tariffe per modello", "Tagliare i costi senza perdere qualità: dimensiona bene, usa la cache, sfoltisci, raggruppa in batch"]} />
+
+<VerifyNote lastVerified="2026-06-20" source="https://platform.claude.com/docs/en/about-claude/pricing">
+I prezzi per token e i limiti di contesto cambiano — leggi sempre i numeri attuali sulle pagine ufficiali di prezzi/modelli. Vedi la [tabella dei modelli](/docs/whats-new/models-and-pricing).
+</VerifyNote>
+
+Costo e limiti sull'API sono tutti misurati in **[token](/docs/foundations/tokens-and-context)** (~¾ di una parola). Tre cose da fare bene.
+
+## 1. Conta correttamente i token
+
+Non tirare a indovinare e **non usare il tokenizer di un altro modello** (ad esempio `tiktoken`) — il conteggio dei token differisce per famiglia di modelli. Usa l'endpoint/l'helper SDK di **token counting** di Anthropic per misurare una richiesta *prima* di inviarla.
+
+<Callout type="tip" items={["Regola approssimativa di pianificazione: ~750 parole ≈ ~1.000 token (un token è all'incirca ¾ di una parola)."]} />
+
+## 2. `max_tokens` ≠ finestra di contesto
+
+Questi due limiti si confondono facilmente, ma regolano cose diverse.
+
+| Limite | Cosa limita | Quando cambiarlo |
+| --- | --- | --- |
+| **`max_tokens`** | La lunghezza della *risposta* (solo output) | Alzalo se l'output viene troncato |
+| **Finestra di contesto** | Budget totale per **input + output** | Input grandi lasciano meno spazio per l'output |
+
+<Callout type="warning" items={["Imposta max_tokens su quanto serve al task. Troppo basso tronca la risposta. Inutilmente alto non costa di più — paghi solo i token effettivamente generati — ma può lasciare che le risposte divaghino."]} />
+
+## 3. Stima il costo
+
+Ti viene addebitato per **token di input + token di output**, a tariffe per modello (Opus > Sonnet > Haiku). Una stima veloce:
+
+```
+cost ≈ (input_tokens × input_rate) + (output_tokens × output_rate)
+```
+
+Recupera le tariffe attuali dalla [pagina ufficiale dei prezzi](https://platform.claude.com/docs/en/about-claude/pricing) — qui non le codifichiamo di proposito.
+
+## Ridurre il costo (senza perdere qualità)
+
+<Steps items={[
+  {title: "Dimensiona correttamente il modello", body: "Parti da Sonnet; riserva Opus per le parti difficili. Vedi Scegliere un modello (/docs/api/choosing-a-model)."},
+  {title: "Usa il prompt caching", body: "Riutilizza un prefisso di prompt stabile tra le chiamate. Vedi Prompt Caching (/docs/api/prompt-caching)."},
+  {title: "Sfoltisci gli input", body: "Invia solo il contesto che conta. È anche qui che RAG (/docs/foundations/rag) aiuta."},
+  {title: "Raggruppa in batch il lavoro offline", body: "Raggruppa in batch i job dove la latenza non conta."}
+]} />
+
+Più strategia in [Compromessi tra costo e latenza](/docs/foundations/cost-and-latency).
+
+<Quiz title="Mettiti alla prova" questions={[
+  {
+    q: "Stai pianificando una richiesta e vuoi conoscere il suo conteggio di token prima di inviarla. Cosa dovresti usare?",
+    options: ["Un tokenizer generico come tiktoken", "L'endpoint/l'helper SDK di token counting di Anthropic", "Il conteggio delle parole diviso 0,75 come numero finale", "La dimensione della finestra di contesto dalla tabella dei modelli"],
+    answer: 1,
+    explain: "Il conteggio dei token differisce per famiglia di modelli, quindi non riutilizzare il tokenizer di un altro modello. Usa l'endpoint/l'helper SDK di token counting di Anthropic per misurare prima di inviare."
+  },
+  {
+    q: "La tua risposta continua a essere troncata a metà frase. Quale impostazione cambi?",
+    options: ["Abbassa max_tokens", "Alza max_tokens", "Riduci la finestra di contesto", "Passa a un modello più piccolo"],
+    answer: 1,
+    explain: "max_tokens limita la lunghezza della risposta. Se l'output viene troncato, alzalo."
+  },
+  {
+    q: "Come ti viene addebitato sull'API?",
+    options: ["Per richiesta, tariffa fissa", "Solo token di input", "Token di input + token di output, a tariffe per modello", "Per parola di output"],
+    answer: 2,
+    explain: "cost ≈ (input_tokens × input_rate) + (output_tokens × output_rate), con tariffe che differiscono per modello (Opus > Sonnet > Haiku)."
+  },
+  {
+    q: "Qual è la prima mossa migliore per tagliare i costi senza perdere qualità?",
+    options: ["Usare sempre Opus per tutto", "Partire da Sonnet e riservare Opus per le parti difficili", "Impostare max_tokens il più alto possibile", "Usare il tokenizer di un altro modello per risparmiare chiamate"],
+    answer: 1,
+    explain: "Dimensiona correttamente il modello: parti da Sonnet, riserva Opus per le parti difficili. Poi aggiungi il prompt caching, lo sfoltimento degli input e il batching."
+  }
+]} />
+
+<Callout type="takeaways" items={["Tutto si misura in token (~¾ di una parola); ~750 parole ≈ ~1.000 token.", "Conta i token con gli strumenti di Anthropic — mai con il tokenizer di un altro modello.", "max_tokens limita la risposta; la finestra di contesto è il budget totale di input + output.", "Fatturazione = token di input + token di output a tariffe per modello (Opus > Sonnet > Haiku).", "Taglia i costi dimensionando bene il modello, mettendo in cache i prefissi, sfoltendo gli input e raggruppando in batch."]} />
+
+## Avanti
+
+- [Scegliere un modello Claude](/docs/api/choosing-a-model)
+- [Prompt caching e ottimizzazione dei costi](/docs/api/prompt-caching)
+- [Streaming e multi-turno](/docs/api/streaming)

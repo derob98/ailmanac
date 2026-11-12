@@ -1,0 +1,68 @@
+# ランドスケープマップ
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/start-here/landscape-map · AILmanac (CC BY 4.0)
+
+公式およびコミュニティのAIリソースの注釈付きインデックス — そして、それぞれをいつ使うべきか。
+
+<LevelBadge level="all" />
+
+AILmanacは真空の中に存在しているわけではなく、すべてを置き換えるふりをするつもりもありません。このレッスンは、エコシステムにおける最良のリソースの正直なマップです — そして、同じくらい重要なこととして、私たちの**代わりに**それらをいつ使うべきかも示します。
+
+<Callout type="objectives" items={["唯一の信頼できる情報源を特定し、ドキュメントが私たちと食い違ったときになぜドキュメントが常に勝つのかを理解する", "公式のAnthropicリソースと、それぞれが何のためのものかを認識する", "最良のコミュニティおよびベンダー中立のプロンプティングリソースを知る", "シンプルな意思決定テーブルを使って、あらゆるニーズを適切な行き先にマッチさせる", "AILmanacを、確かな視点を持つフィールドガイドとしてランドスケープの中に位置づける"]} />
+
+## 信頼できる情報源
+
+ここから始めましょう。他のすべてがこの1つのルールを中心に回っているからです。
+
+<Callout type="warning" items={["AILmanacと公式ドキュメントが食い違ったときは、ドキュメントが勝ちます。正確で最新の具体的な情報にはドキュメントを使い、確かな視点を持ち、段階的で、実践を通じて学ぶガイダンスには私たちを使ってください。"]} />
+
+- **[Anthropic Documentation](https://platform.claude.com/docs)** — Claude、API、モデル、機能に関する権威ある参照先。
+
+## 公式Anthropicリソース
+
+これらはファーストパーティです。標準的な例、実行可能なコード、あるいは情報源から直接得られるガイド付きの学習が欲しいときに頼ってください。
+
+<Flashcards title="公式リソースを一目で" cards={[{front: "Prompting best practices", back: "Anthropicのプロンプト作成リファレンス。モデルごとのガイダンス付き。旧Prompt Libraryに代わるものです。"}, {front: "Anthropic Cookbook", back: "実行可能なAPIレシピ — ツール使用、RAG、ビジョン。"}, {front: "Claude Code docs", back: "CLI/IDEのリファレンス。"}, {front: "Anthropic Academy / Learn", back: "無料のガイド付きコース。"}, {front: "Model Context Protocol", back: "オープンなMCP標準とサーバーディレクトリ。"}]} />
+
+- **[Prompting best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices)** — Anthropicのプロンプト作成リファレンス。モデルごとのガイダンス付き。（旧Prompt Library、つまりすぐに使える例示プロンプト集に代わるもので、そのURLは現在ここへリダイレクトされます。）
+- **[Anthropic Cookbook](https://github.com/anthropics/anthropic-cookbook)** — 実行可能なAPIレシピ（ツール使用、RAG、ビジョン）。
+- **[Claude Code docs](https://code.claude.com/docs/en/overview)** — CLI/IDEのリファレンス。
+- **[Anthropic Academy / Learn](https://www.anthropic.com/learn)** — 無料のガイド付きコース。
+- **[Model Context Protocol](https://modelcontextprotocol.io)** — オープンなMCP標準 + サーバーディレクトリ。
+
+## コミュニティ＆一般
+
+ベンダー中立の深さや、キュレーションされコミュニティで検証されたワークフローが欲しいときは、これらが際立っています。
+
+- **[awesome-claude-code](https://github.com/hesreallyhim/awesome-claude-code)** — キュレーションされたコマンド、フック、ワークフロー。
+- **[Prompt Engineering Guide](https://www.promptingguide.ai)** — 深く、ベンダー中立のプロンプティング参照先。
+- **[Learn Prompting](https://learnprompting.org)** — 体系的で初心者にやさしいプロンプティングコース。
+
+## 何をいつ使うか
+
+このマップを使う最速の方法は、あなたが必要としているものから始めて、対応する行き先へジャンプすることです。
+
+<Steps items={[{title: "ニーズに名前をつける", body: "今この瞬間に本当に欲しいものを決めましょう — 正確な仕様、コピペできるプロンプト、実行可能なコード、学習パス、理論、あるいはコース。"}, {title: "テーブルでマッチさせる", body: "下の表の左の列であなたのニーズを見つけ、右側にある推奨される行き先を読み取りましょう。"}, {title: "そこで深く掘り下げて、戻ってくる", body: "そのリソースを使って深く掘り下げ、それらすべてを結びつける、確かな視点を持ちレベルタグの付いたパスのためにAILmanacへ戻ってきてください。"}]} />
+
+| あなたが欲しいもの… | 行き先 |
+|---|---|
+| 正確で最新のAPI/機能の詳細 | 公式ドキュメント |
+| コピペできる例示プロンプト | Prompt Library / 私たちの[テンプレート](/docs/templates/prompts) |
+| 実行可能なAPIコード | Cookbook |
+| 確かな視点を持ち、レベルタグの付いたパス | **AILmanac** |
+| プロンプティングに関する深い理論の参照先 | promptingguide.ai |
+| ガイド付きのコース | Anthropic Academy |
+
+## AILmanacの位置づけ
+
+私たちは**確かな視点を持つフィールドガイド**です。まず推奨される1つの方法を示し、レベルごとにタグ付けし、テンプレートが豊富で、鮮度について正直であり、Claude**と**一般的なAIの概念の両方にまたがっています。私たちのことを、適切なときに適切な深いリソースへ案内し、それらすべてが意味を成すように基礎を教えてくれるマップだと考えてください。
+
+<Quiz title="自分を確かめよう" questions={[{q: "AILmanacと公式のAnthropicドキュメントが、ある機能の詳細について食い違っています。どちらを信頼しますか？", options: ["AILmanac、確かな視点を持っているから", "公式ドキュメント、それが信頼できる情報源だから", "先に更新された方"], answer: 1, explain: "AILmanacとドキュメントが食い違ったときは、ドキュメントが勝ちます。それは正確な具体的情報についての権威ある最新の参照先です。"}, {q: "ツール使用、RAG、またはビジョンのための実行可能なAPIコードが必要です。どこへ行きますか？", options: ["Anthropic Cookbook", "Learn Prompting", "Prompt Library"], answer: 0, explain: "Anthropic Cookbookは、ツール使用、RAG、ビジョンをカバーする実行可能なAPIレシピを提供します。"}, {q: "AILmanacはランドスケープの中で自身の役割をどう説明していますか？", options: ["公式ドキュメントの代替", "適切なときに適切な深いリソースへ案内する、確かな視点を持つフィールドガイド", "プロンプティングに関するベンダー中立の理論参照先"], answer: 1, explain: "AILmanacは確かな視点を持つフィールドガイドです — まず推奨される1つの方法を示し、レベルタグが付いており、適切な深いリソースへ案内するマップです。"}]} />
+
+<Callout type="takeaways" items={["公式のAnthropicドキュメントが信頼できる情報源です — 迷ったら、ドキュメントが勝ちます。", "標準的な例、コード、コースには、公式リソース（Prompt Library、Cookbook、Claude Code docs、Academy、MCP）を使いましょう。", "キュレーションされたワークフローやプロンプティングの深さには、コミュニティおよびベンダー中立のリソース（awesome-claude-code、promptingguide.ai、Learn Prompting）を使いましょう。", "あなたのニーズを行き先にマッチさせ、それから確かな視点を持ちレベルタグの付いたパスのためにAILmanacへ戻りましょう。"]} />
+
+## 次へ
+
+- [ようこそ＆なぜこれが存在するのか](/docs/start-here/welcome)
+- [学習パス](/docs/start-here/learning-paths)
+- [リソースを貢献する](/docs/contribute/contribute-in-10-minutes)

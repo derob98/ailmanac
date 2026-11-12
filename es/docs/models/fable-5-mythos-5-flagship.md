@@ -1,0 +1,290 @@
+# Claude Fable 5 y Mythos 5: la guía de campo del buque insignia
+
+> Source: https://derob98.github.io/ailmanac/es/docs/models/fable-5-mythos-5-flagship · AILmanac (CC BY 4.0) · last verified 2026-10-21
+
+Fable 5 fue el primer buque insignia de clase Mythos de Anthropic — ahora un modelo legacy, superado por Fable 5.1. Su API rechaza in-band (HTTP 200, stop_reason: refusal), solo tiene adaptive thinking y nunca devuelve el razonamiento en bruto. Si fijas un modelo de primer nivel, esto cambia cómo escribes las integraciones. Cuándo usarlo frente a Opus 4.8, el patrón de fallback, los cambios de prompting.
+
+<LevelBadge level="intermediate" />
+
+El 9 de junio de 2026 Anthropic lanzó **Claude Fable 5** — su buque insignia de "clase Mythos", por encima de Opus en capacidad — junto con un modelo hermano de lanzamiento limitado, **Claude Mythos 5**. Si solo hojeas el anuncio, te quedarás con "modelo grande, precio más alto". Eso se pierde la historia. Fable 5 es el primer modelo de Anthropic cuya *superficie de integración* es materialmente distinta de todos los Claude anteriores: rechaza **in-band**, como un HTTP 200 exitoso con `stop_reason: "refusal"`, su cadena de pensamiento en bruto **nunca se devuelve**, y hay una primitiva de facturación completamente nueva llamada **fallback credit** creada específicamente para los reintentos en Opus 4.8. Si tu app fija un modelo de primer nivel, no puedes cambiar a Fable 5 sin más como hacías con cualquier Sonnet anterior. Hay que *recablearla*.
+
+Esta página es la guía de campo práctica: qué es realmente Fable 5, qué hace mejor que Opus 4.8, los cuatro lugares exactos donde tu código tiene que cambiar, cuándo es la elección correcta frente a Opus 4.8 o Sonnet 5, y los cambios de prompting que desbloquean la historia de las "ejecuciones autónomas de varios días" del lanzamiento.
+
+<Callout type="objectives" items={[
+  "Entender qué es Fable 5 a nivel de modelo — contexto de 1M, solo adaptive thinking, posicionamiento de clase Mythos",
+  "Dominar los cuatro cambios de API que rompen las migraciones ingenuas desde Opus 4.8",
+  "Reconocer un rechazo en una respuesta (es HTTP 200, no un error) y configurar fallback del lado del servidor o del cliente",
+  "Saber cuándo elegir Fable 5 frente a Opus 4.8 o Sonnet 5, con una tabla de decisión que puedas razonar a las 3 de la madrugada",
+  "Ajustar el prompting: brevedad, límites, andamios de memoria y por qué las herramientas send-to-user importan en ejecuciones autónomas largas",
+]} />
+
+<VerifyNote lastVerified="2026-10-21" source="https://platform.claude.com/docs/en/models/fable-5/overview">
+**Fable 5 es ahora un modelo legacy** — Anthropic lo lista como "Active (legacy)", con retirada no antes del 9 de junio de 2027, y su propia página de modelo te dice que consideres migrar a [Fable 5.1](/docs/models/fable-5-1-field-guide). Todo lo que sigue sigue describiendo con precisión `claude-fable-5`: Fable 5 y Mythos 5 `claude-mythos-5` comparten un contexto de 1M de tokens, hasta 128K de salida máxima, $10 / $50 por MTok (lectura de caché $1) y un corte de conocimiento fiable de enero de 2026. Ambos son Covered Models que exigen 30 días de retención de datos. GA en Claude API, Amazon Bedrock, Claude Platform on AWS, Google Cloud y Microsoft Foundry desde el 9 de junio de 2026. Contrasta la tabla de [Modelos y precios actuales](/docs/whats-new/models-and-pricing) antes de fijar un modelo.
+</VerifyNote>
+
+## La versión de un párrafo
+
+Fable 5 es un buque insignia de **clase Mythos**: un nivel que Anthropic sitúa **por encima** de Opus. `claude-fable-5` está disponible de forma general en la API y en todas las nubes principales; `claude-mythos-5` es exactamente el mismo modelo **sin** los clasificadores de seguridad, ofrecido solo a socios aprobados dentro de Project Glasswing. Comparten precios ($10 de entrada / $50 de salida por MTok), contexto (1M de tokens), tope de salida (128K) y corte de conocimiento. Si los clasificadores de Fable 5 rechazan una solicitud, recibes un HTTP 200 exitoso con `stop_reason: "refusal"`, y se espera que hayas configurado una ruta de fallback hacia Opus 4.8. Esa es toda la forma del lanzamiento.
+
+## Por qué no es simplemente "Opus 4.8 + más"
+
+Anthropic presenta Fable 5 como el modelo al que apuntas problemas que de otro modo llevarían a una persona **horas, días o semanas**. En sus propias palabras, probarlo solo con cargas más simples *infravalora su rango de capacidad*. Los deltas concretos frente a Opus 4.8:
+
+- **Autonomía de largo horizonte.** Ejecuciones de varios días, orientadas a un objetivo, con fuerte retención de instrucciones. Fable 5 mantiene una salida productiva durante periodos largos donde los modelos anteriores se desviaban.
+- **Corrección a la primera en problemas difíciles y bien especificados.** Los primeros testers reportaron implementaciones de una sola pasada de sistemas que antes requerían días de iteración.
+- **Visión.** Precisión sustancialmente mayor en imágenes técnicas densas, apps web y capturas detalladas — a menudo usando **menos** tokens de salida.
+- **Revisión de código y depuración.** La exhaustividad al encontrar bugs es notablemente mayor (fuera de los dominios de ciberseguridad que cubren los clasificadores).
+- **Delegación.** Bastante más fiable al despachar y sostener subagentes paralelos, y mejor comunicándose con agentes pares de larga ejecución.
+- **Ambigüedad.** Mejor recibiendo solicitudes complejas y multihilo y decidiendo qué hacer a continuación sin una especificación paso a paso.
+
+El precio que pagas es el coste (5× el precio de salida de Sonnet 5), la latencia (las solicitudes individuales pueden durar muchos **minutos** con ajustes de effort altos) y un contrato de integración distinto. Ese contrato es donde se concentra la mayor parte del trabajo de migración.
+
+## Los cuatro cambios de API que rompen la migración directa
+
+Si fijabas Opus 4.8 y cambias la cadena a `claude-fable-5`, cuatro cosas se comportan distinto. Si fallas cualquiera, tu app se cae, pierde salida en silencio o no gestiona bien los rechazos.
+
+<Steps items={[
+  {title: "Los rechazos llegan in-band como HTTP 200", body: "Cuando los clasificadores de Fable 5 rechazan una solicitud, no recibes un error HTTP: recibes una respuesta de mensaje normal con content: [] y stop_reason: \"refusal\". stop_details te dice qué categoría se activó (cyber, bio, frontier_llm o reasoning_extraction). NO se te factura un rechazo que llega antes de cualquier salida; los tokens de entrada aparecen en usage pero no se cobran, y la solicitud no cuenta para los límites de tasa. Ramifica directamente según stop_reason — nunca según stop_details ni content."},
+  {title: "Adaptive thinking es el único modo de pensamiento", body: "El extended thinking con presupuesto de tokens ya no existe. thinking: {\"type\": \"disabled\"} no está soportado. Usa el parámetro effort (low / medium / high / xhigh) para controlar la profundidad del pensamiento. Si tienes código que calcula un presupuesto de pensamiento dinámicamente, bórralo y define effort en su lugar."},
+  {title: "El contenido de pensamiento en bruto nunca se devuelve", body: "thinking.display es por defecto \"omitted\" (campo thinking vacío) o puedes pedir \"summarized\" (un resumen legible del razonamiento). La cadena de pensamiento en bruto no está disponible. Si tu app muestra el razonamiento a los usuarios finales, migra a bloques summarized — y ten en cuenta que los prompts que instruyen al modelo a reproducir su razonamiento en el texto de la respuesta pueden activar la categoría de rechazo reasoning_extraction."},
+  {title: "El fallback es una primitiva de primera clase", body: "Anthropic incluye un parámetro fallbacks (beta: server-side-fallback-2026-06-01) que te permite nombrar hasta tres modelos de reserva en una sola solicitud. Cuando Fable 5 rechaza, la API reintenta con el siguiente modelo en la misma solicitud y recibes una sola respuesta. Cada SDK incluye además un BetaRefusalFallbackMiddleware que hace lo mismo del lado del cliente, más un sistema de fallback credit que reembolsa el coste de la caché de prompts al cambiar de modelo. Elige servidor O cliente, no ambos en la misma solicitud."},
+]} />
+
+## Reconocer un rechazo
+
+Un rechazo es un mensaje exitoso, no una excepción. Esta es la forma exacta de respuesta sobre la que ramificas:
+
+```json
+{
+  "id": "msg_01XFUDYJgAACzvnptvVoYEL",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-fable-5",
+  "content": [],
+  "stop_reason": "refusal",
+  "stop_details": {
+    "type": "refusal",
+    "category": "cyber",
+    "explanation": "This request was declined because it could enable cyber harm."
+  },
+  "usage": { "input_tokens": 412, "output_tokens": 0 }
+}
+```
+
+`stop_details.explanation` es legible para humanos pero **no es estable** — muéstralo, no lo analices. `stop_details` en sí es `null` para cualquier motivo de parada distinto de `"refusal"`. Las cuatro categorías documentadas:
+
+| `category`               | Qué significa                                                                                                                     |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `"cyber"`                | Podría facilitar un daño cibernético (malware, exploits). El trabajo de ciberseguridad benigno también puede activarlo.           |
+| `"bio"`                  | Podría facilitar un daño biológico. El trabajo beneficioso en ciencias de la vida también puede activarlo.                        |
+| `"frontier_llm"`         | Podría ayudar al desarrollo de modelos de IA competidores (restringido por los términos comerciales de Anthropic). El trabajo de ML benigno puede activarlo. |
+| `"reasoning_extraction"` | Pide al modelo que reproduzca su razonamiento interno como texto de respuesta. Usa en su lugar la salida de adaptive thinking.    |
+
+<Callout type="warning" items={[
+  "Un rechazo es HTTP 200. El monitoreo basado en conteos de 5xx NUNCA lo verá — emite un evento dedicado por cada rechazo y alerta sobre la diferencia entre rechazos y respuestas servidas por fallback.",
+  "Un rechazo a mitad de stream SÍ se factura: tokens de entrada más cualquier salida parcial ya transmitida, a tarifas normales. Solo los rechazos previos a la salida son gratis.",
+  "Reintentar en el MISMO modelo normalmente consigue otro rechazo. Dirige el reintento a un modelo de fallback (Opus 4.8 es el par sugerido por Anthropic).",
+]} />
+
+## Configurar el fallback — elige un camino
+
+### Del lado del servidor (lo más simple, un solo viaje de ida y vuelta)
+
+<PromptCard title="Fallback del lado del servidor con la Messages API">
+{`curl --fail-with-body -sS https://api.anthropic.com/v1/messages \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "anthropic-beta: server-side-fallback-2026-06-01" \\
+  -H "content-type: application/json" \\
+  -d '{
+    "model": "claude-fable-5",
+    "max_tokens": 1024,
+    "fallbacks": [{"model": "claude-opus-4-8"}],
+    "messages": [{"role": "user", "content": "Hello, Claude"}]
+  }'`}
+</PromptCard>
+
+Las entradas se prueban en orden, deben ser distintas, cada una debe estar entre los `allowed_fallback_models` permitidos del modelo solicitado (publicados en la Models API cuando se define el encabezado beta) y no pueden ser el propio modelo solicitado. Cada entrada puede sobrescribir `max_tokens` y `thinking` solo para ese intento.
+
+La respuesta incluye un bloque de contenido `fallback` que marca cada frontera entre modelos — `{"type": "fallback", "from": {"model": ...}, "to": {"model": ...}}` — y un array `usage.iterations` que registra cada intento. Un modelo que rechazó aparece como una iteración `message` normal; el modelo que respondió aparece como una iteración `fallback_message`.
+
+Disponible en la Claude API y en Claude Platform on AWS. **No** disponible en Amazon Bedrock, Google Cloud, Microsoft Foundry ni en la Message Batches API — en esos, usa el middleware del SDK.
+
+### Del lado del cliente (funciona en todas partes, una sola configuración)
+
+Cada SDK de Anthropic incluye `BetaRefusalFallbackMiddleware` (Python/TypeScript/Go/Java/PHP/Ruby/C#). Configúralo una vez en el cliente y comparte un `BetaFallbackState` a lo largo de una conversación para que los turnos siguientes se mantengan fijados al modelo que aceptó:
+
+```python
+from anthropic import Anthropic, BetaFallbackState, BetaRefusalFallbackMiddleware
+
+client = Anthropic(
+    middleware=[BetaRefusalFallbackMiddleware([{"model": "claude-opus-4-8"}])],
+)
+state = BetaFallbackState()  # share across the conversation
+
+with state:
+    message = client.beta.messages.create(
+        model="claude-fable-5",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": "Hello, Claude"}],
+    )
+print(f"served by: {message.model}")
+```
+
+El middleware también inscribe cada solicitud en `fallback-credit-2026-06-01`, de modo que el coste de la caché de prompts del reintento se reembolsa automáticamente.
+
+### Reintento manual (HTTP puro, lógica propia)
+
+Detecta `stop_reason == "refusal"`, reenvía el cuerpo *sin cambios* con `model` apuntando a un modelo de fallback (el canje exige coincidencia exacta si quieres fallback credit) y — en conversaciones de varios turnos — sigue usando el modelo de fallback en los turnos posteriores en lugar de volver al original.
+
+## Errores comunes al cablear el fallback
+
+- **Presupuesta los reintentos por solicitud, no por sesión.** Un turno puede producir varios rechazos (el agente y los subagentes llaman cada uno a la API).
+- **Da a las llamadas de subagentes sus propios `fallbacks`.** El parámetro no se propaga a las llamadas al modelo hechas desde dentro de la ejecución de herramientas.
+- **Configura el fallback en cada ruta de solicitud** — manejadores de reintento, recuperación de errores, workers en segundo plano. Un manejador que reemite la solicitud sin fallback pierde la protección justo en las solicitudes con más probabilidad de necesitarla.
+- **Haz del fallback una propiedad de la solicitud, no un estado ambiental.** Una bandera compartida o una configuración en caché pueden desincronizarse y dejar una solicitud sin protección en silencio.
+- **Emite una señal por cada rechazo Y por cada respuesta servida por fallback.** Alerta sobre la diferencia entre ambas: una diferencia creciente significa que los fallbacks también están siendo rechazados.
+- **No llames al encabezado beta de otra forma que `server-side-fallback-2026-06-01`.** Cualquier otra fecha devuelve un error 400.
+
+## Cuándo elegir Fable 5, Opus 4.8 o Sonnet 5
+
+El modelo adecuado depende de qué valores: capacidad bruta, coste por token o cómo se comporta la API cuando algo sale mal.
+
+| Si necesitas…                                                           | Elige                | Por qué                                                                                                    |
+| ----------------------------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Los problemas más difíciles — ejecuciones autónomas de varios días, acertar a la primera con especificaciones ambiguas, tareas de visión densa       | **Claude Fable 5**   | Capacidad de clase Mythos; sostiene trabajo de largo horizonte; mejor retención de instrucciones en contextos extensos. |
+| Razonamiento de primer nivel con **zero-data-retention** o sin el contrato de rechazos    | **Claude Opus 4.8**  | Apto para ZDR; superficie de API clásica (los errores son errores); el destino natural de fallback para Fable 5.             |
+| El caballo de batalla: calidad equilibrada, contexto de 1M, lo bastante barato para usarse en todas partes         | **Claude Sonnet 5**  | El modelo por defecto de Claude Code en Pro y Team Standard (Opus 5 es el predeterminado en Max, Team Premium, Enterprise y la API); a menudo a tiro de la calidad de Opus por una fracción del coste. Consulta la [guía de campo de Sonnet 5](/docs/models/sonnet-5-field-guide) para los gotchas de migración. |
+| Trabajo de ciberseguridad o ciencias de la vida que los clasificadores de Fable bloquean por diseño       | **Opus 4.8**         | Fable 5 explícitamente *no está pensado* para trabajo cibernético ofensivo ni de bio/laboratorio — elige el modelo, no pelees con el clasificador. |
+| Recuperación, clasificación, subagentes baratos con presupuestos de latencia ajustados                | **Haiku 4.5**        | El nivel más rápido y barato; úsalo como las hojas de tu árbol de agentes.                                            |
+
+<Callout type="tip" items={[
+  "Fable 5 cuesta 5× el precio de salida de Sonnet 5. En cargas que Sonnet 5 resuelve bien, quedarse en Sonnet no es un compromiso: es la respuesta correcta.",
+  "Si tu integración no puede usar zero-data retention en el nivel superior, quédate con Opus 4.8 como principal. Fable 5 lleva retención obligatoria de 30 días.",
+  "Anthropic recomienda explícitamente empezar en lo más alto de tu rango de dificultad al probar Fable 5. Si solo le pasas tu suite de regresión existente, te perderás lo que desbloquea.",
+]} />
+
+## Cambios de prompting que realmente se notan
+
+El seguimiento de instrucciones de Fable 5 es lo bastante fuerte como para abandonar las guías de estilo largas y detalladas y escribir una sola frase por comportamiento. Tres fragmentos de prompt de la propia guía de Anthropic merecen copiarse tal cual:
+
+<PromptCard title="Evitar que Fable 5 planifique de más en tareas ambiguas">
+{`When you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue in user-facing messages. If you are weighing a choice, give a recommendation, not an exhaustive survey. This does not apply to thinking blocks.`}
+</PromptCard>
+
+<PromptCard title="Fundamentar las afirmaciones de progreso en ejecuciones autónomas largas">
+{`Before reporting progress, audit each claim against a tool result from this session. Only report work you can point to evidence for; if something is not yet verified, say so explicitly. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.`}
+</PromptCard>
+
+<PromptCard title="Recordatorio para pipelines autónomos — eliminar los checkpoints de «¿quieres que…?»">
+{`You are operating autonomously. The user is not watching in real time and cannot answer questions mid-task, so asking "Want me to…?" or "Shall I…?" will block the work. For reversible actions that follow from the original request, proceed without asking. Before ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done ("I'll…", "let me know when…"), do that work now with tool calls. End your turn only when the task is complete or you are blocked on input only the user can provide.`}
+</PromptCard>
+
+Dos cambios menores pero importantes:
+
+- **Effort es tu palanca principal.** Usa `high` por defecto; `xhigh` en el trabajo más difícil y sensible a la capacidad; baja a `medium` / `low` para cambiar calidad por velocidad. Un effort más bajo en Fable 5 a menudo supera igualmente a `xhigh` en modelos anteriores — no desperdicies latencia si la tarea es rutinaria.
+- **Refactoriza skills y prompts preexistentes.** Los skills ajustados para Opus 4.8 suelen ser *demasiado prescriptivos* para Fable 5 y pueden degradar la salida. Anthropic recomienda explícitamente revisar las instrucciones antiguas y a menudo eliminarlas, dejando que los valores por defecto de Fable 5 hagan el trabajo. Audita el lenguaje de "muestra tu razonamiento": puede activar la categoría de rechazo `reasoning_extraction` y aumentar los fallbacks.
+
+## Modos de fallo poco frecuentes que merece la pena nombrar
+
+Dos comportamientos aparecen en sesiones largas y desconciertan a quienes integran por primera vez:
+
+- **Declaraciones de intención solo en texto.** Muy avanzada una ejecución larga, Fable 5 puede terminar ocasionalmente un turno con "Ahora ejecutaré X" sin emitir la llamada a la herramienta, o pedir permiso cuando ya tiene contexto suficiente. La solución es un simple "adelante" como respuesta, o añadir el recordatorio de sistema de pipeline autónomo de arriba.
+- **Ansiedad por el presupuesto de contexto.** En sesiones muy largas, Fable 5 puede sugerir empezar una sesión nueva o recortar su propio trabajo. Esto se activa casi siempre cuando el arnés muestra al modelo una *cuenta atrás de tokens restantes*. Si puedes, no la muestres; si debes, añade `You have ample context remaining. Do not stop, summarize, or suggest a new session on account of context limits. Continue the work.`
+
+## Herramientas send-to-user para agentes asíncronos
+
+Para agentes de larga ejecución cuya UX depende de entregar contenido tal cual a mitad de tarea, define una herramienta `send_to_user` del lado del cliente. Las entradas de herramientas nunca se resumen, así que todo lo que enrutes por ella llega intacto al usuario. Renderizar directamente la entrada de la llamada a la herramienta en tu UI y devolver un simple acuse de recibo da al modelo un canal para entregables parciales que no termina su turno.
+
+```json
+{
+  "name": "send_to_user",
+  "description": "Display a message directly to the user. Use this for progress updates, partial results, or content the user must see exactly as written before the task finishes.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "message": {"type": "string", "description": "The content to display to the user."}
+    },
+    "required": ["message"]
+  }
+}
+```
+
+Combina la herramienta con una indicación de una línea en el prompt de sistema: *"Between tool calls, when you have content the user must read verbatim (a partial deliverable, a direct answer to their question), call the send_to_user tool with that content."* Sin la indicación, Fable 5 rara vez la llama.
+
+## El gotcha de la retención de datos
+
+Tanto Fable 5 como Mythos 5 están designados como **Covered Models** con **retención de datos de 30 días**, por lo que **no están disponibles bajo zero data retention a menos que Anthropic lo autorice expresamente**. Una solicitud a Fable 5 desde una organización cuya configuración de retención no cumple ese requisito vuelve como un `400 invalid_request_error`.
+
+Hay una forma documentada de sortearlo: una organización con un acuerdo de ZDR puede **activar la retención de 30 días para un único workspace** (no el Default Workspace, que siempre sigue el ajuste de la organización) y acceder desde ahí a los Covered Models mientras todos los demás workspaces mantienen ZDR. Si eso no es aceptable — industria regulada, obligación contractual, cliente enterprise — Fable 5 no es un reemplazo directo, así que fija Opus 4.8 como tu modelo de primer nivel. Consulta la [página oficial de retención de datos específica por modelo](https://platform.claude.com/docs/en/manage-claude/api-and-data-retention#model-specific-data-retention-requirements) antes de enrutar tráfico de producción.
+
+## Mythos 5 — el hermano que probablemente no puedas usar
+
+`claude-mythos-5` es el mismo modelo subyacente que Fable 5 con una **configuración de salvaguardas** distinta, entregado solo a organizaciones verificadas. En el lanzamiento eso significaba **Project Glasswing** — el programa conjunto con socios gubernamentales y enterprise de ciberseguridad, solo por invitación, más investigadores de biología seleccionados.
+
+<VerifyNote lastVerified="2026-10-21" source="https://support.claude.com/en/articles/14604842">
+**La vía de acceso cambió el 6 de octubre de 2026 y ya no es solo por invitación.** Glasswing se reestructuró como el **Cyber Verification Program**, al que los equipos de seguridad *se postulan* a través del Verification Portal en `portal.anthropic.com/programs`; las decisiones suelen llegar en siete días hábiles, y los miembros existentes de Glasswing pasaron al nivel superior. Hay tres niveles — **Defense Access** (organizaciones y personas con planes de pago), **Red Team Access** (solo organizaciones) y **Specialized Access** (solo organizaciones, revisado en colaboración con el gobierno de EE. UU.) — y cada uno concede Opus 5.5, Sonnet 5.5 y **Mythos 5.1**, no el Mythos 5 legacy. La elegibilidad depende de que la defensa sea realmente tu negocio: "Organizations whose main business falls outside that scope may not be eligible."
+</VerifyNote>
+
+El compromiso es real: menos intervenciones de clasificadores significa que la responsabilidad de la seguridad posterior pasa a la aplicación que llama. Anthropic señala explícitamente que los clientes sin acceso a Mythos pueden usar Fable para las mismas capacidades, salvo las tareas de ciber de frontera y bio de frontera que el clasificador rechaza.
+
+## Chequeo rápido — ¿se asentaron los conceptos?
+
+<Quiz questions={[
+  {
+    q: "Tu app llama a Fable 5 y recibe un mensaje con content: [] y stop_reason: \"refusal\". ¿Qué estado HTTP recibiste?",
+    options: ["400 Bad Request", "403 Forbidden", "200 OK", "422 Unprocessable Entity"],
+    answer: 2,
+    explain: "Un rechazo es una respuesta EXITOSA. HTTP 200. Ramificar según códigos 5xx o 4xx nunca verá un rechazo — se ramifica según stop_reason dentro del cuerpo JSON."
+  },
+  {
+    q: "Quieres seguir usando los presupuestos de extended thinking de tu ruta de código de Opus 4.8 al migrar a Fable 5. ¿Qué haces?",
+    options: ["Definir thinking: {\"type\": \"disabled\"} y calcular tú mismo el presupuesto", "Nada — el parámetro de presupuesto de pensamiento funciona igual", "Reescribir la ruta de código para usar el parámetro effort", "Volver a Opus 4.8 para esa solicitud"],
+    answer: 2,
+    explain: "Adaptive thinking es el ÚNICO modo de pensamiento en Fable 5 y Mythos 5. thinking: {\"type\": \"disabled\"} no está soportado. Usa effort (low / medium / high / xhigh) como control."
+  },
+  {
+    q: "¿Cuál de estas cosas NO te devolverá Fable 5?",
+    options: ["Un bloque de pensamiento resumido", "Un rechazo con stop_details.category == \"bio\"", "El texto de la cadena de pensamiento en bruto usado para llegar a una respuesta", "Un bloque de contenido fallback tras un rechazo a mitad de stream"],
+    answer: 2,
+    explain: "La cadena de pensamiento en bruto nunca se devuelve en Fable 5 ni en Mythos 5. thinking.display solo admite \"summarized\" u \"omitted\"."
+  },
+  {
+    q: "Una solicitud tiene fallbacks: [{\"model\": \"claude-opus-4-8\"}]. Fable 5 rechaza ANTES de cualquier salida. ¿Qué se te factura?",
+    options: ["Tokens de entrada de Fable 5 más tokens de entrada y salida de Opus 4.8", "Solo tokens de entrada y salida de Opus 4.8", "Nada — los rechazos previos a la salida son siempre gratis", "Ambos modelos a tarifa completa"],
+    answer: 1,
+    explain: "Pagas por el modelo que realmente atiende la solicitud. Un intento que rechazó antes de producir salida no cuesta nada y no consume límites de tasa. Solo se factura la iteración de Opus 4.8."
+  }
+]} />
+
+## Hoja de términos
+
+<Flashcards cards={[
+  {front: "Mythos-class", back: "El nivel de posicionamiento de Anthropic para sus modelos más capaces, POR ENCIMA de Opus. Fable 5 y Mythos 5 son los dos primeros."},
+  {front: "stop_reason: \"refusal\"", back: "La respuesta exitosa HTTP 200 que devuelve Fable 5 cuando un clasificador de seguridad rechaza la solicitud. Ramifica según este valor directamente — nunca según stop_details ni content."},
+  {front: "Parámetro fallbacks", back: "Parámetro beta (server-side-fallback-2026-06-01) que nombra hasta 3 modelos de reserva en una sola solicitud. Ante un rechazo, la API reintenta con el siguiente modelo y devuelve una sola respuesta."},
+  {front: "Iteración fallback_message", back: "La entrada en usage.iterations que indica qué modelo atendió realmente la respuesta tras un fallback. Su presencia, junto con stop_reason != \"refusal\", te dice que el fallback se ejecutó y respondió."},
+  {front: "Fallback credit", back: "Función beta de facturación (fallback-credit-2026-06-01) que reembolsa el coste de la caché de prompts cuando un reintento cambia de modelo, para que no pagues por reescribir la caché. Se aplica automáticamente con el fallback del servidor y el middleware del SDK."},
+  {front: "Adaptive thinking", back: "El único modo de pensamiento en Fable 5 y Mythos 5. Define el parámetro effort (low / medium / high / xhigh) para controlar la profundidad. thinking: {\"type\": \"disabled\"} se rechaza."},
+  {front: "Rechazo reasoning_extraction", back: "Una categoría de rechazo específica que activan los prompts que piden al modelo reproducir su razonamiento interno en el texto de la respuesta. Causa común de fallbacks inesperados — audita skills y prompts de sistema en busca de lenguaje de 'muestra tu razonamiento'."},
+  {front: "Project Glasswing", back: "El programa solo por invitación a través del cual Anthropic entregó originalmente Mythos 5. Reestructurado el 6 de octubre de 2026 como el Cyber Verification Program, cuyos tres niveles (Defense / Red Team / Specialized Access) piden los equipos de seguridad — así que el acceso a Mythos ya no es solo por invitación, y lo que otorgan los niveles es Mythos 5.1."}
+]} />
+
+## Conclusiones
+
+<Callout type="takeaways" items={[
+  "Fable 5 es un buque insignia de clase Mythos a $10/$50 por MTok con contexto de 1M — elígelo para ejecuciones autónomas de varios días, visión densa y acierto a la primera en especificaciones difíciles; quédate en Sonnet 5 para todo lo demás.",
+  "Los cuatro cambios de API a los que migrar: rechazos in-band como HTTP 200, solo adaptive thinking, sin contenido de pensamiento en bruto y fallback como primitiva de primera clase.",
+  "Elige el fallback del servidor por simplicidad en la Claude API / AWS; el middleware del SDK en todos los demás sitios; ambos aplican el fallback credit por ti automáticamente.",
+  "La retención de datos de 30 días es obligatoria — Fable 5 NO es apto para ZDR. Si tienes un requisito de ZDR, fija Opus 4.8.",
+  "Reescribe los prompts prescriptivos de la era Opus 4.8 como frases de una línea; audita el lenguaje de 'muestra tu razonamiento'; usa effort como tu palanca principal de calidad/latencia.",
+]} />
+
+## Siguiente
+
+- [Claude Fable 5.1: qué cambió y cómo migrar](/docs/models/fable-5-1-field-guide) — el sucesor del 1 de septiembre de 2026; tres cambios incompatibles además de todo lo anterior
+- [Elegir un modelo](/docs/models/choosing-a-model)
+- [Modelos de razonamiento comparados](/docs/models/reasoning-models-compared)
+- [Portar prompts entre modelos](/docs/models/porting-prompts-across-models)
+- [Modelos y precios actuales](/docs/whats-new/models-and-pricing)
+- [Este mes en Claude](/docs/whats-new/this-month)

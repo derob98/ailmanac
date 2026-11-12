@@ -1,0 +1,334 @@
+# Claude Fable 5.2: Der Migrations-Leitfaden
+
+> Source: https://derob98.github.io/ailmanac/de/docs/models/fable-5-2-field-guide · AILmanac (CC BY 4.0) · last verified 2026-11-10
+
+Anthropic hat am 9. November 2026 Claude Fable 5.2 und Mythos 5.2 veröffentlicht — das erste Point-Release eines Claude-Flaggschiffs, das WENIGER kostet als das Modell, das es ersetzt ($8/$40, 20 % weniger). Vier Breaking Changes, eine Präfixprüfung, die jetzt für jedes Konto gilt, Prompt-Zeilen, die nicht mehr funktionieren, und eine offizielle Benchmark-Tabelle mit zwei Zeilen, die die Berichterstattung übersehen hat.
+
+<LevelBadge level="intermediate" />
+
+Am **9. November 2026** hat Anthropic **Claude Fable 5.2** (`claude-fable-5-2`) und sein verifizierungspflichtiges Zwillingsmodell **Claude Mythos 5.2** (`claude-mythos-5-2`) veröffentlicht. Eine Sache unterscheidet dieses Release strukturell von jedem früheren Claude-Flaggschiff: **Es ist günstiger als das Modell, das es ersetzt.** Fable 5.1 kostete $10 pro Million Eingabe-Token und $50 pro Million Ausgabe-Token; Fable 5.2 kostet **$8 und $40** — 20 % weniger — und erzeugt die Ausgabe bis zu 30 % schneller.
+
+Das ist die leichte Hälfte. Die schwere Hälfte: Die folgenreichste Änderung dieses Releases ist **keine** neue Funktion, und sie ist diejenige, die am ehesten eine funktionierende Integration lahmlegt. Die Präfixprüfung für Thinking-Blöcke, die bei Fable 5.1 nur bei Konten einen Fehler auslöste, die am oder nach dem 31. August 2026 erstellt wurden, **gilt jetzt für jedes Konto**. Code, der den Gesprächsverlauf bearbeitet, läuft auf einem älteren Konto seit zwei Monaten fehlerfrei. Nach dem Tausch der Modell-ID liefert er einen 400er-Fehler.
+
+Diese Seite ist der Migrations-Leitfaden: was bricht, was die Preissenkung bringt und was nicht, welche Prompt-Zeilen Sie löschen müssen und wie Sie Anthropics Launch-Benchmarks ehrlich lesen.
+
+<Callout type="objectives" items={[
+  "Die vier Breaking Changes an Ihrem eigenen Code prüfen — beginnend mit der Präfixprüfung, die sich gerade auf jedes Konto ausgeweitet hat",
+  "Wissen, was die 20-%-Preissenkung ändert und was nicht — und wann sich der Fast-Modus zum doppelten Listenpreis lohnt",
+  "Die Prompt-Zeilen löschen, die stillschweigend aufgehört haben zu funktionieren, darunter „Antworte direkt, ohne nachzudenken“",
+  "Den Eigentümer-Satz nutzen, der die Häufigkeit, mit der das Modell duplizierten Code zusammenführt, etwa verfünffacht — und seine Kosten kennen",
+  "Anthropics eigene Benchmark-Tabelle lesen, einschließlich der zwei Zeilen, in denen Fable 5.2 nicht gewinnt",
+  "Fable 5.2, Opus 5.5 oder Verbleib bei Fable 5.1 entscheiden und dann die Migration in der richtigen Reihenfolge durchführen",
+]} />
+
+<VerifyNote lastVerified="2026-11-10" source="https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2">
+Modell-IDs, Spezifikationen, die vier Breaking Changes, Preise, Fast-Modus-Tarife, Effort-Empfehlungen, Ablehnungskategorien, Fallback-Ziele, Aufbewahrungsstatus und Verfügbarkeit stammen aus Anthropics offiziellem [„What's new in Claude Fable 5.2“](https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2), dem [Migrationsleitfaden](https://platform.claude.com/docs/en/models/fable-5-2/migration-guide), der [Modellübersicht](https://platform.claude.com/docs/en/models/overview) und [Prompting Claude Fable 5.2](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2), alle am 10. November 2026 gelesen. Benchmark-Zahlen und die Aussage „dasselbe zugrunde liegende Modell“ stammen von Anthropic selbst aus der [Launch-Ankündigung](https://www.anthropic.com/claude-fable-and-mythos-5-2). Die als Prozentwerte zitierten Verhaltensbefunde sind die veröffentlichten Ergebnisse von Anthropics internen Tests, keine unabhängigen Messungen. Beta-Header können ihre Form ändern — prüfen Sie sie vor dem Release erneut. Die aktuelle Modelltabelle finden Sie unter [Aktuelle Modelle und Preise](/docs/whats-new/models-and-pricing).
+</VerifyNote>
+
+## Die Version in einem Absatz
+
+Fable 5.2 ist der Nachfolger von [Fable 5.1](/docs/models/fable-5-1-field-guide), mit derselben Mythos-Klasse oberhalb von Opus, demselben Kontext von 1 Mio. Token, derselben maximalen Ausgabe von 128K, demselben Tokenizer (dem seit Opus 4.7), demselben stets aktiven adaptiven Thinking, demselben In-Band-Verhalten `stop_reason: "refusal"` und derselben 30-Tage-Aufbewahrungspflicht ohne ZDR. Anthropics Empfehlung bleibt unverändert: **Beginnen Sie mit dem aktuellen Opus** — Opus 5.5 — und greifen Sie zu Fable 5.2, „wenn Ihre Evals mit einem Claude-Opus-Modell bei höherem Effort Ihre Anforderungen immer noch nicht erfüllen“. Neu sind: 20 % weniger Preis, bis zu 30 % schnellere Ausgabe, ein optionaler Fast-Modus mit 2,5-facher Token-Rate für den doppelten Preis, vier Breaking Changes und eine Reihe von Prompting-Verschiebungen, die mehrere Zeilen in Ihrem bestehenden System-Prompt nutzlos oder aktiv teuer machen.
+
+## Vier Breaking Changes
+
+Jeder davon ist ein 400er-Fehler, keine stille Verschlechterung. Gehen Sie sie in dieser Reihenfolge durch — der erste trifft Leute, die nichts falsch gemacht haben.
+
+### 1. Die Präfixprüfung gilt jetzt für jedes Konto
+
+Das ist die Änderung, die man zweimal lesen sollte. Jeder Thinking-Block von Fable 5.2 hält den Zustand von allem fest, was ihm vorausging: den `system`-Prompt, das `tools`-Array und jede frühere Nachricht. Wenn Sie einen Thinking-Block zurücksenden, nachdem sich eines davon geändert hat, lehnt die API die Anfrage ab:
+
+```text
+The block is bound to a different conversation
+```
+
+Bei **Fable 5.1** trat dieser 400er-Fehler nur bei Konten auf, die **am oder nach dem 31. August 2026** erstellt wurden. Bei **Fable 5.2 tritt er bei jedem Konto auf, unabhängig vom Alter.** (Mythos 5.1 verhielt sich auf der Claude API bereits so; wenn Sie von Mythos kommen, ist dieser Teil für Sie also keine Änderung.)
+
+Die Folge ist konkret und unangenehm: Ein Harness, der den Verlauf umschreibt — der in einen früheren Turn eine Erinnerung einfügt, alte Nachrichten kürzt, mitten in der Sitzung den System-Prompt austauscht oder irgendetwas umsortiert — läuft auf einem vor diesem Datum erstellten Konto fehlerfrei. Er beginnt zu scheitern, sobald Sie die Modell-ID ändern, und der Fehler sieht nach einer Regression des neuen Modells aus statt nach einem latenten Bug in Ihrem eigenen Code.
+
+:::danger[Testen Sie das, auch wenn Fable 5.1 bei Ihnen nie einen Fehler geliefert hat]
+„Es funktioniert heute“ ist kein Beleg. Wenn Ihr Code das `messages`-Array selbst aufbaut, kann das Ausbleiben dieses Fehlers bei Fable 5.1 lediglich bedeuten, dass Ihr Konto vor dem 31. August 2026 angelegt wurde. Führen Sie den Test vor dem Tausch aus, nicht danach.
+:::
+
+Sie sind ohne Änderungen sicher, wenn **alle** folgenden Punkte zutreffen: `system` und `tools` bleiben während der gesamten Unterhaltung identisch; Ihr Code **hängt** an `messages` nur **an**; und jeder Assistant-Turn geht genau so zurück, wie die API ihn geliefert hat, jeder Block in der ursprünglichen Reihenfolge. Sie sind auch sicher, wenn Claude Code, claude.ai, Claude Managed Agents oder das Claude Agent SDK Ihre Anfragen aufbaut — dann ist die Modell-ID die gesamte Migration.
+
+Der Notbehelf, wenn Sie ausliefern müssen, bevor Sie die Bearbeitung korrigieren können, ist, den Beta-Header `thinking-binding-controls-2026-08-01` zu senden und `thinking.block_binding.prefix_mismatch_behavior` auf `"drop_block"` zu setzen. Die Anfrage gelingt dann und listet jeden verworfenen Block in einem Array `input_transformations` auf oberster Ebene auf. Behandeln Sie das als Notbehelf und nicht als Einstellung: Anthropics eigene Tests ergaben, dass das Modell, wenn früheres Thinking in jedem Turn verworfen wurde, **von Grund auf neu dachte und mehr Ausgabe-Token verbrauchte**. Messen Sie das an Ihren eigenen Aufgaben, bevor Sie sich darauf verlassen.
+
+Die dauerhaften Lösungen sind das Append-only-Werkzeugset: [Systemnachrichten mitten im Gespräch](/docs/api/mid-conversation-system-messages) für Anweisungsänderungen, turn-bezogene Systemnachrichten für Erinnerungen pro Turn sowie Kompaktierung oder Kontext-Bearbeitung — konkret eine Kompaktierung, die nach der Zusammenfassung **keine** früheren Turns behält — um den Verlauf zu kürzen.
+
+### 2. Die Thinking-Blöcke von Fable 5.2 sind eine Einbahnstraße
+
+Fable 5.2 und Mythos 5.2 lesen gegenseitig ihre Thinking-Blöcke, und sie lesen Blöcke von Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Mythos 5.1, Opus 5, Fable 5, Mythos 5 sowie früheren Opus-/Sonnet-/Haiku-Modellen. **Kein anderes Modell liest ihre.**
+
+Eine Unterhaltung *auf* Fable 5.2 zu verlegen, bewahrt also ihr Reasoning. Sie *davon weg* zu verlegen, verliert das Reasoning jedes Turns, der dort lief — und dazu gehören Opus 5.5, Fable 5.1 und beide Fallback-Ziele von Fable 5.2 selbst, Opus 4.8 und Opus 5. Wenn Sie einen Router, ein kostensparendes Downgrade oder einen serverseitigen Ablehnungs-Fallback betreiben, ist das eine echte Verhaltensänderung und keine theoretische.
+
+Der Fehlermodus ist still: Die API verwirft den unlesbaren Block, bevor das Modell ihn sieht, die Anfrage gelingt, und die verworfenen Blöcke werden nicht berechnet. Sie sehen es nur, wenn Sie den Header `thinking-binding-controls-2026-08-01` senden und `input_transformations` lesen.
+
+Zusätzlich zur Modellbindung gibt es eine zweite Bindung: **Thinking-Blöcke von Fable 5.2 funktionieren nur in dem Konto, das sie erzeugt hat**, oder in einem damit verknüpften Konto. Die Anfrage eines anderen Kontos gelingt, wobei der Block stillschweigend verworfen wird; mit dem Beta-Header wird das als `reason: "organization_binding_mismatch"` gemeldet. Das ist relevant, wenn Sie Transkripte zwischen Umgebungen verschieben.
+
+### 3. `computer_20251124` ist außerhalb von Bedrock weg
+
+Fable 5.1 akzeptierte Computer Use auf zwei Wegen: über das Toolset `computer_toolset_20260801` und über das ältere Tool `computer_20251124` hinter dem Beta-Header `computer-use-2025-11-24`. Fable 5.2 und Mythos 5.2 unterstützen **nur das Toolset**. Die Deklaration von `computer_20251124` liefert auf jeder Plattform einen 400 `invalid_request_error` — **außer auf Amazon Bedrock**, wo das ältere Tool weiterhin wie bisher funktioniert.
+
+Diese Bedrock-Ausnahme ist bei Multi-Plattform-Betrieb erwähnenswert: Derselbe Request-Body kann auf Bedrock gültig und auf der Claude API ungültig sein.
+
+### 4. Ein Fable-5.2-Executor braucht einen Fable-5.2- oder Mythos-5.2-Advisor
+
+Beim [Advisor-Tool](/docs/api/tool-use) (Beta) muss der Advisor mindestens so leistungsfähig sein wie der Executor. Ein Fable-5.2- oder Mythos-5.2-Executor akzeptiert **ausschließlich** `claude-fable-5-2` oder `claude-mythos-5-2` als Advisor — jeder andere Wert, einschließlich Fable 5.1 und Mythos 5.1, liefert einen 400er-Fehler.
+
+Hier gibt es eine Reihenfolgefalle, die einmal zubeißt und eine Stunde lang verwirrt. Die Änderung des `model` des Advisors **ist eine Bearbeitung von `tools`** und löst damit Breaking Change #1 aus. Nehmen Sie die Advisor-Änderung deshalb in **neuen Unterhaltungen** vor, nicht mitten in einer bestehenden. Und wenn Sie nur den Advisor aktualisieren und Ihren aktuellen Executor behalten wollen, setzen Sie ihn auf `claude-fable-5-2`: Jedes Executor-Modell akzeptiert diesen.
+
+Noch ein Detail, falls Ihr Code den Advice-Text liest, statt ihn nur durchzureichen: Ein Fable-5.2-Advisor liefert seinen Rat **verschlüsselt** zurück.
+
+<Callout type="info" items={[
+  "Zwei Regeln, die in 5.2 NICHT neu sind, aber weiterhin die häufigsten 400er-Fehler: Adaptives Thinking ist immer aktiv (sowohl thinking.type 'enabled' mit budget_tokens als auch 'disabled' liefern 400), und ein erzwungenes tool_choice ('any' oder ein benanntes Tool) liefert 400. Wenn Sie von Fable 5.1, Mythos 5.1 oder Opus 5.5 kommen, behandeln Sie beides bereits. Wenn Sie von Opus 5 oder früher kommen, sind beide für Sie Breaking Changes.",
+]} />
+
+## Die Migration, der Reihe nach
+
+Anthropic veröffentlicht dafür eine explizite Reihenfolge. Halten Sie sich daran — mehrere Schritte greifen ineinander, und eine falsche Reihenfolge bedeutet erneutes Testen.
+
+<Steps items={[
+  {title: "Modell-ID tauschen", body: "Setzen Sie model auf claude-fable-5-2 (oder claude-mythos-5-2). Wenn Claude Code, claude.ai, Managed Agents oder das Agent SDK Ihre Anfragen aufbaut, sind Sie fertig — hören Sie hier auf. Beachten Sie, dass Claude Code für Codebasen eine Abkürzung /claude-api migrate anbietet."},
+  {title: "Effort explizit auf high setzen, dann durchsweepen", body: "high ist der API-Standard. Setzen Sie ihn trotzdem explizit, damit eine künftige Standardänderung ihn nicht unter Ihnen verschiebt, und lassen Sie Ihre Evals dann auch mit medium und xhigh laufen. Übernehmen Sie KEINEN Level, den Sie auf Fable 5.1 oder Opus 5.5 abgestimmt haben — Level sind pro Modell neu kalibriert, dasselbe Wort bedeutet also eine andere Menge an Thinking."},
+  {title: "Testen, ob Ihr Code den Verlauf bearbeitet", body: "Wenn Ihr Code das messages-Array selbst aufbaut, führen Sie den Präfixprüfungs-Test aus, auch wenn Fable 5.1 für Ihr Konto den Fehler nie geliefert hat. Das ist der Schritt, den man überspringt, weil die Produktion in Ordnung aussieht."},
+  {title: "Jeden Modellwechsel prüfen", body: "Finden Sie jede Stelle, an der ein Router, ein Fallback oder ein kostensparendes Downgrade eine Unterhaltung zwischen Modellen verschiebt. Jedes Modell außer Mythos 5.2 verwirft die Thinking-Blöcke von Fable 5.2 — Opus 5.5 und Fable 5.1 eingeschlossen."},
+  {title: "Computer Use auf das Toolset umstellen", body: "Ersetzen Sie computer_20251124 überall durch computer_toolset_20260801, außer auf Bedrock, wo das alte Tool weiterhin funktioniert."},
+  {title: "Den Advisor in einer neuen Unterhaltung aktualisieren", body: "Setzen Sie das model des Advisor-Tools auf claude-fable-5-2 oder claude-mythos-5-2. Da dies tools bearbeitet, starten Sie eine neue Unterhaltung, statt es mitten in der Sitzung zu ändern."},
+  {title: "Prompts lesen, bevor Sie Ihren Evals trauen", body: "Öffnen Sie Ihre System-Prompts, Skills, Agent-Dateien, Memory-Dateien und den Harness-Text und löschen oder testen Sie die Zeilen aus dem nächsten Abschnitt neu. Mehrere kosten jetzt Token für nichts, und eine verändert das Verhalten in eine Richtung, die Sie vermutlich nicht wollen."},
+  {title: "Ihre längste agentische Aufgabe laufen lassen und auf fünf bestimmte Verhaltensweisen achten", body: "Wo das Modell früh stoppt, unnötige Freigaben erfragt, still wird, mehr delegiert als nötig oder zu bestehendem Code hinzufügt, wo Sie eine Umstrukturierung wollten. Wenden Sie jeweils eine Korrektur an und messen Sie deren Token-Kosten."},
+]} />
+
+## Die Prompt-Zeilen, die Sie jetzt löschen sollten
+
+Dieser Abschnitt wird übersprungen und sollte es nicht. Anthropic dokumentiert mehrere Anweisungen, die für frühere Modelle geschrieben wurden und bei Fable 5.2 entweder aufgehört haben zu funktionieren oder jetzt Geld kosten.
+
+**„Antworte direkt, ohne nachzudenken“ funktioniert nicht mehr.** Fable 5.1 hat eine solche Zeile meist befolgt. In Anthropics Tests **hielt sie Fable 5.2 bei `medium` und höherem Effort nicht vom Denken ab** — und ab `high` denkt das Modell vor fast jeder Antwort nach, auch bei einer Begrüßung. Die Lösung ist kein besserer Satz, sondern ein **niedrigerer Effort-Level für diese Turns**. Löschen Sie die Zeile und ändern Sie den Regler.
+
+**Ein im Prompt geschriebenes Token-Budget kostet Sie Geld.** Manche Harnesses sagen dem Modell im Prompt, wie viele Token die Aufgabe verbrauchen darf und wie viele übrig sind. In Anthropics Tests bei Coding-Aufgaben mit `high` und `xhigh` **senkte das Entfernen eines großen Budgets die Kosten bei gleicher Leistung**. (Es geht um *Text im Prompt*, nicht um die Beta-Funktion Task-Budgets der API, die der Test nicht abdeckte.)
+
+**Dauerhafte Delegierungsanweisungen.** Zeilen, die Arbeit an Subagents schieben, sammeln sich in System-Prompts, Skills und Agent-Dateien an. Fable 5.2 delegiert bereitwillig in einem Harness, dessen Prompts dazu einladen, und Anthropic merkt an, dass Subagents einen großen Anteil an den Kosten einer Sitzung ausmachen können. Lesen Sie diese Dateien vor der Migration und prüfen Sie, auf welchem Modell Ihr Harness Subagents standardmäßig ausführt.
+
+**Harte Stilvorgaben machen die Prosa abgehackt.** Fable 5.2 befolgt Stilregeln genau, sodass eine Regel wie „eine Anweisung pro Satz, in höchstens 20 Wörtern“ jetzt so wörtlich befolgt wird, dass es schadet.
+
+**Die „Behandle diese Antwort als erledigt“-Zeilen aus dem Opus-5.5-Leitfaden.** Diese zwei Sätze verringern das Thinking von Fable 5.2 bei Folgefragen mit `high` Effort tatsächlich — und in Anthropics Tests machten sie das Modell auch **deutlich weniger geneigt, Fehler in seinen früheren Antworten anzusprechen.** In den meisten Anwendungen ist das ein schlechter Tausch. Lassen Sie sie dort weg, wo das Modell seine eigene Arbeit weiter überprüfen soll.
+
+**Angesammelte Vorsichtsregeln.** Dieser Punkt ist subtil und hängt damit zusammen, wie genau 5.2 Anweisungen befolgt. Vorsichtige Regeln häufen sich überall dort an, wo Kontext übernommen wird — Memory-Dateien, Notizen, Anweisungsdateien, Nachrichten zwischen Agents — und manche wurden vom Modell selbst geschrieben. Anthropics Zahlen: Mit einem Dutzend Notizen aus früheren Sitzungen, von denen eine besagte, nie erneut zu versuchen, versuchte das Modell es nach einem ausgelasteten Tool in etwa **vier von zehn Versuchen erneut, gegenüber fast allen** ohne diese Notizen. Ein „Stopp beim ersten Fehler“ eines Reviewer-Agents im Kontext reichte aus, um Fable 5.2 in etwa einem Drittel der Versuche vom erneuten Versuch abzuhalten, in einem Setup, in dem **Fable 5.1 und Opus 5.5 beide erneut versuchten**.
+
+Die Korrektur, die tatsächlich wirkt, ist kontraintuitiv: **Schreiben Sie die Ausnahme in die Regel selbst**, statt eine separate Zeile hinzuzufügen, die die Ausnahme gewährt. Bei einer nackten „Niemals“-Regel, in der eine verantwortliche Person den Schritt genehmigt hatte, führte das Modell ihn in etwa **einem von zehn Versuchen** aus; eine separate Zeile, die besagt, dass ein genehmigter Schritt grünes Licht hat, änderte das kaum; die Regel selbst so umzuschreiben, dass zuerst eine Freigabe einzuholen ist, brachte etwa **neun von zehn Versuchen**.
+
+## Zwei Prompt-Ergänzungen, die ihre Token verdienen
+
+### Die ganze Aufgabe zu Ende bringen
+
+Fable 5.2 beendet manchmal einen Turn, bevor die Arbeit erledigt ist — mit einer Liste dessen, was noch fehlt, einem Angebot weiterzumachen oder einem Stopp bei einem gewöhnlichen Hindernis wie einem Timeout. Das passiert häufiger bei `low` und `medium` Effort. Anthropic veröffentlicht dafür System-Prompt-Text, und seine gemessene Wirkung auf wiedergegebene Sitzungen eines agentischen Coding-Produkts bei `medium` Effort: **etwa halb so viele Sitzungen endeten mit machbarer Restarbeit**, zum Preis von rund **30 % mehr Ausgabe-Token**.
+
+<PromptCard title="Die ganze Aufgabe zu Ende bringen — Ergänzung für den System-Prompt">
+{`# Finishing work
+Please avoid stopping while you still owe work the user asked for. Be persistent and do not stop unless needed.
+
+While status notes are welcome, as is clarifying with the user on open decisions, carry on with work that does not depend on the user's answer without unnecessary stops.
+
+If you notice yourself inviting the user to redirect you or offering to wait, instead proceed on the next part of the task. You may meet ordinary obstacles like errors, timeouts, locked files, empty results or failing tools. Diagnose them first, and when they are not real blockers, work through them with the access you have (wait and retry, fix the request, use another tool or source) rather than stopping unnecessarily.
+
+If someone clearly decided something is a hard blocker, such as a file marked not to be touched, access that was intentionally withheld, or a safety guardrail, leave it alone, say plainly what you found, and look for another safe way to finish the task. Stopping before the task is complete is very rarely merited, as in when the task can't move forward without user input, or where the blocker is deliberate and should not be worked past. This does not override the need for confirmation on risky or destructive actions.`}
+</PromptCard>
+
+Die strukturelle Idee, die Sie beim Anpassen behalten sollten: Sie **trennt zwei Arten von Hindernissen**. Gewöhnliche Fehler — Fehlermeldungen, Timeouts, ausgelastete Tools — werden diagnostiziert und überwunden. Absichtliche Sperren — eine als „nicht anfassen“ markierte Datei, bewusst verwehrter Zugriff, eine Sicherheitsleitplanke — werden in Ruhe gelassen und gemeldet. Anthropic merkt außerdem an, dass der Text die meisten Schlüsse entfernte, die um Erlaubnis fragen, aber **nicht** Schlüsse, die auflisten, was noch fehlt, und dann stoppen.
+
+Eine Konsequenz, auf die Sie Ihr Design ausrichten sollten: Weil das Modell jetzt seltener nachfragt, **behalten Sie Ihren eigenen Bestätigungsschritt für riskante oder irreversible Aktionen.** Der Prompt ist kein Ersatz für ein Gate.
+
+### Sagen, wem der Code gehört
+
+Das ist der auffälligste gemessene Effekt des gesamten Releases, und es ist ein einziger Satz. Fable 5.2 reagiert genau darauf, was der Prompt darüber sagt, wem der Code gehört. Wenn der Prompt nichts über Eigentum sagte oder die Codebasis als die eines anderen darstellte, neigte das Modell dazu, **der bestehenden Struktur etwas hinzuzufügen, auch wenn das Code duplizierte**, und **Probleme in der Nähe zu melden, statt sie zu beheben**.
+
+<PromptCard title="Code-Eigentümerschaft — ein Satz, gemessener Effekt">
+{`This codebase is yours: what it's for and how it's built are your call, and you'll keep building on it.`}
+</PromptCard>
+
+Anthropics Zahlen bei kleinen Coding-Aufgaben: Das Modell führte duplizierten Code mit diesem Satz in etwa **der Hälfte** der Versuche zusammen, ohne ihn in **weniger als einem Zehntel**. Der Effekt blieb bestehen, auch wenn der Satz in einem langen System-Prompt stand.
+
+Nun die Rechnung, denn das ist ein Tausch und kein Gratisgewinn. Mit dem Satz verbrauchte das Modell etwa **das 1,5-Fache an Ausgabe-Token**, nahm mehrere Änderungen vor, die niemand verlangt hatte (viele davon neue Tests und Dokumentation), und — Bugfixes ausgenommen — **veränderte in einem von sechs bis zehn Versuchen das Verhalten einer bestehenden Funktion**, häufiger bei höherem Effort. Seine abschließende Zusammenfassung nannte die größeren Änderungen, ließ kleine aber oft aus.
+
+:::warning[Prüfen Sie den Diff, nicht die Zusammenfassung]
+Dieser letzte Befund ist der operative: Die eigene Zusammenfassung des Modells ist kein vollständiges Änderungsprotokoll dessen, was es getan hat. Beachten Sie außerdem, dass eine Umfangsbegrenzung an anderer Stelle im Prompt diesen Satz **nicht** aufhebt — mit „Keine nebenbei durchgeführten Refactorings, Umbenennungen oder Aufräumarbeiten“ weiter oben im selben Prompt führte das Modell duplizierten Code dennoch in etwa einem Drittel der Versuche zusammen. Lassen Sie den Satz ganz weg, wo der Nutzer den Code besitzt und minimale Änderungen will.
+:::
+
+## Effort: bei high anfangen und wissen, wofür jeder Level da ist
+
+Fable 5.2 unterstützt alle fünf Effort-Level und verwendet auf der Claude API standardmäßig **`high`**. Anthropics Einordnung: **Der Großteil des Leistungsgewinns ist bereits bei `high` vorhanden**, und darüber sind die Gewinne ungleichmäßig und aufgabenabhängig.
+
+| Level | Wofür Anthropic ihn empfiehlt |
+|---|---|
+| `low` | Schnelles Hin und Her, gut spezifizierte Aufgaben, hohes Volumen, schnelle Subagents. Die Werte lagen hier **nahe an denen von Fable 5.1 bei höheren Effort-Leveln**. |
+| `medium` | Interaktives Coding, Chat, alltägliche Wissensarbeit. |
+| `high` | Schwieriges Coding, Recherche, agentische Arbeit, lange unbeaufsichtigte Läufe. Der Standard. Turns dauern spürbar länger als bei `medium`. |
+| `xhigh` | Ihre schwerste, lang laufende Coding- und Agentenarbeit, *wo Sie einen Gewinn gemessen haben*. Hob interne Coding-Werte leicht an und verbrauchte deutlich mehr Token. |
+| `max` | Die Obergrenze ausmessen oder offene Probleme wie wissenschaftliche Entdeckung und Mathematik, bei denen Zeit und Token keine Rolle spielen. |
+
+Drei Verhaltensweisen, die Sie bei der Wahl eines Levels im Kopf behalten sollten. Das Modell **hört bei niedrigerem Effort eher früh auf**, kombinieren Sie agentische Arbeit mit `low`/`medium` also mit dem obigen Text „Die ganze Aufgabe zu Ende bringen“. Ab `high` **denkt es vor fast jeder Antwort nach**, leiten Sie einfache Turns also auf einen niedrigeren Level um, statt zu versuchen, das Thinking wegzuprompten. Und **Effort verändert die Antwortlänge kaum** — das ist eine Prompting-Aufgabe, kein Regler.
+
+Sie können Level in einem Workflow mischen: mit `medium` planen, dann den Effort für die lange unbeaufsichtigte Strecke erhöhen. Um den Level mitten in der Unterhaltung zu ändern, *ohne* den Prompt-Cache zurückzusetzen, nutzen Sie Per-Message-Effort (Beta, `mid-conversation-output-config-2026-07-01`); wenn Sie stattdessen einen neuen `effort` auf oberster Ebene setzen, beginnt der Cache von vorn. Vertiefung: [Effort Tuning](/docs/api/effort-tuning) und [Thinking & Effort](/docs/api/thinking-and-effort).
+
+## Was die Preissenkung tatsächlich bringt
+
+| | Fable 5.1 | Fable 5.2 | Fable 5.2 Fast-Modus |
+|---|---|---|---|
+| Basis-Eingabe | $10 / MTok | **$8 / MTok** | $16 / MTok |
+| Ausgabe | $50 / MTok | **$40 / MTok** | $80 / MTok |
+| Cache-Lesezugriffe | $0.25 / MTok | **$0.20 / MTok** | — |
+| 5-Min-Cache-Schreibzugriffe | — | $10 / MTok | — |
+| 1-Std-Cache-Schreibzugriffe | — | $16 / MTok | — |
+| Batch | — | $4 Eingabe / $20 Ausgabe | — |
+
+Drei Dinge, die Sie aus dieser Tabelle mitnehmen sollten. **Der Cache-Lese-Multiplikator hat sich nicht geändert** — er beträgt weiterhin das 0,025-Fache der Basis-Eingabe, dasselbe Verhältnis, das Fable 5.1 eingeführt hat; die Ersparnis ist also pauschal 20 % auf ganzer Linie und keine neue Caching-Geschichte. **Batch ist die üblichen 50 % Rabatt**, womit die Eingabe von Fable 5.2 im Batch zum Preis von Opus 5.5 ohne Batch liegt. Und **der Fast-Modus kostet genau das Doppelte des Standardtarifs** für „bis zu 2,5-fache“ Token-Generierungsgeschwindigkeit, was ihn zu einem Latenzkauf macht mit einem Durchsatzergebnis zwischen Break-even und leicht vorteilhaft — sinnvoll, wenn ein Mensch wartet, nicht als Standard.
+
+Der Fast-Modus für Fable 5.2 steht auf der Claude API, beiden Google-Cloud-Pfaden und Microsoft Foundry zur Verfügung (wo er für von Anthropic gehostete Deployments eine **separate Modell-ID** ist, `claude-fable-5-2-fast`). Anthropic führt ihn auch in Claude Code auf.
+
+:::tip[Das günstigere Flaggschiff ist trotzdem nicht die billige Option]
+Opus 5.5 kostet $4 / $20 — die Hälfte von Fable 5.2 — und bleibt Anthropics eigener empfohlener Ausgangspunkt. Die Preissenkung verkleinert den Abstand; sie ändert nicht die Empfehlung. Greifen Sie zu Fable 5.2, wenn Ihre Evals mit Opus bei höherem Effort nicht ausreichen, und aktuelle Zahlen finden Sie unter [Aktuelle Modelle und Preise](/docs/whats-new/models-and-pricing).
+:::
+
+## Die Launch-Benchmarks ehrlich lesen
+
+Anthropic hat zum Launch eine Vergleichstabelle veröffentlicht. Hier ist sie, wie veröffentlicht — und dann die drei Dinge, die darin bemerkenswert sind.
+
+| Benchmark | Fable 5.2 | Fable 5.1 | Opus 5.5 | GPT-6 Astra | Gemini 4 Carbon |
+|---|---|---|---|---|---|
+| FrontierCode 2.0 (agentic coding) | 49.1% *(xhigh)* | 41.1% *(medium)* | 45.5% | 42.8% | — |
+| FrontierSWE v2 (agentic coding) | 69.9% | 56.3% | 62.3% | 65.5% | 61.2% |
+| AutomationBench (business workflows) | 51.4% | 31.4% | 42.5% | 41.4% | **53.9%** |
+| Terminal-Bench-Science 0.1 | 74.6% | 52.6% | 58.7% | 68.1% | 64.8% |
+| WANDR (agentic search, relaxed) | 82.1% | 68.7% | 72.3% | — | — |
+| OSWorld 2.1 (computer use, partial) | 89.3% | 83.5% | 87.2% | 79.5% | 81.5% |
+| RoboDojo Sim (robotics) | 64.9% | 27.6% | 39.4% | 29.8% | — |
+| AA-Briefcase v1.1 (rubric) | 66.1% | 61.5% | 61.2% | 52.0% | 61.8% |
+| AA-Briefcase v1.1 (Elo) | 1785 | 1669 | **1800** | 1569 | 1611 |
+| Remote Labor Index | 41.3% *(high)* | 17.9% | 21.3% | 20.8% | — |
+| Humanity's Last Exam (with tools) | 74.2% | 65.6% | 67.7% | 57.2% | — |
+| Chartography (visual charts, no tools) | 73.4% | 44.8% | 64.4% | 71.0% | 72.5% |
+
+**Erstens: Die Coding-Schlagzeilenzeile vergleicht unterschiedliche Effort-Level.** Die 49,1 % von Fable 5.2 bei FrontierCode 2.0 sind bei `xhigh`; die 41,1 % von Fable 5.1 bei `medium`. Anthropic kennzeichnet das in den eigenen Fußnoten, und der Großteil der Berichterstattung ließ die Kennzeichnungen weg. Es ist keine erfundene Zahl — nur nicht der 8-Punkte-Sprung bei gleichen Einstellungen, als der sie sich liest. Die Zeile FrontierSWE v2 (69,9 % gegenüber 56,3 %) trägt keinen solchen Vorbehalt und ist der sauberere Coding-Vergleich.
+
+**Zweitens: Fable 5.2 gewinnt nicht überall.** Gemini 4 Carbon schlägt es bei AutomationBench (53,9 % gegenüber 51,4 %), und — die Zeile, die niemand zitiert hat — **Opus 5.5 schlägt es beim AA-Briefcase-Elo, 1800 zu 1785**, obwohl Fable 5.2 den Rubric-Wert desselben Benchmarks mit 66,1 % zu 61,2 % gewinnt. Ein Rubric-Wert und ein direkter Elo-Vergleich messen verschiedene Dinge, und hier widersprechen sie sich. Wenn Ihre Arbeitslast Wissensarbeit statt langfristigem Coding ist, ist dieser Widerspruch die entscheidungsrelevanteste Zeile der Tabelle und spricht dafür, eigene Evals zu fahren, statt auf Grundlage eines Launch-Beitrags zu wechseln.
+
+**Drittens: Die größten Sprünge liegen in den engsten Domänen.** RoboDojo Sim mehr als verdoppelt sich (27,6 % → 64,9 %), und der Remote Labor Index mehr als verdoppelt sich (17,9 % → 41,3 %). Beeindruckend, und zugleich die Zeilen, die am wenigsten etwas über Ihre Anwendung vorhersagen. Die allgemeine Lehre und die Checkliste mit sechs Fragen: [Wie man einen KI-Benchmark liest, ohne sich täuschen zu lassen](/docs/models/reading-ai-benchmarks).
+
+Auf der Mythos-Seite bewertet Anthropics Tabelle es genau dort etwas über Fable 5.2, wo die Schutzmaßnahmen greifen: **76,3 %** bei CyScenarioBench, **89,6 %** bei CVE Rediscovery, **85,1 %** beim De-novo-Binder-Design in 24 Stunden, **75,3 %** bei Terminal-Bench-Science 0.1.
+
+## Fable 5.2 vs. Mythos 5.2
+
+Anthropics eigene Aussage ist die klarste verfügbare Einordnung und verdient es, zitiert statt paraphrasiert zu werden: „Claude Fable und Claude Mythos sind dasselbe zugrunde liegende Modell. Fable hat starke Cybersicherheits- und Biologie-Schutzmaßnahmen gegen Missbrauch, die es uns ermöglichen, es allen Nutzern zur Verfügung zu stellen.“
+
+Mythos 5.2 ist also kein größeres Modell. Es sind dieselben Gewichte ohne die Cyber- und Biologie-Schutzmaßnahmen, nur verfügbar für Organisationen, die über Programme wie das **Cyber Verification Program** verifiziert wurden. Anthropic gibt außerdem an, die Schutzmaßnahmen von Fable 5.2 seien „so robust wie die von Fable 5.1, erzeugen aber weniger unnötige Blockaden“ — wenn also harmlose Sicherheits- oder Biowissenschaftsarbeit bei 5.1 die Klassifikatoren auslöste, sollte die Falsch-Positiv-Rate niedriger sein, bevor Sie überhaupt in Erwägung ziehen, Zugang zu beantragen.
+
+Praktisch: Die beiden lesen gegenseitig ihre Thinking-Blöcke, sodass der Wechsel einer Unterhaltung zwischen ihnen das Reasoning intakt lässt. Wenn eine Ablehnung legitime Arbeit blockiert, ist der Weg ein Verifizierungsprogramm, kein Prompt-Workaround.
+
+## Ablehnungen und Fallback
+
+Fable 5.2 lehnt In-Band ab: **HTTP 200** mit `stop_reason: "refusal"` und einem `stop_details`-Objekt, das die Kategorie nennt. Fünf Kategorien:
+
+- `cyber` — könnte Malware- oder Exploit-Entwicklung ermöglichen
+- `bio` — könnte biologischen Schaden ermöglichen, etwa gefährliche Labormethoden
+- `frontier_llm` — könnte bei der Entwicklung konkurrierender KI-Modelle helfen
+- `reasoning_extraction` — bittet das Modell, sein internes Reasoning im Antworttext wiederzugeben
+- `general_harms` — ein anderer Bereich der Nutzungsrichtlinie
+
+Zwei betriebliche Hinweise. Die zulässigen serverseitigen Fallback-Ziele für Fable 5.2 sind **Opus 4.8 und Opus 5** — beide können laut Breaking Change #2 die Thinking-Blöcke von Fable 5.2 nicht lesen, ein Fallback verliert also das Reasoning der Unterhaltung. Und **`reasoning_extraction` hat keinen empfohlenen Fallback**, diese Ablehnung bleibt also bestehen; die Lösung ist, nicht mehr nach Reasoning im Antworttext zu fragen und es stattdessen mit `display: "summarized"` aus den Thinking-Blöcken zu lesen.
+
+## Ein Quellenwiderspruch, berichtet statt aufgelöst
+
+Stand 10. November 2026 beschreiben zwei offizielle Anthropic-Seiten den Status von Fable 5.1 unterschiedlich. Die [Modellübersicht](https://platform.claude.com/docs/en/models/overview) führt `claude-fable-5-1` unter **„Legacy models (still available)“**. Die Statustabelle der [Modell-Deprecations](https://platform.claude.com/docs/en/about-claude/model-deprecations) führt es als **Active**, ohne angekündigte Deprecation und mit einer Außerbetriebnahme-Untergrenze nicht vor dem 1. September 2027.
+
+Beides lässt sich eher vereinbaren, als dass es im Widerspruch steht, und die Unterscheidung ist nützlich: In Anthropics eigenem Lebenszyklus-Vokabular bedeutet **Legacy** „erhält keine Updates mehr und könnte in Zukunft als veraltet eingestuft werden“ — eine Stufe vor **Deprecated**, ab der ein Außerbetriebnahmedatum vergeben wird. Die Gruppierung der Übersicht ist das redaktionelle Signal; die Statustabelle ist das vertragliche. Anthropic sichert mindestens **60 Tage Vorankündigung** vor der Außerbetriebnahme eines öffentlich veröffentlichten Modells zu, und diese Frist beginnt, wenn die Mitteilung ergeht.
+
+So oder so gibt es keinen Grund zu zögern: Fable 5.1 kostet jetzt **mehr** als sein Nachfolger. Vollständige Lebenszyklus-Verfolgung: [Deprecation & Migration Watch](/docs/whats-new/deprecations).
+
+## Häufige Fehler
+
+- **„Es funktioniert auf Fable 5.1“ als Beweis für korrektes Verlaufshandling zu nehmen.** Es kann nur beweisen, dass Ihr Konto vor dem 31. August 2026 angelegt wurde. Das ist die wahrscheinlichste Art, wie Sie diese Migration beißt.
+- **`"drop_block"` als Lösung statt als Notbehelf zu nutzen.** Es verwandelt einen 400er-Fehler in eine Rechnung: Verworfenes Thinking bedeutet, dass das Modell erneut denkt.
+- **Einen Effort-Level zu übernehmen.** Dasselbe Wort bedeutet bei einem anderen Modell eine andere Menge an Thinking. Sweepen Sie neu.
+- **„Antworte direkt“-Zeilen im Prompt zu lassen.** Sie funktionieren ab `medium` nicht mehr und kosten trotzdem Token. Senken Sie stattdessen den Effort.
+- **Den Code-Eigentümer-Satz zu einer Codebasis hinzuzufügen, die dem Nutzer gehört.** Er verfünffacht in etwa das Zusammenführen von Duplikaten, erhöht die Ausgabe-Token um das ~1,5-Fache und verändert das Verhalten bestehender Funktionen in einem von sechs bis zehn Versuchen. Das passt für manche Repos und ist für die meiste Kundenarbeit falsch.
+- **Das `model` des Advisors mitten in der Unterhaltung zu ändern.** Das bearbeitet `tools` und löst deshalb die Präfixprüfung aus. Nur in neuen Unterhaltungen.
+- **Die abschließende Zusammenfassung des Modells als vollständigen Diff zu lesen.** Anthropics eigene Tests sagen, dass kleine Änderungen darin fehlen.
+- **Auf Grundlage der Launch-Tabelle zu wechseln.** Zwei Zeilen sprechen gegen Fable 5.2, eine davon für Opus 5.5 zu weniger als dem halben Preis.
+
+## Testen Sie sich selbst
+
+<Quiz questions={[
+  {
+    q: "Ihr Agent läuft seit zwei Monaten fehlerfrei auf Fable 5.1 und fügt bei jeder Anfrage eine Statuserinnerung in den vorherigen Nutzer-Turn ein. Sie tauschen die ID gegen claude-fable-5-2 und bekommen 400er-Fehler. Was ist passiert?",
+    options: [
+      "Fable 5.2 hat die Unterstützung für Änderungen an Nutzer-Turns komplett entfernt, ohne Workaround",
+      "Die Präfixprüfung der Thinking-Blöcke, die bei Fable 5.1 nur bei Konten am oder nach dem 31. August 2026 einen Fehler auslöste, gilt bei Fable 5.2 für jedes Konto",
+      "Die Modell-ID ist falsch — sie braucht ein Datumssuffix",
+      "Erinnerungen müssen jetzt als Tool-Ergebnisse gesendet werden"
+    ],
+    answer: 1,
+    explain: "Das ist Breaking Change #1 und der wahrscheinlichste Migrationsfehler. Alles vor einem Thinking-Block zu bearbeiten, macht ihn ungültig; bei Fable 5.1 trat der resultierende 400er-Fehler nur bei neueren Konten auf, sodass ältere Konten einen latenten Bug sauber ausführten. Die dauerhafte Lösung ist ein Append-only-Verlauf (turn-bezogene Systemnachrichten für Erinnerungen pro Turn); der Notbehelf ist prefix_mismatch_behavior: \"drop_block\", das Ausgabe-Token kostet, weil das Modell erneut denkt."
+  },
+  {
+    q: "Sie betreiben einen Router, der schwierige Turns in derselben Unterhaltung an Fable 5.2 und günstige Turns an Opus 5.5 schickt. Was passiert mit dem Reasoning?",
+    options: [
+      "Nichts — Opus 5.5 ist neuer als Fable 5.1, also liest es die Blöcke von Fable 5.2",
+      "Die Anfrage scheitert mit einem 400er-Fehler, bis Sie einen Beta-Header aktivieren",
+      "Opus 5.5 verwirft die Thinking-Blöcke von Fable 5.2, bevor das Modell sie sieht; die Anfrage gelingt, das Verwerfen wird nicht berechnet und bleibt still, es sei denn, Sie senden thinking-binding-controls-2026-08-01 und lesen input_transformations",
+      "Die Blöcke werden in Textblöcke umgewandelt und als Eingabe berechnet"
+    ],
+    answer: 2,
+    explain: "Die Bewahrung ist einseitig. Fable 5.2 liest Blöcke früherer Modelle; nur Fable 5.2 und Mythos 5.2 lesen die von Fable 5.2. Opus 5.5 und Fable 5.1 verwerfen sie beide — ebenso Opus 4.8 und Opus 5, die die eigenen Fallback-Ziele von Fable 5.2 sind, sodass auch ein Ablehnungs-Fallback das Reasoning verliert."
+  },
+  {
+    q: "Welche Zeile in Anthropics Launch-Tabelle spricht GEGEN den Wechsel von Wissensarbeit von Opus 5.5 zu Fable 5.2?",
+    options: [
+      "FrontierSWE v2, wo Opus 5.5 höher punktet",
+      "AA-Briefcase v1.1 Elo, wo Opus 5.5 1800 gegen die 1785 von Fable 5.2 erzielt — obwohl Fable 5.2 den Rubric-Wert desselben Benchmarks gewinnt",
+      "Humanity's Last Exam, wo Fable 5.2 gegen GPT-6 Astra verliert",
+      "RoboDojo Sim, wo der Gewinn am kleinsten ist"
+    ],
+    answer: 1,
+    explain: "Der Rubric-Wert und der direkte Elo-Vergleich desselben Benchmarks widersprechen sich, und der Elo begünstigt Opus 5.5 zu weniger als dem halben Preis. Auch Gemini 4 Carbon schlägt Fable 5.2 bei AutomationBench (53,9 % gegenüber 51,4 %). Außerdem vergleicht die Schlagzeilenzeile FrontierCode 2.0 Fable 5.2 bei xhigh mit Fable 5.1 bei medium — von Anthropic gekennzeichnet, von der meisten Berichterstattung weggelassen."
+  },
+  {
+    q: "Ihr System-Prompt für eine Kunden-Codebasis sagt „Keine nebenbei durchgeführten Refactorings, Umbenennungen oder Aufräumarbeiten.“ Ein Teammitglied fügt den Code-Eigentümer-Satz hinzu, um die Struktur zu verbessern. Was sollten Sie erwarten?",
+    options: [
+      "Nichts — die frühere Umfangsbegrenzung hebt den Eigentümer-Satz auf",
+      "Einen 400er-Fehler, weil sich die beiden Anweisungen widersprechen",
+      "Das Modell führt duplizierten Code in etwa einem Drittel der Versuche dennoch zusammen, verbraucht ~1,5-mal so viele Ausgabe-Token und kann in einem von sechs bis zehn Versuchen das Verhalten bestehender Funktionen ändern",
+      "Der Eigentümer-Satz gilt nur, wenn er die erste Zeile des Prompts ist"
+    ],
+    answer: 2,
+    explain: "Anthropic hat genau diese Kombination getestet: Die Umfangsbegrenzung hebt den Eigentümer-Satz nicht auf. Bei Kundenarbeit, in der dem Nutzer der Code gehört und er minimale Änderungen will, lassen Sie den Satz weg, statt ihn einzuhegen — und prüfen Sie den Diff statt der abschließenden Zusammenfassung des Modells, die kleine Änderungen auslässt."
+  }
+]} />
+
+## Begriffe zum Merken
+
+<Flashcards cards={[
+  {front: "Prefix check", back: "Der API-Test, ob sich etwas vor einem Thinking-Block geändert hat, seit das Modell ihn erzeugt hat — system, tools oder eine frühere Nachricht. Bei Fable 5.2 liefert ein Verstoß bei JEDEM Konto 400 'The block is bound to a different conversation'; bei Fable 5.1 nur bei Konten, die am oder nach dem 31. August 2026 erstellt wurden."},
+  {front: "prefix_mismatch_behavior: \"drop_block\"", back: "Beta-Einstellung (thinking-binding-controls-2026-08-01), die ungültige Thinking-Blöcke verwirft und erfolgreich ist, statt einen Fehler zu liefern; jeder wird in einem Array input_transformations auf oberster Ebene gemeldet. Ein Notbehelf: Verworfenes Thinking bedeutet, dass das Modell erneut denkt und mehr Ausgabe-Token verbraucht."},
+  {front: "computer_toolset_20260801", back: "Das Computer-Use-Toolset, das Fable 5.2 verlangt. Das frühere Tool computer_20251124 liefert auf jeder Plattform 400 außer auf Amazon Bedrock, wo es weiterhin funktioniert."},
+  {front: "Advisor-Paarungsregel", back: "Ein Fable-5.2- oder Mythos-5.2-Executor akzeptiert nur claude-fable-5-2 oder claude-mythos-5-2 als Advisor. Die Änderung des model des Advisors bearbeitet tools, nehmen Sie sie also in neuen Unterhaltungen vor. Jeder Executor akzeptiert einen Fable-5.2-Advisor."},
+  {front: "Fast-Modus", back: "Optionaler Modus von Fable 5.2 / Mythos 5.2: bis zu 2,5-fache Ausgabe-Token pro Sekunde zu genau dem 2-Fachen des Listenpreises ($16 Eingabe / $80 Ausgabe). Auf Microsoft Foundry ist er eine separate Modell-ID, claude-fable-5-2-fast."},
+  {front: "Fable vs. Mythos", back: "Anthropic: 'dasselbe zugrunde liegende Modell'. Fable trägt die Cyber- und Biologie-Schutzmaßnahmen, die seine Veröffentlichung für alle ermöglichen; Mythos ist der Build ohne sie, für Organisationen, die über Programme wie das Cyber Verification Program verifiziert wurden. Sie lesen gegenseitig ihre Thinking-Blöcke."},
+  {front: "reasoning_extraction", back: "Die eine Ablehnungskategorie von Fable 5.2 ohne empfohlenen serverseitigen Fallback, die Ablehnung bleibt also bestehen. Wird ausgelöst, wenn das Modell gebeten wird, sein internes Reasoning im Antworttext wiederzugeben; lesen Sie stattdessen Thinking-Blöcke mit display: \"summarized\"."},
+  {front: "Legacy vs. Deprecated", back: "In Anthropics Lebenszyklus-Vokabular: Legacy = erhält keine Updates mehr, könnte später als veraltet eingestuft werden. Deprecated = nicht empfohlen, mit zugewiesenem Außerbetriebnahmedatum. Fable 5.1 ist derzeit in der Modellübersicht als Legacy, in der Statustabelle aber als Active geführt."},
+]} />
+
+## Wichtigste Erkenntnisse
+
+<Callout type="takeaways" items={[
+  "Die Ausweitung der Präfixprüfung auf jedes Konto ist das Hauptrisiko, keine Funktion: Code, der den Gesprächsverlauf bearbeitet, lief unter Fable 5.1 auf einem älteren Konto sauber und liefert nach dem Tausch einen 400er-Fehler. Testen Sie es, auch wenn Sie den Fehler nie gesehen haben.",
+  "Dies ist das erste Point-Release eines Claude-Flaggschiffs, das günstiger ist als sein Vorgänger — $8/$40 gegenüber $10/$50, bei unverändertem Cache-Lese-Multiplikator von 0,025. Es gibt kein Preisargument, bei Fable 5.1 zu bleiben.",
+  "Es ist trotzdem nicht die billige Option: Opus 5.5 kostet die Hälfte und bleibt Anthropics eigener empfohlener Ausgangspunkt. Greifen Sie zu Fable 5.2, wenn Ihre Evals mit Opus bei höherem Effort nicht ausreichen.",
+  "Erst löschen, dann hinzufügen: „Antworte direkt, ohne nachzudenken“ funktioniert ab medium Effort nicht mehr, ein im Prompt geschriebenes Token-Budget erhöhte die Kosten bei gleicher Leistung, und die „Behandle diese Antwort als erledigt“-Zeilen von Opus 5.5 machen das Modell deutlich weniger geneigt, eigene frühere Fehler anzusprechen.",
+  "Der Code-Eigentümer-Satz ist die wirkungsvollste einzelne Zeile des Releases und ein echter Tausch: Das Zusammenführen von Duplikaten steigt von unter einem Zehntel der Versuche auf etwa die Hälfte, bei ~1,5-fachen Ausgabe-Token und unverlangten Verhaltensänderungen in einem von sechs bis zehn Versuchen. Richtig für Ihr eigenes Repo, falsch für die meiste Kundenarbeit.",
+  "Lesen Sie die Launch-Tabelle mit ihren Fußnoten: Die Schlagzeilenzeile FrontierCode 2.0 vergleicht xhigh mit medium, Gemini 4 Carbon gewinnt AutomationBench, und Opus 5.5 gewinnt AA-Briefcase Elo zu weniger als dem halben Preis.",
+]} />
+
+## Weiter
+
+- [Claude Fable 5.1: Was sich geändert hat und wie man migriert](/docs/models/fable-5-1-field-guide) — das Release, das dieses ablöst, und woher die Regeln zu stets aktivem Thinking und erzwungenem `tool_choice` stammen
+- [Claude Opus 5.5: Der Leitfaden](/docs/models/opus-5-5-field-guide) — das Modell, mit dem Anthropic Ihnen weiterhin zu beginnen rät, zum halben Preis
+- [Wie man einen KI-Benchmark liest, ohne sich täuschen zu lassen](/docs/models/reading-ai-benchmarks) — die Checkliste hinter der Lesart der Launch-Tabelle auf dieser Seite

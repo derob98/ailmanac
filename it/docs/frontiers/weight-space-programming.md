@@ -1,0 +1,277 @@
+# Programmazione nello spazio dei pesi: quando un modello fa il debug dei pesi di un altro
+
+> Source: https://derob98.github.io/ailmanac/it/docs/frontiers/weight-space-programming · AILmanac (CC BY 4.0) · last verified 2026-11-03
+
+MIT CSAIL ha chiesto a GPT-6 Astra di leggere e modificare i pesi grezzi di Qwen3.5-0.8B. Modificarne lo 0,016% ha portato MATH-500 dal 7,9% al 48,1%. Il titolo dice «l'IA migliora l'IA»; i numeri dicono qualcosa di più circoscritto e più utile — ha rimosso una patologia che bloccava il modello, non gli ha aggiunto capacità matematica. L'esperimento di controllo che lo dimostra, perché lo 0,016% è un numero fuorviante, il budget nascosto di forward pass, il tetto di leggibilità e la lezione di igiene della valutazione che puoi usare oggi senza toccare un solo peso.
+
+<LevelBadge level="advanced" />
+
+Il **2 novembre 2026** quattro ricercatori del MIT CSAIL hanno pubblicato un post e un paper con un'impostazione volutamente provocatoria: gli LLM di frontiera possono trattare i pesi grezzi di una rete neurale come **codice leggibile e modificabile**. Niente discesa del gradiente, niente ciclo di addestramento, nessuna rete ausiliaria addestrata. Solo un modello, un dump testuale dei parametri di un altro modello, una sandbox Python e un budget.
+
+Il risultato che ha fatto il giro del mondo è stato il più grosso. Incaricato di rendere **Qwen3.5-0.8B** più bravo in matematica, GPT-6 Astra ha cambiato **131.072 pesi su circa 800 milioni — lo 0,016%** — e ha portato MATH-500 dal **7,9% al 48,1%**. In un giorno il post è diventato la notizia più votata su Hacker News con **2.693 punti**, e sono comparsi almeno cinque nuovi repository GitHub che cercavano di riprodurre o trasformare in prodotto l'idea.
+
+Il dibattito si è assestato su *«l'IA ora può migliorare l'IA»*, cioè l'unica lettura che l'esperimento di controllo del paper stesso esclude. Quello che è successo davvero è più circoscritto, meglio documentato e molto più utile: **Astra ha fatto il debug di un modello già rilasciato.** Ha trovato l'unica patologia che nascondeva una capacità già presente nei pesi, e l'ha cancellata. Questa pagina parla di quella differenza, perché è lì che sta tutto il valore pratico.
+
+<Callout type="objectives" items={[
+  "Dire con precisione cosa dimostra il risultato su Qwen — e leggere i tre numeri che provano che si è trattato di uno sblocco, non di un guadagno di capacità",
+  "Citare l'esperimento di controllo che nessuno cita: lo stesso metodo, lo stesso budget, su Gemma 3 270M ha spostato MATH-500 dal 6,8% al 7,0%",
+  "Spiegare perché «lo 0,016% dei pesi» sottostima la modifica — 131.072 pesi sono un cambiamento strutturale mirato a una profondità scelta, non rumore sparso",
+  "Collocare la tecnica nella sua vera genealogia (ROME, MEMIT, ablazione direzionale, abliterazione) e indicare l'unica cosa davvero nuova",
+  "Individuare la valuta nascosta in ogni affermazione sullo spazio dei pesi: il budget di forward pass, senza il quale i numeri del titolo non si riproducono",
+  "Conoscere il tetto di leggibilità — l'esperimento in cui i soli pesi non bastavano e i pattern di attenzione sì",
+  "Applicare oggi la lezione trasferibile senza modificare alcun peso: controlla il tuo tasso di troncamento prima di concludere che un modello piccolo «non sa» fare un compito",
+]} />
+
+<VerifyNote lastVerified="2026-11-03" source="https://rikiyat.github.io/blog/weight-space-programming/">
+Tutti i numeri degli esperimenti in questa pagina provengono dalla relazione degli autori su *«Sparks of Weight-Space Programming»* (Rikiya Takehi, Jayden Teoh, Alex Zhang, Omar Khattab; MIT CSAIL), letta il 3 novembre 2026 — un giorno dopo la pubblicazione. Va trattata di conseguenza: è un **preprint di un giorno**, autodichiarato dagli autori, senza ancora alcuna replicazione indipendente. I log completi degli esperimenti sono pubblici, il che è meglio di quanto accada per la maggior parte di affermazioni di questa portata, ma log pubblicati non sono una replicazione. Il numero di stelle e le date dei repository vengono dall'API di GitHub del 3 novembre 2026 e cambieranno. La cifra di «circa 20 ore di tempo agente» viene dal thread di annuncio degli autori e non dalle tabelle degli esperimenti — consideralo un dato approssimativo.
+</VerifyNote>
+
+## Cosa è stato fatto davvero
+
+L'esperimento su Qwen — l'ottavo e ultimo del post — si è svolto così. Ad Astra sono stati dati **Qwen3.5-0.8B** (24 layer, modalità thinking attiva), un kernel Python, l'accesso ai set di esercizi di GSM8K e MATH (**7.469** e **7.275** problemi) e un budget di forward pass attraverso il modello. Gli erano esplicitamente **vietati** la discesa del gradiente, i cicli di addestramento, la ricerca ad albero e il web. Poteva leggere i pesi ed eseguire il modello per vedere cosa succedeva.
+
+Astra ha riferito che Qwen3.5-0.8B restava bloccato in **cicli di ragionamento** — un difetto di cui avverte la sua stessa model card — ha localizzato il comportamento nei blocchi MLP dei **layer 15 e 19** e ha sottratto la direzione ritenuta responsabile da **64 colonne di output**. Questo è l'intero intervento: 64 colonne, 131.072 numeri singoli.
+
+| Benchmark | Prima | Dopo (50 forward pass) | Variazione |
+| --- | --- | --- | --- |
+| MATH-500 | 7,9% | 48,1% | 6,1× |
+| GSM8K | 13,8% | 67,1% | 4,9× |
+| IFEval (aderenza alle istruzioni) | 21,0% | 62,3% | 3,0× |
+| Raggiunto il limite di token in output | 93,0% | 33,1% | −59,9 punti |
+
+## La riformulazione: è debugging, non addestramento
+
+Guarda di nuovo quella tabella da diagnosta, non da titolista. **Tre benchmark non correlati si sono mossi insieme**, e uno di essi — IFEval — non c'entra niente con la matematica. Un vero miglioramento in matematica non triplica come effetto collaterale l'aderenza alle istruzioni.
+
+Ora leggi la quarta riga, quella che spiega davvero. Prima della modifica, **il 93% dei tentativi ha raggiunto il limite di token in output.** Nove esecuzioni su dieci non hanno mai prodotto una risposta finale. Il 7,9% su MATH-500 non misurava se Qwen3.5-0.8B sapesse fare i conti; misurava quanto spesso il modello riusciva a uscire dal proprio ciclo prima di essere interrotto. Porta il troncamento al 33,1% e ogni punteggio che sta dietro il troncamento si muove, perché ogni punteggio dietro il troncamento veniva misurato attraverso di esso.
+
+:::tip[La firma da imparare]
+**Una modifica, tre benchmark non correlati, il troncamento crolla.** Questo schema è l'impronta digitale della *rimozione di un ostacolo*. L'impronta digitale dell'*aggiunta di una capacità* è stretta — la metrica bersaglio si muove e quelle non correlate no. Ogni volta che vedi un salto spettacolare su più benchmark da un intervento minuscolo, sospetta di avere davanti uno sblocco e vai a cercare il dato sul troncamento o sul formato.
+:::
+
+Come la inquadrano gli autori, il 6× non è un modello più intelligente — è **un modello finalmente lasciato libero di finire le sue risposte**.
+
+Non è un ridimensionamento. Saper trovare e rimuovere chirurgicamente una patologia in un modello già rilasciato, senza riaddestrare e senza l'oblio catastrofico che di solito accompagna il fine-tuning, è una capacità di grande valore. Ma è una capacità *diversa* da quella che il titolo lascia intendere, e confonderle ti costerà caro se pianifichi il lavoro su questa base.
+
+## L'esperimento di controllo che nessuno cita
+
+Ecco il numero che avrebbe dovuto stare in ogni resoconto e non c'era quasi in nessuno. Gli autori hanno eseguito lo stesso metodo, con lo stesso budget di forward pass, su **Gemma 3 270M**:
+
+| Modello | MATH-500 prima | MATH-500 dopo | Esito |
+| --- | --- | --- | --- |
+| Qwen3.5-0.8B | 7,9% | 48,1% | Ha funzionato |
+| Gemma 3 270M | 6,8% | 7,0% | **Nessun effetto** |
+
+Astra non è riuscito a migliorare Gemma. La spiegazione degli autori è la tesi di questa pagina enunciata come limite: gli errori di Gemma 3 270M in matematica erano **errori di ragionamento distribuiti**, non un singolo componente bloccante localizzato. Non c'era una patologia unica da cancellare, quindi il metodo non aveva nulla da fare.
+
+Ecco la precondizione. Una modifica di questo tipo nello spazio dei pesi richiede una **patologia localizzata** — un meccanismo specifico e individuabile che sopprime una capacità specifica già presente. Dove la debolezza è diffusa e riguarda davvero la capacità, la tecnica, finora, non ha nulla da offrire. Rimuove ostacoli; non installa competenze.
+
+## Perché «0,016%» è il modo sbagliato di sentirlo
+
+«Ha cambiato solo lo 0,016% dei pesi» suona come un sussurro — una spintarella, un errore di arrotondamento. L'impostazione ti invita a immaginare una spolverata di rumore sulla rete. Non è ciò che è successo, e il fraintendimento conta in entrambe le direzioni.
+
+131.072 pesi divisi per 64 colonne fanno **2.048 valori per colonna**. Quindi la modifica consiste in 64 direzioni di output complete, a una **profondità scelta** (layer 15 e 19 su 24 — il centro dello stack, dove questa famiglia di tecniche trova di solito il meccanismo comportamentale), tutte spinte nello stesso verso. È un cambiamento *strutturato, mirato, dal sapore di basso rango*, non diffuso.
+
+Il che taglia in due direzioni:
+
+- **È meno magico di quanto sembri.** Scegliere due layer MLP a metà stack e sottrarre una direzione dai loro output è una forma di intervento già molto battuta. La scala del risultato viene dalla *precisione del bersaglio*, non dalla piccolezza del numero.
+- **È più invasivo di quanto sembri.** 64 direzioni allineate a metà profondità sono un vero taglio chirurgico. «0,016%» è un numero rassicurante che descrive un'operazione non rassicurante, e l'artefatto pubblicato non contiene alcuna valutazione di cos'*altro* sia cambiato al di fuori dei quattro benchmark riportati.
+
+## La genealogia, e l'unica cosa nuova
+
+Se la forma dell'intervento ti suona familiare, è perché questa tecnica ha un albero genealogico consolidato. Leggere l'affermazione senza conoscerlo è il modo in cui si finisce per chiamare scoperta un'operazione nota — e, peggio, per non vedere qual è la vera novità.
+
+<Steps
+  items={[
+    {title: "ROME (2022) — modifica del modello di rango uno", body: "Individua dove vive una specifica associazione fattuale, poi applica un aggiornamento di rango uno ai pesi MLP di un singolo layer per scrivere direttamente un nuovo ricordo. Ha stabilito che la chirurgia mirata e discreta sui pesi funziona e che gli MLP a metà stack sono il punto in cui mirare."},
+    {title: "MEMIT (2023) — modifica di massa", body: "Il successore di ROME. Abbandona l'assunto di ROME che un solo layer basti e distribuisce l'aggiornamento su un intervallo di layer critici, ed è così che si inseriscono migliaia di modifiche invece di una. Nota l'eco strutturale: anche Astra ha scelto una piccola schiera di layer a metà stack invece di uno solo."},
+    {title: "Ablazione direzionale / abliterazione (dal 2024)", body: "Esegui il modello su insiemi contrastanti di prompt, prendi la differenza media delle attivazioni per ottenere una direzione comportamentale (classicamente la direzione del rifiuto), poi modifica i pesi in modo che nessun layer possa scrivere su di essa. Senza addestramento, senza gradienti. Meccanicamente è la stessa operazione eseguita da Astra su Qwen: trovare una direzione, sottrarla dagli output dei layer."},
+    {title: "Heretic e simili (2026) — automatizzato e popolare", body: "Gli strumenti sono maturati e sono diventati mainstream. Heretic — «modifica di modelli linguistici senza addestramento: rimuovere la censura, sopprimere lo slop, ridurre la piaggeria» — conta 38.427 stelle, con port e fork per GPU Blackwell, DGX Spark e Apple Silicon. La chirurgia dei pesi automatizzata e senza addestramento non è una curiosità di ricerca; è un'utility popolare."},
+    {title: "Programmazione nello spazio dei pesi (2026) — chi trova la direzione", body: "Ecco la vera novità. In ogni passaggio precedente, un essere umano progettava la procedura che localizzava il bersaglio: un metodo di tracciamento causale, un protocollo di attivazione contrastiva, una funzione obiettivo. Ad Astra non è stato dato nulla di tutto questo. Gli sono stati consegnati i parametri grezzi ed è stato chiesto di capire sia cosa non andava sia dove, dai pesi e da pochi forward pass. La modifica è vecchia; la novità è delegare a un modello generalista la ricerca di cosa modificare."}
+  ]}
+/>
+
+Questa riformulazione dice anche cosa osservare adesso. La domanda interessante non è «un LLM può applicare una modifica ai pesi» — ROME sapeva applicarla già nel 2022. È **quanto è bravo un modello generalista nel passaggio diagnostico**, la parte che ha sempre richiesto un ricercatore.
+
+## La valuta nascosta: i forward pass
+
+Ogni numero del titolo in questa pagina porta con sé una riserva silenziosa: **con 50 forward pass**. Appartiene all'affermazione, non alle note a piè di pagina, perché «niente gradienti, niente addestramento» induce a sentire «niente valutazione» — ed è sbagliato.
+
+L'esperimento sul Go rende visibile la dipendenza. Ad Astra è stato chiesto di scrivere da zero, layer per layer, i pesi di una rete per il Go da **1.480.274 parametri** (243 → 512 × 6 → 82, ReLU), ragionando su identificazione delle pietre, libertà, pericolo dei gruppi e valutazione delle mosse, contro baseline PPO addestrate su **20 milioni di partite**:
+
+| Budget di forward pass | Risultato |
+| --- | --- |
+| 0 | Vince più della metà delle partite contro le reti PPO più piccole |
+| 50 | Batte una rete PPO di pari dimensioni |
+
+Quindi il metodo non è pura lettura dei pesi. È **lettura dei pesi più un piccolissimo ciclo chiuso** — scrivi, verifica, correggi. Cinquanta valutazioni sono un ciclo straordinariamente economico rispetto a 20 milioni di partite di PPO, e quell'economicità è il vero titolo. Ma un tentativo di riproduzione che stanzia zero forward pass esegue un esperimento diverso e più debole, e deve aspettarsi numeri diversi e più deboli.
+
+## Il tetto di leggibilità
+
+Il settimo esperimento è quello che tiene onesto l'insieme, e gli autori meritano credito per averlo pubblicato con la stessa evidenza dei successi.
+
+Hanno preso **Gemma 3 270M** (18 layer, istruita), hanno fatto il fine-tuning di due copie con embedding e layer di output congelati — una onesta, una **accondiscendente** (sycophantic) — e hanno chiesto ad Astra di dire quale fosse quale.
+
+Dai soli pesi, **non ci è riuscito**. La differenza comportamentale installata dal fine-tuning semplicemente non era leggibile nei parametri a quella scala.
+
+Con uno strumento che mostrava i **pattern di attenzione** — dove guardava davvero ciascuna testa — ha indovinato tutte e tre le coppie e ha prodotto una spiegazione meccanicistica: le teste dei layer centrali del modello accondiscendente assegnavano più peso ai token del suggerimento dell'utente stesso. Che è esattamente ciò che la piaggeria *è*, descritta in circuiti.
+
+Due conclusioni da portarsi dietro:
+
+1. **«Gli LLM sanno leggere i pesi» ha un confine netto.** I parametri statici erano insufficienti per una vera domanda comportamentale. Era necessario osservare la rete *in funzione*.
+2. **La vittoria resta una vittoria.** Un modello generalista dotato di un visualizzatore di attenzione ha prodotto una diagnosi meccanicistica corretta e specifica di una patologia comportamentale. Questo è lavoro di interpretabilità.
+
+## Scrivere i pesi da zero
+
+Vale la pena registrarlo perché i numeri sono sorprendenti. Ad Astra è stato chiesto di generare **in un colpo solo** i pesi di reti che giocano a MinAtar (600 → 32 → 32 → 6, tanh), senza addestramento, senza gradienti e senza rollout nell'ambiente — ragionando su quale programma ciascun layer dovesse implementare e convertendolo in forma neurale:
+
+| Gioco | Astra, un colpo solo | PPO, 100M di passi |
+| --- | --- | --- |
+| Breakout | 517,4 | 15,8 |
+| Seaquest | 53,1 | 5,6 |
+| Asterix | 53,2 | 25,8 |
+
+Su Breakout il divario è di **32×** contro una baseline che ha consumato cento milioni di passi nell'ambiente. L'avvertenza onesta è che si tratta di reti minuscole per giochi piccoli e interamente specificabili — esattamente il regime in cui «scrivi direttamente il programma» dovrebbe battere la ricerca cieca, e il risultato è in parte un atto d'accusa verso l'efficienza campionaria di PPO sui compiti giocattolo. Ma il tetto si è spostato, e in una direzione che nessuno aveva dimostrato.
+
+L'esperimento di riparazione ha lo stesso sapore: una policy Kinetix per un'auto da **171.664 parametri** che non riusciva a saltare una rampa, con **0% su 256 episodi**, è passata al **100%** dopo che Astra ha modificato in un colpo solo il **3,5%** dei suoi pesi — aggiungendo un percorso attraverso i layer che leggeva posizione e velocità dell'auto.
+
+## Come leggere la prossima affermazione sullo spazio dei pesi
+
+Questo campo sta per produrre molti paper e molti thread. Cinque domande, in ordine, ti diranno cosa hai davanti.
+
+<Steps
+  items={[
+    {title: "C'era un controllo su un modello senza la patologia?", body: "La domanda di maggior valore. Qwen ha funzionato e Gemma no, ed è proprio quell'accoppiamento a rendere interpretabile il risultato su Qwen. Un'affermazione senza controllo negativo non sa distinguere «ha rimosso un blocco» da «ha aggiunto una capacità» — e hanno implicazioni completamente diverse per il tuo lavoro."},
+    {title: "Si sono mossi anche benchmark non correlati?", body: "Se una modifica per la matematica ha anche triplicato l'aderenza alle istruzioni, hai davanti uno sblocco. Vai a cercare il tasso di troncamento, di formato o di rifiuto che lo spiega. Un movimento stretto sulla sola metrica bersaglio è l'affermazione più forte sulla capacità."},
+    {title: "Qual era il budget di forward pass?", body: "«Niente gradienti» non è «niente valutazione». Chiedi quante volte è stato eseguito il modello. Zero è un'affermazione molto più forte di cinquanta, e cinquanta è ciò che ha prodotto la maggior parte di questi numeri."},
+    {title: "Quanto è costata la modifica in scala e tempo?", body: "Circa 20 ore di tempo agente per esaminare 800 milioni di parametri — per un modello che si può sottoporre a fine-tuning su una sola GPU consumer. La lunghezza del contesto limita quanta rete entra davanti al modello. Niente di tutto questo si estrapola linearmente a un 70B, figuriamoci a un modello di frontiera."},
+    {title: "Quali test di regressione sono stati pubblicati?", body: "Quattro benchmark sono migliorati. L'artefatto pubblicato dice poco su cos'altro sia cambiato. Un taglio di 64 direzioni a metà profondità è esattamente il tipo di cambiamento che può danneggiare silenziosamente comportamenti che nessuno ha misurato — la letteratura sulla modifica dei modelli documenta da anni l'oblio graduale e catastrofico causato da modifiche su larga scala."}
+  ]}
+/>
+
+## Cosa puoi usare oggi
+
+Questa settimana non consegnerai i parametri del tuo modello di produzione a un LLM. Ma l'intuizione diagnostica che sta sotto il risultato è utilizzabile subito, non costa nulla, e i numeri su Qwen dicono che la maggior parte delle persone la sbaglia.
+
+**Prima di concludere che un modello piccolo o locale non sa fare un compito, misura quanto spesso viene interrotto.** Qwen3.5-0.8B sembrava un modello con il 7,9% di padronanza della matematica. Era un modello con un ciclo, misurato attraverso un limite di token. Se la tua valutazione non separa *sbagliato* da *mai finito*, non stai misurando la capacità — stai misurando capacità per tasso di fuga, e ricorrerai a un modello più grande e più costoso per risolvere un problema che non è mai stato di capacità.
+
+<PromptCard title="Il triage del troncamento da cui ogni valutazione di modelli locali dovrebbe partire">
+{`Before judging this model's capability on my task, split the failures by cause.
+
+For each failed case, classify it as exactly one of:
+  TRUNCATED  - hit the output/token limit before producing a final answer
+  LOOPED     - repeated substantially similar text or re-derived the same step 3+ times
+  MALFORMED  - finished, but in a shape my parser or grader could not accept
+  WRONG      - finished cleanly, in the right shape, and the answer is incorrect
+
+Report: the count and percentage for each class, plus the accuracy
+recomputed over only the cases that reached a final answer.
+
+Then tell me which single class to fix first, and whether the headline
+accuracy is measuring reasoning quality or escape rate.`}
+</PromptCard>
+
+Solo il bucket **WRONG** è un'evidenza sul ragionamento. TRUNCATED e LOOPED di solito si correggono a poco prezzo con modifiche al campionamento e all'harness — una penalità di ripetizione, un limite di output più alto, un budget di passi nel prompt, una condizione di arresto che spezzi il ciclo — molto prima che qualcuno tocchi un peso. Vedi [Controlli di campionamento](/docs/foundations/sampling-controls) per le manopole, e [Eval](/docs/foundations/evals) per costruire l'harness che tiene separati i quattro bucket.
+
+Aggiunge anche una quarta opzione a una decisione che la maggior parte delle persone considera a tre vie. Accanto a [prompt, fine-tuning e RAG](/docs/foundations/finetune-vs-prompt-vs-rag) c'è ora la **chirurgia dei pesi** — senza addestramento, mirata, e già pratica per un solo compito ristretto: cancellare un comportamento appreso specifico (rifiuto, un tic verbale, la piaggeria, un ciclo) da un modello open-weight che controlli. È questo che rappresentano le 38.000 stelle di Heretic. Non è un modo per far sapere a un modello cose che non sa.
+
+<Flashcards title="Vocabolario dello spazio dei pesi" cards={[
+  {front: "Programmazione nello spazio dei pesi (WSP)", back: "Trattare i parametri grezzi di una rete neurale come codice leggibile e modificabile — un LLM generalista ispeziona i pesi e scrive direttamente le modifiche, senza discesa del gradiente, ciclo di addestramento o modello ausiliario addestrato."},
+  {front: "Patologia localizzata", back: "Un meccanismo specifico e individuabile che sopprime una capacità già contenuta nei pesi. La precondizione perché la modifica WSP faccia qualcosa: Qwen3.5-0.8B ne aveva una (i cicli di ragionamento), Gemma 3 270M no, e lo stesso metodo ha spostato Gemma dal 6,8% al 7,0%."},
+  {front: "Ablazione direzionale", back: "Identificare una direzione nello spazio delle attivazioni che guida un comportamento, poi modificare i pesi in modo che i layer non possano più scriverci. La famiglia meccanica a cui appartiene la modifica di Astra su Qwen — l'operazione è consolidata; delegare a un modello generalista la ricerca della direzione è la parte nuova."},
+  {front: "Abliterazione", back: "Ablazione direzionale applicata alla direzione del rifiuto, che toglie al modello la capacità di rifiutare. Diffusa da strumenti come Heretic (38,4k stelle). Senza addestramento, senza gradienti, ed è il motivo principale per cui la provenienza dei pesi open conta."},
+  {front: "ROME / MEMIT", back: "Rank-One Model Editing (NeurIPS 2022) scrive un fatto tramite un aggiornamento di rango uno ai pesi MLP di un layer; MEMIT (ICLR 2023) distribuisce gli aggiornamenti su un intervallo di layer critici per inserirne migliaia. L'arte precedente che ha stabilito gli MLP a metà stack come bersaglio."},
+  {front: "Budget di forward pass", back: "Quante volte il modello modificato viene effettivamente eseguito durante il processo. La valuta nascosta di ogni risultato WSP: i numeri del titolo su Qwen e sul Go sono «con 50 forward pass». Niente gradienti non significa niente valutazione."},
+  {front: "Capacità mascherata dal troncamento", back: "Un punteggio di benchmark che in realtà misura quanto spesso il modello esce da un ciclo prima di essere interrotto. Qwen3.5-0.8B ha raggiunto il limite di token nel 93,0% dei tentativi, quindi il suo 7,9% su MATH-500 era soprattutto un tasso di fuga."},
+  {front: "Tetto di leggibilità", back: "Il punto in cui i pesi statici smettono di rispondere a una domanda comportamentale. Astra non ha saputo distinguere dai soli pesi un Gemma 3 270M accondiscendente da uno onesto; con uno strumento sui pattern di attenzione ha indovinato tutte e tre le coppie."},
+]} />
+
+<Quiz questions={[
+  {
+    q: "La modifica di Astra ha portato MATH-500 di Qwen3.5-0.8B dal 7,9% al 48,1%. Quale singolo numero aggiuntivo spiega di più ciò che è successo davvero?",
+    options: [
+      "È stato modificato solo lo 0,016% dei pesi",
+      "I raggiungimenti del limite di token in output sono scesi dal 93,0% al 33,1%",
+      "La modifica ha preso di mira i layer MLP 15 e 19",
+      "Il risultato ha usato un budget di 50 forward pass"
+    ],
+    answer: 1,
+    explain: "Prima della modifica, il 93% dei tentativi non arrivava mai a una risposta finale — quindi il 7,9% era in gran parte un tasso di fuga dal ciclo più che una misura dell'abilità matematica. Far crollare il troncamento al 33,1% permette a ogni punteggio che sta dietro di muoversi, ed è anche il motivo per cui IFEval è triplicato pur non avendo nulla a che fare con la matematica. Gli altri tre fatti sono tutti veri e tutti importanti, ma nessuno spiega l'entità."
+  },
+  {
+    q: "Lo stesso metodo, lo stesso budget, applicato a Gemma 3 270M ha spostato MATH-500 dal 6,8% al 7,0%. Cosa stabilisce questo controllo?",
+    options: [
+      "Gemma 3 270M è troppo piccolo perché qualunque modifica dei pesi funzioni",
+      "Il budget di forward pass era troppo piccolo per un modello da 270M",
+      "La tecnica rimuove una patologia bloccante localizzata e non può aggiungere una capacità che il modello non ha",
+      "I modelli istruiti resistono alle modifiche nello spazio dei pesi"
+    ],
+    answer: 2,
+    explain: "Gli autori attribuiscono il risultato nullo al fatto che gli errori di Gemma in matematica erano errori di ragionamento distribuiti e non un singolo componente correggibile. È la precondizione enunciata come limite: deve esserci una patologia localizzata che sopprime una capacità già presente nei pesi. Nessun blocco, niente da cancellare. È anche il motivo per cui la lettura «l'IA migliora l'IA» esagera — e nota che la dimensione di Gemma non ha impedito all'esperimento sulla piaggeria di funzionare sullo stesso identico modello."
+  },
+  {
+    q: "Cosa c'è di davvero nuovo nella programmazione nello spazio dei pesi rispetto a ROME, MEMIT e abliterazione?",
+    options: [
+      "Modificare i pesi senza discesa del gradiente né ciclo di addestramento",
+      "Prendere di mira i layer MLP al centro dello stack",
+      "Sottrarre una direzione comportamentale dagli output dei layer",
+      "Un modello generalista che esegue il passaggio diagnostico — trovare cosa modificare e dove — senza alcuna procedura di localizzazione progettata da un essere umano"
+    ],
+    answer: 3,
+    explain: "I primi tre erano tutti arte precedente consolidata: l'abliterazione è senza addestramento e senza gradienti, ROME e MEMIT hanno stabilito gli MLP a metà stack come bersaglio, e la sottrazione direzionale è esattamente il meccanismo dell'abliterazione. Ciò che quei metodi avevano in comune era una procedura progettata da un essere umano per localizzare il bersaglio — tracciamento causale, un protocollo di attivazione contrastiva, una funzione obiettivo. Ad Astra sono stati dati parametri grezzi e una sandbox e ha dovuto capire sia cosa non andava sia dove. La modifica è vecchia; la novità è delegare la ricerca."
+  },
+  {
+    q: "Un nuovo paper sostiene che un LLM ha reso un modello enormemente migliore modificandone i pesi. Quale domanda dovresti porre per prima?",
+    options: [
+      "Se è stato testato anche un modello di controllo senza la patologia",
+      "Quanti pesi sono stati modificati, in percentuale",
+      "Quali layer sono stati presi di mira",
+      "Se i pesi modificati sono stati pubblicati"
+    ],
+    answer: 0,
+    explain: "Senza un controllo negativo non puoi distinguere «ha rimosso un blocco» da «ha aggiunto una capacità», e le due cose implicano conseguenze completamente diverse per il tuo lavoro. È l'accoppiamento Qwen contro Gemma a rendere interpretabile il numero su Qwen. La percentuale di pesi modificati è la più debole delle quattro — lo 0,016% suona come un sussurro mentre descrive 64 direzioni di output allineate tagliate a metà profondità, che è un vero cambiamento chirurgico."
+  },
+  {
+    q: "Ad Astra è stato chiesto di distinguere un Gemma 3 270M accondiscendente da uno onesto. Cos'è successo?",
+    options: [
+      "Ha identificato l'accondiscendente dai soli pesi in tutti e tre i set",
+      "Ha fallito dai soli pesi, e ci è riuscito una volta dotato di uno strumento che mostrava i pattern di attenzione",
+      "Ci è riuscito solo dopo che gli è stata concessa la discesa del gradiente",
+      "Ha identificato l'accondiscendente ma non ha dato alcuna spiegazione meccanicistica"
+    ],
+    answer: 1,
+    explain: "Questo è il tetto di leggibilità. La differenza comportamentale installata dal fine-tuning non era leggibile nei parametri statici a quella scala. Con un visualizzatore di attenzione, Astra ha indovinato tutte e tre le coppie e ha spiegato il meccanismo: le teste dei layer centrali del modello accondiscendente danno più peso ai token del suggerimento dell'utente. Quindi «gli LLM sanno leggere i pesi» ha un confine reale — era necessario osservare la rete in funzione — e il risultato resta autentico lavoro di interpretabilità."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Il risultato su Qwen è un risultato di debugging, non di addestramento. Astra ha rimosso una patologia bloccante (i cicli di ragionamento) che nascondeva un'abilità matematica già presente nei pesi — non ha insegnato la matematica al modello.",
+  "La prova sta nello schema: tre benchmark non correlati si sono mossi insieme (MATH-500 6,1x, GSM8K 4,9x, IFEval 3,0x) mentre i raggiungimenti del limite di token in output sono scesi dal 93,0% al 33,1%. Gli interventi stretti che muovono tutto sono sblocchi.",
+  "Il controllo è il numero più importante del paper e il meno citato. Stesso metodo, stesso budget, Gemma 3 270M: dal 6,8% al 7,0%. Nessuna patologia localizzata, nessun effetto. La tecnica rimuove ostacoli; non installa competenze.",
+  "«Lo 0,016% dei pesi» è un numero rassicurante che descrive un'operazione non rassicurante: 131.072 pesi sono 64 direzioni di output complete tagliate ai layer 15 e 19 su 24. Strutturato e mirato, non sparso.",
+  "La genealogia è reale — ROME (2022), MEMIT (2023), ablazione direzionale, Heretic a 38,4k stelle. La forma della modifica è un'idea vecchia di anni. La novità è un modello generalista che esegue il passaggio diagnostico senza una procedura di localizzazione progettata da un essere umano.",
+  "I forward pass sono la valuta nascosta. I numeri del titolo sono «con 50 forward pass», e l'esperimento sul Go mostra chiaramente il gradiente da 0 a 50. «Niente gradienti» non significa «niente valutazione».",
+  "I soli pesi hanno un tetto: Astra non ha saputo individuare dai parametri il Gemma accondiscendente e ha avuto bisogno dei pattern di attenzione. I pesi statici erano insufficienti per una domanda comportamentale.",
+  "Usa oggi il risultato, gratis: dividi i fallimenti delle tue valutazioni in TRUNCATED / LOOPED / MALFORMED / WRONG. Solo WRONG è un'evidenza sul ragionamento, e gli altri tre di solito si correggono nell'harness.",
+  "È un preprint di un giorno, autodichiarato, con log pubblicati ma nessuna replicazione indipendente. Che i log siano pubblici è meglio di quanto riescano a fare la maggior parte delle affermazioni di questa portata — resta comunque non una replicazione.",
+]} />
+
+## Fonti e approfondimenti
+
+- [Sparks of Weight-Space Programming: LLMs can natively read & write neural network weights](https://rikiyat.github.io/blog/weight-space-programming/) — Rikiya Takehi, Jayden Teoh, Alex Zhang, Omar Khattab (MIT CSAIL), 2 novembre 2026. La fonte primaria di ogni numero sperimentale qui riportato: tutti e otto gli esperimenti, le architetture di rete e i conteggi dei parametri, la tabella prima/dopo di Qwen3.5-0.8B e il dettaglio dei layer 15/19 e delle 64 colonne, il controllo su Gemma 3 270M, l'esperimento sulla piaggeria e il suo fallimento dai soli pesi, i risultati di generazione su MinAtar e Go, la riparazione su Kinetix e i permessi e i divieti dichiarati sugli strumenti.
+- [RikiyaT/lm_understand-logs](https://github.com/RikiyaT/lm_understand-logs) — i log completi degli esperimenti degli autori (516 stelle; repository creato il 29 ottobre 2026). L'artefatto che rende le affermazioni verificabili e non solo riportate.
+- [RikiyaT/Qwen3.5-0.8B-weight-space-programming](https://huggingface.co/RikiyaT/Qwen3.5-0.8B-weight-space-programming) — il modello modificato dell'Esperimento 8, pubblicato per poter eseguire entrambe le versioni da sé. Una [demo dal vivo](https://huggingface.co/spaces/akhaliq/weight-space-programming-demo) permette di vedere il modello di base andare in loop mentre quello modificato finisce.
+- ["Like gene editing for neural networks": MIT researchers used GPT-6 Astra to edit Qwen's open weights directly](https://venturebeat.com/technology/like-gene-editing-for-neural-networks-mit-researchers-used-gpt-6-astra-to-edit-qwens-open-weights-directly-boosting-math-performance) — il resoconto di VentureBeat, utile per capire come il risultato è stato presentato al pubblico.
+- [What is Weight-Space Programming and why it suddenly blew up the internet?](https://www.turingpost.com/p/what-is-weight-space-programming-and-why-it-suddenly-blew-up-the-internet) — Turing Post, commento indipendente che arriva alla stessa lettura «debugging, non addestramento».
+- [Locating and Editing Factual Associations in GPT (ROME)](https://github.com/kmeng01/rome) — Meng, Bau et al., NeurIPS 2022 (789 stelle). L'arte precedente di modifica dei pesi di rango uno su un singolo layer.
+- [Mass-Editing Memory in a Transformer (MEMIT)](https://memit.baulab.info/) — ICLR 2023, [codice](https://github.com/kmeng01/memit) (569 stelle). Il successore di ROME; distribuisce gli aggiornamenti su un intervallo di layer critici.
+- [p-e-w/heretic](https://github.com/p-e-w/heretic) — modifica di modelli linguistici senza addestramento: rimuovere la censura, sopprimere lo slop, ridurre la piaggeria (38.427 stelle, letto il 3 novembre 2026). La prova che la chirurgia dei pesi automatizzata e senza gradienti è già un'utility mainstream.
+- [Model Editing at Scale leads to Gradual and Catastrophic Forgetting](https://arxiv.org/html/2401.07453v3) — Gupta et al. Il lato negativo documentato delle modifiche ai pesi accumulate, e il motivo per cui conta la mancanza di test di regressione nell'artefatto WSP.
+- [Discussione su Hacker News](https://news.ycombinator.com/) — il post è arrivato in prima pagina con 2.693 punti il 3 novembre 2026.
+- Pagine collegate di AILmanac: [Pesi open con backdoor: la supply chain dei modelli abliterati](/docs/security/backdoored-open-weights) · [Guida pratica a GPT-6 Astra](/docs/models/openai-astra-preview) · [Fine-tuning, prompt o RAG](/docs/foundations/finetune-vs-prompt-vs-rag) · [Eval](/docs/foundations/evals)
+
+## Prossimi passi
+
+- [Pesi open con backdoor: la supply chain dei modelli abliterati](/docs/security/backdoored-open-weights) — la metà sicurezza di questa storia. Quando la chirurgia dei pesi senza addestramento è così facile e così efficace, «da dove vengono questi pesi» diventa una questione di supply chain, e questa è la pagina su cosa si può nascondere in un checkpoint modificato.
+- [Scoperta agentica: dentro l'harness che ha trovato ART](/docs/frontiers/agentic-discovery-art-harness) — l'altro risultato del 2026 in cui un modello generalista ha fatto un lavoro che prima richiedeva un ricercatore, con il design dell'harness scritto per esteso. Da leggere accanto a questa pagina per vedere com'è il passaggio diagnostico quando lo si scala in una campagna.
+- [Fine-tuning, prompt o RAG](/docs/foundations/finetune-vs-prompt-vs-rag) — la decisione a cui questa pagina aggiunge un quarto ramo. Vale la pena rileggerla con la chirurgia dei pesi in mente: senza addestramento, mirata, e brava in un solo compito — cancellare un comportamento appreso, mai aggiungere conoscenza.

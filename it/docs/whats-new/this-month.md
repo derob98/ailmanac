@@ -1,0 +1,43 @@
+# Questo mese in Claude
+
+> Source: https://derob98.github.io/ailmanac/it/docs/whats-new/this-month · AILmanac (CC BY 4.0) · last verified 2026-07-01
+
+Un riepilogo in linguaggio semplice delle recenti modifiche a modelli, Claude Code e API.
+
+<LevelBadge level="all" />
+
+<VerifyNote lastVerified="2026-06-24" source="https://platform.claude.com/docs">
+Questa pagina è un riepilogo dinamico, curato da persone. Per l'elenco autorevole e completo delle modifiche, consulta sempre la documentazione ufficiale di Anthropic e il changelog di Claude Code.
+</VerifyNote>
+
+Un riepilogo in linguaggio semplice di ciò che è cambiato di recente in tutto Claude — così puoi scorrere "cosa c'è di nuovo e cosa significa per me" senza leggere ogni changelog. Dal più recente.
+
+:::info[Come questa pagina resta aggiornata]
+Le voci vengono aggiunte dalla community e da un [watcher automatizzato](/docs/contribute/automation) che segnala le modifiche a monte affinché una persona le descriva. Ogni voce rimanda alla sua fonte ufficiale. Manca qualcosa? [Aggiungilo](/docs/contribute/contribute-in-10-minutes).
+:::
+
+## Come leggere una voce
+
+Ogni aggiornamento è etichettato per **ambito** — 🗣️ App (chat/voce/mobile), 🛠️ Claude Code, 🔌 API, 🧠 Modelli — e risponde a **"cosa significa per te."**
+
+## Aggiornamenti recenti
+
+- 🧠 **Modelli** — **Claude Sonnet 5** è stato rilasciato il 30 giugno 2026 ed è ora il **modello predefinito in Claude Code**, con una finestra di contesto nativa da 1M-token e un prezzo introduttivo fino al 31 agosto 2026. È il nuovo livello Sonnet bilanciato "parti da qui", che sostituisce Claude Sonnet 4.6 (ora un modello legacy). *Cosa significa:* se fissi un modello, migra a `claude-sonnet-5`; e controlla sempre la tabella [Modelli e prezzi attuali](/docs/whats-new/models-and-pricing) per gli ID esatti e i prezzi aggiornati prima di fare affidamento su un numero letto in un post di blog. <VerifyNote lastVerified="2026-07-01" source="https://platform.claude.com/docs/en/models/overview">ID API `claude-sonnet-5`; livello Sonnet; contesto da 1M-token; output massimo 128k; knowledge cutoff a gennaio 2026. Il prezzo introduttivo di $2 / $10 per MTok è valido fino al 31 agosto 2026 (standard $3 / $15). Ora è il predefinito di Claude Code secondo il [changelog](https://code.claude.com/docs/en/changelog) (v2.1.197, June 30 2026).</VerifyNote>
+- 🛠️ **Claude Code** — I **workflow dinamici** sono in research preview: chiedine uno (o imposta `/effort ultracode`) e Claude scrive uno script JavaScript che orchestra da decine a centinaia di [subagent](/docs/claude-code/subagents) in background — per audit sull'intera codebase, migrazioni di grandi dimensioni e ricerche verificate in modo incrociato. Esegui `/deep-research` per vedere quello incluso, oppure `/workflows` per osservare le esecuzioni. *Cosa significa:* ora puoi affrontare compiti su scala flotta che una singola conversazione non potrebbe mai coordinare, con l'orchestrazione salvata come comando rieseguibile. Vedi [Workflow dinamici e ultracode](/docs/claude-code/dynamic-workflows). <VerifyNote lastVerified="2026-06-24" source="https://code.claude.com/docs/en/workflows">Richiede Claude Code v2.1.154+; disponibile sui piani a pagamento, sull'API, su Bedrock, Vertex e Foundry.</VerifyNote>
+- 🧠 **Modelli** — Un nuovo modello di primissimo livello, **Claude Fable 5**, è stato rilasciato a giugno 2026 (Claude Code v2.1.170+). *Cosa significa:* controlla la tabella [Modelli e prezzi attuali](/docs/whats-new/models-and-pricing) per la gamma aggiornata e gli ID esatti prima di fissare un modello — non inserire mai a mano i dati di un modello presi da un post di blog.
+- 🛠️ **Claude Code** — I subagent possono ora **generare i propri subagent** (fino a 5 livelli di profondità), e `/code-review --fix` applica i risultati della revisione al tuo working tree. *Cosa significa:* la delega si compone più in profondità, e la revisione può chiudere il cerchio invece di limitarsi a segnalare. Verifica in modo incrociato il [changelog ufficiale](https://code.claude.com/docs/en/changelog) per il comportamento esatto.
+- 🔌 **API** — Capacità come l'output strutturato, l'extended thinking e il prompt caching si evolvono. *Cosa significa:* ricontrolla la [sezione API](/docs/api/first-call) prima di fare affidamento sui parametri esatti.
+
+## Vuoi il flusso completo?
+
+Questo è un *riepilogo*, non un registro completo. Per tutto:
+
+- [Documentazione e annunci di Anthropic](https://platform.claude.com/docs)
+- [Changelog di Claude Code](https://code.claude.com/docs/en/overview)
+- [Monitoraggio deprecazioni e migrazioni](/docs/whats-new/deprecations)
+
+## Avanti
+
+- [Modelli e prezzi attuali](/docs/whats-new/models-and-pricing)
+- [Monitoraggio deprecazioni e migrazioni](/docs/whats-new/deprecations)
+- [Changelog del sito](/docs/whats-new/site-changelog)

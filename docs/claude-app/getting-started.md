@@ -1,0 +1,83 @@
+# Getting Started with Claude.ai
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-app/getting-started · AILmanac (CC BY 4.0) · last verified 2026-08-13
+
+Accounts, the interface, and your first useful conversation.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={[
+  "Get an account, and know which plan decision you can safely postpone",
+  "Read the claude.ai interface in 20 seconds — and know what each chat remembers",
+  "Run one genuinely useful first conversation instead of a test question",
+  "Pick up the three habits that separate useful sessions from frustrating ones",
+]} />
+
+<VerifyNote lastVerified="2026-08-13" source="https://claude.com/pricing">
+Plan names and limits change — see [Plans, Limits & Billing](/docs/claude-app/plans-and-billing) and the official pricing page for current details.
+</VerifyNote>
+
+[claude.ai](https://claude.ai) is the easiest way to use Claude — no install, no code. Here's how to get value in your first sitting.
+
+## Sign in and pick a plan
+
+Create an account at [claude.ai](https://claude.ai). The **free** tier is plenty to learn the ropes; paid tiers raise usage limits and unlock more. You don't need to decide now — see [Plans, Limits & Billing](/docs/claude-app/plans-and-billing) when you're ready.
+
+## The interface in 20 seconds
+
+- A **message box** at the bottom — type or paste here.
+- The **conversation** above — your turns and Claude's, in order.
+- A **sidebar** of past chats — each chat is its own context.
+- **Attachments** — drop in files, images, or PDFs to ask about them.
+
+It's also on **[mobile](/docs/claude-app/mobile)** and by **[voice](/docs/claude-app/voice-mode)**.
+
+## Your first useful conversation
+
+Don't "search" — ask like you'd ask a sharp colleague, with context and a clear ask. Four moves:
+
+<Steps items={[
+  {title: "Give the situation, not a keyword", body: "Say who it's for, what you're trying to achieve, and any constraint that matters — budget, deadline, audience. A search engine wants keywords; Claude wants the brief."},
+  {title: "Name the shape of the answer you want", body: "A day-by-day outline, a checklist, a 120-word email, a table. Specific shapes are far easier to use than a wall of prose."},
+  {title: "Refine in plain language", body: "Swap day 2 for something less touristy. Add rough costs. Make it a checklist. You don't need to re-explain the task — the chat still holds it."},
+  {title: "Verify anything you'd act on", body: "Opening hours, prices, citations, names. Confident and wrong is the one failure mode to watch for."},
+]} />
+
+<PromptCard title="A first prompt worth typing">{`I'm planning a 3-day trip to Rome in October for two people who love food and
+history, on a mid-range budget. Draft a day-by-day outline with one must-do per
+day and a nearby lunch spot.`}</PromptCard>
+
+Then **refine in plain language**: *"swap day 2 for something less touristy," "add rough costs," "make it a checklist."* This back-and-forth is where the magic is — see [Prompting Basics](/docs/prompting/basics).
+
+## Three habits from day one
+
+1. **Give context.** Goal, audience, format, tone. (It can't read your mind.)
+2. **Iterate.** First answer is a draft.
+3. **Verify what matters.** Facts, numbers, and citations can be confidently wrong — see [Hallucinations](/docs/foundations/hallucinations).
+
+## Level up
+
+- **[Projects](/docs/claude-app/projects)** — a workspace with its own files and instructions.
+- **[Custom instructions & styles](/docs/claude-app/custom-instructions)** — set your defaults once.
+- **[Artifacts](/docs/claude-app/artifacts)** — get live documents and runnable apps in a side panel.
+- **[Claude Science](/docs/claude-app/claude-science)** — a specialized workbench for research workflows (beta).
+
+<Quiz title="Check yourself" questions={[
+  {q: "What does \"each chat is its own context\" mean in practice?", options: ["Every chat shares one running memory", "What you explained in one chat is not automatically present in another", "Chats are deleted when you close the tab", "Only the newest chat keeps context"], answer: 1, explain: "Each chat in the sidebar is its own context, so a new conversation starts without the background you gave in an earlier one."},
+  {q: "The first draft is usable but too touristy. What's the efficient next move?", options: ["Start a new chat and rewrite the whole prompt", "Refine in plain language in the same chat", "Upgrade your plan", "Attach a PDF of the itinerary"], answer: 1, explain: "The chat still holds the original brief, so a short plain-language refinement is enough — the first answer is a draft."},
+  {q: "Which day-one habit guards against the model's main failure mode?", options: ["Give context", "Iterate", "Verify what matters", "Use voice mode"], answer: 2, explain: "Facts, numbers, and citations can be confidently wrong, so verify anything you would act on."},
+]} />
+
+<Callout type="takeaways" items={[
+  "Start free — the plan decision can wait until limits actually bite.",
+  "Each chat is a separate context; a new chat starts from nothing.",
+  "Ask like you'd brief a sharp colleague: situation, constraint, and the shape of answer you want.",
+  "Treat the first answer as a draft and refine in plain language.",
+  "Verify anything you would act on — confident and wrong is the failure mode to watch.",
+]} />
+
+## Next
+
+- [Your First 5 Minutes](/docs/start-here/your-first-5-minutes)
+- [Talking to Claude (Voice Mode)](/docs/claude-app/voice-mode)
+- [Everyday Productivity](/docs/playbooks/productivity)

@@ -1,0 +1,271 @@
+# Agentic Discovery: Im Harness, das ART fand
+
+> Source: https://derob98.github.io/ailmanac/de/docs/frontiers/agentic-discovery-art-harness · AILmanac (CC BY 4.0) · last verified 2026-09-24
+
+Am 23. September 2026 gab Anthropic bekannt, dass Claude-Agenten eine neue Enzymfamilie gefunden haben. Interessant ist das Preprint: 949 Sessions und 215,6 Mio. Tokens (davon 189,5 Mio. Cache-Writes), 98 von 119 Aufgaben von den Agenten selbst erfunden, eine Entdeckung, die sich in zehn Wiederholungen nicht reproduzieren ließ, und ein Benchmark, in dem Tools die Erkennung von 90 % auf 32 % drückten.
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={["Die ART-Kampagne als Architektur lesen, nicht als Schlagzeile: fünf Agentenrollen, eine durch Gates gesteuerte Aufgabenkette und eine Triage-Queue","Verstehen, warum 98 der 119 Aufgaben der Kampagne nicht im Briefing standen — und warum die Entdeckung aus einer verworfenen Hypothese hervorging","Eine Multi-Agent-Token-Rechnung richtig lesen: 189,5 Mio. der 215,6 Mio. Tokens waren Prompt-Cache-Writes","Die zwei Ergebnisse erklären, die die Presse übersprungen hat — 0 von 10 bei der Reproduktion, und Tools, die das Modell schlechter darin machen, die Daten zu sehen","Die übertragbaren Teile des Harness für einen nicht-biologischen Korpus übernehmen und wissen, welche Teile sich nicht übertragen lassen"]} />
+
+Am **23. September 2026** veröffentlichte Anthropic *Claude discovers a novel enzyme system with CRISPR-like repeats*. Der Beitrag landete am selben Abend auf der Hacker-News-Startseite und kam auf rund **655 Punkte und 672 Kommentare**, dazu Agenturberichte bei jedem großen Medium und ein sichtbares Wackeln bei Gene-Editing-Aktien. Die Zusammenfassung, die alle wiederholten: ~950 Agenten, 21 Stunden, 210 Millionen Tokens, ein neues Enzymsystem.
+
+Diese Zahlen sind echt. Sie sind auch der am wenigsten nützliche Teil der Geschichte.
+
+Das begleitende Preprint — *Autonomous AI agents discover reverse transcriptases with tandem repeat arrays* von Yoon, Athukoralage, Ameisen, Kauderer-Abrams, Perry und Durrant — beschreibt das Harness, die Abrechnung, die Fehlermodi und eine Reihe von Kontrollen. Es enthält mindestens vier Dinge, die verändern, wie du deine eigenen Agenten-Pipelines bauen solltest, und die in der Berichterstattung praktisch nirgends vorkamen. Um sie geht es auf dieser Seite.
+
+<VerifyNote lastVerified="2026-09-24" source="https://www.anthropic.com/news/claude-discovers-novel-enzyme-system and the linked preprint PDF (https://www-cdn.anthropic.com/22573675ada52a8ca8a97a1a4b4326b2f208a071.pdf)">
+ART ist ein Preprint-Ergebnis, keine begutachtete Fachliteratur, und die Biologie ist ausdrücklich unfertig — die Autoren haben *nicht* gezeigt, dass das Enzym aktiv ist oder dass die Array-RNAs seine Substrate sind. Die Harness-Zahlen unten stammen aus den Methods des Papers und sollten als Momentaufnahme einer im September 2026 durchgeführten Kampagne verstanden werden, nicht als stabiler Benchmark.
+</VerifyNote>
+
+## Was die Kampagne tatsächlich war
+
+Ein **Research Brief** — ein kurzes Dokument, das das Ziel nennt, kein Workflow — wurde von einem Launch-Agenten in fünf Stufen aufgefächert, die als Kette mit skriptgesteuerten Abschlussprüfungen dazwischen liefen. Keine Aufgabe einer späteren Stufe konnte starten, bevor die vorherige geschlossen war.
+
+| Stufe | Was sie tat |
+| --- | --- |
+| 1. Input-Aufbau | Referenzsets und Profil-HMMs von Grund auf bauen |
+| 2. Datenbank-Sweep | Loci der Reversen Transkriptase (RT) über **1,9 Milliarden** metagenomische Proteincluster erfassen |
+| 3. RT-Klassifikation | Rund 200.000 gefundene RT-Cluster in neun Klassen einsortieren |
+| 4. Nachbarschafts-Zensus | Rund 11.000 Loci samplen, **3.564** wiederkehrende Nachbarproteinfamilien als mögliche Partner bewerten |
+| 5. Deep Dives | Die Familien untersuchen, die die eigenen Auswahlkriterien der Agenten bestanden hatten |
+
+Der Trichter, der am Ende herauskam: **3.564 Kandidatenfamilien → 16, die die Kriterien der Agenten bestanden (+1 später befördert) → 19 geschriebene Berichte → 3 als echte neue RT-Assoziationen bestätigt.** Vierzehn der siebzehn wurden als Annotationsartefakte, Teile bereits beschriebener Systeme oder zufällig benachbarte Gene verworfen. Davon unabhängig meldeten Worker drei ungewöhnliche RTs, die sich als neue Linien herausstellten — eine davon ist ART.
+
+Diese Überlebensrate ist die ehrliche Schlagzeile. Eine gut geführte autonome Kampagne über einen Korpus im Milliardenmaßstab lieferte **drei** belastbare Assoziationen und eine interessante Anomalie. Plane entsprechend.
+
+## Das Harness: fünf Rollen, eine gemeinsame Aufzeichnung
+
+Jeder Agent der Kampagne war eine Instanz von **Claude Code**, konfiguriert mit Claude Mythos 5, in einer Sandbox mit 60 CPU-Kernen, 192 GiB Speicher und **ohne GPU** — Strukturvorhersagen wurden an eine separate GPU-Queue geschickt (19 Jobs, ESMFold oder ColabFold). Das Harness erlaubte bis zu **58 gleichzeitige Sessions**.
+
+<Steps items={[
+  {title: "Der Launch-Agent fächert das Briefing auf", body: "Eine Session macht aus dem Research Brief die Fünf-Stufen-Kette, jede Stufe abgeschlossen durch eine skriptgesteuerte Abschlussprüfung. Das ist die einzige Stelle, an der menschliche Absicht in das System eintritt — Anthropic gibt an, die menschliche Beteiligung beschränkte sich auf den initialen Prompt und die Laborarbeit."},
+  {title: "Der Worker plant und führt dann aus", body: "Jede Aufgabe trägt einen Task Brief. Der Worker schreibt einen Plan, führt ihn aus und reicht eine schriftliche Zusammenfassung zusammen mit dem Code und den Datendateien ein, die er erzeugt hat. 414 der 949 Sessions waren Worker; sie machten 63,7 der 76,9 Agentenstunden aus."},
+  {title: "Der Supervisor prüft und kann die Kampagne erweitern", body: "Ein zweiter Agent liest den Plan, die Zusammenfassung und die bearbeiteten Dateien und nimmt die Aufgabe dann an oder gibt sie zur Überarbeitung zurück — 49 von 119 Aufgaben wurden mindestens einmal überarbeitet. Entscheidend: Der Supervisor kann auch neue Aufgaben als Reaktion auf das eben Gelesene eröffnen."},
+  {title: "Die Triage-Queue steuert die neue Arbeit", body: "Von Agenten vorgeschlagene Folgeaufgaben laufen nicht automatisch. Sie landen in einer Triage-Queue, aus der das Harness sie freigibt oder mit schriftlicher Begründung ablehnt. 10 von 119 Aufgaben wurden hier abgelehnt."},
+  {title: "Der Curator schreibt Ergebnisse in den gemeinsamen Speicher", body: "Nach jeder abgeschlossenen Aufgabe liest ein Curator-Agent Briefing und Zusammenfassung und trägt die Ergebnisse in eine gemeinsame Wissensbasis ein. Relevante Einträge werden dann in die Prompts späterer Worker und Supervisoren injiziert. Das ist der Mechanismus, der aus 949 Sessions eine Kampagne macht statt 949 Fremder."},
+  {title: "Der Editor prüft, bevor ein Bericht abgelegt wird", body: "Berichte durchlaufen einen Editor-Agenten, bevor sie in die Aufzeichnung gelangen. Alles — Pläne, Ergebnisse, Reviews, Skripte — wird in einen versionierten Speicher committet, den jeder Agent lesen kann."},
+  {title: "Die Kampagne endet, wenn die Queue leer ist", body: "Es gibt kein festes Schrittbudget und kein Zeitlimit. Der Lauf endet, wenn keine ausführbare Aufgabe mehr übrig ist — in diesem Fall nach 21,5 Stunden."}
+]} />
+
+Sessions pro Rolle: **414 Worker, 375 Supervisor, 107 Curator, 52 Editor**, plus die Launch-Session — insgesamt 949. Beachte, dass Aufsicht fast so viel kostet wie Arbeit. Wenn du ein review-lastiges Harness dimensionierst, ist ein Session-Verhältnis von Worker zu Supervisor nahe 1:1 hier die empirische Form, nicht 10:1.
+
+Die Agenten hatten die üblichen Claude-Code-Tools (Shell, Dateien, Websuche) plus vom Harness ergänzte Anbindungen an die Proteindatenbank, an Literatursuche und Volltextabruf, an die gemeinsame Wissensbasis und an die GPU-Queue. Sie installierten und betrieben Standard-Bioinformatiksoftware selbst — HMMER, MMseqs2, BLAST+, MAFFT, FastTree, Infernal, ViennaRNA und weitere. Über die erhaltenen Logs hinweg: **7.578 Shell-Befehle, 696 Datenbankabfragen, 131 Literatursuchen, 61 Web-Requests.**
+
+Ein Detail, das man sich abschauen sollte: Die Sandbox enthielt eine Bibliothek von etwa **140 Skills** — schriftliche Methodenleitfäden —, von denen die Worker 15 konsultierten. Sieben waren Survey-spezifisch, und ihre Titel lesen sich wie eine Methodik-Checkliste: unabhängige Vorkommen einer Genfamilie zählen, die operonartige Anordnung gegen den Fensterhintergrund bewerten, Kandidatenfamilien beurteilen, **Neuheitsbehauptungen testen**, nicht charakterisierte Familien annotieren, **Mechanismen zusammen mit der kontrafaktischen Evidenz vorschlagen** und Genumgebungs-Abbildungen zeichnen. Die letzten beiden sind diejenigen, die eine autonome Kampagne ehrlich halten.
+
+## 98 von 119 Aufgaben standen nicht im Briefing
+
+Die Aufgabenaufzeichnung der Kampagne gliedert sich so: **5 aus den Stufen des Briefings gesäte Aufgaben, 16 aus den beförderten Familien gesäte Deep Dives und 98 Folgeaufgaben**, die während des Laufs entstanden. Etwa vier von fünf Arbeitseinheiten wurden von den Agenten mitten in der Kampagne erfunden.
+
+Das ist kein Overhead. Dort kam das Ergebnis her.
+
+Die Kette, aus der Transkriptanalyse des Papers:
+
+1. In Aufgabe `t0010` untersuchte ein Worker eine RT-Familie, die ausgewählt worden war, weil sie neben einer RNA-Polymerase-Untereinheit eines Jumbo-Phagen lag. Er **verwarf** diese Assoziation als zufällige Genreihenfolge — stellte aber trotzdem eine Folgeaufgabe ein, um die RT selbst anzusehen, und vermerkte, dass eine freistehende Retron-ähnliche RT in einem Jumbo-Phagen ein berichtenswerter Nebenbefund sei.
+2. Der Supervisor schloss, dass Retron-RTs mit einer stromaufwärts kodierten nicht-kodierenden RNA arbeiten, und schrieb den nächsten Task Brief: die 5′-Flanken auf eine solche RNA prüfen.
+3. Diese RTs hatten stromaufwärts liegende Regionen mit einem Median von **27 bp** — viel zu kurz, um eine zu kodieren. Ihre nächsten Verwandten hatten einen Median von **940 bp**. Der Worker holte die stromaufwärts liegende Sequenz der Verwandten direkt in seinen Kontext, um sie anzusehen.
+4. In Aufgabe `t0062` bemerkte er beim Lesen dieser Rohsequenz mit bloßem Auge ein Tandem-Repeat-Array — ein ~17-bp-Motiv, das `CATGTG[T/A]TCGCATGT` entspricht und sich mit ~110–180 bp großen Spacern über eine 2.900 nt lange Flanke eines 228.907 bp langen Contigs wiederholt. Ein zweiter Locus zeigte dieselbe Architektur mit einem völlig anderen Repeat.
+5. Er argumentierte dann gegen sich selbst — verglich das Muster mit variablen DGR-Repeats, CRISPR-Mini-Arrays und bekannten diversitätserzeugenden RT-Systemen —, bevor er eine Literatursuche startete, die darauf angelegt war, die Neuheitsbehauptung zu widerlegen statt zu bestätigen.
+
+Weder der Research Brief noch der Task Brief erwähnten Repeats oder Arrays. In dieser Session wurde kein Repeat-Finder-Tool ausgeführt. Der Befund existiert, weil man einer **verworfenen Hypothese erlaubte, eine Folgeaufgabe zu erzeugen**, und weil das Harness einen Worker etwas verfolgen ließ, wonach er nicht gefragt worden war.
+
+**Konsequenz fürs Design:** Wenn deine Agenten-Pipeline nur den DAG ausführt, den du gezeichnet hast, hast du eine langsamere Version einer herkömmlichen Pipeline gebaut. Hinzufügen solltest du die Teile, die Geld kosten und nach Verschwendung aussehen — einen Kanal für von Agenten vorgeschlagene Arbeit und ein Gate, das diese Vorschläge schriftlich prüft, statt sie automatisch auszuführen oder automatisch zu verwerfen.
+
+## Die Token-Rechnung richtig lesen
+
+Die vielzitierte Zahl ist „210 Millionen Tokens“. Die Abrechnung des Papers ist genauer, und ihre Form ist wichtig:
+
+| Komponente | Tokens |
+| --- | --- |
+| Ungecachter Input | 11,3 Mio. |
+| Output | 14,9 Mio. |
+| In den Prompt-Cache geschrieben | 189,5 Mio. |
+| **Berichtete Summe** | **215,6 Mio.** |
+| Aus dem Prompt-Cache gelesen | *in der Summe nicht enthalten* |
+
+**88 % der Schlagzeilenzahl sind also Cache-Writes**, und die größte reale Menge im System — Cache-Reads, womit 949 Sessions mit einer gemeinsamen Wissensbasis gespeist wurden — ist darin gar nicht enthalten. Output-Tokens, die Größe, die man instinktiv schätzt, machen 7 % aus.
+
+Zwei praktische Folgen. Erstens: Wenn du dein eigenes Harness gegen „210 Mio. Tokens“ vergleichst, stelle sicher, dass du dieselben vier Dinge zählst; die meisten Dashboards berichten eine andere Mischung. Zweitens: In einem Harness mit vielen Sessions und gemeinsamem Speicher dominiert die Cache-Ökonomie die Kosten — ein Cache-Write wird mit Aufschlag auf den Basis-Input abgerechnet, ein Cache-Read mit starkem Rabatt, daher ist das Verhältnis zwischen beiden der größte einzelne Hebel auf die Rechnung. Wie diese Rechnung funktioniert, steht unter [Prompt Caching Economics](/docs/frontiers/prompt-caching-economics). Das Paper nennt keine Dollarkosten, und wir tun es auch nicht.
+
+Die Wanduhrzeit betrug **21,5 Stunden** bei **76,9 Agentenstunden** — eine durchschnittliche Parallelität von etwa 3,6 trotz einer Obergrenze von 58. Lang laufende Agentenkampagnen sind weit serieller, als die Parallelitätsgrenze vermuten lässt, weil Stufen-Gating und Review-Schleifen Wartezeiten erzwingen.
+
+## Der Befund ließ sich nicht reproduzieren
+
+Dies ist das Ergebnis, das öfter zitiert werden sollte als jedes andere.
+
+Die Autoren starteten die identische Kampagne, dasselbe Harness und denselben Brief, **zehnmal erneut** und erzeugten 3.084 Aufgabenaufzeichnungen und 5.632 Session-Transkripte. Fast jede Wiederholung, die den Zensus abschloss, samplete ART-Loci. In zweien eröffneten Worker Folgeaufgaben zu dieser Linie.
+
+**Keiner von ihnen las die DNA stromaufwärts. Das Array wurde in jeder Wiederholung übersehen.** Das Paper führt das auf die Breite des RT-Suchraums und das nicht-deterministische Verhalten des Harness zurück.
+
+Nimm das in beide Richtungen ernst:
+
+- **Gegen Übertreibung.** „KI entdeckte X“ beschreibt eine einzelne Stichprobe aus einem stochastischen Prozess, keine Fähigkeit, die man abrufen kann. Eine Kampagne mit 11 Läufen fand es einmal.
+- **Fürs Pipeline-Design.** Die Einheit einer agentischen Suche ist nicht der Lauf, sondern die *Population* von Läufen. Wenn ein Befund etwas wert ist, wiederhole die Kampagne, dedupliziere über die Wiederholungen hinweg und behandle Berichte einzelner Läufe als Hinweise. Das liefert dir außerdem eine kostenlose Negativkontrolle: Was jeder Lauf produziert, ist wahrscheinlich eine Eigenschaft deiner Pipeline, nicht der Daten.
+- **Für die Evaluation.** Ein Harness, das eine echte Anomalie 1 von 11 Mal zutage fördert, ist immer noch enorm wertvoll, wenn ein Lauf ein paar hundert Dollar kostet und der Gewinn ein neues biologisches System ist. Geringe Reproduzierbarkeit ist nicht dasselbe wie ein geringer Erwartungswert — aber du musst den Lauf bepreisen, nicht das Ergebnis.
+
+## Tools machten das Modell blind
+
+Weil die Kampagne selbst nicht reproduzierbar war, bauten die Autoren einen **Benchmark mit festem Input**: Einem Modell wird das ART-System auf einer von fünf Informationsstufen gegeben, es soll den Locus charakterisieren und seine Funktion vorhersagen, und ein Judge-Modell (Mythos 5) bewertet den Bericht gegen zehn kuratierte Aussagen zum Array, zur RT und zum Partner.
+
+Die fünf Stufen steigern sich von zwei RT-Proteinsequenzen über zwei Loci als Rohtext über alle 96 Loci als Dateien mit Tools und Dateien plus vorhergesagte Strukturen bis zu Dateien plus Literatur- und Webzugriff.
+
+Das erwartete Ergebnis ist, dass mehr Information und mehr Tooling monoton helfen. Beim Partnergen taten sie das. Beim **Array** — der eigentlichen Entdeckung — kehrte es sich um:
+
+- Mit den Loci **als Text im Kontext** beschrieben die leistungsfähigsten Modelle das Array in **mindestens 90 %** der Versuche korrekt.
+- Mit denselben Daten **als Dateien plus Tools** fiel die Erkennung auf bis zu **32 %** (Opus 5, Stufe 4).
+- Die Transkripte erklärten es: In den dateibasierten Läufen **las in 39 % der Versuche nie jemand einen zusammenhängenden Abschnitt von 200 nt oder mehr** — man sah nie mehr als etwa eine Repeat-Einheit. Es wurde abgefragt, gegrept, zusammengefasst und *über* die Sequenz nachgedacht, ohne sie je anzusehen.
+- Wenn ein Lauf ≥200 nt zusammenhängend las, lag die Erkennung **16 bis 32 Prozentpunkte höher**. Über die vier stärksten Modelle gepoolt stieg die Erkennung von **29 % auf 76 %**, je mehr DNA in den Kontext kam, und erreichte bei Mythos 5 **96 %**.
+
+Auch das Modellpanel ist erwähnenswert: Das Paper testete sieben Claude-Modelle und fand eine klare Fähigkeitslücke zwischen den vier stärksten (Opus 5.5, Mythos 5.1, Mythos 5, Opus 5) und dem Rest (Opus 4.8, Opus 4.6, Sonnet 5) — ein Beleg dafür, dass der Erfolg der ursprünglichen Kampagne vom Frontier-Modell abhing, auf dem sie lief.
+
+**Die übertragbare Lehre hat mit Biologie nichts zu tun.** Immer wenn das Signal in der *Form* von Rohdaten steckt — ein sich wiederholendes Muster in einem Log, ein regelmäßiger Offset in einer Binärdatei, ein seltsamer Rhythmus in einer Zeitreihe, duplizierte Strophen in einer Konfiguration —, lässt tool-vermittelter Zugriff das Modell das Vernünftige tun und zusammenfassen, statt hinzusehen. Das Tool ist eine Abstraktion, und Abstraktionen sind genau das, was Anomalien verbirgt. Das ist das Gegenteil des üblichen Context-Engineering-Rats, und es ist eine echte Ausnahme davon:
+
+<PromptCard title="Force direct observation when you're hunting anomalies">{`When investigating this record, do not rely only on summaries, counts, greps, or tool
+output. Read at least 2,000 contiguous raw bytes/characters of the region itself into
+your context and describe, literally, what you see — including anything structural you
+notice that I did not ask about.
+
+Then state: (a) what you expected this region to look like, (b) what it actually looks
+like, and (c) any difference between the two that you cannot explain. Treat (c) as the
+finding, not as noise.`}</PromptCard>
+
+Kombiniere das mit dem Standardrat aus [Context Engineering](/docs/frontiers/context-engineering): Kuratiere aggressiv für *Ausführungs*-Aufgaben, aber zahle die Tokens, um bei *Entdeckungs*-Aufgaben direkt auf Primärdaten zu schauen. Das sind verschiedene Jobs.
+
+## Warum es das bemerkte: ein Detektor, der auf Repeats anspringt
+
+Der ungewöhnlichste Abschnitt des Papers ist eine Interpretierbarkeitsanalyse des tatsächlichen Entdeckungstranskripts. Die Autoren schickten die Session des Workers zurück durch Mythos 5 und zerlegten die Aktivität des Modells in einer Schicht in interpretierbare Signale, auf der Suche nach etwas, das auf wiederholte DNA reagiert.
+
+Sie fanden zwei. Beide waren still, bevor das Array begann. **Repeat-Signal 2** wurde bis zur dritten Repeat-Kopie stärker und blieb dann über den Rest stabil, wobei die Aktivität fast vollständig auf den Repeat und das unmittelbar folgende Nukleotid beschränkt war. **Repeat-Signal 1** erreichte bei der dritten Kopie seinen Höhepunkt und ließ dann nach. Die Kontrolle ist der überzeugende Teil: Das Durchmischen der Nukleotide *innerhalb jeder Kopie* — Zusammensetzung erhalten, Wiederholung zerstört — brachte Repeat-Signal 2 bei allen 14 Kopien und Repeat-Signal 1 bei 12 von 14 zum Schweigen. Keines der Signale ist DNA-spezifisch.
+
+Zum Vergleich ließen sie zwei dedizierte genomische Sprachmodelle, Evo 2 und gLM2, über denselben Locus laufen. Beide markierten die Repeats sicher, und das bidirektionale Modell (gLM2) erfasste jede Kopie einschließlich der ersten, während das kausale (Evo 2) die ersten beiden Kopien schlecht vorhersagte und sich entlang des Arrays verbesserte — genau das Verhalten, das man von einem Modell erwartet, das nur rückwärts sehen kann.
+
+Im Transkript folgt auf das Anspringen des Signals unmittelbar ein natürlichsprachliches Reasoning, das das Muster ein Tandem-Repeat-Array nennt. Ein Allzweck-Assistent trug einen internen Detektor für eine strukturelle Eigenschaft von Rohsequenz in sich, und die Aktivierung dieses Detektors zeigte sich als verbalisierte Beobachtung. Das ist eine konkrete, mechanistische Antwort auf „wie hat es das bemerkt?“ — und ein Grund, dem Tool-Blindheits-Ergebnis zu glauben, statt es abzutun: Ein Detektor kann nicht auf Bytes anspringen, die nie in den Kontext gelangt sind.
+
+## Der Judge reihte ihn nicht auf Platz eins
+
+Die 19 Berichte wurden in einem Turnier aus paarweisen Vergleichen gereiht — jedes geordnete Paar einmal verglichen, **342 Spiele**, wobei ein Mythos-5-Judge ein festes Rubrik und zwei anonymisierte Berichte las und jeden von 1 bis 5 bewertete nach Wirkung (Gewicht 0,35), Neuheit (0,30), Fundiertheit (0,25) und Umsetzbarkeit (0,10). Ein Bericht mit 2 oder weniger bei der Fundiertheit verlor automatisch. Die Ratings wurden mit einem Bradley-Terry-Modell angepasst.
+
+Der ART-Bericht landete auf **Platz drei**, mit 32 Siegen in 36 Spielen.
+
+Daraus lässt sich dreierlei mitnehmen. Ein anonymisiertes Round-Robin mit automatischer Niederlage bei mangelnder Fundiertheit ist ein viel besseres LLM-Judge-Design, als Berichte unabhängig voneinander auf einer 1–10-Skala zu bewerten — der paarweise Vergleich ist stabiler, und die Fundiertheitsuntergrenze erledigt selbstsicheren Unsinn, bevor er mit Neuheit gewinnen kann. Aber das beste Ergebnis des Stapels wurde trotzdem nicht auf Platz eins gereiht, also **behandle ein LLM-Judge-Ranking als Triage-Reihenfolge, nicht als Urteil**, und halte dein Top-k breit genug, damit auch ein drittplatzierter Eintrag noch einen Menschen erreicht. Und beachte, dass der gesamte Apparat ohnehin den Menschen nachgelagert ist: Jeder überlebende Kandidat ging an menschliche Wissenschaftler, und die Laborarbeit war vollständig menschlich. Die allgemeine Form dieser Einschränkung steht unter [The Verification Bottleneck](/docs/frontiers/the-verification-bottleneck).
+
+## Was über ART tatsächlich bekannt ist
+
+Hier ist genug Vorsicht angebracht, dass es sich lohnt, sauber zu trennen.
+
+**Vom Preprint gestützt:**
+
+- ART — Array-assoziierte Reverse Transkriptasen — ist eine Familie von RTs, die weitgehend auf Jumbo-Phagen-Genome beschränkt ist und in einer Klade neben Retrons sitzt.
+- Jeder Locus hat drei Teile: ein Array aus Repeat-Einheiten von ~200 nt, die RT und ein dediziertes Partnergen. Es wurden drei Strukturtypen des Partnerproteins beobachtet (59, 7 und 3 Linien).
+- Das Repeat-Layout ähnelt einem CRISPR-Array, aber anders als CRISPR-Spacer sind die ART-Einheiten **zwischen verwandten Phagen konserviert**.
+- In einer RNA-seq-Zeitreihe der Infektion mit *Staphylococcus*-Phage SA1 (öffentliches BioProject PRJNA836150) wird das Array reichlich transkribiert und erscheint als diskrete Einheiten — in großem Überschuss gegenüber dem Enzym selbst transkribiert. Dieses Muster legt nahe, dass ein Enzym mit einem Repertoire verschiedener RNAs versorgt wird.
+- Das System versteckte sich in aller Öffentlichkeit: Beim Phagen MarsHill (GenBank `MW248466.1`) identifizierte der ursprüngliche Genombericht die RT und schlug eine nicht-kodierende 5′-RNA vor, beschrieb aber weder die Repeats noch das Partnergen.
+
+**Nicht gezeigt:**
+
+- Dass die RT enzymatisch aktiv ist.
+- Dass die Array-RNAs ihre Substrate sind.
+- Dass RT und Partner überhaupt interagieren.
+- Was das System für den Phagen leistet. Das ist offen, und die Autoren sagen das.
+
+Alles, was ART als „neues Gene-Editing-Werkzeug“ darstellt, eilt der Evidenz um mehrere Jahre voraus. Gezeigt wurde der *Entdeckungsprozess*, nicht die Biologie.
+
+## Die Form für einen nicht-biologischen Korpus übernehmen
+
+Die domänenspezifische Hälfte davon — metagenomische Datenbanken, HMM-Profile, Strukturvorhersage — lässt sich nicht übertragen. Das Harness schon. Wenn du Agenten über einen großen Korpus laufen lässt, den du nicht vollständig verstehst (Logs, ein Legacy-Monorepo, Verträge, Telemetrie, eine Package-Registry), ist dies das Muster:
+
+<Steps items={[
+  {title: "Schreibe ein Briefing, keinen Workflow", body: "Nenne das Ziel und die Kriterien dafür, wann etwas interessant ist. Lass einen Launch-Agenten daraus Stufen auffächern. Wenn du die Schritte vorgibst, bekommst du eine Pipeline — und eine Pipeline kann nur die Neuheit finden, die du vorab definiert hast."},
+  {title: "Steuere die Stufen mit skriptgesteuerten Prüfungen", body: "Keine Aufgabe aus Stufe N+1 startet, bevor Stufe N eine deterministische Abschlussprüfung besteht. Das verhindert, dass ein Lauf mit 900 Sessions einen frühen Fehler durch jede spätere Stufe weiterträgt."},
+  {title: "Trenne Worker und Supervisor", body: "Verschiedene Sessions, verschiedene Prompts. Der Supervisor prüft Plan und Artefakte, nicht nur die Zusammenfassung, und kann Arbeit zurückschicken — hier wurden etwa 40 % der Aufgaben mindestens einmal überarbeitet."},
+  {title: "Gib Agenten einen Kanal, um Arbeit vorzuschlagen, und steuere ihn per Gate", body: "Eine Triage-Queue, die mit schriftlicher Begründung freigibt oder ablehnt. Hier kam der eigentliche Befund her, und hier würde ein unbegrenzter Lauf sonst abschweifen."},
+  {title: "Kuratiere Ergebnisse in Prompts, nicht nur in Speicher", body: "Eine Curator-Rolle, die die Ergebnisse jeder Aufgabe in einen gemeinsamen Speicher schreibt, wobei relevante Einträge in die Prompts späterer Agenten injiziert werden. Speicher, den niemand liest, ist kein Gedächtnis."},
+  {title: "Lass die Agenten auf Rohdaten schauen", body: "Verlange im Task Brief für jede Anomalie-Jagd-Stufe ausdrücklich zusammenhängendes Lesen von Primärdaten. Tools laden zum Zusammenfassen ein; die Lücke von 90 % auf 32 % ist, was das kostet."},
+  {title: "Reihe Berichte per anonymisiertem paarweisem Turnier", body: "Festes Rubrik, gewichtete Dimensionen, automatische Niederlage bei geringer Fundiertheit, Bradley-Terry-Fit. Gib dann das Top-k — nicht das Top-1 — an einen Menschen."},
+  {title: "Wiederhole die Kampagne, bevor du ihr glaubst", body: "Derselbe Brief, mehrere Läufe. Befunde, die einmal auftauchen, sind Hinweise; Befunde, die jedes Mal auftauchen, sind meist Artefakte deines Harness. Hier tauchte der echte einmal in elf auf."}
+]} />
+
+<Flashcards title="Harness vocabulary" cards={[
+  {front: "Agentisches Harness", back: "Software, die LLM-Agenten über Sessions hinweg koordiniert — Aufgaben zuweist, Outputs prüft, Gedächtnis weiterträgt und entscheidet, wann der Lauf endet. In der ART-Kampagne war jeder Agent eine Claude-Code-Instanz; das Harness lieferte die Rollen und die Queue."},
+  {front: "Worker-/Supervisor-Trennung", back: "Ein Agent plant und führt eine Aufgabe aus; ein separater Agent prüft Plan, Ergebnisse und bearbeitete Dateien und kann annehmen, zur Überarbeitung zurückgeben oder Folgeaufgaben eröffnen. 414 Worker- gegenüber 375 Supervisor-Sessions — die Prüfung kostete fast so viel wie die Arbeit."},
+  {front: "Curator-Agent", back: "Liest Briefing und Zusammenfassung jeder abgeschlossenen Aufgabe und schreibt die Ergebnisse in eine gemeinsame Wissensbasis, deren relevante Einträge dann in die Prompts späterer Agenten injiziert werden. Der Mechanismus, der viele Sessions zu einer Kampagne macht."},
+  {front: "Triage-Queue", back: "Das Gate zwischen von Agenten vorgeschlagener Folgearbeit und Ausführung: Das Harness gibt einen Vorschlag frei oder lehnt ihn mit schriftlicher Begründung ab. 98 von 119 Aufgaben waren Folgeaufgaben; 10 wurden hier abgelehnt."},
+  {front: "Cache-Write-Tokens", back: "Tokens, die für das Schreiben von Inhalten in den Prompt-Cache abgerechnet werden, getrennt von ungecachtem Input, Output und Cache-Reads. 189,5 Mio. der 215,6 Mio. berichteten Tokens der Kampagne — 88 % — waren Cache-Writes, und Cache-Reads wurden komplett ausgeschlossen."},
+  {front: "Tool-vermittelte Blindheit", back: "Wenn es ein Modell schlechter macht, ihm Dateien und Tools statt Daten im Kontext zu geben, weil es zusammenfasst und abfragt, statt zu lesen. Array-Erkennung: ≥90 % im Kontext, bis zu 32 % mit Tools; 39 % der Tool-Läufe lasen nie 200 zusammenhängende nt."},
+  {front: "Bradley-Terry-Turnierranking", back: "Kandidaten reihen, indem man paarweise Sieg-/Niederlage-Ergebnisse an ein Modell latenter Stärke anpasst. Hier über 342 anonymisierte, von LLMs beurteilte Vergleiche von 19 Berichten angewandt; die spätere Entdeckung landete auf Platz drei."},
+  {front: "ART (array-associated reverse transcriptase)", back: "Eine neue Familie von RTs in Jumbo-Phagen mit einem stromaufwärts liegenden Array aus Repeat-Einheiten von ~200 nt und einem dedizierten Partnergen. Die Array-Architektur ähnelt CRISPR; die Repeats sind zwischen verwandten Phagen konserviert; die Funktion ist unbekannt."},
+  {front: "Retron", back: "Ein bekanntes prokaryotisches RT-System, in dem die RT eine dedizierte nicht-kodierende RNA in einzelsträngige DNA umschreibt, die mit einem Effektorprotein in der Phagenabwehr wirkt. ART sitzt in einer Klade neben Retrons — der Vergleich, der die Untersuchung vorantrieb."}
+]} />
+
+## Teste dich selbst
+
+<Quiz title="Check yourself" questions={[
+  {
+    q: "Wie viele der 119 Aufgaben der ART-Kampagne waren Folgeaufgaben, die die Agenten während des Laufs erzeugten, statt aus dem Briefing gesät zu sein?",
+    options: ["5", "16", "98", "119"],
+    answer: 2,
+    explain: "5 Aufgaben stammten aus den Stufen des Briefings und 16 waren Deep Dives zu beförderten Familien; die übrigen 98 waren mitten in der Kampagne vorgeschlagene Folgeaufgaben, die über eine Triage-Queue freigegeben wurden. Der ART-Befund stammt von einer davon ab."
+  },
+  {
+    q: "Was geschah, als die Autoren die identische Kampagne zehnmal erneut starteten?",
+    options: [
+      "ART wurde in jeder Wiederholung gefunden, was die Reproduzierbarkeit bestätigte",
+      "ART wurde in etwa der Hälfte der Wiederholungen gefunden",
+      "Keine Wiederholung las die stromaufwärts liegende DNA — das Array wurde in allen zehn übersehen",
+      "Die Wiederholungen fanden eine andere, größere Enzymfamilie"
+    ],
+    answer: 2,
+    explain: "Fast jede Wiederholung, die den Zensus abschloss, samplete ART-Loci, und zwei eröffneten sogar Folgeaufgaben zu dieser Linie, aber keine las die DNA stromaufwärts, sodass das Array jedes Mal übersehen wurde. Die Autoren führen das auf den Suchraum und den Nicht-Determinismus des Harness zurück."
+  },
+  {
+    q: "Was geschah im Benchmark mit festem Input mit der Array-Erkennung, als die Modelle die Loci als Dateien mit Tools statt als Text im Kontext bekamen?",
+    options: [
+      "Sie verbesserte sich, weil Tools den Modellen Querverweise auf Datenbanken erlauben",
+      "Sie blieb unverändert — das Eingabeformat spielte keine Rolle",
+      "Sie fiel auf bis zu 32 %, weil 39 % der Versuche nie 200 zusammenhängende Nukleotide lasen",
+      "Sie fiel nur bei den schwächsten Modellen des Panels"
+    ],
+    answer: 2,
+    explain: "Loci im Kontext ergaben mindestens 90 % Erkennung; Dateien plus Tools drückten sie auf bis zu 32 %. Die Transkriptprüfung zeigte, dass 39 % der toolbasierten Versuche nie einen zusammenhängenden Abschnitt von 200 nt lasen, sodass sie nie mehr als etwa eine Repeat-Einheit sahen."
+  },
+  {
+    q: "Die Kampagne berichtete 215,6 Mio. Tokens. Was war die größte Komponente?",
+    options: [
+      "Ungecachte Input-Tokens (11,3 Mio.)",
+      "Output-Tokens (14,9 Mio.)",
+      "In den Prompt-Cache geschriebene Tokens (189,5 Mio.)",
+      "Aus dem Prompt-Cache gelesene Tokens"
+    ],
+    answer: 2,
+    explain: "Cache-Writes betrugen 189,5 Mio. — 88 % der berichteten Summe. Cache-Reads wurden aus der Zahl komplett ausgeschlossen, weshalb du beim Vergleich deines eigenen Harness mit '210 Mio. Tokens' prüfen musst, dass du dieselben vier Größen zählst."
+  },
+  {
+    q: "Wie schnitt der Bericht über ART im Turnierranking der 19 Berichte der Kampagne ab?",
+    options: [
+      "Er landete auf Platz eins, mit einer makellosen Bilanz",
+      "Er landete auf Platz drei, mit 32 Siegen in 36 Spielen",
+      "Er wurde wegen mangelnder Fundiertheit automatisch ausgeschieden",
+      "Er wurde nie gereiht — Menschen zogen ihn direkt aus der Queue"
+    ],
+    answer: 1,
+    explain: "342 anonymisierte paarweise Spiele, von Mythos 5 nach Wirkung, Neuheit, Fundiertheit und Umsetzbarkeit beurteilt, platzierten den ART-Bericht auf Platz drei. Das beste Ergebnis des Stapels war nicht die erste Wahl des Judge — ein Grund, Menschen das Top-k statt des Top-1 zu geben."
+  }
+]} />
+
+## Quellen & weiterführende Literatur
+
+- Anthropic — *Claude discovers a novel enzyme system with CRISPR-like repeats* (23. Sept. 2026): https://www.anthropic.com/news/claude-discovers-novel-enzyme-system
+- Preprint — Yoon, Athukoralage, Ameisen, Kauderer-Abrams, Perry, Durrant, *Autonomous AI agents discover reverse transcriptases with tandem repeat arrays* (Anthropic, Sept. 2026). Alle Zahlen zu Harness, Abrechnung, Wiederholungen, Benchmark und Interpretierbarkeit auf dieser Seite stammen aus seinen Results und Methods: https://www-cdn.anthropic.com/22573675ada52a8ca8a97a1a4b4326b2f208a071.pdf
+- Hacker-News-Diskussion (655 Punkte, 672 Kommentare, 23. Sept. 2026): https://news.ycombinator.com/item?id=49820134
+- Anthropic — *Claude Science, an AI workbench for scientists* (30. Juni 2026), die Plattformhälfte der Toolchain: https://www.anthropic.com/news/claude-science-ai-workbench
+- Anthropic Engineering — *Effective harnesses for long-running agents*: https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents
+- Arc Institute — Evo 2, das genomische Sprachmodell, das als Vergleich für die Repeat-Erkennung diente: https://github.com/ArcInstitute/evo2
+- RNA-seq-Daten hinter dem Expressionsergebnis: NCBI BioProject PRJNA836150 — https://www.ncbi.nlm.nih.gov/bioproject/PRJNA836150 — und der Phagen-Eintrag MarsHill `MW248466.1`: https://www.ncbi.nlm.nih.gov/nuccore/MW248466.1
+
+## Weiter
+
+- [Harnesses für Long-Running Agents](/docs/frontiers/long-running-agent-harnesses) — das allgemeine Muster, von dem diese Kampagne eine Instanz ist
+- [Wie Agent Memory tatsächlich funktioniert](/docs/frontiers/agent-memory-architectures) — was die Curator-Rolle tut, in der breiteren Taxonomie
+- [Claude Science](/docs/claude-app/claude-science) — die Workbench, auf der die Kampagne lief
+- [Prompt Caching Economics](/docs/frontiers/prompt-caching-economics) — wie man einen Lauf mit 189,5 Mio. Cache-Writes bepreist

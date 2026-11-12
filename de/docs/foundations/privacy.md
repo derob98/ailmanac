@@ -1,0 +1,140 @@
+# Datenschutz & Umgang mit Daten
+
+> Source: https://derob98.github.io/ailmanac/de/docs/foundations/privacy · AILmanac (CC BY 4.0) · last verified 2026-11-09
+
+Was Sie bedenkenlos einfügen können, Training mit Ihren Daten und wann sich lokaler Betrieb lohnt.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={[
+  "Vor dem Einfügen sensibler Inhalte jedes KI-Tool mit einem Fünf-Fragen-Check prüfen",
+  "Verstehen, warum eine Datenschutzgarantie meist an eine OBERFLÄCHE oder einen TARIF gebunden ist und nicht an das Thema, über das Sie sprechen",
+  "Die vier getrennten Fragen auseinanderhalten — Training, Aufbewahrung, Zugriff und Datenstandort —, denn ein Tool kann bei einer gut und bei einer anderen schlecht sein",
+  "Die drei Datenschutz-Oberflächen jenseits Ihres Prompts erkennen: verbundene Konten, Gedächtnis und alles, was Sie veröffentlichen oder teilen",
+  "Entscheiden, wann lokal oder selbst gehostet wirklich die richtige Antwort ist und nicht der Reflex",
+]} />
+
+<VerifyNote lastVerified="2026-11-09" source="https://www.anthropic.com/legal/privacy">
+Regeln zu Datenverarbeitung und Training unterscheiden sich je nach Anbieter, Produkt und Tarif (Privatkunden vs. API vs. Enterprise) und ändern sich im Lauf der Zeit. Nichts auf dieser Seite ersetzt die Lektüre der aktuellen Bedingungen Ihres eigenen Anbieters — verstehen Sie sie als Liste der Fragen, die Sie stellen sollten, nicht als die Antworten.
+</VerifyNote>
+
+Eine einfache Frage mit echtem Gewicht: **Was passiert mit dem Text, den Sie an eine KI senden?** Die Antwort hängt vom Anbieter, vom Produkt und von Ihrem Tarif ab — die sichere Gewohnheit lautet also: *wissen, bevor man einfügt*.
+
+Der häufigste Fehler ist die Annahme, die Garantie folge dem **Thema**. Das tut sie fast nie. Garantien gelten für eine **Oberfläche** (diese Funktion, dieser Hub, diese API) oder für einen **Tarif** (Enterprise, Zero-Retention) — derselbe Satz über Ihr Gehalt kann also auf zwei völlig verschiedene Arten behandelt werden, je nachdem, wo in derselben App Sie ihn getippt haben.
+
+## Vier Fragen, nicht eine
+
+„Ist es privat?“ fasst vier unabhängige Eigenschaften zusammen. Ein Tool kann bei einer gut und bei einer anderen schlecht abschneiden, also fragen Sie getrennt.
+
+<Steps items={[
+  {title: "Training — wird meine Eingabe zur Verbesserung des Modells genutzt?", body: "Das unterscheidet sich je nach Tarif enorm. Viele API- und Enterprise-Angebote trainieren standardmäßig NICHT mit Ihren Daten; bei Privatkunden-Einstellungen hängt es oft von einem Schalter ab, den Sie vielleicht umgelegt haben oder auch nicht. Prüfen Sie die tatsächliche Einstellung in Ihrem Konto, nicht die Marketingseite."},
+  {title: "Aufbewahrung — wie lange wird es gespeichert, und löscht Löschen wirklich?", body: "Eine Unterhaltung aus Ihrem Verlauf zu entfernen und sie aus dem Back-End-Speicher zu entfernen sind zwei verschiedene Ereignisse mit zwei verschiedenen Zeitplänen. Fragen Sie nach beiden Zahlen. Fragen Sie getrennt nach Daten, die für eine Richtlinienprüfung markiert wurden — sie werden meist deutlich länger aufbewahrt."},
+  {title: "Zugriff — wer beim Anbieter kann es lesen, und bei welchem Auslöser?", body: "Sicherheitsprüfung, Missbrauchsuntersuchung und Support-Eskalation gehören zum normalen Betrieb eines Dienstes. Die Frage ist nicht, ob Menschen es je sehen können, sondern was dazu führt."},
+  {title: "Datenstandort — wo wird verarbeitet, und ist es verschlüsselt?", body: "Wichtig für DSGVO, Branchenvorgaben und Kundenverträge. Ist eine bestimmte Region erforderlich, ist das meist eine Enterprise-Funktion und keine Einstellung für Privatkunden."},
+  {title: "Dann: Gibt es überhaupt eine Zero-Retention- oder Business-Option?", body: "Wenn sensible Arbeit für Sie Routine ist, sollte die Antwort auf die vorherigen vier Fragen lauten „wir sind im Tarif, in dem das vertraglich zugesichert ist“, nicht „wir haben den Schalter geprüft“."}
+]} />
+
+<PromptCard title="Fügen Sie das in die Dokumentationssuche eines KI-Anbieters ein oder schicken Sie es an dessen Vertrieb">
+{`For the specific product and plan we would be on:
+1. Is customer input used for model training by default? Is it a per-user or
+   per-organization setting, and who can change it?
+2. What are the two retention windows — removal from the user-visible history,
+   and deletion from back-end storage? What is retained longer, and why?
+3. Under what triggers can your staff read customer conversations?
+4. Can processing be pinned to a specific region, and on which plan?
+5. Do you offer a zero-retention mode, and what does it disable?
+Please point to the documentation for each answer rather than summarizing.`}
+</PromptCard>
+
+Kann ein Anbieter nicht alle fünf Fragen mit Links beantworten, ist das selbst die Antwort.
+
+## Die Garantie folgt der Oberfläche, nicht dem Thema
+
+Das klarste aktuelle Beispiel ist Anthropics Funktion **Persönliche Finanzen**. Unterhaltungen im Hub „Persönliche Finanzen“ werden nicht zum Training der Modelle von Anthropic verwendet und bleiben aus dem Gedächtnis und Ihrem monatlichen Rückblick heraus. Fügen Sie denselben Kontoauszug in einen gewöhnlichen Claude-Chat ein, gelten stattdessen Ihre **normalen Datenschutzeinstellungen für das Konto** — der Ausschluss gehört zum Hub, nicht zu der Tatsache, dass es um Geld ging.
+
+<Callout type="warning" items={[
+  "Verallgemeinern Sie die Lehre, nicht das Beispiel: Wenn Sie ein Datenschutzversprechen lesen, suchen Sie das Substantiv, auf das es sich bezieht. „In diesem Workspace“, „in diesem Tarif“, „über diese API“, „in diesem Hub“ — dieses Substantiv ist die tatsächliche Grenze. Ein Versprechen ohne ein solches Bezugs-Substantiv ist meist ein Versprechen über die Absichten des Anbieters und nicht über Ihre Daten."
+]} />
+
+## Praktische Faustregeln
+
+- **Fügen Sie keine Geheimnisse ein** — API-Schlüssel, Passwörter, Tokens — in kein KI-Tool. Nie. Nicht weil der Anbieter unseriös wäre, sondern weil ein Geheimnis in einem Transkript ein Geheimnis in einem Log, einem Backup, einem geteilten Link und womöglich einem Support-Ticket ist.
+- **Minimieren Sie personenbezogene Daten.** Senden Sie nur, was die Aufgabe braucht; schwärzen Sie nach Möglichkeit Namen, IDs und Kontonummern. Ein Modell braucht die Kennung für die Argumentation selten.
+- **Daten anderer Personen gehören diesen Personen.** Seien Sie vorsichtig mit personenbezogenen Kundendaten, Gesundheits- oder Finanzinformationen — es können rechtliche Pflichten (DSGVO, HIPAA und andere) bestehen, die Ihr persönliches Wohlbefinden nicht außer Kraft setzt.
+- **Nutzen Sie den richtigen Tarif.** Für regulierte oder vertrauliche Arbeit verwenden Sie eine Business-/Enterprise-/Zero-Retention-Option, kein privates Konto. Das ist der wirksamste einzelne Schritt auf dieser Seite.
+- **Erwägen Sie lokale/selbst gehostete Modelle**, wenn Daten Ihre Umgebung wirklich nicht verlassen dürfen — Sie tauschen etwas Leistungsfähigkeit gegen volle Kontrolle. Siehe [einen privaten lokalen KI-Stack](/docs/models/private-local-ai-stack).
+
+## Drei Oberflächen, die man vergisst
+
+Ihr Prompt ist die offensichtliche. Diese drei lassen Daten auf Wegen abfließen, die Menschen überraschen.
+
+| Oberfläche | Warum man sie leicht übersieht | Was zu tun ist |
+| --- | --- | --- |
+| **Verbundene Konten** (Banken, E-Mail, Drive, CRM) | Die Berechtigung liegt beim *Aggregator oder OAuth-Anbieter*, nicht in der KI-App. Das Abo zu kündigen oder die App zu löschen lässt die Verbindung oft bestehen. | An der Quelle prüfen und widerrufen — im Portal des Aggregators, in der Liste der Drittanbieter-Apps Ihres Google-/Microsoft-Kontos. Betrachten Sie den Schalter in der KI-App selbst als Komfortfunktion. Siehe [Connectors](/docs/claude-app/connectors). |
+| **Gedächtnis** | Es soll Kontext *über* Unterhaltungen hinweg tragen — genau deshalb trägt es eine einmal gemachte Angabe in Chats, in denen Sie sie nicht erwarten. | Wissen, ob Ihr Tool es hat, was gespeichert ist und wie man einen einzelnen Eintrag statt alles löscht. Siehe [Gedächtnis über Chats hinweg](/docs/claude-app/memory). |
+| **Alles Veröffentlichte oder Geteilte** | Ein geteilter Link oder ein veröffentlichtes Artefakt ist häufig ein *eigenes Objekt* mit eigener Lebensdauer — es kann die Unterhaltung überdauern, aus der es stammt, und ein interaktives kann die eigenen verbundenen Daten des Betrachters lesen. | Fragen Sie vor dem Teilen, was die Kopie des Empfängers kann, nicht nur, was sie anzeigt. Den Chat zu löschen ist oft keine Bereinigung. |
+
+## Auf dem Gerät vs. Cloud
+
+| | Cloud (gehostet) | Lokal / selbst gehostet |
+|---|---|---|
+| Leistungsfähigkeit | Am höchsten | Geringer (aber im Aufwind) |
+| Daten verlassen Ihren Rechner | Ja (gemäß Anbieterbedingungen) | Nein |
+| Einrichtung/Kosten | Einfach, Bezahlung nach Nutzung | Mehr Aufwand, Ihre Hardware |
+| Wem Sie vertrauen müssen | Den Bedingungen und Kontrollen des Anbieters | Ihrem eigenen Rechner, Patching und Backups |
+
+Lokal ist nicht automatisch privater — es ist *anders* privat. Ein unverschlüsselter Laptop mit zwei Jahren Transkripten ist ein schlechteres Ergebnis als ein seriöser Anbieter in einem Zero-Retention-Tarif. Wählen Sie lokal, wenn die Anforderung wirklich „das darf das Netzwerk nicht verlassen“ lautet, nicht aus Reflex.
+
+## Quiz
+
+<Quiz questions={[
+  {
+    q: "Ein Tool verspricht, dass Unterhaltungen in seinem eigenen Finanz-Workspace nie zum Training verwendet werden. Sie fügen stattdessen einen Kontoauszug in einen normalen Chat derselben App ein. Was gilt dafür?",
+    options: [
+      "Dasselbe Versprechen — es geht ja eindeutig um Finanzdaten",
+      "Ihre gewöhnlichen Datenschutzeinstellungen des Kontos",
+      "Nichts; eingefügte Dokumente sind immer ausgenommen",
+      "Automatisch die strengste Richtlinie des Produkts"
+    ],
+    answer: 1,
+    explain: "Datenschutzgarantien gelten für eine Oberfläche oder einen Tarif, nicht für ein Thema. Das Bezugs-Substantiv im Versprechen war „der Finanz-Workspace“ — außerhalb davon gelten Ihre normalen Einstellungen. Suchen Sie bei jeder Datenschutzzusage das Substantiv, auf das sie sich bezieht; dieses Substantiv ist die wahre Grenze."
+  },
+  {
+    q: "Sie kündigen Ihr KI-Abo. Was sollten Sie über ein Konto annehmen, das Sie über einen Daten-Aggregator damit verbunden hatten?",
+    options: [
+      "Es wurde automatisch widerrufen, als die Abrechnung endete",
+      "Es bleibt verbunden, bis Sie es beim Aggregator widerrufen",
+      "Es wird zu einer reinen Leseberechtigung",
+      "Es läuft nach 30 Tagen ab"
+    ],
+    answer: 1,
+    explain: "Die Berechtigung liegt beim Aggregator oder OAuth-Anbieter, nicht bei Ihrem Abo. Den Zugriff auf eine Funktion zu verlieren ist nicht dasselbe wie die Datenverbindung zu widerrufen. Prüfen Sie Zugriffe Dritter an der Quelle — im eigenen Portal des Aggregators oder in der Liste verbundener Apps Ihres Identitätsanbieters."
+  },
+  {
+    q: "Welches Paar von Aufbewahrungsfakten sollten Sie getrennt erfragen?",
+    options: [
+      "Verschlüsselung im Ruhezustand und bei der Übertragung",
+      "Entfernung aus Ihrem sichtbaren Verlauf und Löschung aus dem Back-End-Speicher",
+      "Grenzen von Gratis- und Bezahltarif",
+      "Modellversion und Trainings-Stichtag"
+    ],
+    answer: 1,
+    explain: "Es sind zwei verschiedene Ereignisse auf zwei verschiedenen Uhren — eine Unterhaltung kann sofort aus Ihrem Verlauf verschwinden und wochenlang in Back-End-Systemen bestehen. Für Richtlinienprüfungen markierte Daten sind meist ein drittes, deutlich längeres Fenster. Eine einzige „Aufbewahrungsdauer“ ist fast nie die ganze Antwort."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Stellen Sie vier Fragen, nicht eine: Training, Aufbewahrung, Zugriff, Datenstandort. Ein Tool kann eine bestehen und eine andere nicht.",
+  "Suchen Sie in jedem Datenschutzversprechen das Bezugs-Substantiv — den Hub, Tarif, Workspace oder die API, für die es gilt. Dieses Substantiv ist die Grenze, nicht das Thema, über das Sie sprechen.",
+  "Der wirksamste Schritt ist, im richtigen Tarif zu sein, nicht, klug auszuwählen, was Sie einfügen.",
+  "Prüfen Sie verbundene Konten beim Aggregator oder Identitätsanbieter, nicht in der KI-App.",
+  "Eine Unterhaltung zu löschen löscht oft nicht das Artefakt oder den geteilten Link, der daraus entstanden ist.",
+  "Lokal ist anders privat, nicht automatisch privater. Wählen Sie es für eine echte Anforderung."
+]} />
+
+## Weiter
+
+- [Persönliche Finanzen in Claude](/docs/claude-app/personal-finance) — das ausgearbeitete Beispiel für jedes Prinzip dieser Seite, mit den genauen Feldern, Grenzen und Fehlerfällen
+- [Wer Ihre KI-Chats liest](/docs/security/who-reads-your-ai-chats-safety-review-escalation) — die fortgeschrittene Version der Frage nach dem *Zugriff*: Sicherheitsprüfung, Weitergabe an Behörden und die Aufbewahrung, die das Löschen einer Unterhaltung überdauert
+- [Was KI-Chats an Tracker verraten](/docs/security/what-ai-chats-leak-to-trackers) — die Oberfläche, die keine der obigen Richtlinien abdeckt
+- [Verantwortungsvolle Nutzung, Ethik & Verifikation](/docs/security/responsible-use)

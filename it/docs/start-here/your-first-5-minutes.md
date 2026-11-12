@@ -1,0 +1,122 @@
+# I tuoi primi 5 minuti
+
+> Source: https://derob98.github.io/ailmanac/it/docs/start-here/your-first-5-minutes · AILmanac (CC BY 4.0)
+
+Da zero a una risposta davvero utile con Claude — la prima vittoria più rapida possibile.
+
+<LevelBadge level="beginner" />
+
+Nessuna configurazione, nessun gergo. In cinque minuti otterrai un risultato davvero utile e capirai *perché* ha funzionato.
+
+<Callout type="objectives" items={[
+  "Apri Claude e fai la tua prima vera domanda (senza alcuna configurazione)",
+  "Scrivi un prompt come lo vorrebbe un collega sveglio: obiettivo, lunghezza, pubblico, tono",
+  "Rifinisci una risposta con domande di follow-up in linguaggio naturale (perfezionamento iterativo)",
+  "Adotta l'unica abitudine di sicurezza che conta: verifica prima di fidarti"
+]} />
+
+:::tip[Aggiungi qui uno screenshot]
+Questa pagina è la base per i principianti — merita screenshot annotati o una breve GIF. Se puoi contribuire con materiale visivo, ti preghiamo di [aprire una PR](/docs/contribute/contribute-in-10-minutes).
+:::
+
+## Il percorso in 5 minuti
+
+<Steps items={[
+  {title: "Minuto 1 — Apri Claude", body: "Vai su claude.ai e accedi (il piano gratuito basta per iniziare). Puoi usare Claude anche dall'app mobile o tramite voce — vedi Quale Claude dovrei usare? per la mappa completa."},
+  {title: "Minuto 2 — Chiedi come faresti a un collega sveglio", body: "Non 'cercare'. Dai contesto e di' cosa vuoi: indica l'obiettivo, la lunghezza, il pubblico, il tono e che aspetto ha il 'fatto'. Questo è l'80% del prompting, e funziona su ogni IA."},
+  {title: "Minuto 3 — Leggi, poi rifinisci", body: "Non devi azzeccarlo perfettamente al primo colpo. Rispondi in linguaggio naturale — 'rendila più corta e più informale', 'aggiungi una frase sul Q&A gratuito'. Questo botta e risposta è il perfezionamento iterativo."},
+  {title: "Minuto 4 — Prova un secondo compito, diverso", body: "Dimostra a te stesso che è di uso generale: riassumi un articolo, spiega un concetto in modo semplice o pianifica una cena veloce con gli ingredienti che hai."},
+  {title: "Minuto 5 — Impara l'unica abitudine di sicurezza", body: "L'IA può sembrare sicura di sé ed essere comunque sbagliata. Per qualsiasi cosa che conti, controllala. Verifica fatti, numeri, date, citazioni e riferimenti."}
+]} />
+
+## Minuto 2, da vicino — il più grande miglioramento per i principianti
+
+La più grande vittoria del primo giorno: **dai contesto e di' cosa vuoi**. Confronta:
+
+❌ *"email di marketing"*
+
+✅ *"Scrivi un'email amichevole di 120 parole che invita i clienti esistenti a un webinar del 30 giugno sulla nostra nuova dashboard di analytics. Calda ma non vendereccia. Concludi con una chiara call to action per confermare la partecipazione."*
+
+Il secondo prompt indica **obiettivo, lunghezza, pubblico, tono e che aspetto ha il "fatto"**. Questo è l'80% del prompting, e funziona su ogni IA. (Altro in [Le basi del prompting](/docs/prompting/basics).)
+
+<PromptCard title="Il tuo primo prompt da provare">{`Write a friendly 120-word email inviting existing customers to a webinar on June 30 about our new analytics dashboard. Warm but not salesy. End with a clear RSVP call to action.`}</PromptCard>
+
+## Minuto 3, da vicino — rifinisci in linguaggio naturale
+
+Non devi azzeccarlo perfettamente al primo colpo. Rispondi semplicemente come faresti con un collega:
+
+- *"Rendila più corta e più informale."*
+- *"Aggiungi una frase sul Q&A gratuito alla fine."*
+- *"Dammi 3 opzioni per l'oggetto."*
+
+Questo botta e risposta — il **perfezionamento iterativo** — batte l'agonizzare su un unico prompt perfetto.
+
+## Minuto 4, da vicino — prova un secondo compito, diverso
+
+Scegline uno per dimostrare che è di uso generale:
+
+- *"Riassumi questo articolo in 5 punti elenco: [incolla il testo]."*
+- *"Spiegami l'interesse composto come se avessi 12 anni, con un esempio."*
+- *"Ho pollo, riso e spinaci. Dammi una cena da 20 minuti."*
+
+## Minuto 5, da vicino — l'unica abitudine di sicurezza
+
+:::warning[Verifica prima di fidarti]
+L'IA può sembrare sicura di sé ed essere comunque **sbagliata** — specialmente su fatti, numeri, date, citazioni e riferimenti. Per qualsiasi cosa che conti, **controllala**. Questo non è un difetto che puoi eliminare con un prompt; è il modo in cui funziona lo strumento. Vedi [Allucinazioni e come ridurle](/docs/foundations).
+:::
+
+<Callout type="takeaways" items={[
+  "Il contesto batte le parole chiave: indica l'obiettivo, la lunghezza, il pubblico, il tono e che aspetto ha il 'fatto'",
+  "Il perfezionamento iterativo (follow-up in linguaggio naturale) batte la rincorsa di un unico prompt perfetto",
+  "Claude è di uso generale — prova un secondo compito, non correlato, per sentirlo",
+  "Verifica sempre qualsiasi cosa che conti; la sicurezza di sé non è correttezza"
+]} />
+
+## Mettiti alla prova
+
+<Quiz title="Mettiti alla prova" questions={[
+  {
+    q: "Qual è il singolo, più grande miglioramento per i principianti ai tuoi prompt?",
+    options: [
+      "Usare più parole chiave, come un motore di ricerca",
+      "Dare contesto e dire cosa vuoi (obiettivo, lunghezza, pubblico, tono)",
+      "Pagare sempre prima il piano premium"
+    ],
+    answer: 1,
+    explain: "La pagina lo definisce l'80% del prompting — indica l'obiettivo, la lunghezza, il pubblico, il tono e che aspetto ha il 'fatto'. Funziona su ogni IA."
+  },
+  {
+    q: "La tua prima risposta non è del tutto giusta. Cosa raccomanda la pagina?",
+    options: [
+      "Ricominciare da capo e costruire un unico prompt perfetto",
+      "Rispondere in linguaggio naturale per rifinirla (perfezionamento iterativo)",
+      "Accettarla così com'è perché non puoi cambiarla"
+    ],
+    answer: 1,
+    explain: "Il perfezionamento iterativo — follow-up come 'rendila più corta e più informale' — batte l'agonizzare su un unico prompt perfetto."
+  },
+  {
+    q: "Qual è l'unica abitudine di sicurezza da adottare dal minuto 5?",
+    options: [
+      "Fidarsi delle risposte che suonano sicure di sé",
+      "Verificare qualsiasi cosa che conti — fatti, numeri, date, citazioni, riferimenti",
+      "Fare solo domande di cui conosci già la risposta"
+    ],
+    answer: 1,
+    explain: "L'IA può sembrare sicura di sé ed essere comunque sbagliata. Per qualsiasi cosa che conti, controllala — non è un difetto che puoi eliminare con un prompt."
+  }
+]} />
+
+## Hai spiccato il volo 🎉
+
+Dove andare adesso:
+
+- Migliora ogni risposta → [Le basi del prompting](/docs/prompting/basics)
+- Scegli un piano strutturato → [Percorsi di apprendimento](/docs/start-here/learning-paths)
+- Usa l'IA per il lavoro vero → [Produttività quotidiana](/docs/playbooks/productivity)
+- Qualcosa non ha quadrato? → [Risoluzione dei problemi: "Perché Claude ha fatto così?"](/docs/contribute/troubleshooting)
+
+
+## Prossimi passi
+
+- [Percorsi di apprendimento (scegli il tuo binario)](/docs/start-here/learning-paths)

@@ -1,0 +1,196 @@
+# Claude 사용자를 위한 ChatGPT
+
+> Source: https://derob98.github.io/ailmanac/ko/docs/models/chatgpt-for-claude-users · AILmanac (CC BY 4.0) · last verified 2026-10-07
+
+Claude에 능숙하지만 ChatGPT를 써야 하나요? 중요한 차이점, 그대로 옮겨지는 것, 그리고 각각 언제 손을 뻗어야 하는지 — Custom GPT 폐지와 그것을 대체하는 Plugins까지.
+
+<LevelBadge level="beginner" />
+
+당신은 이미 Claude로 사고합니다. 그런데 동료가 Custom GPT를 공유하거나 클라이언트가 ChatGPT에서 일하고 있어서, AI 어시스턴트 사용법을 처음부터 다시 배우지 않고 **오늘 당장** 거기서 생산적으로 일해야 합니다. 좋은 소식: 당신이 아는 거의 모든 것이 그대로 옮겨집니다. 이 페이지는 당신의 Claude 멘탈 모델을 ChatGPT에 대응시키고, 실제로 다르게 작동하는 몇 안 되는 것들을 짚어주며, 각각이 언제 빛나는 경향이 있는지 알려줍니다.
+
+<Callout type="objectives" items={[
+  "Claude 개념을 ChatGPT의 대응물로 번역하기 (Projects, Custom GPTs와 그것을 대체하는 Plugins, custom instructions/memory, canvas, 모델 선택기)",
+  "당신의 Claude 프롬프팅 습관 중 어떤 것이 그대로 넘어가는지 알기 (대부분)",
+  "실제로 조정해야 하는 몇 안 되는 것들을 짚어내기",
+  "언제 ChatGPT에 손을 뻗고 언제 Claude에 머무를지 알기",
+]} />
+
+<VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/docs/models">
+정확한 모델 이름, 모델 선택기의 레이아웃, 요금제 등급, 파일/업로드 제한, 가격, 그리고 어떤 기능이 어떤 모델과 짝지어지는지는 OpenAI에서 **끊임없이 바뀝니다**. 이 페이지는 오래 유지되는 멘탈 모델과 개념 대응을 가르칩니다. 특정 이름, 제한, 또는 가격에 대해서는 여기 적힌 숫자를 믿기보다 OpenAI의 최신 공식 문서(Sources에 링크됨)를 확인하세요.
+</VerifyNote>
+
+:::warning[Custom GPTs는 사라지는 중 — plugins가 그 자리를 대체합니다]
+OpenAI는 **custom GPTs를 plugins로 전환하고 있으며**, custom GPTs는 폐지 시점에 작동을 멈춥니다. 동료가 오늘 Custom GPT를 건네준다면 그것은 아직 돌아가지만, 그 위에 새로운 것을 쌓지는 마세요 — 투자하기 전에 아래 **Projects vs Custom GPTs**를 읽으세요.
+:::
+
+## 60초 개념 지도
+
+한 섹션만 읽는다면 이걸 읽으세요. 당신이 Claude에서 아는 것들이 ChatGPT와 어떻게 대응되는지 정리했습니다:
+
+| Claude에서는 이렇게 부릅니다… | ChatGPT에서는… | 같은 개념? |
+| --- | --- | --- |
+| Claude Projects (작업 공간 + 파일 + 프로젝트 지침) | **Projects** | 예 — 거의 같은 개념 |
+| Custom Style / 재사용하는 저장된 시스템 프롬프트 | **Custom GPTs** — **Plugins**(skills + apps)로 대체되는 중 | 비슷함, 단 반전 있음 (아래 참조) |
+| 계정 수준 환경설정 / "어떻게 응답해줬으면 하는지" | **Custom instructions** | 예 |
+| Claude의 과거 대화 기억 | **Memory** | 예 — 같은 개념, 자주 진화함 |
+| Artifacts (문서/코드용 사이드 패널) | **Canvas** | 예 — 같은 개념 |
+| 모델 선택기 (Opus / Sonnet / Haiku) | **모델 선택기** (속도 vs 추론 등급) | 예 — 같은 개념, 다른 이름 |
+| 도구 사용 / function calling (API) | **Function calling** | 예 — 같은 형태, 다른 JSON 세부사항 |
+
+핵심: 배워야 할 *새로운 개념*이 거의 없습니다. 대부분 이미 이해하고 있는 것들을 **이름 바꾸고 재배치**하는 것뿐입니다.
+
+## Projects vs Custom GPTs — 제대로 알아둘 가치가 있는 유일한 구분
+
+이것이 Claude 사용자가 가장 자주 헷갈리는 단 하나의 지점입니다. ChatGPT에는 둘 다 "커스터마이징된 Claude"처럼 느껴지는 **두 가지**가 있는데, 서로 다른 일을 위한 것이기 때문입니다.
+
+- **Projects**는 *조직화용*입니다 — 하나의 진행 중인 작업을 중심으로 여러 대화, 업로드된 파일, 공유 지침을 묶는 작업 공간입니다. 여러 대화에 걸친 연속성이 핵심입니다. Claude Project를 열 상황이라면 Project에 손을 뻗으세요: 긴 리서치 스레드, 진화하는 글, 참고 문서가 있는 워크스트림. <VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/docs/projects">OpenAI 자신의 표현: "프로젝트를 사용해 관련된 대화, 파일, 지침, 소스를 함께 보관하세요"("Use a project to keep related chats, files, instructions, and sources together") — "시간이 지나도 계속되고, 하나 이상의 결과물을 만들며, 같은 파일과 소스에 의존하는"("will continue over time, produce more than one output, or depend on the same files and sources") 작업을 위한 것입니다. 무료 및 유료 요금제 전반의 가용성은 시간이 지나면서 바뀌므로 최신 페이지를 확인하세요.</VerifyNote>
+
+- **Custom GPTs**는 *패키징된 어시스턴트*입니다 — 고정된 페르소나로 새로운 대화 하나를 시작해 호출하는, 저장된 구성(시스템 프롬프트, 선택적 지식 파일, 활성화된 도구, 때로는 API 액션)입니다. 재사용하고 공유하도록 만들어졌기에, 한 사람이 전문성을 구축하면 여러 사람이 이를 실행합니다. **그리고 이것은 폐지되는 중입니다.**
+
+- **Plugins**가 그 대체물입니다: OpenAI의 표현으로는 "skills, apps 또는 둘 다를 포함할 수 있는, 워크플로를 위한 재사용 가능한 패키지"("a reusable package for a workflow that can include skills, apps, or both")입니다 — *skills*는 일을 어떻게 할지에 대한 지침을 담고, *apps*는 ChatGPT를 다른 서비스에 연결합니다. Custom GPT와 같은 직관, 더 넓은 표면. <VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/codex/migrate-custom-gpts">OpenAI: "우리는 custom GPTs를 plugins로 전환하고 있습니다. 아래 마일스톤을 사용해 custom GPTs가 폐지되기 전에 마이그레이션을 계획하세요."("We're transitioning custom GPTs to plugins. Use the milestones below to plan your migration before custom GPTs are retired.") 공개된 마일스톤은 관리자 공지 → 마이그레이션 → Custom GPT 폐지이며, 그 시점에 "custom GPTs는 작동을 멈추고 GPT 디렉터리에서 사라집니다"("custom GPTs stop running and leave the GPT directory"). 원래의 GPT는 "폐지까지는 사용 가능한 상태로 남고"("remains usable until retirement"), 더 이상 작동하지 않더라도 폐지 이후에도 GPT를 마이그레이션할 수는 있습니다. 구체적인 날짜는 워크스페이스 단위로 다르고(이 가이드는 ChatGPT Enterprise 관리자와 GPT 제작자를 대상으로 쓰였습니다) 변경될 수 있습니다 — 여기 적힌 날짜를 믿기보다 링크된 페이지의 마일스톤을 읽으세요.</VerifyNote>
+
+멘탈 지름길:
+
+- **공유 컨텍스트로 여러 대화에 걸친 연속성이 필요한가?** → Project.
+- **매번 같게 행동하는, 재사용 가능하고 공유 가능한 전문가가 필요한가?** → Plugin (그리고 이미 가진 Custom GPT를 마이그레이션하세요).
+
+Claude 사용자를 위한 두 가지 함정:
+
+- Custom GPT나 Plugin 대화는 매번 그 사전 설정 지침과 해당 대화만 가진 채 **새롭게** 시작하는 경향이 있습니다 — 진행 중인 Project 스레드처럼 지난 세션을 기억할 것이라고 기대하지 마세요.
+- 마이그레이션은 무손실이 **아닙니다**. 커스텀 액션은 따로 다시 만들어야 합니다 — 지원되는 커넥터나 당신 자신의 MCP 서버를 대상으로 — 그래서 액션에 크게 의존하는 GPT는 원클릭 변환이 아니라 실제 작업을 필요로 합니다. 당신이 다시 만드는 쪽이라면, [Codex Agent Plugins](/docs/models/codex-agent-plugins-catalogs)가 패키징 레이어를 다룹니다.
+
+## Custom instructions & memory — 같은 개념, 살짝 다른 레이어
+
+Claude에서는 전역 환경설정을 정하고 컨텍스트를 기억하게 둡니다. ChatGPT도 똑같이 하되, 지침을 설정할 수 있는 더 명시적인 레이어가 있을 뿐입니다:
+
+<Steps items={[
+  {title: "계정 수준 custom instructions", body: "당신의 상시 환경설정 — 톤, 상세 수준, 무엇에 집중할지. Claude 계정 환경설정처럼 모든 대화에 적용됩니다."},
+  {title: "Project 지침", body: "하나의 Project 주제로 범위가 한정된 컨텍스트 — Claude Project 지침에 해당합니다."},
+  {title: "Plugin (또는 Custom GPT) 지침", body: "패키징된 어시스턴트에 구워 넣은 '시스템 프롬프트' — Plugin의 skill, 또는 아직 마이그레이션하지 않은 Custom GPT의 지침 필드. 빌더가 행동을 완전히 제어하는 곳입니다."},
+  {title: "대화 내, 일회성", body: "한 메시지짜리 조정이 필요할 때 그냥 대화에서 말하세요 — Claude와 똑같습니다."},
+]} />
+
+**Memory**는 그 자체로 진화하는 시스템입니다: ChatGPT는 별개의 대화들에 걸쳐 컨텍스트를 이어갈 수 있습니다. *무엇을* 기억하는지, *얼마나* 기억하는지, *어디서 사용 가능한지*(예: 패키징된 어시스턴트 내부인지 아닌지)를 **가변적인 것**으로 취급하세요 — 자주 바뀌므로 가정하지 말고 현재 동작을 확인하세요. <VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/codex/personalize">OpenAI: "선호하는 응답 스타일처럼 대화 전반에서 ChatGPT가 따랐으면 하는 환경설정에는 custom instructions를 사용하세요."("Use custom instructions for preferences you want ChatGPT to follow across chats, such as your preferred response style.") 레이어링은 실제로 존재합니다 — Codex에서는 개인 레이어가 전역 `AGENTS.md`에 있고, "프로젝트와 리포지터리도 자체 지침을 제공할 수 있습니다"("projects and repositories can also provide their own instructions"). 세부사항과 가용성은 바뀌므로 최신 페이지를 확인하세요.</VerifyNote>
+
+## Canvas는 ChatGPT의 Artifacts입니다
+
+문서나 코드 블록이 살아있는 편집 가능한 객체가 되는 사이드 패널인 Claude Artifacts를 좋아한다면, **canvas**에서 편안함을 느낄 것입니다. 글쓰기와 코딩을 위한 전용 편집 공간을 열어, 메시지 전체를 재생성하는 대신 당신과 모델이 그 자리에서 수정할 수 있게 합니다. 같은 직관, 다른 이름.
+
+주의할 점 하나 (그리고 우리가 세부사항을 하드코딩하지 않는 좋은 이유): **당신이 받는 편집 공간은 요청한 내용만이 아니라 당신이 어디에 있는지에 따라 달라집니다**. OpenAI의 최신 문서는 미리보기-및-편집 동작이 표면(surface)별로 다르다고 설명합니다 — 데스크톱 앱은 생성된 문서를 대화 옆에서 미리 보여주고, CLI에는 시각적 미리보기가 전혀 없으며, IDE 확장은 에디터 안에서 파일을 검토합니다. 선택된 모델도 영향을 줄 수 있습니다. 사이드 패널이 나타나지 않으면, 버그를 의심하기 전에 당신의 표면이나 모델을 의심하세요. <VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/codex/artifacts-viewer">OpenAI의 파일 미리보기 문서는 가용성을 표면별로 규정합니다: 데스크톱 앱은 "생성된 문서, 프레젠테이션, 스프레드시트, PDF 파일을 대화 옆에서 미리 보여주고"("previews generated documents, presentations, spreadsheets, and PDF files alongside the chat"), CLI는 "시각적 파일 미리보기를 포함하지 않으며"("doesn't include a visual file preview"), IDE 확장은 텍스트와 코드 파일을 에디터에서 검토합니다. 이 페이지는 모델 기반 제한을 단언하지 않으므로, 모델 관련 주의사항은 문서화된 규칙이 아니라 안전장치 정도로 취급하세요. Canvas 자체는 OpenAI 도움말 센터에 별도로 문서화되어 있습니다(Sources에 링크됨).</VerifyNote>
+
+## 모델 선택기 — 이름이 아니라 작업으로 고르기
+
+Opus vs Sonnet vs Haiku를 고르듯이, ChatGPT도 모델을 고르라고 요청합니다 — 대체로 **속도 ↔ 추론** 스펙트럼을 따라(빠른 답변을 위한 빠른/즉각 옵션, 어려운 문제를 위한 고추론 옵션, 그리고 최상위 등급은 유료 요금제로 제한). *이름과 등급 수는 자주 바뀝니다*. 오래 유지되는 기술은 이미 Claude에서 쓰는 것과 같습니다: **작업의 난이도와 당신의 지연시간/비용 허용치에 모델을 맞추기.**
+
+이것이 바로 [모델 선택하기](/docs/models/choosing-a-model)와 [어떤 Claude를 써야 할까?](/docs/start-here/which-claude)의 프레임워크입니다 — 제공사에 무관합니다. 모델 이름을 외우지 말고, "빠름 vs 깊음"을 읽어내고 그에 맞춰 고르는 법을 배우세요.
+
+외우라는 뜻이 아니라 요점을 구체적으로 보여주기 위해: **2026년 10월 7일** 기준으로 선택기에는 **Astra**(가장 강력한 모델), **GPT-6.1 Sol**("Astra보다 낮은 비용으로 복잡한 작업에서 Astra에 가까운 성능", Plus, Pro, Business, Enterprise, Edu로 순차 배포 중), **GPT-6 Luna**(집중적이고 대량인 작업을 위한 효율 모델)가 올라와 있습니다 — 반면 **GPT-5.5는 2026년 10월 14일에 ChatGPT, ChatGPT Work, Codex에서 폐지되고** API에서는 계속 사용할 수 있습니다. 그 날짜보다 한참 뒤에 이 글을 읽고 있다면, 이 단락의 모든 이름은 이미 바뀌었을 것입니다. 바로 그게 요점입니다. <VerifyNote lastVerified="2026-10-07" source="https://learn.chatgpt.com/docs/models">모델 구성, 요금제 가용성, GPT-5.5 폐지 날짜는 OpenAI의 최신 models 페이지에서 읽었습니다. 거기 적힌 이전 폐지들: GPT-5.3-Codex-Spark는 2026년 9월 14일, GPT-5.4와 GPT-5.4-mini는 2026년 8월 31일. 이 목록은 설계상 빠르게 낡습니다 — 여기 적힌 것을 믿지 말고 원본을 다시 읽으세요.</VerifyNote>
+
+<Callout type="tip" items={[
+  "일상적인 초안 작성, 서식 지정, 빠른 Q&A에는 빠른/즉각 등급에 손을 뻗으세요.",
+  "다단계 논리, 까다로운 코드, 신중한 분석에는 고추론 등급에 손을 뻗으세요.",
+  "canvas 같은 기능이나 도구가 없어 보이면, 버그를 의심하기 전에 당신의 표면(데스크톱 vs 웹 vs CLI vs IDE)이나 선택된 모델을 의심하세요.",
+]} />
+
+## Function calling — 같은 형태, 다른 JSON 세부사항
+
+Claude로 [도구 사용](/docs/api/tool-use)을 해봤다면, OpenAI의 **function calling**은 즉시 익숙하게 느껴질 것입니다. *루프가 같기* 때문입니다:
+
+<Steps items={[
+  {title: "도구 선언", body: "각 도구를 이름, 설명, 그리고 파라미터의 JSON 스키마(어떤 것이 필수인지, 그 타입)로 기술합니다. Claude 도구 정의와 같은 개념입니다."},
+  {title: "모델이 호출을 요청", body: "프롬프트와 사용 가능한 도구가 주어지면, 모델은 텍스트 대신에(또는 텍스트와 함께) 구조화된 도구 호출 — 도구 이름과 인자 — 을 반환합니다."},
+  {title: "당신이 실행", body: "당신의 애플리케이션이 그 인자로 실제 함수를 실행합니다. 모델은 절대 스스로 아무것도 실행하지 않습니다."},
+  {title: "결과 반환", body: "도구의 출력을 모델에 다시 전달합니다."},
+  {title: "모델이 답변", body: "결과를 사용해 최종 응답을 만들어냅니다 — 그리고 끝내기 전에 더 많은 호출을 요청할 수 있습니다."},
+]} />
+
+동일한 것: 기술 → 모델-요청 → 당신이-실행 → 결과-반환 → 답변 루프, 다중/병렬 호출, 그리고 *모델은 제안하고, 당신의 코드가 처리한다*는 원칙. <VerifyNote lastVerified="2026-10-07" source="https://developers.openai.com/api/docs/guides/function-calling">OpenAI 가이드와 문구 단위로 대조해 확인했습니다. 그 가이드는 "함수"("a function")를 `type`, `name`, `description`, `parameters`, `strict`를 갖춘 "JSON 스키마로 정의되는 특정한 종류의 도구"("a specific kind of tool, defined by a JSON schema")로 정의하고, 같은 다섯 단계를 나열합니다: 호출할 수 있는 도구와 함께 모델에 요청 → 도구 호출 수신 → 애플리케이션 쪽에서 코드 실행 → 도구 출력과 함께 두 번째 요청 → 최종 응답(또는 추가 도구 호출) 수신. 정확한 필드 이름과 옵션은 바뀌므로 최신 API 가이드를 확인하세요.</VerifyNote>
+
+**다른 것** — 복사-붙여넣기 하면 발목을 잡을 것: 정확한 JSON 필드 이름, 메시지 목록에서 도구 호출과 결과가 표현되는 방식, "strict"/구조화 출력 옵션, 그리고 특정 API 엔드포인트 형태. 제공사 전반의 규칙으로: **프롬프팅과 아키텍처는 옮겨지지만, 와이어 포맷 세부사항은 그렇지 않습니다** — 항상 제공사별 스키마를 다시 확인하세요.
+
+## 무엇이 옮겨지는가 (스포일러: 거의 전부)
+
+힘들게 얻은 당신의 Claude 습관은 헛되지 않습니다. 이것들은 본질적으로 바뀌지 않고 넘어갑니다:
+
+- **프롬프트 구조** — 명확한 역할, 명시적 작업, 예시, 요청된 출력 형식 → [프롬프팅 기초](/docs/prompting/basics)
+- **의도적으로 컨텍스트 주기** — 알맞은 자료를 붙여넣고, 범위를 한정하고, 전부 쏟아붓지 않기
+- **특정 출력 형식 요청하기** — 표, JSON, 단계; 똑같이 작동합니다
+- **그 자리에서 반복하기** — 후속 질문으로 다듬기 (이제는 canvas로도)
+- **도구 사용 루프** — 도구를 기술하고, 모델이 호출하게 하고, 결과를 반환하기 → [도구 사용](/docs/api/tool-use)
+- **작업 난이도로 모델 고르기** — 빠름 vs 깊음, 같은 판단
+
+<PromptCard title="제공사 중립 시스템 프롬프트 — Custom GPT나 Project 지침에 넣으세요">{`You are a {role}.
+Goal: {one clear sentence}.
+Rules:
+- Use ONLY the context I provide; if the answer isn't there, say "I don't know".
+- Be concise. No preamble.
+- Output format: {exact format — e.g. a markdown table with columns X, Y, Z}.
+When you need information you don't have, ask one focused question instead of guessing.`}</PromptCard>
+
+## 실제로 조정해야 하는 것
+
+정말로 다른 것들의 짧고 정직한 목록:
+
+- **"커스터마이징" 객체가 하나가 아니라 둘.** 미리 정하세요: 진행 중인 작업 공간(Project)인가, 재사용 가능한 패키징 어시스턴트(Plugin — 또는 그렇게 되어가는 중인 Custom GPT)인가? 잘못 고르는 것이 가장 흔한 초기 실수입니다.
+- **Custom GPTs는 종착지가 아니라 마이그레이션 대상.** OpenAI는 그것들을 Plugins로 옮기고 폐지하고 있습니다. 하나를 물려받았다면 마이그레이션을 계획하세요. 새로 시작하지는 마세요.
+- **기능 ↔ 표면 짝지음.** ChatGPT에서는 미리보기/편집 패널(또는 특정 도구)이 사용 가능한지 여부가 어디서 실행하는지에 따라 달라질 수 있고, 때로는 선택된 모델에도 달려 있습니다. 무언가 없을 때는 다른 무엇보다 먼저 이것들을 확인하세요.
+- **도구의 와이어 포맷.** function-calling *개념*은 동일하지만, JSON 세부사항은 그렇지 않습니다 — Claude의 정확한 도구 JSON을 절대 그대로 재사용하지 마세요.
+- **가변적인 세부사항.** 모델 이름, 등급, 제한, 가격은 빠르게 변합니다. Claude에서도 그래야 하듯, 원본에서 확인하는 습관을 들이세요.
+
+## 각각 언제 빛나는 경향이 있는가
+
+둘 다 훌륭한 범용 어시스턴트이고 특정 작업에서의 격차는 종종 작고 유동적입니다 — 그러니 이것을 법칙이 아니라 *경향*으로 취급하고, [당신의 데이터로 직접 하는 평가](/docs/models/choosing-a-model)가 결정하게 하세요:
+
+- **ChatGPT에 손을 뻗을 때는** 그 특정 생태계가 필요할 때입니다 — 팀이 이미 유지하는 Custom GPT, 협업자가 설정한 Project, 또는 거기서 의존하는 내장 도구/통합. 클라이언트나 동료가 ChatGPT에서 일한다면, 거기서 만나는 것이 마찰보다 낫습니다.
+- **Claude에 손을 뻗을 때는** 이 사이트가 중심으로 삼는 Claude 워크플로에 이미 들어가 있을 때입니다 — Projects, Artifacts, 그리고 AILmanac 전반에 문서화된 프롬프팅/에이전트 패턴 — 그리고 그것들을 깊이 파고들고 싶을 때입니다.
+
+대부분의 경우 정직한 답: **당신(또는 당신의 팀)이 이미 세팅되어 있는 쪽.** 기술은 이식 가능하고, 세팅 비용이 진짜 전환 비용입니다.
+
+<Flashcards title="ChatGPT 대 Claude 용어집" cards={[
+  {front: "ChatGPT Projects", back: "하나의 진행 중인 작업을 중심으로 여러 대화, 파일, 공유 지침을 묶는 조직화 작업 공간. ≈ Claude Projects."},
+  {front: "Custom GPT", back: "패키징되고 재사용 가능하며 공유 가능한 어시스턴트 — 시스템 프롬프트 + 선택적 지식 + 도구 — 고정된 페르소나로 새 대화로 호출됨. 폐지되는 중: OpenAI는 custom GPTs를 Plugins로 전환하고 있습니다."},
+  {front: "Plugin", back: "Custom GPTs의 대체물. OpenAI의 표현: 'skills, apps 또는 둘 다를 포함할 수 있는, 워크플로를 위한 재사용 가능한 패키지' — skills는 일을 어떻게 할지 말하고, apps는 ChatGPT를 다른 서비스에 연결합니다. 커스텀 액션은 변환되지 않고 다시 만들어야 합니다."},
+  {front: "Custom instructions", back: "ChatGPT가 어떻게 응답할지에 대한 당신의 상시 환경설정, 대화 전반에 적용됨. 프로젝트와 리포지터리 수준에서도 레이어링 가능. ≈ Claude 계정 환경설정."},
+  {front: "Canvas", back: "그 자리에서 수정할 수 있는, 글쓰기와 코딩을 위한 사이드 패널 편집 공간. ≈ Claude Artifacts."},
+  {front: "Function calling", back: "OpenAI의 도구 사용: JSON 스키마로 도구를 기술하고, 모델이 호출을 요청하고, 당신이 실행해 결과를 반환. Claude 도구 사용과 같은 루프; 다른 JSON 세부사항."},
+  {front: "이식 가능한 기술", back: "프롬프팅 구조, 컨텍스트 절제, 출력 형식 요청, 도구 루프, 작업별 모델 선택 — 둘 다에서 작동합니다."},
+]} />
+
+<Quiz title="스스로 점검하기" questions={[
+  {q: "진행 중인 리서치 작업을 위해 관련된 여러 대화, 참고 파일, 공유 지침을 함께 유지하는 작업 공간을 원합니다. ChatGPT에서 무엇을 사용하나요?", options: ["Custom GPT", "Project", "Custom instructions"], answer: 1, explain: "Projects는 여러 대화에 걸친 연속성을 위한 조직화 작업 공간입니다 — Claude Project에 가장 가까운 대응물. Custom GPT는 다중 대화 작업 공간이 아니라 단일 패키징 어시스턴트입니다."},
+  {q: "Claude 도구 사용을 써봤습니다. OpenAI function calling에 대해 무엇이 참인가요?", options: ["처음부터 다시 배워야 하는 완전히 다른 개념", "같은 기술→호출→실행→반환 루프이지만, 정확한 JSON 필드 이름이 다름", "JSON까지 동일해서 Claude의 도구 정의를 그대로 붙여넣을 수 있음"], answer: 1, explain: "루프와 아키텍처는 그대로 옮겨집니다; 오직 와이어 포맷 세부사항(필드 이름, 메시지 형태)만 다릅니다 — 그러니 제공사 간에 원시 JSON을 복사하지 마세요."},
+  {q: "기대했는데 사이드 패널 미리보기가 나타나지 않습니다. 가장 먼저 확인할 가능성이 높은 것은?", options: ["인터넷 연결", "당신이 어느 표면에 있는지 — OpenAI는 미리보기 동작이 데스크톱 앱, 웹, CLI, IDE 확장 사이에서 다르다고 문서화합니다", "memory를 다 써버렸는지 여부"], answer: 1, explain: "OpenAI의 최신 문서는 미리보기-및-편집 가용성을 표면별로 규정합니다: 데스크톱 앱은 생성된 파일을 대화 옆에서 미리 보여주고, CLI에는 시각적 미리보기가 전혀 없으며, IDE 확장은 에디터에서 파일을 검토합니다. 선택된 모델도 영향을 줄 수 있지만 — 문서화된 차이는 표면입니다."},
+  {q: "동료가 팀이 의존하는 Custom GPT를 건네줍니다. 올바른 행동은?", options: ["계속 그 위에 쌓기 — Claude Project에 해당하는 ChatGPT 대응물이니까", "Plugin으로의 마이그레이션을 계획하고, 커스텀 액션에는 여유 시간을 더 두기", "무시하기; Custom GPTs는 애초에 잘 작동한 적이 없다"], answer: 1, explain: "OpenAI는 custom GPTs를 Plugins로 전환하고 있고, 폐지 시점에 custom GPTs는 작동을 멈추고 GPT 디렉터리에서 사라집니다. 원래의 것은 그때까지 사용 가능하므로 시간은 있습니다 — 하지만 커스텀 액션은 자동으로 변환되지 않고, 지원되는 커넥터나 당신 자신의 MCP 서버를 대상으로 다시 만들어야 합니다."},
+]} />
+
+<Callout type="takeaways" items={[
+  "새로운 개념은 거의 없습니다 — Projects ≈ Claude Projects, Plugin ≈ 패키징된 재사용 어시스턴트, canvas ≈ Artifacts, function calling ≈ 도구 사용.",
+  "단 하나의 구분을 제대로: Projects = 여러 대화 조직화; Plugin = 재사용 가능하고 공유 가능한 전문가.",
+  "Custom GPTs는 Plugins로 전환되는 중이고 폐지될 예정입니다 — 물려받은 것은 마이그레이션하고, 새로 시작하지 말고, 커스텀 액션에는 실제 시간을 예산으로 잡으세요.",
+  "당신의 프롬프팅, 컨텍스트, 출력 형식, 도구 루프 습관은 바뀌지 않고 옮겨집니다 — Opus/Sonnet/Haiku처럼 작업 난이도로 모델을 고르세요.",
+  "몇 가지만 조정하세요: 두 개의 커스터마이징 객체, 기능↔표면 짝지음, 그리고 도구 호출 JSON 세부사항.",
+  "이름, 등급, 제한, 가격은 빠르게 낡습니다 — Claude에서도 그래야 하듯, OpenAI 문서에서 세부사항을 확인하세요.",
+]} />
+
+## 출처 및 더 읽을거리
+
+- [Models — learn.chatgpt.com](https://learn.chatgpt.com/docs/models) — 현재의 모델 선택기, 각 모델이 어떤 요금제에 있는지, 그리고 폐지 공지. 어떤 모델 이름이든 믿기 전에 확인할 곳.
+- [Projects — learn.chatgpt.com](https://learn.chatgpt.com/docs/projects) — Projects가 무엇이고 어떻게 작동하는지.
+- [Moving your custom GPT workflows to plugins — learn.chatgpt.com](https://learn.chatgpt.com/codex/migrate-custom-gpts) — 마이그레이션 마일스톤, 무엇이 변환되고 무엇을 다시 만들어야 하는지.
+- [Personalize ChatGPT — learn.chatgpt.com](https://learn.chatgpt.com/codex/personalize) — custom instructions와 지침 레이어가 쌓이는 방식.
+- [Work with files — learn.chatgpt.com](https://learn.chatgpt.com/codex/artifacts-viewer) — 미리보기-및-편집 동작, 그리고 표면별 차이.
+- [ChatGPT & Codex changelog — learn.chatgpt.com](https://learn.chatgpt.com/docs/changelog) — 가변적인 기능/모델 변경을 추적하는 표준 장소.
+- [What is the canvas feature in ChatGPT — OpenAI Help Center](https://help.openai.com/en/articles/9930697-what-is-the-canvas-feature-in-chatgpt-and-how-do-i-use-it) — canvas 편집 공간.
+- [Plugins in ChatGPT and Codex — OpenAI Help Center](https://help.openai.com/en/articles/20001256-plugins-in-chatgpt-and-codex) — OpenAI 자신의 마이그레이션 가이드에서 링크된, plugin 개념.
+- [Function calling — OpenAI API docs](https://developers.openai.com/api/docs/guides/function-calling) — 도구 호출 형태와 요청/응답 루프.
+
+## 다음
+
+- **현재의 플래그십** → [Claude 사용자를 위한 GPT-6 Astra](/docs/models/openai-astra-preview) — OpenAI의 최상위 모델, 그리고 Opus와 나란히 놓고 읽는 법
+- **DevDay 2026 릴리스** → [Claude 사용자를 위한 GPT-6.1 Sol](/docs/models/gpt-6-1-sol-devday-2026) — Sonnet 5.5와 같은 요금표, 272K 비용 절벽, 그리고 여전히 Sonnet이 이기는 벤치마크 항목
+- **Custom GPT 대체하기** → [Codex Agent Plugins & 카탈로그 페더레이션](/docs/models/codex-agent-plugins-catalogs) — 마이그레이션된 워크플로가 착지하는 패키징 레이어
+- **아이덴티티 레이어** → [Sign in with ChatGPT](/docs/models/sign-in-with-chatgpt) — OAuth/OIDC 제공자, 무엇을 공유하는지, 그리고 당신의 앱에서 받아들이는 방법
+- 제공사 중립적으로 고르는 법 → [모델 선택하기](/docs/models/choosing-a-model)
+- 다른 대형 어시스턴트에서도 왔나요? → [Claude 사용자를 위한 Gemini](/docs/models/gemini-for-claude-users) · [Claude 사용자를 위한 Grok](/docs/models/grok-for-claude-users)
+- 어디서나 통하는 습관들 → [프롬프팅 기초](/docs/prompting/basics) · [도구 사용](/docs/api/tool-use)
+- 핵심을 깊이 파기 → [어떤 Claude를 써야 할까?](/docs/start-here/which-claude)

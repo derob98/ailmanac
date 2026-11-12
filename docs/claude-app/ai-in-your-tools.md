@@ -1,0 +1,38 @@
+# AI in Your Existing Tools (M365 / Workspace / Slack)
+
+> Source: https://derob98.github.io/ailmanac/docs/claude-app/ai-in-your-tools · AILmanac (CC BY 4.0) · last verified 2026-08-02
+
+Where you actually meet Claude inside the tools you already use.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-08-02" source="https://www.anthropic.com">
+Integrations and availability across third-party tools change frequently and vary by plan/region — confirm current options with Anthropic and the tool vendor.
+</VerifyNote>
+
+You don't always go *to* an AI — increasingly it shows up **inside the apps you already work in**. Meeting Claude where you are removes the copy-paste tax and fits AI into real workflows.
+
+## Common places AI shows up
+
+- **Productivity suites** — assistants embedded in documents, email, spreadsheets, and slides (Microsoft 365, Google Workspace). Draft, summarize, and transform content without leaving the file.
+- **Chat/collaboration** — assistants and bots in tools like Slack for summarizing threads, drafting replies, and answering from your knowledge base.
+- **Browsers** — read and act on the current page — see [Claude in Chrome & Computer Use](/docs/claude-app/chrome-and-computer-use).
+- **Your own apps** — via [Connectors (MCP)](/docs/claude-app/connectors) and the [API](/docs/api/first-call).
+
+## Two ways to "bring AI to your tools"
+
+1. **Use an existing integration** — install the official app/add-in/bot where it exists. Fastest path.
+2. **Connect via MCP** — [Connectors](/docs/claude-app/connectors) let Claude reach external tools/data through the open [Model Context Protocol](/docs/claude-code/mcp), so it can work *with* your systems.
+
+## Make it useful (and safe)
+
+- **Start with read/summarize** tasks (low risk) before letting an integration take actions.
+- **Mind permissions** — an integration that can act on your accounts inherits real power; grant least privilege ([Securing Agents](/docs/security/securing-agents)).
+- **Watch for [prompt injection](/docs/security/prompt-injection)** when AI reads untrusted content (emails, docs, web).
+- **Check data terms** for work data — see [Privacy](/docs/foundations/privacy).
+
+## Next
+
+- [Connectors (MCP) in the Apps](/docs/claude-app/connectors)
+- [Claude in Chrome & Computer Use](/docs/claude-app/chrome-and-computer-use)
+- [Securing Agents & Tools](/docs/security/securing-agents)

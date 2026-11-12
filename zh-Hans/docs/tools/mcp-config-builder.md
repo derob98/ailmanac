@@ -1,0 +1,25 @@
+# MCP 配置生成器
+
+> Source: https://derob98.github.io/ailmanac/zh-Hans/docs/tools/mcp-config-builder · AILmanac (CC BY 4.0)
+
+勾选你需要的服务器，即可得到开箱即用的 .mcp.json。
+
+<LevelBadge level="intermediate" />
+
+[MCP](/docs/claude-code/mcp) 将 Claude 连接到外部工具和数据。选择你需要的服务器，然后复制（或下载）一份起步用的 `.mcp.json`。请用环境变量替换 `${...}` 占位符——切勿把密钥硬编码进去。
+
+<McpConfigBuilder />
+
+:::warning[有两行需要你自己填写包名]
+PostgreSQL 和 Slack 会特意输出 `REPLACE-WITH-A-MAINTAINED-…` 占位符，而不是具体的包。大家过去用于这两项的 `@modelcontextprotocol/server-*` 包已[归档且不再维护](/docs/templates/mcp-config)，没有任何安全保证，也没有官方替代品——所以请自行挑选一个仍在维护的社区服务器，审查之后再粘贴它的包名。其余各行要么是仍在维护的参考服务器，要么是厂商自己的端点。
+:::
+
+:::warning[信任，但要验证]
+MCP 服务器会运行代码，并可能访问数据。只连接你信任的服务器，给予最小权限，并在 [modelcontextprotocol.io](https://modelcontextprotocol.io) 上核实每个包。参见[审查第三方代码](/docs/security/reviewing-third-party-code)。
+:::
+
+## 下一步
+
+- [Claude Code 中的 MCP 服务器](/docs/claude-code/mcp) — 完整指南
+- [MCP 配置与服务器脚手架](/docs/templates/mcp-config) — 服务器起步代码
+- [构建并接入你的第一个 MCP 服务器](/docs/walkthroughs/first-mcp-server)

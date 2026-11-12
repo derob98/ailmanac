@@ -1,0 +1,46 @@
+# Intégrations IDE
+
+> Source: https://derob98.github.io/ailmanac/fr/docs/claude-code/ide-integrations · AILmanac (CC BY 4.0) · last verified 2026-07-16
+
+Extensions VS Code et JetBrains, diffs en ligne et réglages partagés.
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-07-16" source="https://code.claude.com/docs/en/vs-code">
+Les IDE pris en charge et les étapes de configuration changent — vérifiez dans la documentation officielle des intégrations IDE.
+</VerifyNote>
+
+Vous n'êtes pas obligé de vivre dans le terminal. Claude Code s'intègre à votre éditeur pour que vous examiniez les changements **sous forme de diffs, là où vous codez**.
+
+## Ce que vous obtenez
+
+- **Diffs en ligne.** Les modifications proposées apparaissent sous forme de diff révisable dans l'éditeur, pas seulement en texte dans un terminal.
+- **Contexte de l'éditeur.** Vos fichiers ouverts, votre sélection et votre projet sont accessibles à Claude.
+- **Le même cerveau.** C'est le même Claude Code — votre [CLAUDE.md](/docs/claude-code/claude-md), vos [permissions](/docs/claude-code/permissions), vos [hooks](/docs/claude-code/hooks) et vos [réglages](/docs/claude-code/settings) s'appliquent à l'identique entre la CLI et l'IDE. Configurez une fois, utilisez partout.
+
+## Éditeurs pris en charge
+
+- **VS Code** (et les éditeurs basés sur VS Code) via l'extension.
+- **IDE JetBrains** (IntelliJ, PyCharm, WebStorm, etc.) via le plugin.
+
+Installez depuis la marketplace de l'éditeur et authentifiez-vous ; consultez la [documentation officielle](https://code.claude.com/docs/en/vs-code) pour les étapes actuelles.
+
+## CLI ou IDE — lequel ?
+
+C'est le même outil ; choisissez selon votre préférence et la tâche :
+
+| Préférez l'IDE quand… | Préférez la CLI quand… |
+|---|---|
+| Vous voulez examiner les diffs visuellement | Vous scriptez ou êtes en mode [headless](/docs/claude-code/headless-and-agent-sdk) |
+| Vous codez déjà dans l'éditeur | Vous êtes sur un serveur / en SSH |
+| Vous aimez avoir le contexte de l'éditeur intégré | Vous voulez un contrôle maximal et des pipes |
+
+:::tip[Les réglages sont partagés]
+Comme la CLI et l'IDE lisent la même configuration, mettez en place votre [CLAUDE.md](/docs/claude-code/claude-md) et vos [permissions](/docs/claude-code/permissions) une fois et ils vous suivent entre les deux.
+:::
+
+## Et après
+
+- [CLAUDE.md & fichiers de mémoire](/docs/claude-code/claude-md)
+- [Mode Plan](/docs/claude-code/plan-mode)
+- [settings.json](/docs/claude-code/settings)

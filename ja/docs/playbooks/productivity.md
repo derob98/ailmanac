@@ -1,0 +1,134 @@
+# 日常の生産性
+
+> Source: https://derob98.github.io/ailmanac/ja/docs/playbooks/productivity · AILmanac (CC BY 4.0)
+
+日々の仕事に Claude を使う、最初の価値の高い 5 つの用途 — コピー&ペーストできるプロンプト付き。
+
+<LevelBadge level="beginner" />
+
+ほとんど誰でも今日から使える 5 つのことです。それぞれにスタート用のプロンプトが付いています — 貼り付けて、かっこの中を入れ替え、普通の言葉で磨いていきましょう。
+
+<Callout type="objectives" items={[
+  "コピー&ペーストする 1 つのプロンプトから、返信、要約、計画の下書きを作る",
+  "これらのプロンプトのすべてが名指ししている 3 つの要素を見分ける: 目的、形式、制約",
+  "プロンプトを一から書き直すのではなく、追加の指示で出力を操縦する",
+  "自分の文章のサンプルを渡して、自分らしい文章を得る",
+  "どの出力は、行動する前に検証しなければならないかを知る"
+]} />
+
+## 1. 受信トレイを手なずける
+
+<PromptCard title="Draft a reply to an email you received">
+{`Here's an email I received. Draft a polite, concise reply that [accepts the
+meeting but proposes Thursday instead]. Keep it under 80 words.
+
+Email: [paste]`}
+</PromptCard>
+
+役立つ追加の指示: *「もっとフォーマルに」*、*「感謝の一文を足して」*、*「2 つのバージョンを出して」*。
+
+## 2. 長いものを要約する
+
+<PromptCard title="Summarise anything, with decisions pulled out separately">
+{`Summarise this in 5 bullet points a busy manager could read in 30 seconds,
+then list any decisions or action items separately.
+
+Text: [paste]`}
+</PromptCard>
+
+記事、会議のメモ、スレッド、レポートに使えます。非常に長い入力では、**まず**要約を頼み、それから掘り下げます。
+
+## 3. 作業を計画して分解する
+
+<PromptCard title="Turn a vague goal into a plan with risks flagged">
+{`I need to [organise a 30-person team offsite] by [October]. Give me a
+step-by-step plan with rough timing, and flag the 3 things most likely
+to go wrong.`}
+</PromptCard>
+
+プロジェクトの計画、チェックリスト、曖昧な目標を次のアクションに変えるのに最適です。
+
+## 4. 一緒に考え抜く
+
+<PromptCard title="Pressure-test a decision instead of just making it">
+{`I'm deciding between [option A] and [option B] for [situation]. Lay out the
+trade-offs in a table, then tell me what else I should consider before
+deciding.`}
+</PromptCard>
+
+壁打ちの相手として使いましょう — 自分の考えを試すために、反対の立場で論じてもらいます。
+
+## 5. 下書きを作り、自分のものにする
+
+<PromptCard title="Get a draft in your own voice">
+{`Write a first draft of [a LinkedIn post announcing our new feature].
+Match this voice: [paste a paragraph you wrote]. Then suggest a punchier
+opening line.`}
+</PromptCard>
+
+*自分の*文章のサンプルを渡すことが、ありきたりでない出力を得るコツです。
+
+## 大切な 2 つの習慣
+
+<Steps items={[
+  {
+    "title": "文脈を与えて、反復する",
+    "body": "上のプロンプトはどれも、目的、形式、制約を名指ししています — それがレシピのすべてです。そして、最初から正解である必要はありません。プロンプトを書き直す代わりに、何が違うのかを普通の言葉で伝えましょう(「もっと短く」、「もっとくだけて」、「2 つのバージョンで」)。"
+  },
+  {
+    "title": "事実に関わるものは検証する",
+    "body": "日付、数字、名前、引用、そして「事実」は、自信たっぷりに間違っていることがあります。貼り付けたドキュメントの要約はリスクが低いですが、モデルが記憶から思い出した市場の数字はそうではありません。重要なことは、確認してください。"
+  }
+]} />
+
+この 2 つの習慣には、それぞれ裏付けとなるページがあります。目的、形式、制約を名指しする方法は[プロンプトの基本](/docs/prompting/basics)、どの出力が自信たっぷりに間違いうるかを知るには[ハルシネーション](/docs/foundations/hallucinations)です。
+
+<Quiz questions={[
+  {
+    "q": "40 ページのレポートを貼り付けて、内容を理解したいとします。このページは、最初に何を頼むよう勧めていますか?",
+    "options": [
+      "セクションごとの詳細な分析",
+      "5 つの箇条書きの要約を頼み、それから重要な部分を掘り下げる",
+      "ドキュメントに出てくるすべての数字の一覧",
+      "もっとやさしい言葉への書き換え"
+    ],
+    "answer": 1,
+    "explain": "非常に長い入力では、まず要約を頼み、それから掘り下げます。特定のセクションに注意を割く前に地図が得られ、そのドキュメントが本当に必要だったものかどうかも、すぐに分かります。"
+  },
+  {
+    "q": "下書きがありきたりで、自分らしさがまったくありません。このページが挙げる解決策は何ですか?",
+    "options": [
+      "もっと創造的なトーンを頼む",
+      "自分の文章を一段落、声のサンプルとして貼り付ける",
+      "10 個のバージョンを頼み、1 つを選ぶ",
+      "自分の人柄をもっと長く説明する"
+    ],
+    "answer": 1,
+    "explain": "自分の文章のサンプルを渡すことが、最も効果的な一手です。声の説明(「親しみやすいがプロフェッショナル」)は解釈されますが、実際の自分の段落は模倣されます。"
+  },
+  {
+    "q": "次の出力のうち、行動する前に最も検証が必要なのはどれですか?",
+    "options": [
+      "プロンプトに貼り付けたメモの要約",
+      "貼り付けたメールをもとに作った返信の下書き",
+      "モデルが記憶から出した市場の統計",
+      "説明した 2 つの選択肢のトレードオフの表"
+    ],
+    "answer": 2,
+    "explain": "自分が渡したテキストに基づくものは、そのテキストと照らして確認できます。出典なしにモデルが思い出した数字は、自信たっぷりに間違いうるもので、確認すべき日付、数字、名前、引用はそういうものです。"
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "目的 + 形式 + 制約が、レシピのすべてです。ここの 5 つのプロンプトはすべてそのパターンです。",
+  "書き直す代わりに、普通の言葉で磨きましょう — 「もっと短く」、「もっとフォーマルに」、「2 つのバージョンで」はどれも効きます。",
+  "入力が長いときは、まず要約し、それから掘り下げます。",
+  "自分の文章のサンプルは、どんなトーンの説明にも勝ります。",
+  "根拠のある出力は確認しやすく、思い出された事実こそが痛い目に遭わせます。"
+]} />
+
+## 次へ
+
+- プロンプトの腕を上げる → [プロンプトパターンライブラリ](/docs/prompting/pattern-library)
+- プロジェクト向けの永続的なワークスペース → [プロジェクト](/docs/claude-app/projects)
+- 既存のツールの中で AI を使う → [既存のツールの中の AI](/docs/claude-app/ai-in-your-tools)

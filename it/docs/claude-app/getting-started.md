@@ -1,0 +1,83 @@
+# Iniziare con Claude.ai
+
+> Source: https://derob98.github.io/ailmanac/it/docs/claude-app/getting-started · AILmanac (CC BY 4.0) · last verified 2026-08-13
+
+Account, interfaccia e la tua prima conversazione utile.
+
+<LevelBadge level="beginner" />
+
+<Callout type="objectives" items={[
+  "Creare un account, e sapere quale decisione sul piano puoi rimandare senza rischi",
+  "Leggere l'interfaccia di claude.ai in 20 secondi — e sapere cosa ricorda ogni chat",
+  "Fare una prima conversazione davvero utile invece di una domanda di prova",
+  "Prendere le tre abitudini che separano le sessioni utili da quelle frustranti",
+]} />
+
+<VerifyNote lastVerified="2026-08-13" source="https://claude.com/pricing">
+I nomi dei piani e i limiti cambiano — vedi [Piani, limiti e fatturazione](/docs/claude-app/plans-and-billing) e la pagina ufficiale dei prezzi per i dettagli attuali.
+</VerifyNote>
+
+[claude.ai](https://claude.ai) è il modo più semplice per usare Claude — niente installazione, niente codice. Ecco come ottenere valore già nella tua prima sessione.
+
+## Accedi e scegli un piano
+
+Crea un account su [claude.ai](https://claude.ai). Il piano **free** è più che sufficiente per imparare le basi; i piani a pagamento alzano i limiti d'uso e sbloccano di più. Non devi decidere ora — vedi [Piani, limiti e fatturazione](/docs/claude-app/plans-and-billing) quando sei pronto.
+
+## L'interfaccia in 20 secondi
+
+- Una **casella dei messaggi** in basso — scrivi o incolla qui.
+- La **conversazione** sopra — i tuoi turni e quelli di Claude, in ordine.
+- Una **barra laterale** delle chat passate — ogni chat ha il proprio contesto.
+- **Allegati** — trascina file, immagini o PDF per fare domande su di essi.
+
+È disponibile anche su **[mobile](/docs/claude-app/mobile)** e tramite **[voce](/docs/claude-app/voice-mode)**.
+
+## La tua prima conversazione utile
+
+Non "cercare" — chiedi come faresti a un collega in gamba, con contesto e una richiesta chiara. Quattro mosse:
+
+<Steps items={[
+  {title: "Dai la situazione, non una parola chiave", body: "Di' per chi è, cosa stai cercando di ottenere e qualsiasi vincolo che conta — budget, scadenza, pubblico. Un motore di ricerca vuole parole chiave; Claude vuole il briefing."},
+  {title: "Indica la forma della risposta che vuoi", body: "Una scaletta giorno per giorno, una checklist, un'email di 120 parole, una tabella. Le forme specifiche sono molto più usabili di un muro di prosa."},
+  {title: "Affina in linguaggio naturale", body: "Sostituisci il giorno 2 con qualcosa di meno turistico. Aggiungi i costi approssimativi. Trasformalo in una checklist. Non devi rispiegare il compito — la chat lo conserva ancora."},
+  {title: "Verifica tutto ciò su cui agiresti", body: "Orari di apertura, prezzi, citazioni, nomi. Sicuro di sé e sbagliato è l'unica modalità di errore da tenere d'occhio."},
+]} />
+
+<PromptCard title="Un primo prompt che vale la pena scrivere">{`I'm planning a 3-day trip to Rome in October for two people who love food and
+history, on a mid-range budget. Draft a day-by-day outline with one must-do per
+day and a nearby lunch spot.`}</PromptCard>
+
+Poi **affina in linguaggio naturale**: *"sostituisci il giorno 2 con qualcosa di meno turistico", "aggiungi i costi approssimativi", "trasformalo in una checklist".* È in questo botta e risposta che sta la magia — vedi [Le basi del prompting](/docs/prompting/basics).
+
+## Tre abitudini fin dal primo giorno
+
+1. **Dai contesto.** Obiettivo, pubblico, formato, tono. (Non può leggerti nel pensiero.)
+2. **Itera.** La prima risposta è una bozza.
+3. **Verifica ciò che conta.** Fatti, numeri e citazioni possono essere sbagliati con sicurezza — vedi [Allucinazioni](/docs/foundations/hallucinations).
+
+## Fai un salto di qualità
+
+- **[Progetti](/docs/claude-app/projects)** — uno spazio di lavoro con file e istruzioni propri.
+- **[Istruzioni personalizzate e stili](/docs/claude-app/custom-instructions)** — imposta i tuoi valori predefiniti una volta sola.
+- **[Artifact](/docs/claude-app/artifacts)** — ottieni documenti live e app eseguibili in un pannello laterale.
+- **[Claude Science](/docs/claude-app/claude-science)** — un banco di lavoro specializzato per flussi di ricerca (beta).
+
+<Quiz title="Verifica te stesso" questions={[
+  {q: "Cosa significa in pratica \"ogni chat ha il proprio contesto\"?", options: ["Ogni chat condivide un'unica memoria continua", "Quello che hai spiegato in una chat non è automaticamente presente in un'altra", "Le chat vengono eliminate quando chiudi la scheda", "Solo la chat più recente conserva il contesto"], answer: 1, explain: "Ogni chat nella barra laterale ha il proprio contesto, quindi una nuova conversazione parte senza il background che avevi dato in una precedente."},
+  {q: "La prima bozza è usabile ma troppo turistica. Qual è la mossa successiva più efficiente?", options: ["Aprire una nuova chat e riscrivere tutto il prompt", "Affinare in linguaggio naturale nella stessa chat", "Passare a un piano superiore", "Allegare un PDF dell'itinerario"], answer: 1, explain: "La chat conserva ancora il briefing originale, quindi basta un breve affinamento in linguaggio naturale — la prima risposta è una bozza."},
+  {q: "Quale abitudine del primo giorno protegge dalla principale modalità di errore del modello?", options: ["Dai contesto", "Itera", "Verifica ciò che conta", "Usa la modalità vocale"], answer: 2, explain: "Fatti, numeri e citazioni possono essere sbagliati con sicurezza, quindi verifica tutto ciò su cui agiresti."},
+]} />
+
+<Callout type="takeaways" items={[
+  "Parti dal piano free — la decisione sul piano può aspettare finché i limiti non si fanno sentire davvero.",
+  "Ogni chat è un contesto separato; una nuova chat parte da zero.",
+  "Chiedi come se stessi facendo un briefing a un collega in gamba: situazione, vincoli e la forma di risposta che vuoi.",
+  "Tratta la prima risposta come una bozza e affina in linguaggio naturale.",
+  "Verifica tutto ciò su cui agiresti — sicuro di sé e sbagliato è la modalità di errore da tenere d'occhio.",
+]} />
+
+## Avanti
+
+- [I tuoi primi 5 minuti](/docs/start-here/your-first-5-minutes)
+- [Parlare con Claude (modalità vocale)](/docs/claude-app/voice-mode)
+- [Produttività quotidiana](/docs/playbooks/productivity)

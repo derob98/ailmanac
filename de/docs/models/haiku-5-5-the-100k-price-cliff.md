@@ -1,0 +1,363 @@
+# Claude Haiku 5.5: die 100K-Preisklippe
+
+> Source: https://derob98.github.io/ailmanac/de/docs/models/haiku-5-5-the-100k-price-cliff · AILmanac (CC BY 4.0) · last verified 2026-10-08
+
+Haiku 5.5 erschien am 7. Oktober 2026 für 0,10 $/0,50 $ pro MTok — eine Senkung um 90 % — und ist das einzige aktuelle Claude-Modell, das nach Prompt-Länge bepreist wird. Ein Token jenseits von 100.000 bepreist die gesamte Anfrage um das Fünffache neu. Die Schwelle wird mit dem neuen Tokenizer gemessen, erreicht Sie im Text also ~23 % früher als erwartet, und die 90 % der Schlagzeile sind in der Praxis ~87 % unterhalb der Klippe und ~35 % oberhalb.
+
+<LevelBadge level="intermediate" />
+
+Am **7. Oktober 2026** veröffentlichte Anthropic **Claude Haiku 5.5** (`claude-haiku-5-5`): das schnellste Modell der Reihe, mit einem **Kontextfenster von 1M** (zuvor 200K), **128K maximaler Ausgabe** (zuvor 64K), adaptivem Denken mit dem Parameter `effort` erstmals in einem Haiku und einem Schlagzeilen-Eingabepreis von **0,10 $ / MTok** gegenüber 1,00 $ bei Haiku 4.5.
+
+Das ist eine Senkung der Preisliste um 90 %, und diese Zahl stand an der Spitze jedes Berichts. Es ist auch nicht die Zahl, die Sie zahlen werden, aus zwei Gründen, die sich verstärken — und einer davon ist eine strukturelle Änderung, die nichts anderes in der Reihe hat.
+
+**Haiku 5.5 ist das einzige aktuelle Claude-Modell, das nach Prompt-Länge bepreist wird.** Jedes andere Claude-Modell ab 4.6 rechnet eine Anfrage mit 900K Tokens mit genau demselben Preis pro Token ab wie eine mit 9K. Haiku 5.5 hat zwei Preislisten, und der Wechsel zwischen ihnen ist eine **harte Schwelle bei 100.000 Tokens**, die *die gesamte Anfrage* — Eingabe, Ausgabe, Cache-Schreibvorgänge, Cache-Lesevorgänge, Batch — auf das **5-Fache** neu bepreist.
+
+Der zweite Grund ist leiser: Haiku 5.5 wechselt zum neueren Tokenizer, sodass **derselbe Text etwa 30 % mehr Tokens** zählt als bei Haiku 4.5. Das schmälert den Rabatt und verschiebt auch die Klippe: Die 100.000 werden in *neuen* Tokens gezählt, sie erreicht Sie also, gemessen am tatsächlichen Text, etwa 23 % früher, als jeder annimmt, der eine Messung von Haiku 4.5 übernimmt.
+
+Diese Seite rechnet aus, was Sie in jedem Regime tatsächlich zahlen, zeigt, wo die Klippe in Wörtern liegt, und behandelt dann die Migration — einschließlich fünf 400-Fehlern und sechs Änderungen, die `200` zurückgeben und Ihnen einfach eine schlechtere Antwort liefern.
+
+<Callout type="objectives" items={[
+  "Die echten Zahlen kennen: zwei Preislisten, geteilt bei 100.000 Tokens, 1M Kontext, 128K Ausgabe (300K bei Batches), adaptives Denken, Standard-Effort medium, Wissensstand Juni 2026",
+  "Verstehen, dass die Klippe eine Neubepreisung ist, keine Überschreitungsgebühr: ein Token jenseits von 100.000 multipliziert die gesamte Rechnung mit 5",
+  "Die Klippe im Text (~55.500 englische Wörter) und in alten Messungen (~77.000 Haiku-4.5-Tokens) verorten, weil sie mit dem neuen Tokenizer gezählt wird",
+  "Die ehrliche Ersparnis berechnen: ~87 % unterhalb der Klippe, ~35 % oberhalb, und in beiden Fällen weiterhin 75 % unter Sonnet 5.5",
+  "Entscheiden, wann man unterhalb der Schwelle aufteilt — ein durchgerechneter Fall, der eine Rechnung bei denselben Eingabe-Tokens um 79 % senkt — und wann Aufteilen die falsche Antwort ist",
+  "Die fünf Breaking Changes beheben, die eine Haiku-4.5-Codebasis mit 400 scheitern lassen, einschließlich Assistant-Prefill, das Haiku 4.5 akzeptierte",
+  "Die sechs stillen Änderungen erkennen, die 200 zurückgeben: eine leere Antwort durch ein ohne Denken abgestimmtes max_tokens, content[0], das nicht mehr die Antwort ist, und Ablehnungen ohne serverseitigen Fallback",
+]} />
+
+<VerifyNote lastVerified="2026-10-08" source="https://platform.claude.com/docs/en/models/haiku-5-5/overview">
+Spezifikationen, beide Preislisten, die Schwelle von 100.000 Tokens, Lebenszyklus-Daten und jeder
+Breaking Change auf dieser Seite stammen von Anthropics Haiku-5.5-Modellseite, Preisseite, What's-new-Seite,
+Migrationsleitfaden und Prompting-Leitfaden, gelesen am 8. Oktober 2026. Preise und Limits ändern sich — bestätigen Sie immer auf
+[Modelle und Preise](/docs/whats-new/models-and-pricing), bevor Sie budgetieren.
+</VerifyNote>
+
+## Spezifikationen, und die Zeile ohne Vorbild
+
+| | Haiku 4.5 | **Haiku 5.5** | Sonnet 5.5 |
+| --- | --- | --- | --- |
+| Claude-API-ID | `claude-haiku-4-5-20251001` | **`claude-haiku-5-5`** | `claude-sonnet-5-5` |
+| Eingabe / Ausgabe pro MTok, Prompt ≤ 100K | 1 $ / 5 $ | **0,10 $ / 0,50 $** | 2 $ / 10 $ |
+| Eingabe / Ausgabe pro MTok, Prompt > 100K | 1 $ / 5 $ | **0,50 $ / 2,50 $** | 2 $ / 10 $ |
+| Cache-Lesen | 0,10 $ | **0,01 $ / 0,05 $** | 0,10 $ |
+| 5-Min-Cache-Schreiben | 1,25 $ | **0,125 $ / 0,625 $** | 2,50 $ |
+| 1-Std-Cache-Schreiben | 2 $ | **0,20 $ / 1 $** | 4 $ |
+| Batch Eingabe / Ausgabe | 0,50 $ / 2,50 $ | **0,05 $ / 0,25 $ · 0,25 $ / 1,25 $** | 1 $ / 5 $ |
+| Kontextfenster | 200K | **1M** | 1M |
+| Max. Ausgabe (sync) | 64K | **128K** | 128K |
+| Max. Ausgabe (Batches, Beta) | — | **300K** | 300K |
+| Parameter `effort` | nicht unterstützt | **unterstützt, Standard `medium`** | unterstützt, Standard `high` |
+| `thinking: disabled` | n/a (`budget_tokens`) | **akzeptiert bei `low`/`medium`/`high`** | 400 (`between_tools` verwenden) |
+| Erzwungenes `tool_choice` | akzeptiert | **akzeptiert** | 400 |
+| Assistant-Prefill | akzeptiert | **400** | — |
+| Tokenizer | vorheriger | **neuerer (~30 % mehr Tokens)** | neuerer |
+| System-Prompt für Tool-Nutzung (`auto`/`none`) | 496 Tokens | **286 Tokens** | 286 Tokens |
+| Verlässlicher Wissensstand | Feb 2025 | **Jun 2026** | Jun 2026 |
+| Priority Tier | unterstützt | **nicht unterstützt** | — |
+| Serverseitiger Fallback bei Ablehnung | — | **keiner** | `cyber`, `frontier_llm` → Sonnet 5 |
+| Außerbetriebnahme frühestens | 15. Okt 2026 | **7. Okt 2027** | 28. Sep 2027 |
+
+Drei dieser Zeilen verdienen mehr als einen flüchtigen Blick.
+
+**Die zwei Eingabezeilen sind die Geschichte.** Kein anderes aktuelles Claude-Modell hat zwei. Anthropics Abschnitt zur Langkontext-Bepreisung nennt die Ausnahme ausdrücklich: Claude-Modelle ab 4.6 *außer Haiku 5.5* enthalten das volle 1M-Fenster zum Standardpreis. Haiku 5.5 wird „nach Prompt-Länge bepreist“.
+
+**Haiku 5.5 ist das permissivste aktuelle Modell in puncto Determinismus.** Es akzeptiert `thinking: {"type": "disabled"}` (bei `low`, `medium` oder `high` Effort) *und* ein erzwungenes `tool_choice`. Opus 5.5 lehnt beides ab. Sonnet 5.5 lehnt beides ab. Wenn die 5.5-Generation einen deterministischen Klassifikator zerbrochen hat, den Sie auf Haiku 4.5 betreiben, ist Haiku 5.5 das eine Modell der Familie, auf das Sie ihn weitgehend intakt umziehen können — Sie verlieren nur Prefill, wie unten behandelt.
+
+**Die Untergrenze von Haiku 4.5 ist der 15. Oktober 2026 — eine Woche nach Erscheinen von Haiku 5.5.** Die offizielle Statustabelle führt es weiterhin als **Active** ohne angekündigte Abkündigung, es ist also keine Ausfallwarnung; das Verstreichen eines „nicht früher als“-Datums ist ein Signal zum Planen, und Anthropic sagt mindestens 60 Tage Vorankündigung zu, sobald eine Mitteilung ergeht. Aber es ist jetzt die nächstgelegene Untergrenze der Reihe und hat jetzt einen direkten Nachfolger. Siehe [Abkündigungen](/docs/whats-new/deprecations) dazu, wie man diese Tabelle liest.
+
+## Die Klippe ist eine Neubepreisung, keine Überschreitungsgebühr
+
+Das ist die wichtigste mechanische Tatsache der Seite, und die, die am ehesten weggedacht wird. Die Schwelle von 100.000 Tokens funktioniert **nicht** wie ein Handytarif, bei dem man bis zum Limit den günstigen Preis und für den Überschuss einen höheren zahlt. Anthropics Preisliste ist pro *Prompt* geschrieben: eine Zeile „für Prompts bis 100.000 Tokens“, eine weitere „für Prompts über 100.000 Tokens“. Überschreiten Sie die Linie, wird **jedes Token dieser Anfrage** zum höheren Preis abgerechnet.
+
+Nehmen Sie eine Antwort mit 500 Tokens und schieben Sie ein Token über die Grenze:
+
+| Anfrage | Eingabekosten | Ausgabekosten | Gesamt |
+| --- | --- | --- | --- |
+| Prompt mit 100.000 Tokens | 100.000 × 0,10 $/M = **0,0100 $** | 500 × 0,50 $/M = 0,00025 $ | **0,01025 $** |
+| Prompt mit 100.001 Tokens | 100.001 × 0,50 $/M = **0,0500 $** | 500 × 2,50 $/M = 0,00125 $ | **0,05125 $** |
+
+Ein zusätzliches Token, genau das **5-Fache** der Rechnung. Es gibt keinen Verlauf und keine Mischung. Eine Arbeitslast, deren Prompts um 100K liegen, ist eine Arbeitslast, deren Monatsrechnung eine Sprungfunktion enthält, und auf welcher Seite der Stufe Sie landen, kann davon abhängen, dass ein Nutzer einen weiteren Absatz einfügt.
+
+Die praktische Folge: **Behandeln Sie 100.000 als hartes Budget, nicht als Ziel.** Lassen Sie Spielraum. Eine Pipeline, die für 98K Tokens entworfen ist, hat 2 % Puffer, bevor ihre Kosten sich verfünffachen, und die Dinge, die einen Prompt still wachsen lassen — ein längerer abgerufener Chunk, ein zusätzliches Few-Shot-Beispiel, eine letzte Woche hinzugefügte Tool-Definition, Gesprächsverlauf — kündigen sich nicht an.
+
+## Wo die Klippe im Text tatsächlich liegt
+
+Die Schwelle wird in Haiku-5.5-Tokens mit dem neuen Tokenizer gezählt. Zwei Umrechnungen zählen.
+
+**In Wörtern.** Anthropic setzt 1M Tokens mit dem aktuellen Tokenizer auf etwa 555K englische Wörter. 100.000 Tokens sind also **etwa 55.500 Wörter** — sagen wir ein Buch mit 180 Seiten oder 20–25 umfangreiche PDFs.
+
+**In alten Messungen.** Derselbe Text erzeugt auf Haiku 5.5 etwa 30 % mehr Tokens als auf Haiku 4.5. Ein Prompt, den Sie auf Haiku 4.5 mit 100.000 Tokens gemessen haben, kommt auf Haiku 5.5 auf etwa **130.000** Tokens — bequem über der Klippe, beim 5-Fachen, bei Text, der früher genau an Ihrem Limit lag. Rückwärts gerechnet: Um unter 100.000 neuen Tokens zu bleiben, brauchen Sie Text im Umfang von etwa **77.000 Haiku-4.5-Tokens**.
+
+Diese Schrumpfung um 23 % ist die Falle. Wer einen Haiku-5.5-Prompt aus einer Haiku-4.5-Tokenzahl dimensioniert — einer gecachten Messung, einem gespeicherten `usage`-Wert, einer Tabelle, einer fest codierten Konstante in einem Chunker —, wird um etwa ein Drittel zu niedrig messen und eine Schwelle überschreiten, von der er glaubt, weit innerhalb zu liegen.
+
+<Callout type="warning">
+Zählen Sie jeden Prompt neu, mit `model` auf `claude-haiku-5-5` gesetzt. Der Token-Counting-Endpunkt ist Tokenizer-spezifisch; eine auf Haiku 4.5 gemachte Zählung ist keine Schätzung der Haiku-5.5-Zählung, sondern eine andere Messung einer anderen Sache. Das gilt auch für `max_tokens`-Werte und Kostenmodelle.
+</Callout>
+
+<PromptCard title="Recount a prompt against the new tokenizer before you trust any budget">
+{`curl https://api.anthropic.com/v1/messages/count_tokens \\
+  -H "x-api-key: $ANTHROPIC_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "content-type: application/json" \\
+  -d '{
+    "model": "claude-haiku-5-5",
+    "system": [{"type": "text", "text": "<your real system prompt>"}],
+    "messages": [{"role": "user", "content": "<your longest real input>"}]
+  }'`}
+</PromptCard>
+
+## Die ehrliche Ersparnis: drei Regime
+
+„90 % günstiger“ ist eine Aussage über die Preisliste. Was Sie zahlen, hängt davon ab, in welchem Band Sie landen, und vom Tokenizer. Alle drei Zahlen unten halten den *Text* konstant und lassen die Tokenzahl wandern — der einzige Vergleich, der für eine Rechnung etwas bedeutet.
+
+### Unterhalb der Klippe: ~87 % weniger als Haiku 4.5
+
+Eine Klassifikations-Arbeitslast, 1.000.000 Anfragen/Monat. Der Prompt misst auf Haiku 4.5 9.000 Tokens, also auf Haiku 5.5 etwa 11.700; die Antwort hat 300 alte Tokens, etwa 390 neue.
+
+| | Haiku 4.5 | Haiku 5.5 (≤ 100K) |
+| --- | --- | --- |
+| Eingabe | 9.000 MTok × 1 $ = 9.000 $ | 11.700 MTok × 0,10 $ = **1.170 $** |
+| Ausgabe | 300 MTok × 5 $ = 1.500 $ | 390 MTok × 0,50 $ = **195 $** |
+| **Gesamt** | **10.500 $** | **1.365 $** |
+
+**87 % weniger** für dieselbe Arbeit. Die 30 % Token-Inflation frisst drei Punkte der 90 % in der Schlagzeile. Das ist die Zahl für ein Budget.
+
+### Oberhalb der Klippe: ~35 % weniger als Haiku 4.5
+
+Oberhalb von 100.000 Tokens betragen die Preise 0,50 $/2,50 $ gegenüber 1 $/5 $ bei Haiku 4.5 — 2× günstiger pro Token. Mit der Token-Inflation von 30 % ergibt sich für denselben Text eine Ersparnis von `1 − (0,5 × 1,3) = 0,35`.
+
+**35 % weniger**, gleichmäßig bei Eingabe und Ausgabe. Immer noch eine Senkung, aber nichts wie die Schlagzeile. Eine Langkontext-Arbeitslast, die von Haiku 4.5 migriert und einen Rückgang um 90 % erwartet, verfehlt das um fast den Faktor drei.
+
+### In beiden Fällen: 75 % weniger als Sonnet 5.5
+
+Haiku 5.5 und Sonnet 5.5 teilen sich den neueren Tokenizer, die Tokenzahlen sind also identisch und der Vergleich ist reiner Preis. Oberhalb der Klippe sind 0,50 $/2,50 $ gegen 2 $/10 $ genau **4× günstiger**, also 75 % weniger. Unterhalb der Klippe sind es 20×.
+
+Das ist die beruhigende Zeile: Selbst in seinem teuren Band ist Haiku 5.5 deutlich das günstigste aktuelle Claude-Modell. Die Klippe kostet Sie die Schlagzeile, nicht die Stufe.
+
+## Wann man unterhalb der Schwelle aufteilt — und wann nicht
+
+Wenn die Klippe ganze Anfragen neu bepreist, ist es ein echter Hebel, eine lange Anfrage in mehrere kurze zu zerlegen. Es ist häufig auch die falsche Entscheidung. Hier die Rechnung, dann die Grenzen.
+
+Ein Batch aus 1.000 Dokumenten mit je 150.000 Tokens Eingabe und 2.000 Tokens Ausgabe:
+
+| Strategie | Eingabe | Ausgabe | Gesamt |
+| --- | --- | --- | --- |
+| 1.000 ganze Dokumente (> 100K, 5-fache Preise) | 150 MTok × 0,50 $ = 75,00 $ | 2 MTok × 2,50 $ = 5,00 $ | **80,00 $** |
+| 2.000 Hälften à 75K (Preise ≤ 100K) | 150 MTok × 0,10 $ = 15,00 $ | 4 MTok × 0,50 $ = 2,00 $ | **17,00 $** |
+
+**79 % weniger, bei identischen Eingabe-Tokens.** Der aufgeteilte Lauf zahlt sogar für die *doppelte* Ausgabe — zwei Antworten pro Dokument statt einer — und gewinnt dennoch um fast den Faktor fünf, weil der Preisunterschied die Duplizierung überwiegt.
+
+<Steps items={[
+  {title: "Die echte Verteilung messen, nicht den Durchschnitt", body: "Zählen Sie Ihre Prompts mit model auf claude-haiku-5-5 und tragen Sie sie auf. Liegt das 95. Perzentil unter ~85.000 Tokens, haben Sie nichts zu tun. Überspannt die Verteilung 100.000, steckt die Sprungfunktion bereits in Ihrer Rechnung, und in einem Durchschnitt sehen Sie sie nicht."},
+  {title: "Fragen, ob die Aufgabe überhaupt trennbar ist", body: "Aufteilen ist sinnvoll, wenn jeder Chunk unabhängig antwortet: Extraktion pro Klausel, Klassifikation pro Abschnitt, Routing pro Datensatz. Es ist unsinnig, wenn die Antwort vom ganzen Dokument abhängt — eine globale Zusammenfassung, ein Querverweis, der in einem anderen Abschnitt aufgelöst wird, ein Widerspruch zwischen Seite 3 und Seite 90, eine laufende Summe. Diese aufzuteilen macht sie nicht billiger, sondern falsch."},
+  {title: "Chunks mit Spielraum dimensionieren, aus der neuen Zählung", body: "Wählen Sie eine Obergrenze, die Platz für den System-Prompt, Tool-Definitionen (286 Tokens vor Ihren eigenen Schemata), Few-Shot-Beispiele und jeden Gesprächsverlauf lässt — alles zählt zum Prompt. 75.000 gegenüber einer Schwelle von 100.000 ist ein vernünftiger Ausgangspunkt; 98.000 nicht."},
+  {title: "Den Merge-Schritt ehrlich bepreisen", body: "Aufteilen vervielfacht Anfragen und fügt meist einen Reduce-Durchgang hinzu, der die Teilantworten kombiniert. Zählen Sie diese Tokens und diese Anfragen. Im durchgerechneten Fall oben ist der Merge im Verhältnis zu 79 % Ersparnis billig; bei einer Arbeitslast mit 40 Chunks pro Dokument und langem Merge-Prompt kann das anders sein."},
+  {title: "Das Limit prüfen, das Sie zuerst treffen", body: "Eine Verdoppelung oder Vervierfachung der Anfragenzahl verschiebt die Beschränkung von den Kosten zu Rate Limits und Nebenläufigkeit. Bestätigen Sie, dass die neue Anfragerate zu Ihrem Tarif passt, bevor Sie die Änderung ausliefern, sonst tauschen Sie ein Geldproblem gegen ein 429-Problem."},
+  {title: "Kürzen statt teilen erwägen", body: "Ist ein Prompt 110.000 Tokens lang, ist das Streichen von 15.000 Tokens wenig wertvollen Kontexts strikt besser als ihn zu zweiteilen: eine Anfrage, kein Merge, keine verlorene Chunk-übergreifende Argumentation, und dieselbe 5-fache Ersparnis. Greifen Sie zum Messer vor der Säge."},
+]} />
+
+## Die Cache-Lese-Falle
+
+Prompt Caching ist die übliche Antwort auf ein teures Präfix, und bei Haiku 5.5 wirkt es so mit der Klippe zusammen, dass man es leicht übersieht: Die Preisliste bepreist **jede** Token-Kategorie in beiden Bändern. Cache-Schreibvorgänge und Cache-Lesevorgänge haben je einen Preis im günstigen und im teuren Band. Caching befreit Sie nicht von der Schwelle; es wird zusammen mit allem anderen neu bepreist.
+
+Ein Agent mit einem gecachten Präfix von 120.000 Tokens im 1-Stunden-Cache, ein Schreibvorgang und 100 Lesevorgänge:
+
+| Strategie | Cache-Schreiben | 100 Cache-Lesevorgänge | Gesamt |
+| --- | --- | --- | --- |
+| 120K-Präfix (> 100K: 1 $ Schreiben, 0,05 $ Lesen) | 0,12 MTok × 1 $ = 0,120 $ | 12 MTok × 0,05 $ = 0,600 $ | **0,720 $** |
+| 95K-Präfix (≤ 100K: 0,20 $ Schreiben, 0,01 $ Lesen) | 0,095 MTok × 0,20 $ = 0,019 $ | 9,5 MTok × 0,01 $ = 0,095 $ | **0,114 $** |
+
+**21 %** des Präfixes zu kürzen senkt **84 %** der Kosten. Es gibt in der Claude-Bepreisung keinen anderen Hebel mit dieser Form — bei jedem anderen aktuellen Modell spart das Kürzen von 21 % eines Prompts 21 %.
+
+<Callout type="warning">
+Das Band wird nach Prompt-Länge gewählt, und ein gecachtes Präfix ist Teil des Prompts. Die sichere Annahme für die Praxis lautet: **Die gesamte Anfrage-Eingabe — gecachte Tokens eingeschlossen — bestimmt die Preisliste**, ein Cache, der über 100.000 Tokens wächst, hebt Ihre Lesevorgänge also ohne Codeänderung und ohne Fehler von 0,01 $ auf 0,05 $. Prüfen Sie das an dem `usage`-Block Ihrer eigenen Anfragen und an der Kostenaufschlüsselung der Console für Ihre genaue Form, bevor Sie ein Budget darauf festlegen.
+</Callout>
+
+Eine weitere Caching-Wechselwirkung aus dem Prompting-Leitfaden: **Das Ändern des Top-Level-Werts `effort` zwischen Anfragen macht den Prompt-Cache** für die Nachrichten der Unterhaltung **ungültig**. Um den Effort pro Zug zu variieren, ohne den Cache zu zerstören, verwenden Sie die Effort-Änderung pro Nachricht (Beta, `mid-conversation-output-config-2026-07-01`), die adaptives Denken voraussetzt — bei ausgeschaltetem Denken liefert sie 400.
+
+## Migration von Haiku 4.5: die fünf 400er
+
+Anthropics eigene Aussage ist, dass bestehende Haiku-4.5-*Prompts* unverändert gut funktionieren sollten. Die *Anfragen* sind eine andere Sache. Fünf Dinge, die Haiku 4.5 akzeptierte, scheitern jetzt geschlossen.
+
+| Was Sie senden | Ergebnis | Lösung |
+| --- | --- | --- |
+| `thinking: {"type": "enabled", "budget_tokens": N}` | 400 | `{"type": "adaptive"}` senden (oder weglassen) und mit `effort` steuern |
+| `thinking: {"type": "disabled"}` bei `xhigh`- oder `max`-Effort | 400 | In Ordnung bei `low`/`medium`/`high`; Effort senken oder das Feld weglassen |
+| Nicht standardmäßiges `temperature` / `top_p`, jedes `top_k`, oder `temperature` und `top_p` zusammen | 400 | Alle drei weglassen. Falls vorhanden, muss `temperature` `1` und `top_p` `0.99` sein — `top_p: 1` ist ein 400 |
+| Ein abschließender Assistenten-Zug, den das Modell fortsetzen soll (Prefill) | 400, **auch bei ausgeschaltetem Denken** | `messages` mit einem Nutzer-Zug beenden; siehe unten |
+| `computer_20250124` in der Claude API oder Google Cloud | 400 | `{"type": "computer_toolset_20260801"}` verwenden, den Header `computer-use-2025-01-24` entfernen |
+
+Dazu ein sechster, der nur Unterhaltungen trifft: Einen Thinking-Block zurückzusenden, nachdem Sie `system`, `tools` oder eine frühere Nachricht geändert haben, liefert 400. Halten Sie Unterhaltungen **Append-only**. Bei Konten, die vor dem 31. August 2026 00:00 UTC erstellt wurden, tritt der Fehler nur auf, wenn Sie `thinking.block_binding.prefix_mismatch_behavior` setzen.
+
+### Prefill ist das, was wehtun wird
+
+Assistant-Prefill — `messages` mit einem teilweisen Assistenten-Zug wie `{"label":` zu beenden, um eine Form zu erzwingen — ist ein Standardtrick in genau den Klassifikations- und Extraktions-Pipelines mit hohem Volumen, für die Haiku gebaut ist, und Haiku 4.5 akzeptierte es bei ausgeschaltetem Denken. Haiku 5.5 liefert auch bei ausgeschaltetem Denken 400. Es gibt kein Flag.
+
+Ersetzen Sie es danach, was es getan hat:
+
+- **Eine Ausgabeform erzwingen** → [strukturierte Ausgaben](/docs/api/structured-output) oder ein Tool mit `enum`-Feldern für Klassifikation. (Auf Amazon Bedrock, das keine strukturierten Ausgaben unterstützt, das Tool verwenden.)
+- **Eine Einleitung unterdrücken** → im System-Prompt eine direkte Antwort verlangen.
+- **Eine abgeschnittene Antwort fortsetzen** → in den Nutzer-Zug verlegen: *„Your previous response was interrupted and ended with `[previous_response]`. Continue from where you left off.“*
+- **Das Modell an Kontext erinnern** → in den Nutzer-Zug legen.
+
+<Callout type="note">
+Denken Sie an die Kompensation: Haiku 5.5 akzeptiert weiterhin ein **erzwungenes `tool_choice`**, das Opus 5.5 und Sonnet 5.5 ablehnen. Für einen Klassifikator liefert `tool_choice` mit einem `enum`-typisierten Tool denselben Determinismus, den Prefill bot, und überlebt die gesamte 5.5-Generation. Der einzige Preis ist, dass die Antwort mit dem Tool-Aufruf beginnt und keinen Thinking-Block enthält.
+</Callout>
+
+## Die sechs Änderungen, die 200 zurückgeben
+
+Die 400er melden sich bei der ersten Anfrage in Ihren Logs. Diese nicht. Jede liefert eine völlig gültige Antwort, die still schlechter ist, und jede hat jemandes Pipeline kaputtgemacht.
+
+1. **Eine leere Antwort durch ein `max_tokens`, das Sie nicht geändert haben.** Denken ist standardmäßig an, und Denk-Tokens zählen zu `max_tokens`. Ein für Haiku 4.5 *ohne* Denken dimensioniertes Limit kann nun mit `stop_reason: "max_tokens"` nach einem Thinking-Block und vor jedem Text stoppen. Erhöhen Sie `max_tokens` oder senken Sie `effort`.
+2. **`content[0]` ist nicht mehr die Antwort.** Antworten können mit einem oder mehreren `thinking`-Blöcken beginnen, auch wenn die Anfrage Denken nie erwähnt. Wählen Sie Blöcke nach ihrem Feld `type`, nie nach der Position.
+3. **Der Denktext ist standardmäßig leer.** Haiku 4.5 lieferte zusammengefasstes Denken; Haiku 5.5 liefert jeden Block mit leerem Feld `thinking` und nur einer `signature`. Wenn Sie Reasoning loggen oder anzeigen, setzen Sie `thinking.display` auf `"summarized"`, um es zurückzubekommen.
+4. **Ablehnungen sind neu, und es gibt kein Sicherheitsnetz.** Haiku 5.5 betreibt Sicherheits-Klassifikatoren, die `stop_reason: "refusal"` mit einer `stop_details.category` von `cyber`, `frontier_llm`, `bio` oder `general_harms` zurückgeben können. Haiku 4.5 tat das nicht. Haiku 5.5 hat außerdem **keinen serverseitigen Fallback** — anders als Sonnet 5.5 wiederholt nichts für Sie, und das erneute Senden derselben Anfrage bringt meist eine weitere Ablehnung. Eine unbehandelte Ablehnung sieht genau aus wie eine leere Antwort. Behandeln Sie sie im Client.
+5. **Kontenübergreifendes Wiedereinspielen von Denken verwirft still das Reasoning.** Haiku-5.5-Thinking-Blöcke funktionieren nur im Konto, das sie erzeugt hat (oder einem verknüpften). Senden Sie einen aus einem anderen Konto, *entfernt die API den Block und gelingt ohne ihn* — eine Qualitätsregression ohne Fehler. Wenn Sie Unterhaltungen speichern und wieder einspielen, spielen Sie jede über ihr erzeugendes Konto ein.
+6. **Jede Tokenzahl, die Sie haben, ist jetzt um ~30 % falsch.** `usage`-Felder, Token-Counting-Ergebnisse, `max_tokens`, Kostenmodelle, Chunk-Größen, Kontextbudgets und — wie oben behandelt — auf welcher Seite der 100.000-Token-Klippe Sie liegen.
+
+Und ein Kapazitätspunkt, der keines von beidem ist: Wenn Sie eine **Priority-Tier**-Zusage für Haiku 4.5 haben, planen Sie gesondert. Priority Tier wird auf Haiku 5.5 nicht unterstützt.
+
+## Effort: der neue Regler und was er kostet
+
+Haiku 5.5 ist das erste Haiku mit `effort`, und es ersetzt `budget_tokens` vollständig — es gibt keine alte Einstellung zum Übernehmen. Anthropics Empfehlung nach Stufe:
+
+| Stufe | Verwenden für | Beachten |
+| --- | --- | --- |
+| `low` | Chat, kurze Tool-Aufgaben, einfache Anfragen mit hohem Volumen | In langen Agenten-Prompts: übersprungene Suchen, frühes Aufhören, übersprungene Prüfungen |
+| `medium` | **Der Standard.** Die meiste Arbeit, einschließlich agentischem Coding | — |
+| `high` | Wissensarbeit, längere Agentenaufgaben, strenges Befolgen von Anweisungen | — |
+| `xhigh` / `max` | Nur wenn Ihre Evals zeigen, dass sich der Qualitätsgewinn lohnt | Denken und Antworten werden viel länger; zu diesem Zeitpunkt auch Sonnet 5.5 benchmarken |
+
+Zwei Befunde aus Anthropics eigenen Tests sind verinnerlichenswert, weil beide einer Intuition widersprechen.
+
+**Man kann sich nicht aus dem Denken herausprompten.** Dem Modell im Prompt zu sagen, direkt zu antworten, hielt es nicht vom Denken ab. Senken Sie die Effort-Stufe oder setzen Sie `thinking: {"type": "disabled"}` (bei `high` oder darunter). Prosa ist nicht der Hebel.
+
+**Effort zu erhöhen ist keine kostenlose Lösung.** Der Wechsel von `low` auf `medium` halbierte in einem langen Coding-Agent-Prompt das frühe Aufhören ungefähr — und *mehr als verdoppelte* die Ausgabe-Tokens pro Versuch. Beide Hälften dieses Satzes gehören in die Entscheidung.
+
+Ein dritter, engerer: Bei `xhigh`-Effort in mehrstufigen Chats schreibt das Modell manchmal seine ganze Antwort in sein Denken und beendet den Zug ohne sichtbaren Text. Wenn Sie `xhigh` betreiben, prüfen Sie auf leere Antworten.
+
+## Zwei Prompt-Ergänzungen, die ihre Tokens verdienen
+
+Der Prompting-Leitfaden ist ungewöhnlich konkret darin, welcher System-Prompt-Text welche Metrik bewegte. Zwei lohnen sich, unverändert zu kopieren, wenn Sie das passende Symptom haben.
+
+Geben Sie Haiku 5.5 ein Suchwerkzeug, **geben Sie ihm das heutige Datum** — Anthropics Tests ergaben, dass allein das Antworten in aktuellen Ergebnissen verankerte. Bei `low`-Effort oder hinter einem langen System-Prompt braucht es womöglich dennoch einen Anstoß, überhaupt zu suchen:
+
+<PromptCard title="Nudge an under-searching Haiku 5.5 (place directly after the date)">
+{`The current date is [current_date].
+
+Your training data ends well before today's date. Records, office holders, prices, versions, rules and anything "latest" may have changed since then, so search for those before you answer, even when you feel sure. Facts that can't change need no search. When the answer depends on where the user is, put the user's country or region in the search query.`}
+</PromptCard>
+
+Anthropic berichtet, dies habe die Suchrate bei Fragen mit geänderten Antworten erhöht und nur bei 0–3 % der Prompts, die keine brauchten, zusätzliche Suchen hinzugefügt. Das ausdrückliche Anti-Muster: Schreiben Sie **nicht** „search for any present-day factual question, regardless of how confident you are“ — das ließ das Modell bei der Hälfte der Prompts suchen, die keine Suche brauchten, ohne mehr richtige Antworten zu erzeugen.
+
+Der zweite gilt für eine bestimmte, fiese Kombination: **Denken aus plus strukturierte Ausgaben**, bei der das Modell einen nötigen Tool-Aufruf überspringen kann. Die sauberen Lösungen sind, für diese Anfragen adaptives Denken zu verwenden, `output_config.format` wegzulassen, wo ein Tool-Aufruf nötig ist, oder den Aufruf mit `tool_choice` zu erzwingen. Wenn Sie Denken wirklich aus brauchen:
+
+<PromptCard title="Keep tool calls alive with thinking off and JSON output">
+{`The JSON output format applies to your final answer only. When you need a tool, call it first, with no text before the call, and write the JSON once you have the results.`}
+</PromptCard>
+
+## Sollten Sie umziehen?
+
+Eine kurze Entscheidungsregel, der Reihe nach.
+
+1. **Prompts zuverlässig unter ~85.000 neuen Tokens?** Umziehen. ~87 % weniger als Haiku 4.5 für dieselbe Arbeit, mit einem 1M-Fenster und Wissensstand Juni 2026 statt Feb 2025. Das sind die meisten Haiku-Arbeitslasten — Klassifikation, Routing, Extraktion, billige Subagenten — und nach Behebung der fünf 400er ist es fast ein kostenloser Gewinn.
+2. **Prompts, die 100.000 überspannen?** Erst messen, dann kürzen oder aufteilen. Die Sprungfunktion ist das ganze Problem; unter die Linie zu kommen ist mehr wert als jede andere Ihnen verfügbare Optimierung.
+3. **Prompts wirklich über 100.000 und nicht trennbar?** Trotzdem umziehen — es ist 35 % weniger als Haiku 4.5 und 75 % weniger als Sonnet 5.5 —, aber aus dem hohen Band budgetieren und die Schlagzeile ganz ignorieren.
+4. **`budget_tokens`, Prefill, Priority Tier oder `computer_20250124` nötig?** Die sind weg. Die Migration ist für die ersten drei mechanisch; beziffern Sie die Arbeit, bevor Sie sie einplanen.
+5. **Schon nahe an der Qualitätsgrenze?** Benchmarken Sie Sonnet 5.5 im selben Durchlauf. Anthropic empfiehlt es ausdrücklich, sobald Sie bei Haiku zu `xhigh` oder `max` greifen — dann zahlen Sie womöglich Haiku-Preise für Sonnet-förmige Arbeit und bekommen keins von beiden.
+
+<Flashcards cards={[
+  {front: "Claude-API-Modell-ID für Haiku 5.5", back: "claude-haiku-5-5 — eine feste ID ohne Datumssuffix und ohne separaten Alias."},
+  {front: "Was macht Haiku 5.5 in der aktuellen Reihe einzigartig?", back: "Es ist das einzige aktuelle Claude-Modell, das nach Prompt-Länge bepreist wird. Jedes andere Modell ab 4.6 rechnet das volle 1M-Fenster zu Standardpreisen ab."},
+  {front: "Was passiert bei 100.001 Tokens?", back: "Die gesamte Anfrage — Eingabe, Ausgabe, Cache-Schreibvorgänge, Cache-Lesevorgänge, Batch — wird zur höheren Preisliste abgerechnet: 5x. Es ist eine Neubepreisung, keine Überschreitungsgebühr auf den Überschuss."},
+  {front: "Wo liegt die Klippe in englischen Wörtern?", back: "Bei etwa 55.500 Wörtern (1M Tokens ≈ 555K Wörter mit dem aktuellen Tokenizer)."},
+  {front: "Wo liegt die Klippe in Haiku-4.5-Tokenzahlen?", back: "Bei etwa 77.000. Derselbe Text hat auf Haiku 5.5 ~30 % mehr Tokens, also 100.000 alte Tokens ≈ 130.000 neue — bereits darüber."},
+  {front: "Echte Ersparnis ggü. Haiku 4.5, unterhalb der Klippe", back: "~87 % beim selben Text. Die 90 % Preislistensenkung minus ~30 % Token-Inflation."},
+  {front: "Echte Ersparnis ggü. Haiku 4.5, oberhalb der Klippe", back: "~35 % beim selben Text: 2x günstiger pro Token, minus ~30 % mehr Tokens."},
+  {front: "Ersparnis ggü. Sonnet 5.5 oberhalb der Klippe", back: "75 % — 0,50 $/2,50 $ gegen 2 $/10 $, bei identischem Tokenizer, das Preisverhältnis ist also die ganze Geschichte."},
+  {front: "Welche Denk-Einstellungen akzeptiert Haiku 5.5?", back: "Adaptiv (Standard) und deaktiviert — aber deaktiviert nur bei low-, medium- oder high-Effort. xhigh und max liefern 400. budget_tokens liefert 400."},
+  {front: "Warum liefert ein funktionierendes max_tokens plötzlich eine leere Antwort?", back: "Denken ist standardmäßig an und zählt zu max_tokens, die Antwort kann also nach einem Thinking-Block und vor jedem Text stoppen. max_tokens erhöhen oder Effort senken."},
+  {front: "Was ersetzt Assistant-Prefill?", back: "Strukturierte Ausgaben oder ein Tool mit enum-Feldern plus erzwungenes tool_choice — das Haiku 5.5 weiterhin akzeptiert, anders als Opus 5.5 und Sonnet 5.5."},
+  {front: "Was passiert bei einer Ablehnung?", back: "stop_reason: \"refusal\" mit einer Kategorie cyber, frontier_llm, bio oder general_harms. Es gibt keinen serverseitigen Fallback — im Client behandeln; ein Retry lehnt meist wieder ab."},
+  {front: "Was macht den Prompt-Cache bei Haiku 5.5 ungültig?", back: "Das Ändern des Top-Level-Werts effort zwischen Anfragen. Die Beta-Funktion zur Effort-Änderung pro Nachricht verwenden, um den Effort zu variieren, ohne den Cache zu verlieren."},
+  {front: "Lebenszyklus-Status von Haiku 4.5", back: "Weiterhin Active ohne angekündigte Abkündigung, aber seine frühestmögliche Außerbetriebnahme — 15. Oktober 2026 — ist die nächste Untergrenze der Reihe, und es hat jetzt einen direkten Nachfolger."},
+]} />
+
+<Quiz questions={[
+  {
+    q: "Eine Anfrage sendet einen Prompt mit 100.400 Tokens an Haiku 5.5. Wie wird sie abgerechnet?",
+    options: [
+      "100.000 Tokens zu 0,10 $/MTok und 400 Tokens zu 0,50 $/MTok.",
+      "Alle 100.400 Tokens zu 0,50 $/MTok, und die Ausgabe zu 2,50 $/MTok.",
+      "Alle 100.400 Tokens zu 0,10 $/MTok, da der Überschuss unter 1 % liegt.",
+      "Die Anfrage liefert einen 400-Fehler, weil 100.000 Tokens das Prompt-Limit sind."
+    ],
+    answer: 1,
+    explain: "Die Schwelle bepreist die ganze Anfrage neu, sie misst nicht den Überschuss. Anthropics Preisliste hat eine Zeile für Prompts bis 100.000 Tokens und eine weitere für Prompts darüber, und das Überschreiten der Linie bringt jede Token-Kategorie — Eingabe, Ausgabe, Cache-Schreibvorgänge, Cache-Lesevorgänge und beide Batch-Spalten — auf die höhere Liste. Das Kontextfenster ist 1M, es gibt also keinen Fehler; es gibt nur eine 5-fache Rechnung."
+  },
+  {
+    q: "Sie haben Ihren Prompt auf Haiku 4.5 mit 90.000 Tokens gemessen und wollen im günstigen Band von Haiku 5.5 bleiben. Was sollten Sie erwarten?",
+    options: [
+      "Sie liegen sicher darunter: 90.000 ist weniger als 100.000.",
+      "Sie liegen wahrscheinlich darüber: Derselbe Text hat auf Haiku 5.5 ~30 % mehr Tokens, erwarten Sie also etwa 117.000.",
+      "Tokenzahlen sind über Modelle hinweg identisch, die Messung gilt also direkt weiter.",
+      "Sie liegen darunter, weil die Schwelle aus Gründen der Abwärtskompatibilität mit dem alten Tokenizer gemessen wird."
+    ],
+    answer: 1,
+    explain: "Haiku 5.5 verwendet den neueren Tokenizer, den Claude 4.7 und später teilen und der für denselben Text etwa 30 % mehr Tokens erzeugt. 90.000 × 1,3 ≈ 117.000, über der Klippe. Das günstige Band endet bei Text im Umfang von etwa 77.000 Haiku-4.5-Tokens, jeder Prompt muss also mit model auf claude-haiku-5-5 neu gezählt werden."
+  },
+  {
+    q: "Eine Klassifikations-Pipeline auf Haiku 4.5 beendet jede Anfrage mit einem Assistant-Prefill und setzt Denken auf aus. Was bricht auf Haiku 5.5?",
+    options: [
+      "Nichts — Prefill wird akzeptiert, wann immer Denken aus ist.",
+      "Der Prefill liefert auch bei ausgeschaltetem Denken 400; ersetzen Sie ihn durch strukturierte Ausgaben oder ein erzwungenes tool_choice auf einem enum-typisierten Tool.",
+      "Sowohl der Prefill als auch das erzwungene tool_choice liefern 400, wie bei Opus 5.5 und Sonnet 5.5.",
+      "Der Prefill funktioniert, erzeugt aber still zusammengefasste Thinking-Blöcke."
+    ],
+    answer: 1,
+    explain: "Haiku 4.5 akzeptierte einen Prefill bei ausgeschaltetem Denken; Haiku 5.5 lehnt ihn unabhängig von der Denk-Einstellung mit 400 ab, und es gibt kein Flag, ihn wiederherzustellen. Die gute Nachricht ist, dass ein erzwungenes tool_choice auf Haiku 5.5 weiterhin funktioniert — anders als bei Opus 5.5 und Sonnet 5.5, die es ablehnen —, ein Tool mit enum-Feldern plus tool_choice reproduziert also den Determinismus, den Prefill bot."
+  },
+  {
+    q: "Das gecachte Präfix Ihres Agenten ist auf 115.000 Tokens gewachsen, und die Rechnung sprang ohne Codeänderung stark an. Was ist die wahrscheinlichste Ursache?",
+    options: [
+      "Prompt Caching wird auf Haiku 5.5 nicht unterstützt, jeder Lesevorgang wird also als frische Eingabe abgerechnet.",
+      "Das Präfix überschritt die Schwelle von 100.000 Tokens und hob Cache-Lesevorgänge zusammen mit jeder anderen Token-Kategorie von 0,01 $ auf 0,05 $/MTok.",
+      "Cache-Lesevorgänge sind von der Schwelle ausgenommen, der Anstieg muss also nichts mit der Prompt-Länge zu tun haben.",
+      "Der 1-Stunden-Cache ist abgelaufen und wird nun bei jeder Anfrage neu geschrieben."
+    ],
+    answer: 1,
+    explain: "Die Preisliste führt für jede Token-Kategorie, Cache-Schreib- und -Lesevorgänge eingeschlossen, einen Preis im günstigen und einen im teuren Band — Caching befreit eine Anfrage nicht von der Schwelle. Das ist die eine Stelle in der Claude-Bepreisung, an der das Kürzen eines Prompts überproportional spart: Im durchgerechneten Beispiel senkte das Kürzen von 21 % eines 120K-Präfixes 84 % der Kosten."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Haiku 5.5 ist das einzige aktuelle Claude-Modell, das nach Prompt-Länge bepreist wird: zwei Preislisten, geteilt bei 100.000 Tokens, um das 5-Fache auseinander.",
+  "Die Klippe bepreist die gesamte Anfrage neu, nicht den Überschuss. Ein Token jenseits von 100.000 multipliziert die Rechnung mit fünf.",
+  "Die Schwelle wird mit dem neuen Tokenizer gezählt und erreicht Sie im Text ~23 % früher, als eine Haiku-4.5-Messung nahelegt: ~55.500 Wörter oder ~77.000 alte Tokens.",
+  "Budgetieren Sie ~87 % weniger als Haiku 4.5 unterhalb der Klippe und ~35 % oberhalb — nicht die 90 % der Preisliste. In beiden Fällen liegt es 75 % unter Sonnet 5.5.",
+  "Erst kürzen, dann aufteilen: Bei einem gecachten 120K-Präfix senkte das Kürzen von 21 % die Kosten um 84 %. Aufteilen ist nur für trennbare Aufgaben und fügt einen Merge-Durchgang und Anfragevolumen hinzu.",
+  "Fünf Dinge liefern 400, die Haiku 4.5 akzeptierte — budget_tokens, Sampling-Parameter, Assistant-Prefill, computer_20250124 und deaktiviertes Denken bei xhigh/max — plus ein sechstes für nicht Append-only-Unterhaltungen.",
+  "Sechs weitere liefern 200 und werden einfach schlechter: leere Antworten durch ein unverändertes max_tokens, content[0], das nun ein Thinking-Block ist, leerer Denktext, unbehandelte Ablehnungen ohne serverseitigen Fallback, still verworfenes kontenübergreifendes Reasoning und jede Tokenzahl um ~30 % daneben.",
+]} />
+
+## Weiter
+
+- [Claude Sonnet 5.5: der Praxisleitfaden](/docs/models/sonnet-5-5-field-guide) — die Stufe darüber, und das Modell, das Anthropic Ihnen zu benchmarken rät, sobald Sie bei Haiku zu `xhigh` greifen
+- [Effort-Tuning](/docs/api/effort-tuning) — wie Sie den Durchlauf fahren, den diese Seite immer wieder verlangt, ohne das gerade gesparte Budget zu verbrennen
+- [Prompt Caching bei verschiedenen Anbietern](/docs/models/prompt-caching-across-providers) — die Break-even-Regeln hinter der Cache-Lese-Tabelle oben
+- [Was KI bei verschiedenen Anbietern kostet](/docs/models/what-ai-costs-across-providers) — wo die zwei Bänder von Haiku 5.5 gegenüber dem restlichen Markt landen
+
+## Quellen & weiterführende Lektüre
+
+- [Claude Haiku 5.5 model page — Claude Platform docs](https://platform.claude.com/docs/en/models/haiku-5-5/overview) — Spezifikationen, Modell-IDs pro Plattform, beide Preislisten vollständig, Lebenszyklus-Daten und die Einschränkung der Sampling-Parameter
+- [What's new in Claude Haiku 5.5 — Claude Platform docs](https://platform.claude.com/docs/en/models/haiku-5-5/whats-new-haiku-5-5) — die maßgebliche Änderungstabelle: fünf Breaking, vier geändert, vier neu, mit der jeweils nötigen Maßnahme
+- [Migrating to Claude Haiku 5.5 — Claude Platform docs](https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide) — Vorher/Nachher-Code pro Breaking Change, die ID-Tabelle pro Plattform, die Liste der Prefill-Ersatzmöglichkeiten und der Hinweis zu Priority Tier
+- [Prompting Claude Haiku 5.5 — Claude Platform docs](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-haiku-5-5) — die Effort-Empfehlung pro Stufe, die oben zitierten Snippets zu Suche und JSON-mit-Tools, die Absätze zu frühem Aufhören und Verifikation sowie die Ablehnungskategorien
+- [Pricing — Claude Platform docs](https://platform.claude.com/docs/en/about-claude/pricing) — beide Bänder für jede Token-Kategorie, die Batch-Spalten, der Langkontext-Abschnitt, der Haiku 5.5 als Ausnahme nennt, und die Token-Zahlen des System-Prompts für Tool-Nutzung
+- [Models overview — Claude Platform docs](https://platform.claude.com/docs/en/models/overview) — der modellübergreifende Vergleich, die oben verwendete Umrechnung Wörter pro Token und die Liste der Legacy-Modelle
+- [Model deprecations — Claude Platform docs](https://platform.claude.com/docs/en/about-claude/model-deprecations) — die Statustabelle mit Haiku 4.5 als Active und Untergrenze 15. Oktober 2026 sowie die Zusage von 60 Tagen Vorankündigung
+- [Claude Haiku 5.5 announcement — Anthropic](https://www.anthropic.com/claude-haiku-5-5) — der Launch-Beitrag
+- [Claude Haiku 5.5 system card — Anthropic](https://www.anthropic.com/document/claude-haiku-5-5-system-card) — Sicherheitsbewertungen und Deployment-Entscheidungen
+- [Anthropic launches Claude Haiku 5.5 with 90% API price reduction — VentureBeat (7. Oktober 2026)](https://venturebeat.com/technology/anthropic-launches-claude-haiku-5-5-with-90-api-price-reduction-matching-gpt-6-luna) — Launch-Rahmung und die Schlagzeilen-Preisaussage, die diese Seite zerlegt
+- [Anthropic has released Claude Haiku 5.5 — Artificial Analysis](https://artificialanalysis.ai/articles/claude-haiku-5-5) — unabhängige Einordnung im Intelligence Index und die Änderung des Kontexts von 200K auf 1M

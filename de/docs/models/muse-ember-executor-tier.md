@@ -1,0 +1,215 @@
+# Muse Ember: die Executor-Stufe und das Preisband, das niemand durchgerechnet hat
+
+> Source: https://derob98.github.io/ailmanac/de/docs/models/muse-ember-executor-tier · AILmanac (CC BY 4.0) · last verified 2026-11-10
+
+Metas Muse Ember erschien am 9. November 2026 zu 0,10 $/0,50 $, exakt der Preisliste von Claude Haiku 5.5. Beide Modelle werden nach Prompt-Länge abgerechnet, aber ihre Schwellen liegen an verschiedenen Stellen: Haiku verteuert sich ab 100K um das 5-Fache, Ember ab 200K um das 3-Fache. Dazwischen bleibt ein Band von 100K bis 200K, in dem Ember genau ein Fünftel von Haiku kostet und bei Cache-Lesezugriffen ein Zwölftel. Dazu: die Benchmark-Zeile, die Ember um 7,7 Punkte verliert, die Harness-Asymmetrie in Metas eigener Fußnote und die Geschwätzigkeit, die einen Teil des Rabatts auffrisst.
+
+<LevelBadge level="intermediate" />
+
+Am **9. November 2026** veröffentlichte Meta Superintelligence Labs **Muse Ember** (`muse-ember-1.0`): sein kleinstes Modell, ausdrücklich gedacht für „die Arbeit, die Agenten den ganzen Tag wiederholen: Tool-Aufrufe, Coding-Teilaufgaben, Routing, Extraktion und das Parsen langer Dokumente“. Es erschien zu **0,10 $ pro Million Input-Token und 0,50 $ pro Million Output-Token**.
+
+Das ist keine zufällige Zahl. Es ist, auf den Cent genau, die Preisliste von [Claude Haiku 5.5](/docs/models/haiku-5-5-the-100k-price-cliff). Metas Launch-Tabelle vergleicht Muse Ember mit Haiku 5.5 und GPT-6 Luna und mit nichts sonst.
+
+Die interessante Frage lautet also nicht „ist es billig?“. Beide sind es. Interessant ist die Frage, die keine der beiden Launch-Seiten beantwortet: **Bei identischen Listenpreisen, welches von beiden stellt dir tatsächlich weniger in Rechnung?** Die Antwort hängt vollständig davon ab, wie lang deine Prompts werden, denn *beide* Modelle werden nach Prompt-Länge bepreist, und ihre Schwellen liegen an verschiedenen Stellen.
+
+<Callout type="objectives" items={[
+  "Die Drei-Band-Preistabelle lesen, die Haiku 5.5 und Muse Ember gemeinsam erzeugen, und das Fenster von 100K bis 200K finden, in dem Ember bei Input und Output exakt ein Fünftel von Haiku kostet und bei Cache-Lesezugriffen ein Zwölftel",
+  "Ein Agenten-Loop nach dem SPITZEN-Kontext budgetieren statt nach dem durchschnittlichen, weil das Überschreiten einer Schwelle die Anfrage neu bepreist, die sie überschritten hat",
+  "Metas eigene Benchmark-Tabelle ehrlich deuten: acht Zeilen gewonnen, eine um 7,7 Punkte verloren und ein Unentschieden beim Leitindex",
+  "Die in Metas Fußnote 1 vergrabene Harness-Asymmetrie erkennen: Die Terminal-Bench-Zeile vergleicht drei verschiedene Agent-Harnesses, nicht drei Modelle",
+  "Wissen, was Meta nicht veröffentlicht hat: keine Parameterzahl, keine Model Card, keine Reasoning-Effort-Stufen, keine offenen Gewichte",
+  "Entscheiden, ob Ember als Executor unter einem Planner in deinen Stack gehört, was sowohl Meta als auch die unabhängige Evidenz tatsächlich stützen",
+]} />
+
+<VerifyNote lastVerified="2026-11-10" source="Metas Launch-Beitrag (research.meta.ai/blog/muse-ember) einschließlich Fußnoten 1 und 2; Haiku-5.5-Preise aus Anthropics Preisliste, wie in AILmanacs eigener Haiku-5.5-Seite dokumentiert; unabhängige Benchmark- und Geschwätzigkeitswerte von Artificial Analysis, wie in OrcaRouters Muse-Ember-Analyse berichtet.">
+Preise und Benchmark-Werte sind einen Tag alt und vom Hersteller veröffentlicht. Das Band &gt;200K (0,30 $ / 0,012 $ / 1,50 $) steht in **Fußnote 2** von Metas Beitrag, nicht im Haupttext; bestätige es auf Metas aktueller Modellseite, bevor du darauf budgetierst. Ob dieses Band die **gesamte Anfrage** neu bepreist oder nur die Token oberhalb der Linie, ist **von Meta nicht angegeben**; diese Seite kennzeichnet das als offene Frage, statt sie zu entscheiden. Benchmark-Zeilen mit „Meta internal“ haben keine Reproduktion durch Dritte. Audio- und Video-Input sind Metas Behauptung; unabhängige Listungen verzeichneten zum Zeitpunkt des Schreibens Text- und Bild-Input mit Text-Output. Parameterzahl, Architektur, Wissensstichtag, Cache-Schreibpreis, Batch-Preise und Rate Limits sind nicht offengelegt.
+</VerifyNote>
+
+## Die Ein-Absatz-Version
+
+Muse Ember ist ein **Closed-Weight-Executor-Modell mit Reasoning-Fähigkeit und langem Kontext**, mit einem 1M-Token-Kontextfenster und einer **Output-Obergrenze von 512K**, bepreist mit **0,10 $ / 0,004 $ gecacht / 0,50 $** pro Million Token für Prompts bis 200.000 Token und einem **3-fachen Sprung bei allen drei Tarifen** darüber. Meta positioniert es als unterste Sprosse einer Leiter aus drei Modellen (*Muse Wonder plant, Muse Spark codet, Muse Ember macht das Volumen*), und seine eigenen Auswertungen sehen es **gleichauf mit Claude Haiku 5.5 im Artificial Analysis Intelligence Index (36 zu 36) bei etwa einem Drittel der Kosten pro Aufgabe (0,136 $ gegenüber 0,411 $)**. Es gewinnt acht von Metas zehn Benchmark-Zeilen und verliert eine, die für jeden wichtig ist, der Code ausliefert.
+
+## Teil 1 — Die Drei-Band-Tabelle
+
+Das haben die Launch-Berichte übersehen. Haiku 5.5 und Muse Ember haben denselben **Listenpreis** und dasselbe **1M-Kontextfenster**, und beide wechseln auf eine teure Preisliste, sobald ein Prompt lang wird. Aber Haikus Schwelle liegt bei **100.000 Token** und multipliziert mit **5**; Embers liegt bei **200.000 Token** und multipliziert mit **3**.
+
+Legt man sie nebeneinander, ist der Listenpreis nicht mehr die Geschichte:
+
+| Prompt-Länge | Haiku 5.5 In / Out / Cache-Lesen | Muse Ember In / Out / Cache-Lesen | Embers Vorteil |
+|---|---|---|---|
+| **≤ 100K Token** | 0,10 $ / 0,50 $ / 0,01 $ | 0,10 $ / 0,50 $ / 0,004 $ | Gleichstand bei In/Out; Cache-Lesen **2,5-mal** günstiger |
+| **100K – 200K Token** | 0,50 $ / 2,50 $ / 0,05 $ | 0,10 $ / 0,50 $ / 0,004 $ | **5-mal** günstiger bei In/Out; **12,5-mal** günstiger beim Cache-Lesen |
+| **> 200K Token** | 0,50 $ / 2,50 $ / 0,05 $ | 0,30 $ / 1,50 $ / 0,012 $ | **1,67-mal** günstiger bei In/Out; **4,17-mal** günstiger beim Cache-Lesen |
+
+Alle Zahlen pro Million Token. Haikus Bänder stammen aus Anthropics Preisliste, Embers aus Fußnote 2 von Metas Launch-Beitrag.
+
+Aus dieser Tabelle ergeben sich drei Dinge, und keines davon ist in der Ankündigung eines der beiden Hersteller sichtbar.
+
+### Das mittlere Band ist, wo die Entscheidung liegt
+
+Zwischen 100.000 und 200.000 Token Prompt hat Haiku 5.5 bereits neu bepreist und Muse Ember nicht. In diesem Fenster unterscheiden sich die beiden Modelle, die mit identischem Preis werben, um **genau das 5-Fache bei Input und Output** und das **12,5-Fache beim Cache-Lesen**.
+
+Das ist kein exotisches Fenster. Ein Coding-Agent, der ein paar Dateien, ein Testlog und eine Build-Ausgabe gelesen hat, sitzt mitten in einer Session genau darin. Wenn du hochvolumige Subagent-Arbeit routest und deine Transkripte regelmäßig zwischen 100K und 200K Token landen, ist dieses eine Band der größte Kostenhebel, den du hast: größer als Prompt-Kürzung, größer als Caching-Strategie, größer als Effort-Tuning.
+
+### Oberhalb von 200K schrumpft der Abstand viel stärker, als man vermuten würde
+
+Sobald beide Modelle auf ihren teuren Preislisten sind, bricht Embers Vorteil bei Input und Output von 5 auf **1,67** zusammen. Liegt dein Workload vollständig oberhalb von 200K Token, sind die beiden viel näher beieinander, als die Rechnung für Band 2 nahelegt, und andere Faktoren (das FrontierCode-Ergebnis unten, Output-Geschwätzigkeit, Latenz, in welcher Cloud du ohnehin bist) sollten die Entscheidung treffen statt des Preises.
+
+### Cache-Lesezugriffe sind der stille Gewinn
+
+Embers Tarif für gecachten Input von **0,004 $/M** ist die aggressive Zahl im gesamten Vergleich; Meta stellt ihn als 96 % Rabatt auf den eigenen Input-Tarif dar. Gegenüber Haikus 0,01 $ unterhalb der Schwelle sind das 2,5-mal; gegenüber Haikus 0,05 $ oberhalb **12,5-mal**.
+
+Das zählt überproportional bei Agenten-Loops, weil ein Agent bei jedem einzelnen Schritt ein stabiles Präfix (System-Prompt, Tool-Schemas) erneut sendet. Dieses Präfix wird gecacht. Was *nicht* gecacht wird, ist das wachsende Transkript, das bei jedem Schritt als frischer Input abgerechnet wird. Ein langer Agent-Lauf besteht also überwiegend aus günstigen Cache-Lesezugriffen plus einem teuren, wachsenden Schwanz, und der Cache-Lese-Tarif multipliziert sich über jeden Schritt jedes Laufs.
+
+<Callout type="warning" items={[
+  "Metas Fußnote sagt nur, dass „bei längeren Prompts Muse Ember 0,30 $ kostet“: Sie sagt nicht, ob der höhere Tarif für die gesamte Anfrage gilt oder nur für die Token oberhalb von 200.000. Haiku 5.5 verhält sich dokumentiert so, dass die gesamte Anfrage neu bepreist wird. Solange Meta nichts anderes sagt, budgetiere auch bei Ember mit Neubepreisung der gesamten Anfrage: Das ist die konservative Annahme, und sie deckt sich mit dem Präzedenzfall nebenan.",
+]} />
+
+## Teil 2 — Nach Spitzenkontext budgetieren, nicht nach Durchschnittskontext
+
+Eine Schwelle, die eine Anfrage neu bepreist, hat eine Folge, die Durchschnitte vollständig verbergen: **Die einzige Zahl, die zählt, ist der Höchststand einer einzelnen Anfrage.**
+
+Betrachte einen Agenten-Loop mit 20 Schritten. Jeder Schritt sendet System-Prompt, Tool-Schemas und das aufgelaufene Transkript erneut. Das Präfix ist stabil und wird mit 0,004 $/M gecacht. Das Transkript wächst mit jedem Schritt und wird als frisch abgerechnet.
+
+<Steps items={[
+  {title: "Miss den Spitzenkontext pro Lauf, nicht den Durchschnittskontext", body: "Protokolliere die Input-Token-Zahl jeder Anfrage eines Laufs und behalte das Maximum. Ein Lauf mit durchschnittlich 90K Token kann leicht im letzten Schritt bei 210K liegen, und bei einer Preisliste nach Prompt-Länge kann dieser letzte Schritt zum teuren Tarif abgerechnet werden statt zum durchschnittlichen."},
+  {title: "Finde heraus, welcher Schritt die Linie überschreitet", body: "Instrumentiere den Loop so, dass du den Schrittindex kennst, ab dem die Input-Token 200.000 (Ember) oder 100.000 (Haiku) überschreiten. Dieser Schritt und jeder folgende ist der teure Teil der Rechnung. Alles davor ist im Vergleich fast kostenlos."},
+  {title: "Begrenze Tool-Ausgaben, bevor sie ins Transkript gelangen", body: "Ein einzelnes Build-Log oder ein Test-Dump ist oft das, was einen Lauf über eine Schwelle schiebt. Eine feste Obergrenze für jedes Tool-Ergebnis verkleinert das Transkript, ohne das stabile Präfix umzuschreiben, von dem dein Cache abhängt: Das spart Band-Geld und Cache-Geld zugleich."},
+  {title: "Vergleiche oberhalb der Linie mit Langkontext-Modellen zum Pauschaltarif", body: "Sobald dein Spitzenwert die Schwelle verlässlich überschreitet, kann ein Modell mit niedrigerem Listenpreis und schlechterer Schwelle gegen eines mit höherem Listenpreis und gar keiner Schwelle verlieren. Wiederhole den Vergleich bei deinem tatsächlichen Spitzenwert, nicht beim Listenpreis."},
+  {title: "Miss die Schritte bis zur gültigen Beendigung", body: "Kosten pro Token sind nicht Kosten pro Aufgabe. Ein Modell, das 28 Schritte braucht, wo ein anderes 20 braucht, kann bei halbem Token-Preis teurer sein. Diese Messung entscheidet über die Executor-Wahl, und keiner der Hersteller veröffentlicht sie."},
+]} />
+
+<PromptCard title="Protokolliere die Spitzen-Input-Token pro Lauf, damit du weißt, in welchem Band du tatsächlich abgerechnet wirst">{`# Pseudocode for any agent loop, any provider.
+# The number you need is the MAX, not the mean.
+
+peak_input = 0
+for step in run:
+    resp = call_model(messages=transcript, tools=schemas)
+    peak_input = max(peak_input, resp.usage.input_tokens)
+    transcript.append(resp)
+
+print("peak input tokens:", peak_input)
+# Haiku 5.5  -> expensive card above 100_000
+# Muse Ember -> expensive card above 200_000`}</PromptCard>
+
+## Teil 3 — Metas Benchmark-Tabelle ehrlich lesen
+
+Meta hat zehn Vergleichszeilen veröffentlicht, alle bei maximalem Reasoning-Effort, gegen Claude Haiku 5.5 und GPT-6 Luna. Ember gewinnt acht, spielt eine unentschieden und verliert eine.
+
+| Benchmark | Muse Ember | Haiku 5.5 | GPT-6 Luna | Gemessen von |
+|---|---|---|---|---|
+| AutomationBench-AA | **37,8 %** | 13,9 % | 20,2 % | Artificial Analysis, striktes pass@1 |
+| Agents' Last Exam (Linux-Teilmenge) | **61,6 %** | 57,0 % | 57,1 % | Meta internal |
+| Personal Superintelligence Index | **46,8 %** | 36,1 % | 37,0 % | Meta-internes Komposit |
+| Terminal-Bench 4.0 | **40,9 %** | 39,2 % | 16,4 % | Bestes veröffentlichtes Harness jedes Modells |
+| Coding Agent Index-AA | **46** | 37 | 31 | Artificial Analysis |
+| **FrontierCode 2.0-AA** | 27,2 % | **34,9 %** | 25,2 % | Artificial Analysis |
+| GDP.pdf-AA | **22,8 %** | 20,8 % | **22,8 %** | Artificial Analysis |
+| OSWorld 2.1 (Teilpunkte) | **69,5 %** | 68,9 % | 50,5 % | Meta internal |
+| PerceptionBench (mit Tools) | **80,6 %** | 78,6 % | 62,8 % | Meta internal |
+| Artificial Analysis Intelligence Index v5 | **36** | **36** | 28 | Artificial Analysis |
+
+Vier Beobachtungen, die verändern, wie man sie liest.
+
+### Die AutomationBench-Lücke ist die eigentliche Schlagzeile, und sie ist eine andere Aussage als „es codet gut“
+
+**37,8 % gegenüber Haikus 13,9 %** ist ein Verhältnis von 2,7 und mit Abstand die größte Spanne der Tabelle. AutomationBench-AA bewertet den Abschluss von Geschäftsabläufen unter striktem pass@1. Dieses Ergebnis stützt eine bestimmte Aussage: Ember ist ungewöhnlich gut darin, *mehrstufige prozedurale Arbeit zu Ende zu bringen*, und das ist der stärkste Beleg für die Executor-Rahmung. Über Code-Qualität sagt es nichts.
+
+### FrontierCode ist die Zeile, die man ernst nehmen sollte
+
+**Ember 27,2 %, Haiku 34,9 %**: ein Verlust von 7,7 Punkten und die einzige Zeile, die Ember verliert. FrontierCode 2.0-AA bewertet echte Engineering-Aufgaben, und Meta hat die Zeile aufgenommen, statt sie wegzulassen, was ihm zur Ehre gereicht.
+
+Stellt man sie neben den Coding Agent Index-AA, wo Ember 46 zu 37 gewinnt, ergibt sich ein stimmiges Bild: **Ember ist besser darin, einen Coding-Agent-Loop zu steuern, und schlechter darin, Code zu erzeugen, der ein Review überstehen muss.** Das ist exakt das Profil eines Executors und exakt das falsche Profil für das Modell, das deinen Produktions-Diff schreibt.
+
+### Das Beinahe-Unentschieden bei Terminal-Bench vergleicht drei Harnesses, nicht drei Modelle
+
+Metas Fußnote 1 ist der wichtigste Satz auf der Seite. Die Terminal-Bench-4.0-Zeile lief mit **jedem Modell in seinem eigenen besten veröffentlichten Harness**:
+
+- Muse Ember → **mini-swe-agent**
+- Claude Haiku 5.5 → **Claude Code**
+- GPT-6 Luna → **Codex**
+
+Ein Ergebnis von 40,9 gegen 39,2 über drei *verschiedene* Agent-Gerüste ist kein Modellunterschied von 1,7 Punkten. Die Wahl des Harness verschiebt agentische Werte für sich allein um mehrere Punkte, und genau diese Falle behandelt [Wie man einen KI-Benchmark liest, ohne sich täuschen zu lassen](/docs/models/reading-ai-benchmarks). Behandle diese Zeile als „grob vergleichbar“, nicht als Sieg.
+
+### Der Index ist ein Unentschieden; die Effizienz ist der Gewinn
+
+Metas eigene Tabelle markiert sowohl Ember als auch Haiku 5.5 als Bestwert **36** im Intelligence Index. Das darunterliegende Streudiagramm ist etwas weniger schmeichelhaft: **Ember 35,8 bei 0,136 $ pro Aufgabe, Haiku 36,2 bei 0,411 $ pro Aufgabe**. Die vollständige Leiter:
+
+| Modell | Kosten pro Aufgabe → Index |
+|---|---|
+| Muse Ember | 0,116 $ → 33,9 · 0,136 $ → **35,8** |
+| Claude Haiku 5.5 | 0,092 $ → 24,6 · 0,159 $ → 29,6 · 0,248 $ → 34,3 · 0,411 $ → **36,2** |
+| GPT-6 Luna | 0,073 $ → 21,4 · 0,104 $ → 23,3 · 0,152 $ → **27,8** |
+
+Richtig gelesen lautet Metas Aussage nicht „wir schlagen Haiku“. Sie lautet: „Wir erreichen Haikus Bestwert für etwa ein Drittel der Kosten pro Aufgabe, und wir schlagen jede GPT-6-Luna-Einstellung klar.“ Beides ist belegt. Beachte außerdem, dass Haiku in diesen Daten eine Effort-Leiter mit vier Stufen hat und Ember zwei: Ember ist als reasoning-fähig gekennzeichnet, aber **Meta hat keine Dokumentation der Effort-Einstellungen veröffentlicht**, sodass du die Stufe zu 0,116 $ nicht gezielt wählen kannst, wie du es mit Haikus `effort`-Parameter kannst.
+
+## Teil 4 — Die Geschwätzigkeit, die einen Teil des Rabatts auffrisst
+
+Eine Zahl aus dem unabhängigen Index-Lauf steht nicht in Metas Beitrag: Im Intelligence Index erzeugte Ember **etwa 115 Millionen Output-Token gegenüber einem Median von 97,1 Millionen**, und der Evaluator beschrieb es als „etwas geschwätzig“.
+
+Das sind rund 18 % über dem Median-Output, bei einem Modell, dessen Output-Token das 5-Fache seiner Input-Token kosten. Geschwätzigkeit ist die eine Stelle, an der ein günstiger Executor seinen Vorteil still wieder hergibt, und sie wirkt mit der Schrittzahl zusammen: Ein geschwätziges Modell, das lange Zwischenüberlegungen ins Transkript schreibt, lässt dieses auch schneller wachsen, was den Lauf früher an die 200K-Schwelle bringt.
+
+Die Gegenevidenz ist allerdings real und kommt von Launch-Partnern, nicht von Meta: You.com berichtete von einer **p95-Latenz von 2,2 Sekunden** und **36–48 % weniger Output-Token** in den eigenen Coding-Tests, und Cloudflare berichtete, es sei **am Tail bis zu 30 % schneller** gelaufen als das vergleichbare getestete Modell. Beides sind Partnerzitate in einem Launch-Beitrag: als Richtungsangabe nützlich, keine unabhängige Messung.
+
+<Callout type="note" items={[
+  "Diese beiden Befunde stehen tatsächlich im Widerspruch: Der unabhängige Index-Lauf maß überdurchschnittliche Geschwätzigkeit, während ein Launch-Partner 36–48 % weniger Output-Token als bei seinem bisherigen Modell maß. Beides kann stimmen: Geschwätzigkeit hängt vom Workload ab, und You.com verglich mit einer anderen Baseline als dem Index-Median. Die Auflösung ist, die Output-Token pro abgeschlossener Aufgabe an deinem eigenen Workload zu messen, bevor du die Einsparungen modellierst.",
+]} />
+
+## Teil 5 — Was Meta nicht ausgeliefert hat
+
+Die Lücken sind genauso aufschlussreich wie die Spezifikationen, und sie zeigen alle in dieselbe Richtung.
+
+- **Keine Gewichte.** Ember ist proprietär und wird von Meta bereitgestellt. Es gehört nicht zu Metas Open-Weight-Linie.
+- **Keine Parameterzahl, keine Architekturnotiz, keine Model Card.** „Kleinstes und effizientestes“ ist die gesamte Offenlegung.
+- **Keine Reasoning-Effort-Leiter.** Das Modell wird als reasoning-fähig beschrieben, ohne veröffentlichte Einstellungen; du kannst die Stufe von Kosten und Qualität also nicht selbst abstimmen.
+- **Kein Wissensstichtag, keine Rate Limits, kein Cache-Schreibpreis, keine Batch-Preise.**
+- **Keine unabhängigen Durchsatzzahlen.** Keine Token pro Sekunde, keine Zeit bis zum ersten Token, keine Zeit pro Aufgabe von einem Dritten.
+- **Die Modalität ist umstritten.** Meta behauptet natives Verständnis von Text, Bild, Audio und Video; unabhängige Listungen verzeichneten zum Zeitpunkt des Schreibens Text- und Bild-Input mit Text-Output. Wenn Audio- oder Video-Input für dich tragend ist, prüfe das auf der aktuellen Modellseite, bevor du darauf aufbaust.
+
+In puncto Sicherheit sagt Meta, Ember sei unter seinem Superintelligence Scaling Framework auf chemisch/biologische, Cybersecurity- und Kontrollverlust-Risiken bewertet worden und unter den Schwellen für hohes Risiko des Frameworks geblieben, und es habe trotz seiner Größe dasselbe zentrale Sicherheitstraining erhalten, einschließlich Tests auf Widerstand gegen Anweisungen, die in Webseiten, Dokumenten und Tool-Ausgaben versteckt sind. Dieser letzte Punkt ist der relevante für einen Executor, der sein Leben damit verbringen wird, nicht vertrauenswürdige Tool-Ausgaben zu lesen; siehe [Prompt Injection](/docs/security/prompt-injection), warum das das Richtige zum Testen ist und warum das Bestehen einer internen Auswertung keine Garantie ist.
+
+## Teil 6 — Wo es hinpasst
+
+Metas Rahmung ist eindeutig: **Muse Wonder für die schwersten Probleme, Muse Spark für Coding und agentische Workflows, Muse Ember für wiederholbare Arbeit im großen Maßstab.** Zum Vergleich: Muse Spark 1.3 erreicht im Index 37 bei **2,39 $ pro Aufgabe** mit einer Preisliste von 1,25 $/4,25 $. In Metas eigener Produktlinie liegt Ember also einen Indexpunkt hinter Spark 1.3 bei etwa **1/17 der Kosten pro Aufgabe**.
+
+Verfügbarkeit: Muse Code und die Meta Model API, mit Unterstützung für die Responses API; Ember, Spark und Wonder werden außerdem auf Google Cloud und Oracle Cloud angeboten. Launch-Partner Cline beschrieb es als gezielt gebaut für Subagent-Arbeit wie Coding und Dokumentenanalyse.
+
+Das ehrliche Urteil ist das, worauf sowohl der Preis als auch die Form der Benchmarks zeigen: **Alles an Ember sagt Executor, und nichts Veröffentlichtes sagt Planner.** Setze ein Frontier-Modell auf die Entscheidungen und Ember auf das Volumen. Wenn du diese zweistufige Form baust, behandeln die [Model-Routing-Muster](/docs/models/model-routing-patterns) die Mechanik, und [Warum Agenten Token verbrennen](/docs/models/why-agents-burn-tokens) zeigt, woher das Volumen tatsächlich kommt.
+
+<Flashcards cards={[
+  {front: "Muse Embers Preisbänder", back: "Prompt ≤200K: 0,10 $ In / 0,004 $ gecachter In / 0,50 $ Out pro MTok. >200K: 0,30 $ / 0,012 $ / 1,50 $, ein 3-facher Sprung bei allen drei Tarifen."},
+  {front: "Haiku 5.5s Preisbänder", back: "Prompt ≤100K: 0,10 $ / 0,50 $, Cache-Lesen 0,01 $. >100K: 0,50 $ / 2,50 $, Cache-Lesen 0,05 $, eine 5-fache Neubepreisung der gesamten Anfrage."},
+  {front: "Das Band 100K–200K", back: "Haiku hat bereits neu bepreist, Ember nicht. In diesem Fenster kostet Ember bei Input/Output das 5-Fache weniger und beim Cache-Lesen das 12,5-Fache weniger."},
+  {front: "Die Zeile, die Ember verliert", back: "FrontierCode 2.0-AA: 27,2 % gegenüber Haiku 5.5s 34,9 %, ein Verlust von 7,7 Punkten bei echten Engineering-Aufgaben, die nach Merge-Fähigkeit bewertet werden."},
+  {front: "Metas Fußnote-1-Falle", back: "Die Terminal-Bench-4.0-Zeile ließ jedes Modell in einem anderen Harness laufen: mini-swe-agent für Ember, Claude Code für Haiku, Codex für Luna. Kein sauberer Modellvergleich."},
+  {front: "Warum nach Spitzenkontext budgetieren", back: "Eine Preisliste nach Prompt-Länge bepreist die Anfrage neu, die die Schwelle überschreitet. Die maximale Input-Zahl eines Laufs entscheidet über die Rechnung; der Durchschnitt verbirgt sie."},
+  {front: "Metas Drei-Modell-Leiter", back: "Muse Wonder plant die schwersten Probleme, Muse Spark erledigt Coding und agentische Workflows, Muse Ember führt wiederholbare Arbeit in Masse aus."},
+  {front: "Maximale Output-Token", back: "512K bei Muse Ember, gegenüber 128K bei Haiku 5.5, beide mit einem Kontextfenster von 1M Token."},
+]} />
+
+<Quiz title="Teste dich selbst" questions={[
+  {q: "Muse Ember und Haiku 5.5 nennen beide 0,10 $/0,50 $ pro MTok. Wie schneiden sie bei einem Prompt von 150.000 Token im Vergleich ab?", options: ["Immer noch identisch: Der Listenpreis ist der Preis", "Ember ist etwa 5-mal günstiger, weil Haiku jenseits von 100K neu bepreist hat und Ember nicht", "Haiku ist günstiger, weil seine Schwelle nur die Token oberhalb von 100K betrifft"], answer: 1, explain: "Haiku 5.5s teure Preisliste beginnt oberhalb von 100.000 Token (0,50 $/2,50 $); Embers oberhalb von 200.000. Bei 150K ist Ember noch bei 0,10 $/0,50 $, Haiku nicht: ein 5-facher Abstand bei Input und Output und ein 12,5-facher beim Cache-Lesen."},
+  {q: "Was passiert mit Embers Preisvorteil, sobald deine Prompts 200.000 Token überschreiten?", options: ["Er verschwindet vollständig: Die beiden werden identisch", "Er schrumpft bei Input und Output von etwa 5-fach auf etwa 1,67-fach", "Er wächst, weil Ember kein oberes Band hat"], answer: 1, explain: "Oberhalb von 200K wechselt Ember auf 0,30 $/1,50 $, während Haiku bei 0,50 $/2,50 $ liegt. Das Verhältnis fällt von 5 auf etwa 1,67, sodass in diesem Bereich andere Faktoren die Entscheidung treiben sollten."},
+  {q: "Warum solltest du einen Agenten-Loop nach dem Spitzenkontext statt nach dem Durchschnittskontext budgetieren?", options: ["Weil Anbieter ohnehin nach dem Durchschnitt abrechnen, der Spitzenwert also eine Sicherheitsmarge ist", "Weil eine Preisliste nach Prompt-Länge die Anfrage neu bepreist, die die Schwelle überschreitet, sodass ein einziger später Schritt zum teuren Tarif abgerechnet werden kann", "Weil der Spitzenkontext dein Kontextfenster bestimmt, nicht deinen Preis"], answer: 1, explain: "Schwellen wirken pro Anfrage. Ein Lauf mit durchschnittlich 90K Token, aber einer Spitze von 210K, hat Schritte, die nach der teuren Preisliste abgerechnet werden. Der Durchschnitt verdeckt genau die Schritte, die am meisten kosten."},
+  {q: "In welcher Benchmark-Zeile verliert Muse Ember in Metas eigener Tabelle gegen Claude Haiku 5.5?", options: ["AutomationBench-AA", "Coding Agent Index-AA", "FrontierCode 2.0-AA"], answer: 2, explain: "FrontierCode 2.0-AA: 27,2 % für Ember gegenüber 34,9 % für Haiku 5.5, die einzige Zeile, die Ember verliert, und die, die echte Engineering-Aufgaben bewertet."},
+  {q: "Was verrät Fußnote 1 von Metas Beitrag über den Terminal-Bench-4.0-Vergleich?", options: ["Dass die Werte ohne Evaluator selbst berichtet wurden", "Dass jedes Modell in einem anderen Agent-Harness lief: mini-swe-agent, Claude Code bzw. Codex", "Dass der Benchmark mit niedrigem Reasoning-Effort lief"], answer: 1, explain: "Jedes Modell lief in seinem eigenen besten veröffentlichten Harness. Allein die Harness-Wahl verschiebt agentische Werte um mehrere Punkte, ein Ergebnis von 40,9 gegen 39,2 über drei Gerüste ist also kein sauberer Modellunterschied."},
+  {q: "Welche Muse-Ember-Angabe legt Meta NICHT offen?", options: ["Die Output-Obergrenze von 512K", "Den Preis für gecachten Input von 0,004 $/M", "Die Parameterzahl"], answer: 2, explain: "Meta veröffentlichte Kontextfenster, Output-Obergrenze und die vollständige Preisliste, aber keine Parameterzahl, keine Architekturnotiz und keine Model Card, nur die Beschreibung „kleinstes und effizientestes“."},
+  {q: "Metas eigene Indexdaten zeigen Ember bei 35,8 und Haiku 5.5 bei 36,2. Was ist die vertretbare Aussage?", options: ["Ember ist das intelligentere Modell", "Ember erreicht ungefähr Haikus Bestwert für etwa ein Drittel der Kosten pro Aufgabe", "Die beiden Modelle sind in jedem Benchmark ununterscheidbar"], answer: 1, explain: "Haiku liegt beim Indexwert knapp vorn (0,411 $/Aufgabe für 36,2 gegenüber Embers 0,136 $ für 35,8). Die belegte Aussage ist Effizienz (vergleichbare Qualität pro Aufgabe bei etwa einem Drittel der Kosten), nicht Überlegenheit."}
+]} />
+
+## Quellen & weiterführende Literatur
+
+- [Muse Ember — Metas Launch-Beitrag](https://research.meta.ai/blog/muse-ember): die Primärquelle: Preisliste, die Benchmark-Tabelle mit zehn Zeilen, Fußnote 1 (Harness pro Modell) und Fußnote 2 (das Band &gt;200K), die Positionierung Wonder/Spark/Ember, Partnerzitate von Cloudflare, You.com und Cline sowie die Sicherheitszusammenfassung zum Superintelligence Scaling Framework
+- [Build with Muse Ember — Metas Entwicklerblog](https://dev.meta.ai/resources/blog/build-with-muse-ember): die Modellseite für Entwickler, auf der Verfügbarkeit und Details zur Modalität aktuell gehalten werden
+- [Muse Wonder — Metas Launch-Beitrag](https://research.meta.ai/blog/muse-wonder): der Planner an der Spitze der Leiter, an deren Fuß Ember steht
+- [Introducing Muse Spark 1.3 — Meta](https://research.meta.ai/blog/introducing-muse-spark-1-3): die mittlere Sprosse und die Zahl von 2,39 $ pro Aufgabe, an der Ember gemessen wird
+- [Muse Ember: the executor tier and its 200K price cliff — OrcaRouter](https://www.orcarouter.ai/blog/muse-ember-agent-loop-executor): die unabhängige Analyse, die die Band-Rechnung und die Regel „Spitze statt Durchschnitt“ ausgearbeitet und die überdurchschnittliche Output-Token-Zahl berichtet hat
+- [Artificial Analysis](https://artificialanalysis.ai/): der Evaluator hinter jeder mit „-AA“ markierten Zeile in Metas Tabelle, dazu das Streudiagramm des Intelligence Index v5 und die Anmerkung zur Geschwätzigkeit
+- [Meta releases Muse Ember — TechCrunch](https://techcrunch.com/2026/11/09/meta-releases-muse-ember-a-new-lightweight-model-for-agent-execution/): Berichterstattung vom Launch-Tag und der Platz des Modells in Metas Release-Reihenfolge 2026
+
+## Weiter
+
+- [Claude Haiku 5.5: die 100K-Preisschwelle](/docs/models/haiku-5-5-the-100k-price-cliff): die andere Hälfte dieses Vergleichs in voller Länge: wo die Schwelle in englischen Wörtern liegt, die Cache-Lese-Falle und der eine Hebel, bei dem 21 % weniger Prompt die Kosten um 84 % senken
+- [Muse Code + Muse Spark 1.2: Metas Terminal-Coding-Agent](/docs/models/muse-code-and-spark-1-2): das Produkt, in dem Ember mitgeliefert wird, und die Contributor-Stufe, die Spark im Tausch gegen deine Prompts zu Embers Preis anbot
+- [Model-Routing-Muster](/docs/models/model-routing-patterns): wie man eine Aufteilung in Planner und Executor tatsächlich verdrahtet, ohne dass die Routing-Schicht die Einsparungen auffrisst
+- [Wie man einen KI-Benchmark liest, ohne sich täuschen zu lassen](/docs/models/reading-ai-benchmarks): lies das, bevor du irgendeiner Zeile in irgendeiner Launch-Tabelle traust, auch den obigen

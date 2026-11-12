@@ -1,0 +1,106 @@
+# إعداد MCP وهياكل الخوادم
+
+> Source: https://derob98.github.io/ailmanac/ar/docs/templates/mcp-config · AILmanac (CC BY 4.0) · last verified 2026-11-10
+
+ملف .mcp.json بالإضافة إلى قوالب بدء بسيطة لخادم stdio وخادم بعيد.
+
+<LevelBadge level="intermediate" />
+
+<VerifyNote lastVerified="2026-11-10" source="https://modelcontextprotocol.io">
+تتطور مفاتيح إعداد MCP وواجهات SDK البرمجية — تحقّق منها مقابل مستندات MCP الرسمية و[مستندات MCP الخاصة بـ Claude Code](https://code.claude.com/docs/en/mcp). كما يتغيّر أيّ خوادم مرجعية لا تزال مدعومة؛ وقد جرى التحقق من المجموعة المؤرشفة أدناه مقابل سجل npm ومستودع [modelcontextprotocol/servers](https://github.com/modelcontextprotocol/servers).
+</VerifyNote>
+
+قوالب بدء جاهزة للنسخ واللصق لربط Claude بالأدوات عبر [MCP](/docs/claude-code/mcp). هذّبها إلى ما تحتاجه.
+
+## `.mcp.json` — إعلان الخوادم (مشترك في المشروع)
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/"
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    },
+    "private-api": {
+      "type": "http",
+      "url": "https://api.internal.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${INTERNAL_MCP_TOKEN}" }
+    }
+  }
+}
+```
+
+يحتاج الإدخال البعيد إلى `"type"` صريح. يقرأ Claude Code أي إدخال فيه `url` بلا `type` على أنه خادم stdio، فيتخطّاه وينبّهك إلى إضافة `"type": "http"` (أو `"sse"` / `"ws"`).
+
+:::warning[أبقِ الأسرار خارج الملف]
+أشِر إلى متغيرات البيئة (`${INTERNAL_MCP_TOKEN}`) — لا تكتب الرموز (tokens) مباشرة في ملف يُودَع في المستودع.
+:::
+
+:::warning[معظم الخوادم المرجعية القديمة أصبحت مؤرشفة]
+حزم `@modelcontextprotocol/server-*` التي لا يزال كثيرون ينسخونها لـ **GitHub وPostgreSQL وSlack وPuppeteer** تحمل الآن إشعار إيقاف من npm نصّه *«Archived and unmaintained; no security guarantees»* وتوجد في [modelcontextprotocol/servers-archived](https://github.com/modelcontextprotocol/servers-archived). لم يبقَ سوى قلة من الخوادم المرجعية قيد الصيانة — ومن خوادم TypeScript: `server-filesystem` و`server-memory` و`server-everything` و`server-sequential-thinking`.
+
+فضّل خادم الجهة المطوِّرة نفسها متى وُجد: تقدّم GitHub العنوان [`api.githubcopilot.com/mcp/`](https://github.com/github/github-mcp-server)، وانتقل التحكم بالمتصفح إلى [`@playwright/mcp`](/docs/api/playwright-mcp-deep-guide). أما PostgreSQL وSlack فلا يوجد لهما بديل رسمي — اختر خادماً مجتمعياً قيد الصيانة و[راجعه أولاً](/docs/security/reviewing-third-party-code).
+:::
+
+## خادم stdio بسيط (TypeScript)
+
+خادم صغير يوفّر أداة واحدة. عدّل المعالج ليناسب بياناتك.
+
+```ts
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { z } from "zod";
+
+const server = new McpServer({ name: "echo", version: "1.0.0" });
+
+server.registerTool(
+  "echo",
+  {
+    description: "Echo back the provided text",
+    inputSchema: z.object({ text: z.string().describe("Text to echo back") }),
+  },
+  async ({ text }) => ({ content: [{ type: "text", text: `You said: ${text}` }] }),
+);
+
+await server.connect(new StdioServerTransport());
+```
+
+:::note[إعادة تسمية حزمة SDK (MCP TS SDK v2)]
+جرى تقسيم `@modelcontextprotocol/sdk` إلى `@modelcontextprotocol/server` و`@modelcontextprotocol/client` في الإصدار 2. ما زالت حزمة الإصدار 1 تتلقى إصلاحات الأخطاء؛ ينبغي للمشاريع الجديدة استخدام الإصدار 2.
+:::
+
+## خادم stdio بسيط (Python)
+
+```python
+from mcp.server import MCPServer
+
+mcp = MCPServer("echo")
+
+@mcp.tool()
+def echo(text: str) -> str:
+    """Echo the text back."""
+    return f"You said: {text}"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
+
+## قبل أن تطلق خادماً
+
+- **الحد الأدنى من الامتيازات** — البيانات/الإجراءات التي يحتاجها فقط ([تأمين الوكلاء](/docs/security/securing-agents)).
+- **تحقّق من صحة المدخلات**؛ أعِد الأخطاء كنتائج، ولا تتعطّل.
+- **راجع خوادم الطرف الثالث** قبل الاتصال بها ([مراجعة كود الطرف الثالث](/docs/security/reviewing-third-party-code)).
+
+## التالي
+
+- [خوادم MCP في Claude Code](/docs/claude-code/mcp)
+- [ابنِ واربط أول خادم MCP لك](/docs/walkthroughs/first-mcp-server)
+- [وصفات الخطافات و settings.json](/docs/templates/hooks-settings)

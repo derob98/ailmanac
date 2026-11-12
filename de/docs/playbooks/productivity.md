@@ -1,0 +1,134 @@
+# Alltägliche Produktivität
+
+> Source: https://derob98.github.io/ailmanac/de/docs/playbooks/productivity · AILmanac (CC BY 4.0)
+
+Deine ersten fünf wertvollen Einsatzmöglichkeiten von Claude für die tägliche Arbeit — mit Copy-Paste-Prompts.
+
+<LevelBadge level="beginner" />
+
+Fünf Dinge, die fast jeder schon heute nutzen kann. Jedes kommt mit einem Einstiegs-Prompt — füge ihn ein, tausche die Klammern aus, verfeinere in einfacher Sprache.
+
+<Callout type="objectives" items={[
+  "Aus einem einzigen Copy-Paste-Prompt eine Antwort, eine Zusammenfassung oder einen Plan entwerfen",
+  "Die drei Teile erkennen, die jeder dieser Prompts benennt: Ziel, Format, Rahmenbedingungen",
+  "Mit Nachfragen eine Ausgabe steuern, statt den Prompt von Grund auf neu zu schreiben",
+  "Texte bekommen, die nach dir klingen, indem du eine eigene Textprobe mitgibst",
+  "Wissen, welche Ausgaben du prüfen musst, bevor du danach handelst"
+]} />
+
+## 1. Bändige deinen Posteingang
+
+<PromptCard title="Eine Antwort auf eine erhaltene E-Mail entwerfen">
+{`Here's an email I received. Draft a polite, concise reply that [accepts the
+meeting but proposes Thursday instead]. Keep it under 80 words.
+
+Email: [paste]`}
+</PromptCard>
+
+Hilfreiche Nachfragen: *„formeller“,* *„füge eine Zeile mit Dank hinzu“,* *„gib mir zwei Versionen“.*
+
+## 2. Fasse lange Inhalte zusammen
+
+<PromptCard title="Alles zusammenfassen, Entscheidungen separat herausgezogen">
+{`Summarise this in 5 bullet points a busy manager could read in 30 seconds,
+then list any decisions or action items separately.
+
+Text: [paste]`}
+</PromptCard>
+
+Funktioniert bei Artikeln, Besprechungsnotizen, Threads und Berichten. Bei sehr langen Eingaben bittest du **zuerst** um die Zusammenfassung und gehst dann in die Tiefe.
+
+## 3. Arbeit planen und aufschlüsseln
+
+<PromptCard title="Ein vages Ziel in einen Plan mit markierten Risiken verwandeln">
+{`I need to [organise a 30-person team offsite] by [October]. Give me a
+step-by-step plan with rough timing, and flag the 3 things most likely
+to go wrong.`}
+</PromptCard>
+
+Ideal für Projektpläne, Checklisten und um ein vages Ziel in konkrete nächste Schritte zu übersetzen.
+
+## 4. Gemeinsam durchdenken
+
+<PromptCard title="Eine Entscheidung auf die Probe stellen, statt sie nur zu treffen">
+{`I'm deciding between [option A] and [option B] for [situation]. Lay out the
+trade-offs in a table, then tell me what else I should consider before
+deciding.`}
+</PromptCard>
+
+Nutze es als Sparringspartner — bitte es, die Gegenposition zu vertreten, um dein Denken zu testen.
+
+## 5. Entwerfen, dann zu deinem eigenen machen
+
+<PromptCard title="Einen Entwurf in deiner eigenen Stimme bekommen">
+{`Write a first draft of [a LinkedIn post announcing our new feature].
+Match this voice: [paste a paragraph you wrote]. Then suggest a punchier
+opening line.`}
+</PromptCard>
+
+Eine Probe *deines* Schreibens mitzugeben ist das Geheimnis für Ausgaben, die nicht generisch klingen.
+
+## Die zwei Gewohnheiten, auf die es ankommt
+
+<Steps items={[
+  {
+    "title": "Kontext geben, dann iterieren",
+    "body": "Jeder Prompt oben nennt Ziel, Format und Rahmenbedingungen — das ist das ganze Rezept. Und keiner muss beim ersten Versuch sitzen: Sag in einfacher Sprache, was nicht stimmt („kürzer“, „weniger förmlich“, „zwei Versionen“), statt den Prompt neu zu schreiben."
+  },
+  {
+    "title": "Alles Faktische prüfen",
+    "body": "Daten, Zahlen, Namen, Zitate und „Fakten“ können selbstsicher falsch sein. Die Zusammenfassung eines Dokuments, das du eingefügt hast, ist risikoarm; eine Marktzahl, die das Modell aus dem Gedächtnis abgerufen hat, nicht. Was wichtig ist, prüfst du nach."
+  }
+]} />
+
+Hinter diesen beiden Gewohnheiten steht je eine eigene Seite: [Prompting-Grundlagen](/docs/prompting/basics) zum Benennen von Ziel, Format und Rahmenbedingungen und [Halluzinationen](/docs/foundations/hallucinations), um zu wissen, welche Ausgaben selbstsicher falsch sein können.
+
+<Quiz questions={[
+  {
+    "q": "Du fügst einen 40-seitigen Bericht ein und willst ihn verstehen. Worum bittest du laut dieser Seite zuerst?",
+    "options": [
+      "Um eine detaillierte Analyse Abschnitt für Abschnitt",
+      "Um die Zusammenfassung in 5 Stichpunkten, dann die wichtigen Teile vertiefen",
+      "Um eine Liste aller Zahlen im Dokument",
+      "Um eine Umschreibung in einfacherer Sprache"
+    ],
+    "answer": 1,
+    "explain": "Bei sehr langen Eingaben bittest du zuerst um die Zusammenfassung und gehst dann in die Tiefe. Sie gibt dir eine Landkarte, bevor du einem Abschnitt Aufmerksamkeit schenkst — und sie zeigt dir schnell, ob das Dokument überhaupt das ist, das du brauchtest."
+  },
+  {
+    "q": "Der Entwurf kommt generisch zurück und klingt gar nicht nach dir. Welche Lösung nennt diese Seite?",
+    "options": [
+      "Um einen kreativeren Ton bitten",
+      "Einen Absatz deines eigenen Schreibens als Stimmprobe einfügen",
+      "Um zehn Versionen bitten und eine auswählen",
+      "Eine längere Beschreibung deiner Persönlichkeit schreiben"
+    ],
+    "answer": 1,
+    "explain": "Eine Probe deines eigenen Schreibens ist der wirksamste Einzelschritt. Eine Beschreibung der Stimme („freundlich, aber professionell“) wird interpretiert; ein echter Absatz von dir wird nachgeahmt."
+  },
+  {
+    "q": "Welche dieser Ausgaben musst du am dringendsten prüfen, bevor du danach handelst?",
+    "options": [
+      "Eine Zusammenfassung von Notizen, die du in den Prompt eingefügt hast",
+      "Eine Antwort, die aus einer eingefügten E-Mail entworfen wurde",
+      "Eine Marktstatistik, die das Modell aus dem Gedächtnis erzeugt hat",
+      "Eine Tabelle mit Abwägungen zwischen zwei Optionen, die du beschrieben hast"
+    ],
+    "answer": 2,
+    "explain": "Alles, was auf Text beruht, den du geliefert hast, lässt sich an diesem Text überprüfen. Eine Zahl, die das Modell ohne Quelle abgerufen hat, kann selbstsicher falsch sein — das sind die Daten, Zahlen, Namen und Zitate, die du nachprüfen solltest."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "Ziel + Format + Rahmenbedingungen ist das ganze Rezept. Alle fünf Prompts hier folgen diesem Muster.",
+  "Verfeinere in einfacher Sprache, statt neu zu schreiben — „kürzer“, „förmlicher“, „zwei Versionen“ funktionieren alle.",
+  "Bei langen Eingaben: erst zusammenfassen, dann in die Tiefe gehen.",
+  "Eine Probe deines eigenen Schreibens schlägt jede Beschreibung deines Tons.",
+  "Fundierte Ausgaben sind günstig zu prüfen; abgerufene Fakten sind die, die zubeißen."
+]} />
+
+## Weiter
+
+- Prompting auf das nächste Level bringen → [Prompt-Muster-Bibliothek](/docs/prompting/pattern-library)
+- Ein dauerhafter Arbeitsbereich für ein Projekt → [Projekte](/docs/claude-app/projects)
+- KI in deinen bestehenden Werkzeugen nutzen → [KI in deinen bestehenden Tools](/docs/claude-app/ai-in-your-tools)

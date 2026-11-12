@@ -1,0 +1,25 @@
+# MCP 설정 빌더
+
+> Source: https://derob98.github.io/ailmanac/ko/docs/tools/mcp-config-builder · AILmanac (CC BY 4.0)
+
+원하는 서버를 선택하면 바로 쓸 수 있는 .mcp.json이 만들어집니다.
+
+<LevelBadge level="intermediate" />
+
+[MCP](/docs/claude-code/mcp)는 Claude를 외부 도구와 데이터에 연결합니다. 원하는 서버를 선택하고 시작용 `.mcp.json`을 복사(또는 다운로드)하세요. `${...}` 자리 표시자는 환경 변수로 바꾸고, 비밀 값을 코드에 직접 적지 마세요.
+
+<McpConfigBuilder />
+
+:::warning[두 행은 직접 패키지 이름을 넣어야 합니다]
+PostgreSQL과 Slack은 패키지 대신 `REPLACE-WITH-A-MAINTAINED-…` 자리 표시자를 의도적으로 출력합니다. 이 두 가지에 모두가 사용하던 `@modelcontextprotocol/server-*` 패키지는 [보관 처리되어 더 이상 유지보수되지 않으며](/docs/templates/mcp-config) 보안 보장이 없고, 공식 대체 패키지도 없습니다. 따라서 유지보수되는 커뮤니티 서버를 직접 골라 검토한 뒤 그 패키지 이름을 붙여 넣으세요. 나머지 행은 모두 유지보수되는 참조 서버이거나 공급업체가 직접 제공하는 엔드포인트입니다.
+:::
+
+:::warning[신뢰하되 검증하세요]
+MCP 서버는 코드를 실행하며 데이터에 접근할 수 있습니다. 신뢰하는 서버만 연결하고, 최소 권한만 부여하며, 각 패키지를 [modelcontextprotocol.io](https://modelcontextprotocol.io)에서 확인하세요. [서드파티 코드 검토하기](/docs/security/reviewing-third-party-code)를 참고하세요.
+:::
+
+## 다음 단계
+
+- [Claude Code의 MCP 서버](/docs/claude-code/mcp) — 전체 사용 가이드
+- [MCP 설정 및 서버 스캐폴드](/docs/templates/mcp-config) — 서버 시작 코드
+- [첫 MCP 서버 만들고 연결하기](/docs/walkthroughs/first-mcp-server)

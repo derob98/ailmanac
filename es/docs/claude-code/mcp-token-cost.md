@@ -1,0 +1,112 @@
+# El impuesto de tokens de MCP
+
+> Source: https://derob98.github.io/ailmanac/es/docs/claude-code/mcp-token-cost · AILmanac (CC BY 4.0) · last verified 2026-11-10
+
+Por qué conectar servidores MCP puede quemar entre 50k y 150k tokens antes de tu primera petición — y las tres soluciones: Tool Search, ejecución de código y saber cuándo gana una llamada a la CLI.
+
+<LevelBadge level="advanced" />
+
+<VerifyNote lastVerified="2026-11-10" source="https://www.anthropic.com/engineering/advanced-tool-use">
+Las cifras de tokens y los nombres de las funciones (`defer_loading`, Tool Search Tool, Programmatic Tool Calling) provienen de las publicaciones de ingeniería de Anthropic. El comportamiento de la búsqueda de herramientas del propio Claude Code — que está activada por defecto, los valores de `ENABLE_TOOL_SEARCH`, el mínimo de modelo y los límites de descripción — proviene de la [documentación de MCP de Claude Code](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search), que es donde cambia esa parte. Confirma ambas fuentes antes de citar números exactos.
+</VerifyNote>
+
+En Hacker News y en X se repite una pelea: *¿por qué quemar decenas de miles de tokens en una sola operación MCP cuando lo mismo por CLI cuesta un par de cientos?* Suena a ataque contra MCP. No lo es. Quienes discuten con más ruido son los que aman a los agentes: simplemente ya han visto la factura. Esta página es la guía práctica de esa factura: adónde van realmente los tokens, los dos costes que casi nadie separa y las tres soluciones que convierten un flujo de 150.000 tokens en uno de 2.000.
+
+<Callout type="objectives" items={["Separar los DOS costes de tokens distintos de MCP: la carga de las definiciones de herramientas y los resultados intermedios", "Entender por qué el coste de los esquemas se paga en cada conversación y no una sola vez", "Usar defer_loading y la Tool Search Tool para cargar los esquemas de las herramientas bajo demanda", "Usar la ejecución de código / Programmatic Tool Calling para mantener los resultados grandes fuera del contexto", "Decidir, tarea por tarea, cuándo merece la pena una herramienta MCP y cuándo gana una simple llamada a la CLI"]} />
+
+## Dos costes, no uno
+
+Cuando conectas un servidor MCP, el cliente le pide `tools/list` y recibe **todas las herramientas con su esquema JSON completo**. Todo ese bloque se inyecta en el contexto del modelo. La mayoría se queda ahí en su contabilidad mental. Pero hay dos impuestos distintos, y el segundo suele ser mayor.
+
+**Coste 1 — Definiciones de herramientas.** El nombre, la descripción y el esquema de parámetros de cada herramienta conectada ocupan contexto. El planteamiento de la propia Anthropic: *«Cuando los agentes están conectados a miles de herramientas, tendrán que procesar cientos de miles de tokens antes de leer una petición.»* Un único servidor empresarial puede publicar de decenas a cientos de herramientas; análisis de terceros sitúan un servidor de 400 herramientas en unos 400.000 tokens solo de esquemas — el doble de una ventana de 200k, y aun así el 40 % de una de 1M, gastados antes de la primera petición. (Tamaños de ventana por modelo: [Modelos y precios](/docs/whats-new/models-and-pricing).)
+
+**Coste 2 — Resultados intermedios.** Cuando el modelo llama a una herramienta directamente, **cada resultado vuelve a pasar por el contexto del modelo**, incluso las partes que nunca querías que leyera. El ejemplo de Anthropic: sacas la transcripción de una reunión de dos horas con una herramienta y se la pasas a otra, y la transcripción completa atraviesa el modelo *dos veces* — potencialmente ~50.000 tokens — solo para producir un resumen de una línea.
+
+<Callout type="warning" items={["El Coste 1 se paga en CADA turno hasta que entra en juego el prompt caching: los esquemas se reenvían con cada petición de la conversación, no se cargan una vez. Un catálogo grande de herramientas es un impuesto sobre toda la sesión, no una tarifa única. Este es el coste de una herramienta cuya definición está CARGADA; diferirla (más abajo) es lo que la saca de la factura por turno.", "El Coste 2 escala con tus DATOS, no con el número de herramientas. Diez herramientas pequeñas pueden salir más baratas que una que devuelve un blob gigante."]} />
+
+### Los números, de las fuentes primarias
+
+| Solución | Tarea | Antes | Después | Reducción |
+| --- | --- | --- | --- | --- |
+| Ejecución de código con MCP | Flujo Google Drive → Salesforce | 150,000 | 2,000 | **98.7%** |
+| Tool Search Tool | Cargar definiciones antes de empezar el trabajo | ~77,000 | ~8,700 | **85%** |
+| Programmatic Tool Calling | Tarea de investigación compleja | 43,588 | 27,297 | **37%** |
+
+Las tres filas son cifras publicadas por Anthropic. Lo sorprendente no es el coste, sino la **precisión**: con la Tool Search Tool, la precisión al elegir herramienta *subió* (Opus 4.5 pasó de 79,5 % a 88,1 %; Opus 4 pasó de 49 % a 74 %). Menos herramientas abarrotando el contexto significa que el modelo elige la correcta con más frecuencia. Aquí coste y calidad se mueven en la misma dirección, algo poco habitual.
+
+## Solución 1 — Cargar los esquemas de las herramientas bajo demanda
+
+En lugar de inyectar todos los esquemas desde el principio, márcalos con `defer_loading: true`. Claude solo ve entonces un índice ligero; cuando necesita GitHub, llama a la **Tool Search Tool**, que devuelve *únicamente* los esquemas de GitHub que coinciden — no las más de 50 herramientas de todos los demás servidores. Anthropic informa de que esto preserva ~191.300 tokens de contexto frente a ~122.800 con todo precargado.
+
+### En Claude Code ya está activado
+
+Estás viendo este patrón ahora mismo si usas Claude Code con servidores MCP. **La búsqueda de herramientas está activada por defecto**: al iniciar la sesión solo se cargan los *nombres* de las herramientas y las instrucciones del servidor, y Claude obtiene un esquema completo mediante una llamada a `ToolSearch` cuando una tarea lo necesita. Así que añadir otro servidor te cuesta sus nombres de herramientas, no sus esquemas — Claude Code no impone un tope de herramientas por servidor y dice que el límite práctico es el presupuesto de tu ventana de contexto.
+
+Hay una afirmación muy repetida que conviene corregir, porque es medio cierta. El umbral del «~10 % de la ventana de contexto» es real, pero **no** es el disparador por defecto: es un modo opcional de la variable de entorno `ENABLE_TOOL_SEARCH`:
+
+| `ENABLE_TOOL_SEARCH` | Comportamiento |
+| --- | --- |
+| *(sin definir)* — el valor por defecto | Todas las herramientas MCP diferidas, cargadas bajo demanda |
+| `true` | Igual que sin definir |
+| `auto` | Modo de umbral. Las herramientas diferibles se cargan **de entrada** mientras sus definiciones sumen menos del 10 % de la ventana de contexto; con el 10 % o más, se activa la búsqueda de herramientas |
+| `auto:N` | Modo de umbral con tu propio porcentaje (`N` va de 0 a 100), p. ej. `auto:5` |
+| `false` | Todas las herramientas MCP cargadas de entrada, sin diferir |
+
+Así que si contabas con que las herramientas se cargaran de entrada por debajo del 10 %, tienes el valor por defecto al revés: nada se carga de entrada a menos que pidas `auto`. Y `auto` es **pegajoso**: una vez que el total supera el umbral y se activa la búsqueda de herramientas, esas herramientas pueden seguir diferidas incluso después de que el total vuelva a bajar del umbral.
+
+<Callout type="warning" items={["Tres cosas desactivan la búsqueda de herramientas e ignoran por completo ENABLE_TOOL_SEARCH: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS (desde Claude Code v2.1.227 una organización puede mantenerla activada mediante la configuración gestionada), una sesión que recibe la configuración HIPAA (sin ninguna anulación) y los despliegues de Microsoft Foundry alojados en Azure, que la rechazan en el servidor. Denegar la herramienta ToolSearch en los permisos también carga todo de entrada.", "Hay un mínimo de modelo: Claude Code usa la búsqueda de herramientas con Claude Opus 4, Sonnet 4, Haiku 4.5 y posteriores. En modelos anteriores todo se carga de entrada y ENABLE_TOOL_SEARCH=true NO lo anula. En la Agent Platform de Google Cloud el mínimo es más alto: Opus 4.5, Sonnet 4.5, Haiku 4.5 y posteriores."]} />
+
+Si escribes servidores MCP, diferir también cambia tu presupuesto de descripción, y de forma asimétrica: una herramienta cargada **de entrada** se corta en 4.096 caracteres (el mismo tope que las instrucciones del servidor); una cargada **mediante la búsqueda de herramientas**, en 16.384. Pero la búsqueda en sí solo compara contra el límite más corto, así que las palabras que Claude buscaría deben estar cerca del principio en ambos casos.
+
+<Steps items={[{title: "Audita lo que has conectado", body: "Lista los servidores activos y aproximadamente cuántas herramientas publica cada uno. Ejecuta /context: etiqueta las herramientas como (deferred) o (loaded on-demand) cuando la búsqueda de herramientas las gestiona, así ves qué servidores gastan realmente tokens de esquema y cuáles solo gastan nombres."}, {title: "Desconecta lo que esta tarea no necesita", body: "La solución más barata son menos servidores. Conecta los dos o tres que la tarea realmente usa, no todo tu catálogo — incluso diferido, cada servidor sigue aportando nombres de herramientas e instrucciones del servidor en cada turno."}, {title: "Difiere el resto", body: "En Claude Code eso ya es lo predeterminado. En otros sitios, prefiere un cliente o configuración que admita defer_loading + Tool Search para que los esquemas se carguen solo cuando se buscan."}]} />
+
+## Solución 2 — Mantener los resultados fuera del contexto con ejecución de código
+
+La solución de fondo ataca el Coste 2. En lugar de que el modelo llame a las herramientas una a una con cada resultado pasando por él, el modelo **escribe código** que llama a las herramientas, y los datos intermedios se quedan en el entorno de ejecución. Anthropic expone los servidores MCP como un **árbol de archivos de herramientas** que el agente explora como un sistema de archivos, cargando solo las definiciones que necesita — y *«los resultados intermedios se quedan en el entorno de ejecución por defecto… el agente solo ve lo que registras o devuelves explícitamente.»*
+
+Ese único cambio de diseño es lo que hace pasar el flujo Drive→Salesforce de 150.000 a 2.000 tokens: los registros se mueven a través del código, y al modelo solo vuelve el recuento final. En la Developer Platform la misma idea se ofrece como **Programmatic Tool Calling**: Claude escribe Python que orquesta varias herramientas y filtra las salidas antes de que lleguen a su contexto.
+
+<Callout type="tip" items={["Regla práctica: si una herramienta DEVUELVE algo grande (una transcripción, un volcado de consulta, un archivo), quieres ejecución de código para que el blob se procese fuera del contexto. Si una herramienta solo HACE algo pequeño (crear una incidencia, enviar una fila), una llamada directa está bien."]} />
+
+## Solución 3 — Saber cuándo una llamada a la CLI simplemente gana
+
+A veces la respuesta correcta no es una mejor configuración de MCP, sino no usar MCP. La discusión de HN/X tiene algo de razón: un comando de shell como `gh pr list` o `psql -c '…'` cuesta un par de cientos de tokens de ida y vuelta, mientras que la ruta MCP equivalente paga por los esquemas más un resultado estructurado. Si el agente ya tiene una terminal y la CLI existe, esa suele ser la ruta más ligera.
+
+<PromptCard title="Prefiere la CLI cuando la herramienta ya es una CLI">
+{`# Instead of connecting a GitHub MCP server for read-only work,
+# let the agent use the gh CLI it already has:
+gh pr list --state open --json number,title,author
+
+# ~200 tokens of command + compact output, no schema tax,
+# no server to keep connected across the session.`}
+</PromptCard>
+
+MCP compensa su sobrecarga cuando necesitas una capacidad **tipada, con permisos y multisuperficie** — una base de datos con un rol de solo lectura, un navegador que pueda manejar, una API SaaS con OAuth — o cuando las mismas herramientas se reutilizan a lo largo de muchos turnos y el caching amortiza el coste de los esquemas. Recurre a una CLI cuando la capacidad es puntual, ya se puede automatizar con scripts y devuelve algo pequeño. Ninguna es «mejor»: son puntos distintos de una curva de costes.
+
+<Callout type="takeaways" items={["MCP tiene dos costes de tokens: los esquemas de definición de herramientas (se pagan ~cada turno) y los resultados intermedios (escalan con tus datos).", "Tool Search + defer_loading reducen el coste de los esquemas ~85 % Y aumentan la precisión al elegir herramienta: carga los esquemas solo cuando se buscan.", "En Claude Code la búsqueda de herramientas está ACTIVADA por defecto: al iniciar la sesión solo se cargan los nombres de las herramientas. El umbral del ~10 % que la gente cita es el modo opcional ENABLE_TOOL_SEARCH=auto, no el valor por defecto.", "La ejecución de código / Programmatic Tool Calling mantienen los resultados grandes en el entorno de ejecución; al modelo solo llega lo que registras o devuelves (150k → 2k en el ejemplo de Anthropic).", "La optimización más barata es conectar menos servidores por tarea.", "Cuando la capacidad es puntual, devuelve algo pequeño y ya tiene una CLI, una llamada de shell (~200 tokens) gana a un viaje de ida y vuelta por MCP."]} />
+
+<Flashcards title="Términos de la economía de MCP" cards={[{front: "El impuesto de tokens de MCP", back: "Tokens gastados en esquemas de herramientas + resultados intermedios, no en el trabajo real: el coste oculto de conectar servidores."}, {front: "defer_loading", back: "Una marca que mantiene el esquema de una herramienta FUERA del contexto hasta que Claude lo busca mediante la Tool Search Tool."}, {front: "Tool Search Tool", back: "Permite a Claude descubrir herramientas bajo demanda; buscar 'github' devuelve solo los esquemas de GitHub en lugar de los de todas las herramientas conectadas. Recorte de ~85 % de tokens de esquema según las cifras de Anthropic."}, {front: "Programmatic Tool Calling", back: "Claude escribe código que orquesta herramientas; los resultados intermedios se filtran en el entorno de ejecución, de modo que solo la salida final entra en el contexto."}, {front: "Divulgación progresiva", back: "Patrón general: exponer de entrada un índice ligero de herramientas y obtener los esquemas completos solo cuando hacen falta."}, {front: "ENABLE_TOOL_SEARCH", back: "El mando de Claude Code. Sin definir o true = todo diferido (el valor por defecto). auto / auto:N = cargar de entrada hasta que las definiciones superen el N % de la ventana (10 % por defecto), y entonces activarse y quedarse activado. false = todo de entrada."}]} />
+
+<Quiz title="Compruébalo tú mismo" questions={[{q: "¿Por qué el coste de las definiciones de herramientas es peor que una tarifa única?", options: ["Los esquemas se guardan en disco y se releen despacio", "Los esquemas se reenvían con cada petición de la conversación hasta que se aplica el prompt caching", "Cada llamada a una herramienta duplica el tamaño del esquema"], answer: 1, explain: "Los esquemas de las herramientas viven en el contexto que se envía en cada turno, así que un catálogo grande grava toda la sesión — no solo el primer mensaje — hasta que entra en juego el caching."}, {q: "Una herramienta extrae una transcripción de 2 horas y se la pasa a una herramienta de resumen mediante llamadas directas. ¿Cuál es el coste oculto?", options: ["Ninguno: solo el resumen consume tokens", "La transcripción completa pasa por el contexto del modelo, potencialmente ~50k tokens, aunque solo querías un resumen", "La transcripción se factura una vez en el servidor, no en el modelo"], answer: 1, explain: "Con llamadas directas a herramientas, cada resultado intermedio pasa por el modelo. La ejecución de código mantiene la transcripción en el entorno de ejecución, de modo que solo vuelve el resumen."}, {q: "Necesitas un único 'listar PRs abiertos' de solo lectura durante una sesión de programación y el agente tiene una terminal. ¿Cuál es la opción más ligera?", options: ["Conectar un servidor MCP completo de GitHub", "Ejecutar la CLI gh directamente: ~200 tokens, sin impuesto de esquemas, nada que mantener conectado", "Cargar todas las herramientas de GitHub con defer_loading desactivado"], answer: 1, explain: "Para algo puntual que devuelve poco y ya tiene una CLI, una llamada de shell evita por completo el impuesto de esquemas. MCP compensa su coste con capacidades reutilizadas, tipadas y con permisos."}, {q: "¿Qué sorprendente efecto tiene la Tool Search Tool sobre la precisión al elegir herramienta?", options: ["Baja, porque Claude ve menos herramientas", "Se mantiene igual; solo cambia el coste", "Sube: menos herramientas abarrotando el contexto significa que Claude elige la correcta con más frecuencia"], answer: 2, explain: "Anthropic informa de que la precisión SUBIÓ (Opus 4.5: 79,5 % → 88,1 %) con Tool Search. Coste y calidad se movieron en la misma dirección."}]} />
+
+## Relacionado en AILmanac
+
+- [Servidores MCP en Claude Code](/docs/claude-code/mcp) — cómo añadir, acotar y proteger servidores.
+- [La economía de tokens](/docs/power-user/token-economy) — comprimir la salida de los comandos antes de que llegue al modelo.
+- [Dynamic Workflows](/docs/claude-code/dynamic-workflows) — dónde aparece el coste de orquestación y cómo trocear para medir el gasto.
+- [Uso de herramientas en la API](/docs/api/tool-use) — la forma de petición/respuesta que hay detrás de todo esto.
+- [Playwright MCP: la guía práctica a fondo](/docs/api/playwright-mcp-deep-guide) — ejemplo resuelto sobre el servidor individual más pesado que la gente conecta (~3.500 tokens de impuesto de esquemas), y cuándo gana en su lugar la ruta Skill/CLI.
+- [Tool Search y carga diferida](/docs/api/tool-search-and-deferred-loading) — el análisis a nivel de API: regex frente a BM25, los cinco 400 y por qué el cuerpo de la petición no se hace más pequeño.
+
+## Fuentes y lecturas adicionales
+
+- [Code execution with MCP: building more efficient AI agents](https://www.anthropic.com/engineering/code-execution-with-mcp) — Anthropic Engineering. Fuente de la cifra de 150.000 → 2.000 tokens (98,7 %) y del patrón «los resultados intermedios se quedan en el entorno de ejecución».
+- [Introducing advanced tool use on the Claude Developer Platform](https://www.anthropic.com/engineering/advanced-tool-use) — Anthropic Engineering. Tool Search Tool (`defer_loading`, reducción de ~85 %, mejoras de precisión) y Programmatic Tool Calling (43.588 → 27.297 tokens).
+- [Documentación de MCP de Claude Code](https://code.claude.com/docs/en/mcp) — referencia oficial para conectar y acotar servidores. Su sección [Scale with MCP tool search](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search) es la fuente de que la búsqueda de herramientas sea el valor por defecto, de la tabla de `ENABLE_TOOL_SEARCH`, del mínimo de modelo y de los límites de descripción de 4.096 / 16.384 caracteres.
+- [modelcontextprotocol — Progressive Tool Discovery discussion](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/1923) — conversación de diseño de la comunidad sobre la carga de herramientas bajo demanda.
+- [MCP Progressive Disclosure](https://www.solo.io/blog/mcp-progressive-disclosure) (Solo.io) — recorrido de terceros por el patrón de índice ligero / obtener el esquema bajo demanda.
+
+
+## Siguiente
+
+- [Accesibilidad](/docs/claude-code/accessibility)

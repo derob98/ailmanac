@@ -1,0 +1,141 @@
+# Your First API Call
+
+> Source: https://derob98.github.io/ailmanac/docs/api/first-call · AILmanac (CC BY 4.0) · last verified 2026-08-20
+
+Install the SDK, authenticate, and make a real call to Claude in Python, TypeScript, or cURL.
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<LevelBadge level="beginner" />
+
+<VerifyNote lastVerified="2026-08-20" source="https://platform.claude.com/docs/en/api/overview">
+The API shape below is stable, but model IDs and SDK versions move. See the [current models table](/docs/whats-new/models-and-pricing).
+</VerifyNote>
+
+The API lets *your* program talk to Claude. By the end of this lesson you'll have run a real request and you'll understand exactly what each piece of it does.
+
+<Callout type="objectives" items={["Create an API key and store it safely as an environment variable", "Install the official SDK for Python or TypeScript (or use plain cURL)", "Send your first messages request and read Claude's reply", "Understand the four core fields: model, max_tokens, messages, and system"]} />
+
+## The whole journey in three steps
+
+Everything below fits into one simple sequence. Keep this map in mind as you go.
+
+<Steps items={[{title: "Get an API key", body: "Create a key in the Anthropic Console and export it as an environment variable so it never lives in your code."}, {title: "Install the SDK", body: "Add the anthropic package for Python or @anthropic-ai/sdk for TypeScript. With cURL there is nothing to install."}, {title: "Make the call", body: "Send a list of messages to the model and print the content it returns."}]} />
+
+## 1. Get an API key
+
+Create one in the [Anthropic Console](https://console.anthropic.com). Then set it as an environment variable so it never lives in your code:
+
+<PromptCard title="Export your API key">{`export ANTHROPIC_API_KEY="sk-ant-..."`}</PromptCard>
+
+<Callout type="warning" items={["Never commit your key. Keep keys in environment variables or a secrets manager, never in source control. See the Security page (/docs/security)."]} />
+
+## 2. Install the SDK
+
+Pick your language. The SDK reads the key automatically from the environment variable you just set.
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+<PromptCard title="Install (Python)">{`pip install anthropic`}</PromptCard>
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+<PromptCard title="Install (TypeScript)">{`npm install @anthropic-ai/sdk`}</PromptCard>
+
+</TabItem>
+<TabItem value="curl" label="cURL">
+
+Nothing to install — you just need `curl`.
+
+</TabItem>
+</Tabs>
+
+## 3. Make the call
+
+Every request is a list of `messages`. The model replies with `content`. Run the snippet for your language and you'll see Claude answer the question.
+
+<Tabs groupId="lang">
+<TabItem value="python" label="Python">
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+
+message = client.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=1024,
+    messages=[
+        {"role": "user", "content": "In one sentence, what is an API?"}
+    ],
+)
+
+print(message.content[0].text)
+```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic(); // reads ANTHROPIC_API_KEY from the environment
+
+const message = await client.messages.create({
+  model: "claude-sonnet-5",
+  max_tokens: 1024,
+  messages: [
+    { role: "user", content: "In one sentence, what is an API?" },
+  ],
+});
+
+console.log(message.content[0].text);
+```
+
+</TabItem>
+<TabItem value="curl" label="cURL">
+
+```bash
+curl https://api.anthropic.com/v1/messages \
+  --header "x-api-key: $ANTHROPIC_API_KEY" \
+  --header "anthropic-version: 2023-06-01" \
+  --header "content-type: application/json" \
+  --data '{
+    "model": "claude-sonnet-5",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "In one sentence, what is an API?"}
+    ]
+  }'
+```
+
+</TabItem>
+</Tabs>
+
+## What just happened
+
+You sent four pieces of information. Here's what each one controls:
+
+- **`model`** — which Claude to use. Don't hard-code blindly; see [Choosing a Model](/docs/api/choosing-a-model).
+- **`max_tokens`** — a cap on the reply length (in [tokens](/docs/foundations)). It does *not* set the context window.
+- **`messages`** — the conversation so far. The API is **stateless**: to continue a chat, send the whole history back each time.
+- **`system`** (optional) — a top-level instruction that sets Claude's role for the call.
+
+<Flashcards title="The four core fields" cards={[{front: "model", back: "Which Claude to use. Pick it deliberately rather than hard-coding blindly."}, {front: "max_tokens", back: "A cap on reply length, in tokens. It does NOT set the context window."}, {front: "messages", back: "The conversation so far. The API is stateless, so you resend the whole history each turn."}, {front: "system", back: "Optional top-level instruction that sets Claude's role for the call."}]} />
+
+<Callout type="tip" items={["Because the API is stateless, a multi-turn chat is just a growing messages array: append each reply and resend the full list on the next call."]} />
+
+<Quiz title="Check yourself" questions={[{q: "What does max_tokens control?", options: ["The size of the context window", "A cap on the length of Claude's reply", "How many messages you can send"], answer: 1, explain: "max_tokens caps the reply length in tokens. It does not set the context window."}, {q: "How do you continue a multi-turn conversation with the API?", options: ["The server remembers your previous messages automatically", "You resend the whole message history each time, because the API is stateless", "You set a session ID header"], answer: 1, explain: "The Messages API is stateless: to continue a chat you send the entire conversation history back on every request."}, {q: "Where should your API key live?", options: ["In an environment variable or secrets manager", "Hard-coded in your source file", "Committed to your repository for convenience"], answer: 0, explain: "Keep keys in environment variables or a secrets manager, never in source control."}]} />
+
+<Callout type="takeaways" items={["Three steps: get a key, install the SDK, send a messages request.", "Store the key in ANTHROPIC_API_KEY so the SDK reads it automatically and it never enters your code.", "A request is a list of messages; the reply comes back in content.", "The API is stateless: resend the full conversation history to continue a chat.", "model, max_tokens, messages, and system are the fields you'll reach for first."]} />
+
+## Next
+
+- Check which API version your SDK sends → [API Version 2026-10-21](/docs/api/api-version-2026-10-21)
+- Pick the right model & estimate cost → [Choosing a Model](/docs/api/choosing-a-model) · [Tokens & Pricing](/docs/api)
+- Stream responses and hold a conversation → [Streaming & Multi-Turn](/docs/api)
+- Let Claude call your functions → [Tool Use](/docs/api)
+- Production-ready snippets → [API Snippets](/docs/templates)
