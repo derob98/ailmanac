@@ -1,0 +1,188 @@
+---
+sidebar_position: 6.5
+title: "Quando la modalità auto si blocca per sicurezza"
+description: "Claude Code v2.1.319 ha rimosso il ripiego sul classificatore locale — e ha invertito il codice di uscita di claude -p. Cosa si rompe, e le altre cinque modifiche di ottobre–novembre 2026 che cambiano il comportamento senza dare nell'occhio."
+---
+
+<LevelBadge level="advanced" />
+
+<Callout type="objectives" items={[
+  "Capire perché la modalità auto ha smesso di ripiegare sul suo classificatore integrato, e dove questo crea problemi",
+  "Riconoscere i tre ambienti che lo scatenano: telemetria disattivata, feature flag disattivati e gateway LLM",
+  "Correggere un'esecuzione non presidiata che ha iniziato a fallire — e sapere quale correzione è quella sbagliata",
+  "Individuare le altre cinque modifiche di comportamento di ottobre–novembre 2026 che nessun riepilogo di rilascio mette in evidenza"
+]} />
+
+<VerifyNote lastVerified="2026-11-12" source="https://code.claude.com/docs/en/changelog">
+Ogni versione, data e nome di impostazione in questa pagina proviene dal changelog ufficiale di Claude Code di Anthropic. Claude Code pubblica diversi rilasci a settimana — ricontrolla il changelog per qualsiasi cosa successiva a v2.1.322 (10 novembre 2026).
+</VerifyNote>
+
+La [modalità auto](/docs/claude-code/permissions) è la modalità in cui ormai gira la maggior parte delle persone: invece di chiederti conferma per ogni azione, un **classificatore di sicurezza** vaglia ciascuna di esse. Nella **v2.1.319** (6 novembre 2026) Anthropic ha cambiato ciò che accade quando quel classificatore non è raggiungibile — e la modifica non compare in nessun elenco di "novità", perché non è una funzionalità. È una decisione di applicazione rigorosa che trasforma un degrado prima silenzioso in un arresto netto.
+
+Se esegui Claude Code senza presidio — cron, CI, un'attività pianificata, un runner self-hosted — leggi le prossime due sezioni prima della tua prossima esecuzione di pipeline.
+
+## Cosa è cambiato
+
+Il controllo della modalità auto gira **lato server**. Prima della v2.1.319, una sessione che non riusciva a raggiungerlo ripiegava su un **classificatore locale integrato** e andava avanti. Ora non più: le chiamate che il server non può controllare vengono **richieste all'utente o negate**, senza alcun ripiego.
+
+| | Prima della v2.1.319 | Dalla v2.1.319 |
+|---|---|---|
+| Controllo del server raggiungibile | Il classificatore del server vaglia la chiamata | Invariato |
+| Controllo del server non raggiungibile | Ripiega sul classificatore locale integrato | **Chiede a te, oppure nega** |
+| Sessione non presidiata (`-p`, cron, CI) | Continuava con il classificatore locale | **Il turno si ferma** |
+| Codice di uscita di `claude -p` in quel caso | `0` | **`1`** |
+
+L'ultima riga è quella che arriva in produzione. La modifica del codice di uscita è classificata come *correzione*: `claude -p` usciva con `0` quando le sue azioni erano state rifiutate perché non era disponibile alcun controllo di sicurezza, e ora l'output di testo e JSON esce con `1`. È una correzione: una pipeline che segnalava successo senza fare nulla ti stava mentendo. Ma il sintomo che vedrai è un job verde che diventa rosso dopo un aggiornamento, con la causa reale a un livello di distanza dal messaggio di errore.
+
+:::warning[Tre ambienti lo scatenano, e due non si assomigliano affatto]
+- **Telemetria disattivata** — il controllo del server percorre lo stesso canale.
+- **Feature flag non recuperati** — idem.
+- **Dietro un gateway LLM** — il gateway scarta il controllo.
+
+**Bedrock, Vertex e Foundry sono esplicitamente invariati.** Quindi un'organizzazione su Bedrock non vede nulla, mentre il team accanto, dietro un gateway, perde ogni esecuzione non presidiata sulla stessa versione.
+:::
+
+Due correzioni collegate sono arrivate nello stesso rilascio, ed entrambe dicono che questa modalità di errore era rimasta nascosta:
+
+- `/status` mostrava **"Auto mode server: Enabled"** anche quando la revisione lato server non raggiungeva davvero la sessione — per esempio dietro un gateway che la scarta. Quindi la diagnostica a cui ricorrevi per prima, fino alla v2.1.319, confermava il contrario della verità.
+- La modalità auto **falliva a ogni turno** quando un gateway rispondeva `403` o `422` al controllo di sicurezza. (Un `403` con un `apiKeyHelper` è invariato.)
+
+## Correggere un'esecuzione che ha appena iniziato a fallire
+
+<Steps items={[
+  {
+    title: "Conferma che sia questo e non altro",
+    body: "Esegui `/status` in una sessione interattiva sulla stessa macchina e rete. Dalla v2.1.319 in poi riporta onestamente il controllo del server della modalità auto. Se il controllo non ti raggiunge, hai trovato la causa."
+  },
+  {
+    title: "Decidi se vuoi davvero il vecchio comportamento",
+    body: "`CLAUDE_CODE_AUTO_MODE_SERVER=0` ripristina l'uso del classificatore locale integrato. È la via di fuga documentata — ma stai scegliendo un vaglio più debole, quindi fanne una decisione e non un riflesso."
+  },
+  {
+    title: "Se sei dietro un gateway, prova invece ad ATTIVARE il controllo del server",
+    body: "`CLAUDE_CODE_AUTO_MODE_SERVER=1` abilita il controllo lato server anche con `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` impostato. Se le tue impostazioni gestite definiscono quella variabile, devono impostare anche il `1` — altrimenti l'override non si applica mai."
+  },
+  {
+    title: "Mantieni i feature flag senza riattivare la telemetria",
+    body: "La v2.1.319 ha aggiunto `CLAUDE_CODE_DISABLE_FEATURE_FLAGS`, che ferma il recupero dei feature flag *senza* disattivare la telemetria (ogni flag usa allora il proprio valore predefinito integrato). I due erano saldati insieme; se avevi disattivato la telemetria solo per fermare il recupero dei flag, ora puoi separarli."
+  },
+  {
+    title: "Per le esecuzioni davvero non presidiate, nega invece di restare bloccato",
+    body: "Lo stesso rilascio ha aggiunto l'impostazione `permissions.denyInsteadOfPrompting`: una chiamata a uno strumento che resterebbe in attesa di una richiesta di permesso viene negata e il turno prosegue — nelle sessioni da terminale, nei subagenti e nei teammate. È la forma giusta per un'esecuzione senza nessuno a guardare, dove una richiesta è un blocco infinito."
+  },
+  {
+    title: "Impostalo nell'ambiente del processo, non in un file di impostazioni",
+    body: "Trappola collegata nello stesso rilascio: `CLAUDE_CODE_PROXY_RESOLVES_HOSTS` non può più essere impostato dai file di impostazioni dove l'host gestisce la rete. Diversi di questi parametri ora sono solo di ambiente, di proposito."
+  }
+]} />
+
+<PromptCard title="Unattended-run posture (environment)">
+{`# Behind an LLM gateway: keep the server-side safety check
+export CLAUDE_CODE_AUTO_MODE_SERVER=1
+
+# Stop feature-flag fetching WITHOUT disabling telemetry
+export CLAUDE_CODE_DISABLE_FEATURE_FLAGS=1`}
+</PromptCard>
+
+<PromptCard title="Never hang on a prompt nobody can answer (settings.json)">
+{`{
+  "permissions": {
+    "denyInsteadOfPrompting": true
+  }
+}`}
+</PromptCard>
+
+La correzione sbagliata è ricorrere a `bypassPermissions` perché la pipeline è diventata rossa. Significa scambiare un turno fermo con nessun vaglio affatto — vedi [Rendere sicure le esecuzioni autonome](/docs/security/hardening-autonomous-runs) per ciò che il non presidiato richiede davvero.
+
+## Altre cinque modifiche che cambiano il comportamento in silenzio
+
+Tra il **7 ottobre e il 10 novembre 2026** sono usciti venticinque rilasci (v2.1.293 → v2.1.322). Queste sono le modifiche che cambiano ciò che fa la tua configurazione esistente, senza annunciarsi come breaking.
+
+### 1. La modalità fast di Opus 4.8 viene rimossa il 30 novembre 2026
+
+Deprecata dal **30 ottobre 2026** (arrivata con la v2.1.316). Dopo la rimozione, le richieste in modalità fast su Opus 4.8 **restituiscono un errore e non ripiegano** su Opus 4.8 standard. Passare a Opus 5.5 mantiene l'accelerazione. Una data rigida senza degrado graduale è il tipo di modifica più raro in questo changelog — vedi [Modelli e prezzi](/docs/whats-new/models-and-pricing).
+
+### 2. Il caricamento delle skill si è ristretto due volte, in due modi diversi
+
+- **v2.1.319:** con il sandbox di Bash attivo, le skill nelle cartelle `.claude/skills` *sotto* la cartella di partenza si caricano solo se avvii Claude Code lì o fai `/cd` lì.
+- **v2.1.321** (9 novembre): le cartelle `.claude/skills` dentro `~/.claude/plugins` **non si caricano più** quando Claude lavora sui file lì.
+
+Se una [skill](/docs/claude-code/skills) ha smesso silenziosamente di essere disponibile, questa è la prima cosa da controllare — il sintomo è l'assenza, che non produce alcun errore.
+
+### 3. Le chiamate agli strumenti MCP ora vanno in background da sole
+
+La **v2.1.319** ha aggiunto il supporto ai task MCP nel terminale: quando un server MCP esegue la chiamata a uno strumento come task, Claude Code la sposta in background **subito** e comunica il risultato a Claude quando termina. Imposta `CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND` per farlo attendere dentro la chiamata allo strumento.
+
+I task MCP ora funzionano anche **senza recupero dei feature flag** (Bedrock, Vertex, Foundry, gateway LLM, `DISABLE_TELEMETRY`); `CLAUDE_CODE_DISABLE_MCP_TASKS=1` li disattiva del tutto. Vedi [Server MCP](/docs/claude-code/mcp) e [Task in background](/docs/claude-code/background-tasks).
+
+### 4. Rileggere un file invariato restituisce di nuovo il suo contenuto
+
+La **v2.1.317** (3 novembre) ha rimosso il segnaposto `"file unchanged since your last Read"` dello strumento Read. Leggere due volte lo stesso file ora restituisce il file, non un segnaposto. Meglio per la correttezza — Claude non può più agire su un presupposto obsoleto — e un vero cambiamento nella velocità con cui una sessione lunga riempie il proprio [budget di contesto](/docs/claude-code/context-budget-audit).
+
+### 5. `sed -i` ora è un vero comando Bash
+
+La **v2.1.309** (22 ottobre) ha fatto sì che `sed -i` ricevesse la richiesta standard di Bash e venisse eseguito così com'è, invece che come anteprima simulata di modifica di un file. Come le altre modifiche via Bash, **non viene più ripristinato da `/rewind`**. Se il tuo flusso di lavoro contava su `/rewind` per annullare modifiche in loco sullo stream, quella rete di sicurezza non c'è più — vedi [Checkpoint e Rewind](/docs/claude-code/checkpoints-and-rewind).
+
+Una sesta, più piccola, da conoscere se automatizzi: il `/loop` auto-cadenzato ora **termina** quando un turno finisce invece di pianificare un risveglio di ripiego (v2.1.319). `CLAUDE_CODE_LOOP_KEEPALIVE=1` ripristina il vecchio comportamento.
+
+<Quiz questions={[
+  {
+    q: "Dopo l'aggiornamento alla v2.1.319, il tuo job CI che esegue `claude -p` dietro un gateway LLM diventa rosso. Qual è la causa più probabile?",
+    options: [
+      "Il gateway ha iniziato a rifiutare la tua chiave API",
+      "La modalità auto non riesce a raggiungere il suo controllo lato server, quindi il turno si ferma — e `-p` ora esce con 1 invece di 0",
+      "I feature flag sono necessari perché `claude -p` giri",
+      "`claude -p` è stato rimosso a favore delle sessioni cloud"
+    ],
+    answer: 1,
+    explain: "La v2.1.319 ha rimosso il ripiego sul classificatore locale e ha corretto `claude -p` perché esca con 1 quando le azioni vengono rifiutate per mancanza di un controllo di sicurezza. Probabilmente il job già non faceva nulla — semplicemente usciva con 0 mentre lo faceva."
+  },
+  {
+    q: "Quali piattaforme NON sono state esplicitamente toccate dalla rimozione del ripiego?",
+    options: [
+      "Tutte le piattaforme sono state toccate allo stesso modo",
+      "Solo il terminale; VS Code non è stato toccato",
+      "Bedrock, Vertex e Foundry",
+      "Solo le sessioni sui piani Pro e Max"
+    ],
+    answer: 2,
+    explain: "Il changelog indica Bedrock, Vertex e Foundry come invariati. Questa asimmetria è il motivo per cui due team sulla stessa versione possono vedere comportamenti completamente diversi."
+  },
+  {
+    q: "Un'esecuzione lunga e non presidiata resta bloccata perché una chiamata a uno strumento attende una richiesta di permesso a cui nessuno risponderà. Quale impostazione della v2.1.319 è pensata per questo?",
+    options: [
+      "`permissions.denyInsteadOfPrompting`",
+      "`bypassPermissions`",
+      "`CLAUDE_CODE_DISABLE_FEATURE_FLAGS`",
+      "`CLAUDE_CODE_LOOP_KEEPALIVE`"
+    ],
+    answer: 0,
+    explain: "`permissions.denyInsteadOfPrompting` nega la chiamata e lascia proseguire il turno. Anche `bypassPermissions` fermerebbe il blocco — ma eliminando del tutto il vaglio, che è lo scambio sbagliato per un'esecuzione non presidiata."
+  },
+  {
+    q: "Perché `/status` era una diagnostica inaffidabile per questo problema prima della v2.1.319?",
+    options: [
+      "`/status` non riportava affatto la modalità auto",
+      "Mostrava \"Auto mode server: Enabled\" anche quando il controllo non raggiungeva la sessione",
+      "Funzionava solo in VS Code",
+      "Richiedeva la telemetria attiva per mostrare qualsiasi cosa"
+    ],
+    answer: 1,
+    explain: "Il `/status` precedente alla v2.1.319 riportava il controllo del server come attivo quando un gateway lo scartava — così la prima diagnostica che avresti provato confermava attivamente la conclusione sbagliata."
+  }
+]} />
+
+<Callout type="takeaways" items={[
+  "La v2.1.319 (6 nov 2026) ha rimosso il ripiego sul classificatore locale della modalità auto: un controllo non raggiungibile ora significa chiedere o negare, mai proseguire in silenzio",
+  "`claude -p` esce con 1 dove prima usciva con 0 — una pipeline che non faceva nulla in silenzio ora fallisce in modo rumoroso",
+  "Le cause scatenanti sono telemetria disattivata, feature flag disattivati o un gateway LLM; Bedrock, Vertex e Foundry sono invariati",
+  "`permissions.denyInsteadOfPrompting` è la risposta per le esecuzioni non presidiate; `bypassPermissions` no",
+  "La modalità fast di Opus 4.8 restituisce un errore — senza ripiego — dopo il 30 novembre 2026"
+]} />
+
+## Prossimi passi
+
+- [Permessi e allowlist](/docs/claude-code/permissions) — come funzionano in origine la modalità auto e le sei modalità di permesso
+- [Rendere sicure le esecuzioni autonome](/docs/security/hardening-autonomous-runs) — ciò che un'esecuzione non presidiata richiede davvero
+- [Feature-Flag Gating in Claude Code](/docs/claude-code/feature-flag-gating) — perché due macchine sulla stessa versione si comportano in modo diverso
+- [Risoluzione dei problemi di Claude Code](/docs/claude-code/troubleshooting) — il percorso diagnostico più ampio
